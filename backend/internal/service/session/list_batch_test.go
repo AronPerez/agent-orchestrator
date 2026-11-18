@@ -283,11 +283,12 @@ func listFingerprint(t *testing.T, sess domain.Session) string {
 	t.Helper()
 	out, err := json.Marshal(struct {
 		domain.Session
-		Metadata      domain.SessionMetadata
-		ArtifactDir   string
-		ArtifactFiles []domain.SessionArtifactFile
-		PRs           []domain.PRFacts
-	}{sess, sess.Metadata, sess.Metadata.ArtifactDir, sess.ArtifactFiles, sess.PRs})
+		Metadata         domain.SessionMetadata
+		ArtifactDir      string
+		ArtifactFiles    []domain.SessionArtifactFile
+		PRs              []domain.PRFacts
+		LatestDoneReport *domain.SessionDoneReport
+	}{sess, sess.Metadata, sess.Metadata.ArtifactDir, sess.ArtifactFiles, sess.PRs, sess.LatestDoneReport})
 	if err != nil {
 		t.Fatal(err)
 	}

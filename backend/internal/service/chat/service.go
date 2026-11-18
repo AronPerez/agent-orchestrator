@@ -3116,6 +3116,44 @@ func (s *Service) RelaySessionChatTurn(ctx context.Context, id domain.SessionID,
 	return s.relayChatTurn(ctx, id, text, clientMessageID, options)
 }
 
+// ConfirmSessionChatTurn reads the durable boundary for a prior keyed relay.
+// A queued turn is accepted by AO for later delivery, and a provider turn ID is
+// proof the provider accepted it. A terminal turn with no recorded provider
+// input failed before provider I/O and is safe to retry with a new identity.
+func (s *Service) ConfirmSessionChatTurn(
+	ctx context.Context,
+	id domain.SessionID,
+	text, clientMessageID string,
+	options ports.MessageDeliveryOptions,
+) (bool, error) {
+	if _, err := s.requireChatSession(ctx, id); err != nil {
+		return false, err
+	}
+	conversation, err := s.store.ConversationForSession(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("confirm relayed conversation: %w", err)
+	}
+	msg := s.resolveSteerSender(ctx, ports.ChatUserMessage{
+		Text: text, ClientMessageID: clientMessageID,
+		SenderSessionID: options.SenderSessionID, InteractionAt: options.InteractionAt,
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: options.AuthoredByUser,
+	})
+	turn, found, err := sentMessageReceipt(ctx, s.store, conversation.ID, msg, false)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	if turn.State == domain.TurnStateQueued || turn.ProviderTurnID != "" {
+		return true, nil
+	}
+	if turn.ProviderInputText == "" && (turn.State == domain.TurnStateFailed || turn.State == domain.TurnStateCancelled) {
+		return false, nil
+	}
+	return false, ports.ErrAgentDeliveryUnconfirmed
+}
+
 // StopChat releases a session's controller.
 func (s *Service) StopChat(ctx context.Context, id domain.SessionID) error {
 	return s.Stop(ctx, id)

@@ -2701,6 +2701,75 @@ describe("SessionInspector usage", () => {
 	});
 });
 
+describe("SessionInspector verification", () => {
+  it("shows verified evidence and opens it from the inspector", async () => {
+    const onOpenArtifact = vi.fn();
+    renderWithQuery(
+      <SessionInspector
+        onOpenArtifact={onOpenArtifact}
+        session={session([], {
+          branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1", workspaceRevision: "head-1" },
+          lastInteractionAt: "2026-06-14T23:59:00Z",
+          latestDoneReport: {
+            id: "done-1",
+            verification: {
+              state: "passed",
+              evidence: "verification/done-1.txt",
+              startedAt: "2026-06-15T00:00:00Z",
+              completedAt: "2026-06-15T00:01:00Z",
+              workspaceRevision: "head-1",
+              interactionAt: "2026-06-14T23:59:00Z",
+            },
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Verification")).toBeInTheDocument();
+    expect(screen.getByText("Verified")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "View evidence" }));
+
+    expect(onOpenArtifact).toHaveBeenCalledWith({ path: "verification/done-1.txt" });
+  });
+
+  it("shows advisory tamper reasons ahead of a successful verification", () => {
+    renderWithQuery(
+      <SessionInspector
+        session={session([
+          pr(7, "open", {
+            tamper: {
+              headSha: "abc123",
+              testFilesDeleted: 2,
+              testCasesRemoved: 5,
+              testCasesAdded: 1,
+              skipMarkersAdded: 3,
+              ciWorkflowEdited: true,
+              assessedAt: "2026-06-15T00:02:00Z",
+            },
+          }),
+        ], {
+          latestDoneReport: {
+            id: "done-1",
+            verification: {
+              state: "passed",
+              evidence: "verification/done-1.txt",
+              startedAt: "2026-06-15T00:00:00Z",
+              completedAt: "2026-06-15T00:01:00Z",
+            },
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Tampering suspected")).toBeInTheDocument();
+    expect(screen.getByText("2 test files deleted")).toBeInTheDocument();
+    expect(screen.getByText("5 test cases removed vs 1 added")).toBeInTheDocument();
+    expect(screen.getByText("3 skip markers added")).toBeInTheDocument();
+    expect(screen.getByText("CI workflow edited")).toBeInTheDocument();
+    expect(screen.getByText("Advisory only; this does not block the pull request.")).toBeInTheDocument();
+  });
+});
+
 describe("SessionInspector completion controls", () => {
   it("persists the terminate-on-merge preference", async () => {
     renderWithQuery(<SessionInspector session={session([pr(7, "open")])} />);

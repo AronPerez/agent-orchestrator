@@ -74,9 +74,19 @@ ao session ls [flags]
 | Flag | Meaning | Default / Required |
 |---|---|---|
 | `-a, --all` | Include orchestrator sessions | - |
+| `--all-hosts` | Query this machine and every visible saved host | Cannot combine with `--host`, `--url`, or `AO_URL` |
 | `--include-terminated` | Include terminated sessions | - |
 | `--json` | Output as JSON | - |
 | `-p, --project string` | Filter by project ID | - |
+
+`--all-hosts` is a read-only, partial-success fleet query. It verifies each
+saved host's stable identity before presenting its coordination credential and
+limits concurrent host queries. A sleeping or invalid saved host is reported as
+unavailable without discarding sessions from machines that answered. Human
+output groups sessions by machine and writes unavailable-machine warnings to
+stderr. JSON puts the status of every machine in `meta.hosts` and adds
+`hostId`/`hostLabel` to every `data` row; address a fleet session by the pair
+`hostId` plus `id`, never by the session id alone.
 
 **Examples:**
 
@@ -88,6 +98,11 @@ ao session ls
 ```bash
 # List all sessions including terminated, scoped to one project
 ao session ls --include-terminated -p agent-orchestrator
+```
+
+```bash
+# Discover active workers across this machine and all saved machines
+ao session ls --all-hosts --json
 ```
 
 ---

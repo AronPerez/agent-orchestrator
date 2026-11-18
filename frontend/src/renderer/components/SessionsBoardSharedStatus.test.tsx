@@ -93,6 +93,48 @@ describe("sharing from a board card", () => {
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
+	it("opens verification evidence without opening the card", () => {
+		const onOpenArtifact = vi.fn();
+		const { onOpen } = renderCard({
+			onOpenArtifact,
+			session: {
+				...session,
+				branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1", workspaceRevision: "head-1" },
+				lastInteractionAt: "2026-11-17T11:59:00Z",
+				latestDoneReport: {
+					id: "done-1",
+					verification: {
+						state: "passed",
+						evidence: "verification/done-1.txt",
+						startedAt: "2026-11-17T12:00:00Z",
+						completedAt: "2026-11-17T12:01:00Z",
+						workspaceRevision: "head-1",
+						interactionAt: "2026-11-17T11:59:00Z",
+					},
+				},
+			},
+		});
+		expect(screen.getByText("Verified")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "View evidence" }));
+		expect(onOpenArtifact).toHaveBeenCalledWith("verification/done-1.txt");
+		expect(onOpen).not.toHaveBeenCalled();
+	});
+
+	it("shows suspected tampering as an advisory amber marker", () => {
+		const { container } = renderCard({
+			session: {
+				...session,
+				prs: [{
+					url: "pr-1", number: 1, state: "open", ci: "passing", review: "approved", mergeability: "mergeable",
+					reviewComments: false, updatedAt: "2026-11-17T12:00:00Z",
+					tamper: { headSha: "head-1", skipMarkersAdded: 1, assessedAt: "2026-11-17T12:00:00Z" },
+				}],
+			},
+		});
+		expect(screen.getByText("Tampering suspected")).toBeInTheDocument();
+		expect(container.querySelector("[data-session-verification='tampering_suspected'] .text-status-in-review")).not.toBeNull();
+	});
+
 	it("marks a card whose changed files overlap another session", () => {
 		renderCard({ collision: { pathCount: 2, peerNames: ["API cleanup"] } });
 		expect(screen.getByText("Overlap")).toBeInTheDocument();

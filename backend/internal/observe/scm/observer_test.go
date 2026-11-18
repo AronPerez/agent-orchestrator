@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -41,8 +42,9 @@ type fakeStore struct {
 	detailsUpdatedAt map[string]time.Time
 	writeErr         error
 
-	writes  []fakeWrite
-	renames []domain.RepositoryRename
+	writes        []fakeWrite
+	tamperUpdates []fakeTamperUpdate
+	renames       []domain.RepositoryRename
 
 	listEntered chan struct{}
 	listRelease chan struct{}
@@ -55,6 +57,11 @@ type fakeWrite struct {
 	threads    []domain.PullRequestReviewThread
 	comments   []domain.PullRequestComment
 	reviewMode ports.ReviewWriteMode
+}
+
+type fakeTamperUpdate struct {
+	url, baseSHA, headSHA string
+	assessment            domain.PRTamperAssessment
 }
 
 func (s *fakeStore) ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error) {
@@ -127,6 +134,27 @@ func (s *fakeStore) WriteSCMObservation(_ context.Context, pr domain.PullRequest
 	}
 	s.writes = append(s.writes, fakeWrite{pr: pr, checks: append([]domain.PullRequestCheck(nil), checks...), reviews: append([]domain.PullRequestReview(nil), reviews...), threads: append([]domain.PullRequestReviewThread(nil), threads...), comments: append([]domain.PullRequestComment(nil), comments...), reviewMode: reviewMode})
 	return nil
+}
+
+func (s *fakeStore) UpdatePRTamperAssessment(_ context.Context, prURL, baseSHA, headSHA string, assessment domain.PRTamperAssessment) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeErr != nil {
+		return false, s.writeErr
+	}
+	for id, prs := range s.prs {
+		for i := range prs {
+			if prs[i].URL != prURL || prs[i].BaseSHA != baseSHA || prs[i].HeadSHA != headSHA {
+				continue
+			}
+			assessmentCopy := assessment
+			prs[i].Tamper = &assessmentCopy
+			s.prs[id] = prs
+			s.tamperUpdates = append(s.tamperUpdates, fakeTamperUpdate{url: prURL, baseSHA: baseSHA, headSHA: headSHA, assessment: assessment})
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *fakeStore) RecordRepositoryRename(_ context.Context, r domain.RepositoryRename) error {
@@ -1172,9 +1200,16 @@ func TestPoll_DiscoversSameRepoPRAfterRename(t *testing.T) {
 
 func mustGit(t *testing.T, args ...string) {
 	t.Helper()
-	if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+	_ = mustGitOutput(t, args...)
+}
+
+func mustGitOutput(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
 		t.Fatalf("git %v: %v (%s)", args, err, out)
 	}
+	return string(out)
 }
 
 // A PR opened from the fork push origin against an upstream base repo (the
@@ -1567,6 +1602,183 @@ func TestPoll_UnchangedHashesDoNotWriteOrNotify(t *testing.T) {
 	}
 	if len(store.writes) != 0 || len(lc.observed) != 0 {
 		t.Fatalf("unchanged hashes wrote/notified: writes=%d observed=%d", len(store.writes), len(lc.observed))
+	}
+}
+
+func TestPoll_BackfillsHeadBoundTamperEvidenceWithoutSemanticChange(t *testing.T) {
+	repo := t.TempDir()
+	mustGit(t, "init", repo)
+	mustGit(t, "-C", repo, "config", "user.name", "AO Test")
+	mustGit(t, "-C", repo, "config", "user.email", "ao@example.test")
+	mustGit(t, "-C", repo, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "widget_test.go"), []byte("package widget\n\nfunc TestKeep(t *testing.T) {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "-C", repo, "add", ".")
+	mustGit(t, "-C", repo, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(mustGitOutput(t, "-C", repo, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(repo, "widget_test.go"), []byte("package widget\n\nfunc TestKeep(t *testing.T) { t.Skip(\"later\") }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "-C", repo, "add", ".")
+	mustGit(t, "-C", repo, "commit", "-m", "head")
+	headSHA := strings.TrimSpace(mustGitOutput(t, "-C", repo, "rev-parse", "HEAD"))
+
+	store := testStoreWithSession()
+	store.sessions[0].Metadata.WorkspaceRepoPath = repo
+	obsValue := testObs(1)
+	obsValue.PR.BaseSHA = baseSHA
+	obsValue.PR.HeadSHA = headSHA
+	obsValue.CI.HeadSHA = headSHA
+	local := knownPR(1)
+	local.BaseSHA = baseSHA
+	local.HeadSHA = headSHA
+	local.MetadataHash = metadataSemanticHash(obsValue)
+	local.CIHash = ciSemanticHash(obsValue.CI)
+	local.ReviewHash = reviewSemanticHash(obsValue.Review)
+	store.prs["p-1"] = []domain.PullRequest{local}
+	provider := &fakeProvider{
+		repoGuards:   map[string]ports.SCMGuardResult{prKey(testRepo, 0): {ETag: "repo"}},
+		observations: map[string]ports.SCMObservation{prKey(testRepo, 1): obsValue},
+	}
+	lifecycle := &fakeLifecycle{}
+	observer := newTestObserver(store, provider, lifecycle, time.Unix(100, 0).UTC())
+	discovered, _, err := observer.discoverSubjects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, subj := range discovered {
+		if subj.workspacePath != repo {
+			t.Fatalf("tamper workspace path = %q, want %q", subj.workspacePath, repo)
+		}
+	}
+
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.writes) != 0 || len(store.tamperUpdates) != 1 {
+		t.Fatalf("writes = %d tamper_updates=%d, want one narrow backfill", len(store.writes), len(store.tamperUpdates))
+	}
+	written := store.prs["p-1"][0]
+	if written.Tamper == nil || written.Tamper.HeadSHA != headSHA || !written.Tamper.Suspected() || written.Tamper.SkipMarkersAdded != 1 {
+		t.Fatalf("tamper assessment = %+v", written.Tamper)
+	}
+	if len(lifecycle.observed) != 0 {
+		t.Fatalf("tamper backfill notified lifecycle: %+v", lifecycle.observed)
+	}
+
+	store.writes = nil
+	store.tamperUpdates = nil
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.writes) != 0 || len(store.tamperUpdates) != 0 {
+		t.Fatalf("matching head evidence rewrote PR: writes=%+v tamper_updates=%+v", store.writes, store.tamperUpdates)
+	}
+}
+
+func TestPoll_RetriesUnavailableTamperAssessmentWithoutProviderChange(t *testing.T) {
+	store := testStoreWithSession()
+	store.sessions[0].Metadata.WorkspaceRepoPath = "/workspace"
+	local := knownPR(1)
+	local.BaseSHA = "base-1"
+	local.HeadSHA = "head-1"
+	store.prs["p-1"] = []domain.PullRequest{local}
+	provider := &fakeProvider{
+		repoGuards:  map[string]ports.SCMGuardResult{prKey(testRepo, 0): {ETag: "repo", NotModified: true}},
+		checkGuards: map[string]ports.SCMGuardResult{commitKey(testRepo, local.HeadSHA): {ETag: "checks", NotModified: true}},
+	}
+	now := time.Unix(100, 0).UTC()
+	observer := newTestObserver(store, provider, &fakeLifecycle{}, now)
+	observer.clock = func() time.Time { return now }
+	observer.Cache.RepoPRListETag[prKey(testRepo, 0)] = "repo"
+	observer.Cache.CommitChecksETag[commitKey(testRepo, local.HeadSHA)] = "checks"
+	observer.Cache.LastSyncCursor[prKey(testRepo, 0)] = now
+	observer.Cache.LastPRFetchAt[keyForTrackedPR(local, testRepo)] = now
+
+	attempts := 0
+	observer.assessTamper = func(context.Context, string, string, string, time.Time) (domain.PRTamperAssessment, error) {
+		attempts++
+		if attempts == 1 {
+			return domain.PRTamperAssessment{}, errors.New("base commit unavailable")
+		}
+		return domain.PRTamperAssessment{HeadSHA: local.HeadSHA, SkipMarkersAdded: 1, AssessedAt: now}, nil
+	}
+
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 || len(store.writes) != 0 || len(provider.fetchBatches) != 0 {
+		t.Fatalf("first poll: attempts=%d writes=%d fetches=%d", attempts, len(store.writes), len(provider.fetchBatches))
+	}
+
+	now = now.Add(DefaultTamperRetryInterval / 2)
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 || len(store.writes) != 0 || len(provider.fetchBatches) != 0 {
+		t.Fatalf("early retry: attempts=%d writes=%d fetches=%d", attempts, len(store.writes), len(provider.fetchBatches))
+	}
+
+	now = now.Add(DefaultTamperRetryInterval)
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || len(store.writes) != 0 || len(store.tamperUpdates) != 1 || len(provider.fetchBatches) != 0 {
+		t.Fatalf("due retry: attempts=%d writes=%d tamper_updates=%d fetches=%d", attempts, len(store.writes), len(store.tamperUpdates), len(provider.fetchBatches))
+	}
+	written := store.tamperUpdates[0]
+	if written.headSHA != local.HeadSHA || written.assessment.HeadSHA != local.HeadSHA || written.assessment.SkipMarkersAdded != 1 {
+		t.Fatalf("retry write = %+v", written)
+	}
+}
+
+func TestRetryTamperAssessmentDoesNotReplayStalePRFacts(t *testing.T) {
+	store := testStoreWithSession()
+	store.sessions[0].Metadata.WorkspaceRepoPath = "/workspace"
+	local := knownPR(1)
+	local.BaseSHA, local.HeadSHA, local.CI = "base-1", "head-1", domain.CIPassing
+	store.prs["p-1"] = []domain.PullRequest{local}
+	observer := newTestObserver(store, &fakeProvider{}, &fakeLifecycle{}, time.Unix(100, 0).UTC())
+	observer.assessTamper = func(context.Context, string, string, string, time.Time) (domain.PRTamperAssessment, error) {
+		// A provider write lands while the local assessment is running.
+		store.mu.Lock()
+		current := store.prs["p-1"]
+		current[0].CI = domain.CIFailing
+		store.prs["p-1"] = current
+		store.mu.Unlock()
+		return domain.PRTamperAssessment{HeadSHA: local.HeadSHA, SkipMarkersAdded: 1}, nil
+	}
+	subjects := map[string]*subject{"pr": {session: store.sessions[0], workspacePath: "/workspace", known: local}}
+
+	observer.retryTamperAssessments(context.Background(), subjects, time.Unix(100, 0).UTC())
+
+	if len(store.writes) != 0 || len(store.tamperUpdates) != 1 {
+		t.Fatalf("writes=%d tamper_updates=%d, want narrow update", len(store.writes), len(store.tamperUpdates))
+	}
+	if got := store.prs["p-1"][0].CI; got != domain.CIFailing {
+		t.Fatalf("concurrent CI = %q, want preserved failing", got)
+	}
+}
+
+func TestTamperAssessmentDoesNotReuseEvidenceWhenBaseChanges(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	local := domain.PullRequest{
+		BaseSHA: "base-1",
+		HeadSHA: "head-1",
+		Tamper:  &domain.PRTamperAssessment{HeadSHA: "head-1", SkipMarkersAdded: 1, AssessedAt: now},
+	}
+	changedBase := domain.PullRequest{BaseSHA: "base-2", HeadSHA: "head-1"}
+
+	assessment, backfilled := (&Observer{}).tamperAssessment(
+		context.Background(),
+		domain.SessionRecord{},
+		changedBase,
+		local,
+		now.Add(time.Minute),
+	)
+	if assessment != nil || backfilled {
+		t.Fatalf("changed base reused assessment: assessment=%+v backfilled=%t", assessment, backfilled)
 	}
 }
 

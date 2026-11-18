@@ -88,6 +88,8 @@ func agentCoordinationRequestAllowed(method, path string) bool {
 	switch method {
 	case http.MethodGet:
 		switch {
+		case len(parts) == 4 && parts[2] == "coordination" && parts[3] == "capabilities":
+			return true
 		case len(parts) == 3 && (parts[2] == "projects" || parts[2] == "sessions"):
 			return true
 		case len(parts) == 4 && (parts[2] == "projects" || parts[2] == "sessions"):

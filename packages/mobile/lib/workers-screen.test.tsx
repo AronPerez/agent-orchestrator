@@ -1,7 +1,7 @@
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DashboardSession } from "./api";
-import type { HostedProject } from "./hostedRows";
+import type { HostedOrchestrator, HostedProject } from "./hostedRows";
 import type { HostSnapshot } from "./otherHosts";
 
 const fixtures = vi.hoisted(() => {
@@ -11,6 +11,7 @@ const fixtures = vi.hoisted(() => {
 		headerHeight: 155,
 		hostStates: [] as HostSnapshot[],
 		projects: [] as HostedProject[],
+		orchestrators: [] as HostedOrchestrator[],
 		refreshAll: vi.fn(async () => {}),
 		refreshHost: vi.fn(async (_hostId: string) => {}),
 		select: vi.fn(),
@@ -82,7 +83,8 @@ vi.mock("./store", () => ({ useApp: () => ({
 	configured: fixtures.configured, configResolved: true, connection: fixtures.connection, loading: false, error: null, cloud: fixtures.cloud,
 	config: { hostId: "mac" },
 	refreshAll: fixtures.refreshAll, refreshHost: fixtures.refreshHost,
-	allSessions: fixtures.hostStates.flatMap((host) => host.sessions.map((session) => ({ ...session, hostId: host.hostId }))), allProjects: fixtures.projects,
+		allSessions: fixtures.hostStates.flatMap((host) => host.sessions.map((session) => ({ ...session, hostId: host.hostId, hostName: host.name }))), allProjects: fixtures.projects,
+		allOrchestrators: fixtures.orchestrators,
 	hostStates: fixtures.hostStates, notificationsUnread: fixtures.notificationsUnread,
 	phoneNetwork: { connected: true, internet: true },
 }) }));
@@ -106,6 +108,13 @@ vi.mock("./worker-board-list", async () => {
 	return { WorkerBoardList: ({ ListHeaderComponent, ListEmptyComponent, ...props }: { ListHeaderComponent: React.ReactNode; ListEmptyComponent: React.ReactNode; sessions: unknown[] }) =>
 		React.createElement("WorkerBoardList", props, ListHeaderComponent, props.sessions.length === 0 ? ListEmptyComponent : null) };
 });
+vi.mock("./fleet-tree-list", async () => {
+	const React = await import("react");
+	return {
+		FleetTreeList: ({ ListHeaderComponent, ...props }: { ListHeaderComponent: React.ReactNode }) =>
+			React.createElement("FleetTreeList", props, ListHeaderComponent),
+	};
+});
 // The real one draws nothing on iOS; this stands in for Android's FAB on both.
 vi.mock("./workers-idle-state", () => ({ WorkersIdleState: "WorkersIdleState" }));
 vi.mock("./archive/useLatestArchivedAt", () => ({ useLatestArchivedAt: () => undefined }));
@@ -118,6 +127,7 @@ vi.mock("./RouteErrorBoundary", () => ({ RouteErrorBoundary: () => null }));
 import { startNewTask } from "./newTaskAction";
 import FleetScreen from "../app/(tabs)/(workers)/index";
 import { WorkerBoardList } from "./worker-board-list";
+import { FleetTreeList } from "./fleet-tree-list";
 import { WorkerEnvironmentFilter } from "./worker-environment-filter";
 import { ALL_WORKER_ENVIRONMENTS } from "./worker-controls";
 
@@ -192,6 +202,7 @@ beforeEach(() => {
 	fixtures.cloudSessionsError = null;
 	fixtures.notificationsUnread = 0;
 	fixtures.projects = [];
+	fixtures.orchestrators = [];
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 	fixtures.refreshAll.mockClear();
 	fixtures.refreshHost.mockClear();
@@ -329,6 +340,34 @@ describe("Workers filter menu", () => {
 		act(() => renderer.update(<FleetScreen />));
 		expect(toolbar("left")!.props.children).toBe(menu);
 		expect(toolbar("right")!.props).toBe(trailing);
+	});
+});
+
+describe("Workers fleet hierarchy", () => {
+	it("uses the shared hierarchy for the unfiltered fleet and keeps filtered boards flat", () => {
+		fixtures.projects = [project("project-1", "Project", "mac", "Mac")];
+		act(() => { renderer = create(<FleetScreen />); });
+
+		expect(renderer.root.findByType(FleetTreeList).props.sessions).toHaveLength(1);
+		expect(renderer.root.findByType(FleetTreeList).props.archiveSources).toBeDefined();
+		expect(renderer.root.findAllByType(WorkerBoardList)).toHaveLength(0);
+
+		chooseMachine("Windows");
+		expect(renderer.root.findByType(WorkerBoardList).props.sessions).toHaveLength(0);
+		expect(renderer.root.findAllByType(FleetTreeList)).toHaveLength(0);
+	});
+
+	it("keeps a non-terminal orchestrator visible while its runtime reconnects", () => {
+		fixtures.projects = [project("project-1", "Project", "mac", "Mac")];
+		fixtures.hostStates[0].sessions = [];
+		fixtures.orchestrators = [{
+			id: "orch", projectId: "project-1", projectName: "Project", hostId: "mac", hostName: "Mac",
+			status: "working", mode: "chat", hasRuntime: false, isTerminal: false,
+		}];
+
+		act(() => { renderer = create(<FleetScreen />); });
+
+		expect(renderer.root.findByType(FleetTreeList).props.orchestrators).toHaveLength(1);
 	});
 });
 

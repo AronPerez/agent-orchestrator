@@ -15,6 +15,7 @@ export type WorkerRowInteractionProps = {
 	rowStyle: StyleProp<ViewStyle>;
 	accessibilityLabel: string;
 	accessibilityHint?: string;
+	additionalAccessibilityAction?: { name: string; label: string; onAction(): void };
 	onPress(): void;
 	/**
 	 * The long-press menu's contents, decided by workerContextActions so the rules
@@ -30,5 +31,5 @@ export type WorkerRowInteractionProps = {
 /** The pressable row inside the swipe container, with each platform's own long-press menu. */
 export type WorkerRowContextMenuProps = Pick<
 	WorkerRowInteractionProps,
-	"children" | "onPress" | "actions" | "onAction" | "accessibilityLabel" | "accessibilityHint"
+	"children" | "onPress" | "actions" | "onAction" | "accessibilityLabel" | "accessibilityHint" | "additionalAccessibilityAction"
 > & { style: StyleProp<ViewStyle> };

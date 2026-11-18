@@ -2928,6 +2928,25 @@ func TestTriggerCreatesRunsForMultipleEligiblePRsWithOneReviewer(t *testing.T) {
 	}
 }
 
+func TestReviewQueueAttachesOnlyExactHeadTamperEvidence(t *testing.T) {
+	current := &domain.PRTamperAssessment{HeadSHA: "sha1", SkipMarkersAdded: 1}
+	stale := &domain.PRTamperAssessment{HeadSHA: "old-sha", TestFilesDeleted: 1}
+	runs := []domain.ReviewRun{
+		{ID: "run-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1"},
+		{ID: "run-2", PRURL: "https://github.com/o/r/pull/2", TargetSHA: "sha2"},
+	}
+	queue := reviewQueue(runs, []domain.PullRequest{
+		{URL: runs[0].PRURL, HeadSHA: "sha1", Tamper: current},
+		{URL: runs[1].PRURL, HeadSHA: "sha2", Tamper: stale},
+	})
+	if len(queue) != 2 || queue[0].Tamper != current {
+		t.Fatalf("current-head queue evidence = %+v", queue)
+	}
+	if queue[1].Tamper != nil {
+		t.Fatalf("stale-head evidence reached reviewer: %+v", queue[1].Tamper)
+	}
+}
+
 func TestTriggerAllowsTwoPRsWithSameHeadSHA(t *testing.T) {
 	store := &fakeStore{}
 	launcher := &fakeLauncher{handle: "review-mer-1"}

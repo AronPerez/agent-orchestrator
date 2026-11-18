@@ -41,12 +41,16 @@ import (
 var (
 	ErrNotFound                      = errors.New("session: not found")
 	ErrSemanticAcceptanceUnsupported = errors.New("session: semantic message acceptance unsupported")
-	ErrNotRestorable                 = errors.New("session: not restorable (not terminal)")
-	ErrTerminated                    = errors.New("session: terminated")
-	ErrAgentExited                   = errors.New("session: agent exited")
-	ErrAgentNotExited                = errors.New("session: agent has not exited")
-	ErrAgentExitInProgress           = errors.New("session: agent exit is already in progress")
-	ErrIncompleteHandle              = errors.New("session: incomplete teardown handle")
+	// ErrSemanticDeliveryNotAttempted means SendSemantic returned before it
+	// invoked the messenger. It still matches ErrSemanticAcceptanceUnsupported
+	// so existing capability checks retain their behavior.
+	ErrSemanticDeliveryNotAttempted = fmt.Errorf("%w: delivery was not attempted", ErrSemanticAcceptanceUnsupported)
+	ErrNotRestorable                = errors.New("session: not restorable (not terminal)")
+	ErrTerminated                   = errors.New("session: terminated")
+	ErrAgentExited                  = errors.New("session: agent exited")
+	ErrAgentNotExited               = errors.New("session: agent has not exited")
+	ErrAgentExitInProgress          = errors.New("session: agent exit is already in progress")
+	ErrIncompleteHandle             = errors.New("session: incomplete teardown handle")
 	// ErrProjectNotResolvable means the spawn's project has no usable repo
 	// (unregistered, archived, or missing a path). The API maps it to a 400.
 	ErrProjectNotResolvable = errors.New("session: project repo not resolvable")
@@ -142,6 +146,9 @@ var (
 	// submit both as one prompt (#5711). The API maps it to a retryable 409; the
 	// caller retries once the operator submits or discards their draft.
 	ErrComposerBusy = errors.New("session: composer has an unsent draft")
+	// ErrSemanticDeliveryRejected means a keyed Chat delivery is durably known
+	// not to have crossed the provider boundary and may use a new attempt ID.
+	ErrSemanticDeliveryRejected = errors.New("session: semantic delivery was rejected before provider dispatch")
 	// ErrDeliveryUnconfirmed means the prompt was written to the pane, but the
 	// harness never confirmed that the agent became active before the
 	// confirmation budget was exhausted (e.g. trailing Enter absorbed or dropped).
@@ -5832,11 +5839,14 @@ type semanticDeliveryStore interface {
 	SemanticDeliveryAccepted(ctx context.Context, id domain.SessionID, runtimeLaunchID, deliveryID string) (bool, error)
 }
 
-// SendSemantic delivers an internal message and returns only after the target
-// agent has accepted that exact message. Chat uses its native accepted-turn
-// boundary. Supported TUIs correlate the durable id through UserPromptSubmit;
-// a successful pane write alone never satisfies this method.
-func (m *Manager) SendSemantic(ctx context.Context, id domain.SessionID, message, clientMessageID string) error {
+type chatSemanticDeliveryConfirmer interface {
+	ConfirmSessionChatTurn(context.Context, domain.SessionID, string, string, ports.MessageDeliveryOptions) (bool, error)
+}
+
+// ConfirmSemantic reads the durable status of a prior keyed Chat delivery. It
+// never retries the provider call: ambiguous attempts retain their identity,
+// while a proven pre-dispatch rejection can safely start a new attempt.
+func (m *Manager) ConfirmSemantic(ctx context.Context, id domain.SessionID, message, clientMessageID string) error {
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return err
@@ -5844,24 +5854,53 @@ func (m *Manager) SendSemantic(ctx context.Context, id domain.SessionID, message
 	if !ok {
 		return ErrNotFound
 	}
+	if domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
+		return ErrSemanticAcceptanceUnsupported
+	}
+	confirmer, ok := m.chat.(chatSemanticDeliveryConfirmer)
+	if !ok {
+		return ErrDeliveryUnconfirmed
+	}
+	accepted, err := confirmer.ConfirmSessionChatTurn(ctx, id, message, clientMessageID, ports.MessageDeliveryOptions{})
+	if err != nil {
+		return err
+	}
+	if !accepted {
+		return ErrSemanticDeliveryRejected
+	}
+	return nil
+}
+
+// SendSemantic delivers an internal message and returns only after the target
+// agent has accepted that exact message. Chat uses its native accepted-turn
+// boundary. Supported TUIs correlate the durable id through UserPromptSubmit;
+// a successful pane write alone never satisfies this method.
+func (m *Manager) SendSemantic(ctx context.Context, id domain.SessionID, message, clientMessageID string) error {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return semanticDeliveryNotAttempted(err)
+	}
+	if !ok {
+		return semanticDeliveryNotAttempted(ErrNotFound)
+	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 		handled, sendErr := m.sendChat(ctx, id, message, clientMessageID, ports.MessageDeliveryOptions{})
 		if !handled {
-			return ErrSemanticAcceptanceUnsupported
+			return ErrSemanticDeliveryNotAttempted
 		}
 		return sendErr
 	}
 	receipts, ok := m.store.(semanticDeliveryStore)
 	if !ok {
-		return fmt.Errorf("%w: durable delivery receipts are unavailable", ErrSemanticAcceptanceUnsupported)
+		return fmt.Errorf("%w: durable delivery receipts are unavailable", ErrSemanticDeliveryNotAttempted)
 	}
 	if deliveryID, valid := domain.ReportDeliveryID(domain.WrapReportDelivery(clientMessageID, message)); !valid || deliveryID != clientMessageID {
-		return fmt.Errorf("%w: invalid semantic delivery id", ErrSemanticAcceptanceUnsupported)
+		return fmt.Errorf("%w: invalid semantic delivery id", ErrSemanticDeliveryNotAttempted)
 	}
 	launchID := rec.Metadata.RuntimeLaunchID
 	accepted, err := receipts.SemanticDeliveryAccepted(ctx, id, launchID, clientMessageID)
 	if err != nil {
-		return err
+		return semanticDeliveryNotAttempted(err)
 	}
 	// A delivery accepted before the daemon recorded accepted deliveries
 	// separately is still matched by the conversation checkpoint.
@@ -5869,13 +5908,13 @@ func (m *Manager) SendSemantic(ctx context.Context, id domain.SessionID, message
 		return nil
 	}
 	if rec.IsTerminated || rec.Activity.State == domain.ActivityExited {
-		return ErrTerminated
+		return semanticDeliveryNotAttempted(ErrTerminated)
 	}
 	if launchID == "" {
-		return fmt.Errorf("%w: session has no active runtime launch", ErrSemanticAcceptanceUnsupported)
+		return fmt.Errorf("%w: session has no active runtime launch", ErrSemanticDeliveryNotAttempted)
 	}
 	if !m.harnessSemanticAcceptance(rec.Harness) {
-		return ErrSemanticAcceptanceUnsupported
+		return ErrSemanticDeliveryNotAttempted
 	}
 	// A prior attempt already arrived head-less; resending the same text would
 	// be mangled the same way.
@@ -5928,6 +5967,10 @@ func (m *Manager) SendSemantic(ctx context.Context, id domain.SessionID, message
 		case <-ticker.C:
 		}
 	}
+}
+
+func semanticDeliveryNotAttempted(err error) error {
+	return fmt.Errorf("%w: %w", ErrSemanticDeliveryNotAttempted, err)
 }
 
 func (m *Manager) harnessSemanticAcceptance(harness domain.AgentHarness) bool {

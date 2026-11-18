@@ -3546,6 +3546,19 @@ paths:
       summary: Search visible chat messages across conversations
       tags:
       - conversations
+  /api/v1/coordination/capabilities:
+    get:
+      operationId: getCoordinationCapabilities
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoordinationCapabilitiesResponse'
+          description: OK
+      summary: List authenticated cross-machine coordination capabilities
+      tags:
+      - identity
   /api/v1/cues/{cueId}:
     delete:
       operationId: deleteCue
@@ -20170,6 +20183,8 @@ components:
           type:
           - "null"
           - string
+        latestDoneReport:
+          $ref: '#/components/schemas/SessionDoneReportResponse'
         mode:
           enum:
           - chat
@@ -21317,6 +21332,15 @@ components:
       - cachedTokens
       - totalTokens
       type: object
+    CoordinationCapabilitiesResponse:
+      properties:
+        capabilities:
+          items:
+            type: string
+          type: array
+      required:
+      - capabilities
+      type: object
     CoordinationEvent:
       properties:
         createdAt:
@@ -21496,6 +21520,8 @@ components:
       properties:
         id:
           type: string
+        verification:
+          $ref: '#/components/schemas/ReportVerificationResponse'
       required:
       - id
       type: object
@@ -23782,6 +23808,27 @@ components:
       - open
       - layers
       type: object
+    PRTamperAssessmentResponse:
+      properties:
+        assessedAt:
+          format: date-time
+          type: string
+        ciWorkflowEdited:
+          type: boolean
+        headSha:
+          type: string
+        skipMarkersAdded:
+          type: integer
+        testCasesAdded:
+          type: integer
+        testCasesRemoved:
+          type: integer
+        testFilesDeleted:
+          type: integer
+      required:
+      - headSha
+      - assessedAt
+      type: object
     PostPRCommentRequest:
       properties:
         attachments:
@@ -24590,12 +24637,44 @@ components:
           type: string
         state:
           type: string
+        verification:
+          $ref: '#/components/schemas/ReportVerificationResponse'
       required:
       - id
       - sessionId
       - projectId
       - createdAt
       - repeatCount
+      type: object
+    ReportVerificationResponse:
+      properties:
+        completedAt:
+          format: date-time
+          type: string
+        evidence:
+          type: string
+        interactionAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        outputTail:
+          type: string
+        startedAt:
+          format: date-time
+          type: string
+        state:
+          enum:
+          - passed
+          - failed
+          type: string
+        workspaceRevision:
+          type: string
+      required:
+      - state
+      - evidence
+      - startedAt
+      - completedAt
       type: object
     ResolveCommentsResponse:
       properties:
@@ -25024,6 +25103,8 @@ components:
       properties:
         attachment:
           $ref: '#/components/schemas/AttachmentInput'
+        automationAuthored:
+          type: boolean
         message:
           maxLength: 4096
           minLength: 1
@@ -25170,6 +25251,8 @@ components:
           type: string
         unpushed:
           type: integer
+        workspaceRevision:
+          type: string
       required:
       - commits
       - unpushed
@@ -25187,6 +25270,17 @@ components:
       required:
       - events
       - hasMore
+      type: object
+    SessionDoneReportResponse:
+      properties:
+        id:
+          type: string
+        superseded:
+          type: boolean
+        verification:
+          $ref: '#/components/schemas/ReportVerificationResponse'
+      required:
+      - id
       type: object
     SessionHistoryResponse:
       properties:
@@ -25577,6 +25671,8 @@ components:
           - merged
           - closed
           type: string
+        tamper:
+          $ref: '#/components/schemas/PRTamperAssessmentResponse'
         updatedAt:
           format: date-time
           type: string
@@ -27386,6 +27482,8 @@ components:
           items:
             $ref: '#/components/schemas/ConversationImageContentRequest'
           type: array
+        automationAuthored:
+          type: boolean
         clientMessageId:
           type: string
         recoverOnly:

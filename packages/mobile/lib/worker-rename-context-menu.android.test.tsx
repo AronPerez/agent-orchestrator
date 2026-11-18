@@ -33,7 +33,11 @@ afterEach(() => {
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
 });
-function mount(onPress = vi.fn(), onAction = vi.fn()) {
+function mount(onPress = vi.fn(), onAction = vi.fn(), additionalAccessibilityAction?: {
+	name: string;
+	label: string;
+	onAction(): void;
+}) {
 	Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 	act(() => {
 		renderer = create(
@@ -42,6 +46,7 @@ function mount(onPress = vi.fn(), onAction = vi.fn()) {
 				onAction={onAction}
 				actions={[{ id: "open", title: "Open" }, { id: "pin", title: "Pin" }, { id: "delete", title: "Archive session", destructive: true }]}
 				accessibilityLabel="Polish workers"
+				additionalAccessibilityAction={additionalAccessibilityAction}
 				style={{ minHeight: 76 }}
 			>
 				{createElement("RowContent")}
@@ -119,6 +124,22 @@ it("offers the menu's actions to TalkBack", () => {
 	act(() => row.props.onAccessibilityAction({ nativeEvent: { actionName: "delete" } }));
 	act(() => row.props.onAccessibilityAction({ nativeEvent: { actionName: "longpress" } }));
 	expect(onAction.mock.calls).toEqual([["delete"]]);
+});
+
+it("offers a branch disclosure action on the whole row", () => {
+	const onToggle = vi.fn();
+	const row = mount(vi.fn(), vi.fn(), {
+		name: "toggleBranch",
+		label: "Collapse branch",
+		onAction: onToggle,
+	}).root.findByType("Pressable" as never);
+	expect(row.props.accessibilityActions).toEqual([
+		{ name: "pin", label: "Pin" },
+		{ name: "delete", label: "Archive session" },
+		{ name: "toggleBranch", label: "Collapse branch" },
+	]);
+	act(() => row.props.onAccessibilityAction({ nativeEvent: { actionName: "toggleBranch" } }));
+	expect(onToggle).toHaveBeenCalledTimes(1);
 });
 
 it("routes a chosen action by its id", () => {

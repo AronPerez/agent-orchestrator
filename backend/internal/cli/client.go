@@ -120,6 +120,14 @@ func (c *commandContext) postSetupJSON(ctx context.Context, path string, body, o
 	return c.doJSONPathWithHeadersAndTimeout(ctx, http.MethodPost, "/api/v1/"+path, body, out, nil, 0)
 }
 
+// postVerificationJSON is postJSON for a done report that runs the project's
+// Verify steps. The daemon applies each configured step's own timeout; a
+// shorter aggregate client timeout would cancel a valid multi-step run. The
+// command context still cancels the request when the caller interrupts it.
+func (c *commandContext) postVerificationJSON(ctx context.Context, path string, body, out any) error {
+	return c.doJSONPathWithHeadersAndTimeout(ctx, http.MethodPost, "/api/v1/"+path, body, out, nil, 0)
+}
+
 // patchJSON sends body as JSON to PATCH /api/v1/<path> on the running daemon
 // and decodes a 2xx response into out.
 func (c *commandContext) patchJSON(ctx context.Context, path string, body, out any) error {
@@ -158,6 +166,9 @@ func (c *commandContext) postLoopbackJSON(ctx context.Context, path string, body
 func (c *commandContext) daemonBase() (string, error) {
 	if c.remote != nil {
 		return c.remote.baseURL, nil
+	}
+	if c.pinnedBase != "" {
+		return c.pinnedBase, nil
 	}
 	return c.localDaemonBase()
 }
@@ -204,6 +215,9 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	if err != nil {
 		return err
 	}
+	if err := c.revalidateRemoteTarget(ctx); err != nil {
+		return err
+	}
 
 	var reader io.Reader = http.NoBody
 	if body != nil {
@@ -224,18 +238,23 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}
-	if callerID := callerSession(); callerID != "" {
+	if callerID := c.requestCallerSession(); callerID != "" {
 		req.Header.Set(caller.Header, callerID)
 	}
 	if sideID := os.Getenv("AO_SIDE_CONVERSATION_ID"); sideID != "" {
 		req.Header.Set("X-AO-Side-Conversation", sideID)
+	}
+	if c.beforeRequest != nil {
+		if err := c.beforeRequest(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Reuse the injected client's transport (keeps it stubbable in tests) but
 	// give daemon API calls far more headroom than the 2s status-probe timeout.
 	client := *c.deps.HTTPClient
 	client.Timeout = timeout
-	if c.remote != nil && c.remote.hostID != "" {
+	if c.remote != nil && c.remote.expectedHostID != "" {
 		// The identity probe approved this exact origin. Following even a
 		// same-host redirect could send the coordination bearer to another port
 		// or downgrade an HTTPS target to plaintext.
@@ -300,6 +319,17 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+func (c *commandContext) requestCallerSession() string {
+	callerID := callerSession()
+	if callerID == "" || c.remote == nil {
+		return callerID
+	}
+	if c.remote.sourceRelationKnown && c.remote.sameAsSource {
+		return callerID
+	}
+	return ""
 }
 
 // callerSession is the agent session running this command, so the daemon can

@@ -345,6 +345,9 @@ func (b PreparedBatch) Render() string {
 			out.WriteString("\n")
 			out.WriteString(text)
 		}
+		if verification := report.Verification; verification != nil {
+			fmt.Fprintf(&out, "\nverification: %s (evidence: %s)", verification.State, verification.Evidence)
+		}
 		for _, output := range report.Outputs {
 			fmt.Fprintf(&out, "\n%s: %s", output.Kind, output.Reference)
 		}

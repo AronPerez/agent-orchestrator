@@ -507,6 +507,7 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersClaimPRResponse":                          "ClaimPRResponse",
 	"ControllersClaimPRRequest":                           "ClaimPRRequest",
 	"ControllersSessionPRFacts":                           "SessionPRFacts",
+	"ControllersPRTamperAssessmentResponse":               "PRTamperAssessmentResponse",
 	"ControllersSessionPRSummary":                         "SessionPRSummary",
 	"ControllersSessionPRLabel":                           "SessionPRLabel",
 	"ControllersSessionPRRequestedReviewer":               "SessionPRRequestedReviewer",
@@ -609,6 +610,8 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersSessionCoordinationResponse":      "SessionCoordinationResponse",
 	"DomainCoordinationEvent":                     "CoordinationEvent",
 	"ControllersReportResponse":                   "ReportResponse",
+	"ControllersReportVerificationResponse":       "ReportVerificationResponse",
+	"ControllersSessionDoneReportResponse":        "SessionDoneReportResponse",
 	"ControllersListReportsResponse":              "ListReportsResponse",
 	"ControllersDecisionOptionPayload":            "DecisionOptionPayload",
 	"ControllersDecisionLinkPayload":              "DecisionLinkPayload",
@@ -731,6 +734,7 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"MobilebridgeEndpoint":                        "MobileEndpoint",
 	"MobilebridgeTunnelStatus":                    "MobileTunnelStatus",
 	"ControllersIdentityResponse":                 "IdentityResponse",
+	"ControllersCoordinationCapabilitiesResponse": "CoordinationCapabilitiesResponse",
 	"ControllersEndpointsResponse":                "EndpointsResponse",
 	"ControllersLinkPreviewQuery":                 "LinkPreviewQuery",
 	"ControllersLinkPreviewResponse":              "LinkPreviewResponse",
@@ -1036,6 +1040,13 @@ func identityOperations() []operation {
 			resps: []respUnit{
 				{http.StatusOK, controllers.IdentityResponse{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/coordination/capabilities", id: "getCoordinationCapabilities", tag: "identity",
+			summary: "List authenticated cross-machine coordination capabilities",
+			resps: []respUnit{
+				{http.StatusOK, controllers.CoordinationCapabilitiesResponse{}},
 			},
 		},
 	}

@@ -37,12 +37,15 @@ import {
 	AlertTriangle,
 	Archive,
 	ArrowUpRight,
+	CircleHelp,
 	PanelLeft,
 	GitPullRequest,
 	GitMerge,
 	Info,
 	Play,
 	Loader2,
+	ShieldCheck,
+	TriangleAlert,
 	X,
 } from "@/components/app-icons";
 import { InfoRow, InfoRowButton, InfoRowLink } from "./InspectorInfoRow";
@@ -102,6 +105,11 @@ import {
 	STANDALONE_WORKSPACE_ID,
 } from "../types/workspace";
 import { getAgentActivityView, getSessionTimelinePillView } from "../lib/session-presentation";
+import {
+	sessionVerificationPresentation,
+	type SessionVerificationPresentation,
+	type SessionVerificationReason,
+} from "../lib/session-verification";
 import { BrowserPanelView, type BrowserAnnotationQueueModel } from "./BrowserPanel";
 import type { BrowserViewModel } from "../hooks/useBrowserView";
 import { FilesActionsHostContext, FilesTopbarHostContext } from "./files-topbar-host";
@@ -527,6 +535,10 @@ const SummaryView = memo(function SummaryView({
 	// Reached through a share: this person sees the session's pull requests but
 	// leaves managing them, and the session's policies, to its owner.
 	const guest = session.cloud?.shared === true;
+	const verification = sessionVerificationPresentation(session);
+	const sessionControls = showSessionControls && !guest
+		? <SessionControls hostId={hostId} policies={hasPRs} scratchpad={scratchpadSession} session={session} stopTurn={stopTurn} />
+		: undefined;
 	const prView = usePRViewEnabled();
 	return (
 		<SessionInspectorSummaryView
@@ -627,7 +639,17 @@ const SummaryView = memo(function SummaryView({
 					title={prSectionTitle}
 				/>
 			)}
-			completion={showSessionControls && !guest ? <SessionControls hostId={hostId} policies={hasPRs} scratchpad={scratchpadSession} session={session} stopTurn={stopTurn} /> : undefined}
+			completion={verification || sessionControls ? (
+				<>
+					{verification ? (
+						<SessionVerificationSection
+							onOpenEvidence={onOpenArtifact ? (path) => onOpenArtifact({ path }) : undefined}
+							presentation={verification}
+						/>
+					) : null}
+					{sessionControls}
+				</>
+			) : undefined}
 			context={session.goal?.trim() || collision || collisionScanState ? (
 				<>
 					<SessionContractSummary session={session} />
@@ -639,6 +661,73 @@ const SummaryView = memo(function SummaryView({
 		/>
 	);
 });
+
+function verificationStateLabel(t: TFunction, state: SessionVerificationPresentation["state"]): string {
+	switch (state) {
+		case "verified":
+			return t("verification.verified");
+		case "tampering_suspected":
+			return t("verification.tamperingSuspected");
+		default:
+			return t("verification.unverified");
+	}
+}
+
+function verificationReasonLabel(t: TFunction, reason: SessionVerificationReason): string {
+	switch (reason.kind) {
+		case "test_files_deleted":
+			return t("verification.testFilesDeleted", { count: reason.count });
+		case "test_cases_removed":
+			return t("verification.testCasesRemoved", { added: reason.added, removed: reason.removed });
+		case "skip_markers_added":
+			return t("verification.skipMarkersAdded", { count: reason.count });
+		case "ci_workflow_edited":
+			return t("verification.ciWorkflowEdited");
+	}
+}
+
+function SessionVerificationSection({
+	presentation,
+	onOpenEvidence,
+}: {
+	presentation: SessionVerificationPresentation;
+	onOpenEvidence?: (path: string) => void;
+}) {
+	const { t } = useTranslation();
+	const Icon = presentation.state === "verified" ? ShieldCheck : presentation.state === "tampering_suspected" ? TriangleAlert : CircleHelp;
+	const tone = presentation.state === "verified" ? "text-success" : presentation.state === "tampering_suspected" ? "text-status-in-review" : "text-passive";
+	return (
+		<Section surface={false} title={t("verification.title")}>
+			<div className="flex flex-col gap-2" data-session-verification={presentation.state}>
+				<div className="flex items-center gap-2 text-sm font-medium">
+					<Icon aria-hidden="true" className={cn("size-icon-sm shrink-0", tone)} />
+					<span>{verificationStateLabel(t, presentation.state)}</span>
+				</div>
+				{presentation.reasons.length > 0 ? (
+					<ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+						{presentation.reasons.map((reason) => (
+							<li key={reason.kind}>{verificationReasonLabel(t, reason)}</li>
+						))}
+					</ul>
+				) : null}
+				{presentation.state === "tampering_suspected" ? (
+					<p className="text-xs text-muted-foreground">{t("verification.advisory")}</p>
+				) : null}
+				{presentation.evidence && onOpenEvidence ? (
+					<Button
+						className="self-start"
+						onClick={() => onOpenEvidence(presentation.evidence!)}
+						size="sm"
+						type="button"
+						variant="outline"
+					>
+						{t("verification.viewEvidence")}
+					</Button>
+				) : null}
+			</div>
+		</Section>
+	);
+}
 
 function CollisionRadarSection({
 	collision,

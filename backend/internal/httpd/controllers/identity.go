@@ -13,6 +13,11 @@ import (
 // it when a change to the mobile-facing surface is not backward compatible.
 const MobileAPIVersion = 1
 
+// CoordinationCapabilityAutomationAuthored means the receiving daemon keeps
+// cross-host agent messages classified as automation without resolving a
+// foreign session ID.
+const CoordinationCapabilityAutomationAuthored = "automation-authored"
+
 // IdentityController serves the unauthenticated host-identity probe.
 //
 // The phone races several endpoints, and a private address is not an identity:
@@ -26,6 +31,7 @@ type IdentityController struct {
 // Register mounts the identity route on the supplied router.
 func (c *IdentityController) Register(r chi.Router) {
 	r.Get("/identity", c.identity)
+	r.Get("/coordination/capabilities", c.coordinationCapabilities)
 }
 
 func (c *IdentityController) identity(w http.ResponseWriter, r *http.Request) {
@@ -36,5 +42,11 @@ func (c *IdentityController) identity(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, http.StatusOK, IdentityResponse{
 		HostID:     c.HostID,
 		APIVersion: MobileAPIVersion,
+	})
+}
+
+func (c *IdentityController) coordinationCapabilities(w http.ResponseWriter, _ *http.Request) {
+	envelope.WriteJSON(w, http.StatusOK, CoordinationCapabilitiesResponse{
+		Capabilities: []string{CoordinationCapabilityAutomationAuthored},
 	})
 }

@@ -43,6 +43,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserstream"
 	"github.com/aoagents/agent-orchestrator/backend/internal/caller"
+	"github.com/aoagents/agent-orchestrator/backend/internal/cdc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/clienttz"
 	"github.com/aoagents/agent-orchestrator/backend/internal/codexops"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
@@ -97,6 +98,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
+	"github.com/aoagents/agent-orchestrator/backend/internal/verification"
 )
 
 // usageReconcileTick is the safety-net interval for the usage pipeline
@@ -832,7 +834,7 @@ func Run(buildVersion string) (retErr error) {
 	if githubRepos != nil {
 		sessionSvc.SetGitHubRepositoryResolver(githubRepos)
 	}
-	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Milestones: installMilestones(cfg), Logger: log, GitHubRepos: githubRepos})
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Milestones: installMilestones(cfg), Logger: log, GitHubRepos: githubRepos, OnConfigChanged: sessionSvc.SignalProjectOverlapRadar})
 	go projectSvc.WarmCanonicalRepos(ctx)
 	reportSessions, ok := sessMgr.(reportSemanticSession)
 	if !ok {
@@ -843,11 +845,23 @@ func Run(buildVersion string) (retErr error) {
 		return errors.New("wire decision delivery: session manager lacks attributed send support")
 	}
 	var reportCoordinator *reportsvc.Coordinator
-	reportSvc := reportsvc.New(reportsvc.Deps{Store: store, Artifacts: chatSvc, OnCreated: func(domain.ReportRecord) {
-		if reportCoordinator != nil {
-			reportCoordinator.Wake()
-		}
-	}})
+	verificationRunner := verification.NewRunner()
+	evidenceArtifacts := reportEvidenceArtifacts{
+		register: func(registerCtx context.Context, id domain.SessionID, reference string) error {
+			_, err := sessionSvc.RegisterArtifacts(registerCtx, id, []string{reference})
+			return err
+		},
+		unregister: sessionSvc.UnregisterArtifact,
+	}
+	reportSvc := reportsvc.New(reportsvc.Deps{
+		Store: store, Artifacts: chatSvc, Verifier: verificationRunner,
+		EvidenceArtifacts: evidenceArtifacts, DataDir: cfg.DataDir,
+		OnCreated: func(domain.ReportRecord) {
+			if reportCoordinator != nil {
+				reportCoordinator.Wake()
+			}
+		},
+	})
 	reportCoordinator = reportsvc.NewCoordinator(reportsvc.CoordinatorDeps{
 		Store:    store,
 		Delivery: reportSemanticDelivery{chat: chatSvc, sessions: reportSessions, store: store},
@@ -1525,6 +1539,22 @@ func Run(buildVersion string) (retErr error) {
 		}()
 		go func() {
 			defer sentryobs.RecoverBackground()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return
+			}
+			unsubscribe := cdcPipe.Broadcaster.Subscribe(func(event cdc.Event) {
+				if event.Type != cdc.EventSessionCreated && event.Type != cdc.EventSessionUpdated {
+					return
+				}
+				sessionSvc.SignalProjectOverlapRadarSession(domain.ProjectID(event.ProjectID))
+			})
+			defer unsubscribe()
+			sessionSvc.RunProjectOverlapNoticeRadar(ctx)
+		}()
+		go func() {
+			defer sentryobs.RecoverBackground()
 			// The session operation gate skips reconciliation in progress, so
 			// a slow provider reconnect must not stall hibernation of others.
 			ticker := time.NewTicker(chatHibernateSweepTick)
@@ -1735,6 +1765,19 @@ func telemetryAppVersion(configured, buildVersion string) string {
 type reportSemanticSession interface {
 	SendSemantic(context.Context, domain.SessionID, string, string) error
 	InterruptTUI(context.Context, domain.SessionID) error
+}
+
+type reportEvidenceArtifacts struct {
+	register   func(context.Context, domain.SessionID, string) error
+	unregister func(context.Context, domain.SessionID, string) error
+}
+
+func (a reportEvidenceArtifacts) Register(ctx context.Context, id domain.SessionID, reference string) error {
+	return a.register(ctx, id, reference)
+}
+
+func (a reportEvidenceArtifacts) Unregister(ctx context.Context, id domain.SessionID, reference string) error {
+	return a.unregister(ctx, id, reference)
 }
 
 type decisionMessageSession interface {

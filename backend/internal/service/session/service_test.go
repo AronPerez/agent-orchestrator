@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,11 +86,12 @@ type fakeStore struct {
 	comments            map[string][]domain.PullRequestComment
 	commentsErr         error
 	reviewRuns          map[domain.SessionID][]domain.CurrentHeadReviewRun
+	doneReports         map[domain.SessionID]domain.SessionDoneReport
 	interrupted         map[domain.SessionID]bool
 	listPRFactsCalls    int
 	listReviewRunsCalls int
-	getProjectMu        sync.Mutex
-	getProjectCalls     int
+	listDoneReportCalls int
+	getProjectCalls     atomic.Int64
 	num                 int
 	conversations       map[domain.SessionID]domain.ConversationRecord
 	activities          []domain.ConversationActivity
@@ -116,6 +118,7 @@ func newFakeStore() *fakeStore {
 		threads:        map[string][]domain.PullRequestReviewThread{},
 		comments:       map[string][]domain.PullRequestComment{},
 		reviewRuns:     map[domain.SessionID][]domain.CurrentHeadReviewRun{},
+		doneReports:    map[domain.SessionID]domain.SessionDoneReport{},
 	}
 }
 
@@ -198,6 +201,7 @@ func TestListBatchesKanbanReads(t *testing.T) {
 	st.pr["mer-2"] = domain.PRFacts{URL: "pr-2", HeadSHA: "head-2"}
 	st.reviewRuns["mer-1"] = []domain.CurrentHeadReviewRun{{SessionID: "mer-1", PRURL: "pr-1", Status: domain.ReviewRunRunning, ID: "run-1", CreatedAt: time.Now().UTC()}}
 	st.reviewRuns["mer-2"] = []domain.CurrentHeadReviewRun{{SessionID: "mer-2", PRURL: "pr-2", Status: domain.ReviewRunRunning, ID: "run-2", CreatedAt: time.Now().UTC()}}
+	st.doneReports["mer-1"] = domain.SessionDoneReport{ID: "done-1", Verification: &domain.ReportVerification{State: domain.ReportVerificationPassed}}
 
 	list, err := (&Service{store: st}).List(context.Background(), ListFilter{ProjectID: "mer"})
 	if err != nil {
@@ -211,6 +215,43 @@ func TestListBatchesKanbanReads(t *testing.T) {
 	}
 	if st.listReviewRunsCalls != 1 {
 		t.Fatalf("ListCurrentHeadReviewRuns calls = %d, want 1 batched call", st.listReviewRunsCalls)
+	}
+	if st.listDoneReportCalls != 1 {
+		t.Fatalf("ListLatestDoneReports calls = %d, want 1 batched call", st.listDoneReportCalls)
+	}
+	foundDone := false
+	for _, session := range list {
+		if session.ID == "mer-1" {
+			foundDone = session.LatestDoneReport != nil && session.LatestDoneReport.ID == "done-1"
+		}
+	}
+	if !foundDone {
+		t.Fatalf("latest done report missing from list: %+v", list)
+	}
+}
+
+func TestSessionListAndGetExposeLatestDoneVerification(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer"}
+	verification := &domain.ReportVerification{
+		State: domain.ReportVerificationPassed, Evidence: "verification/done-1.txt",
+		StartedAt: time.Unix(10, 0).UTC(), CompletedAt: time.Unix(11, 0).UTC(),
+	}
+	st.doneReports["mer-1"] = domain.SessionDoneReport{ID: "done-1", Verification: verification}
+	svc := &Service{store: st}
+
+	list, err := svc.List(context.Background(), ListFilter{ProjectID: "mer"})
+	if err != nil || len(list) != 1 {
+		t.Fatalf("List: sessions=%+v err=%v", list, err)
+	}
+	got, err := svc.Get(context.Background(), "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, latest := range map[string]*domain.SessionDoneReport{"list": list[0].LatestDoneReport, "get": got.LatestDoneReport} {
+		if latest == nil || latest.ID != "done-1" || latest.Verification == nil || *latest.Verification != *verification {
+			t.Fatalf("%s latest done report = %+v", label, latest)
+		}
 	}
 }
 
@@ -608,6 +649,17 @@ func (f *fakeStore) ListPRFactsForSessions(_ context.Context, ids []domain.Sessi
 	return out, nil
 }
 
+func (f *fakeStore) ListLatestDoneReportsForSessions(_ context.Context, ids []domain.SessionID) (map[domain.SessionID]domain.SessionDoneReport, error) {
+	f.listDoneReportCalls++
+	out := make(map[domain.SessionID]domain.SessionDoneReport)
+	for _, id := range ids {
+		if report, ok := f.doneReports[id]; ok {
+			out[id] = report
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeStore) ListCurrentHeadReviewRunsForSession(_ context.Context, id domain.SessionID) ([]domain.CurrentHeadReviewRun, error) {
 	f.listReviewRunsCalls++
 	return f.reviewRuns[id], nil
@@ -655,17 +707,9 @@ func (f *fakeStore) ListPRComments(_ context.Context, prURL string) ([]domain.Pu
 }
 
 func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
-	f.getProjectMu.Lock()
-	defer f.getProjectMu.Unlock()
-	f.getProjectCalls++
+	f.getProjectCalls.Add(1)
 	p, ok := f.projects[id]
 	return p, ok, nil
-}
-
-func (f *fakeStore) getProjectCallCount() int {
-	f.getProjectMu.Lock()
-	defer f.getProjectMu.Unlock()
-	return f.getProjectCalls
 }
 
 func (f *fakeStore) ListSessionWorktrees(_ context.Context, id domain.SessionID) ([]domain.SessionWorktreeRecord, error) {
@@ -6143,8 +6187,8 @@ func TestSessionsFromRecordsReusesContractProjectAndSkipsFinishedRows(t *testing
 	if len(sessions) != 4 {
 		t.Fatalf("sessions = %d, want 4", len(sessions))
 	}
-	if calls := st.getProjectCallCount(); calls != 1 {
-		t.Fatalf("GetProject calls = %d, want one shared lookup for active escalations", calls)
+	if got := st.getProjectCalls.Load(); got != 1 {
+		t.Fatalf("GetProject calls = %d, want one shared lookup for active escalations", got)
 	}
 	if !sessions[0].ContractStalled || !sessions[1].ContractStalled || sessions[2].ContractStalled || sessions[3].ContractStalled {
 		t.Fatalf("contract stalled values = [%v %v %v %v], want [true true false false]",

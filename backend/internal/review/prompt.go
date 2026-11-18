@@ -3,6 +3,9 @@ package review
 import (
 	"fmt"
 	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // reviewTexts returns the user-facing prompt and the system prompt to deliver to
@@ -57,12 +60,47 @@ Post your review as a comment on the pull request, stating clearly whether it ne
 
 func reviewQueueText(spec LaunchSpec) string {
 	if len(spec.ReviewQueue) <= 1 {
-		return fmt.Sprintf("\nReview task queue:\n* 1. %s (head commit %s, run %s)\n", spec.PRURL, spec.TargetSHA, spec.RunID)
+		task := ports.ReviewTask{RunID: spec.RunID, PRURL: spec.PRURL, TargetSHA: spec.TargetSHA}
+		if len(spec.ReviewQueue) == 1 {
+			task = spec.ReviewQueue[0]
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "\nReview task queue:\n* 1. %s (head commit %s, run %s)\n", task.PRURL, task.TargetSHA, task.RunID)
+		writeTamperAdvisory(&b, task.Tamper)
+		return b.String()
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nAO created %d review tasks for this worker session. Review every queued PR, then submit all results together.\n\nReview task queue:\n", len(spec.ReviewQueue))
 	for i, task := range spec.ReviewQueue {
 		fmt.Fprintf(&b, "* %d. %s (head commit %s, run %s)\n", i+1, task.PRURL, task.TargetSHA, task.RunID)
+		writeTamperAdvisory(&b, task.Tamper)
 	}
 	return b.String()
+}
+
+func writeTamperAdvisory(b *strings.Builder, assessment *domain.PRTamperAssessment) {
+	if assessment == nil || !assessment.Suspected() {
+		return
+	}
+	reasons := make([]string, 0, 4)
+	if assessment.TestFilesDeleted > 0 {
+		reasons = append(reasons, countedPhrase(assessment.TestFilesDeleted, "test file deleted", "test files deleted"))
+	}
+	if assessment.TestCasesRemoved > assessment.TestCasesAdded {
+		reasons = append(reasons, fmt.Sprintf("%d test cases removed vs %d added", assessment.TestCasesRemoved, assessment.TestCasesAdded))
+	}
+	if assessment.SkipMarkersAdded > 0 {
+		reasons = append(reasons, countedPhrase(assessment.SkipMarkersAdded, "skip marker added", "skip markers added"))
+	}
+	if assessment.CIWorkflowEdited {
+		reasons = append(reasons, "CI workflow edited")
+	}
+	fmt.Fprintf(b, "  Tamper marker (advisory): %s. Inspect these changes; this marker does not block the PR.\n", strings.Join(reasons, "; "))
+}
+
+func countedPhrase(count int, singular, plural string) string {
+	if count == 1 {
+		return fmt.Sprintf("1 %s", singular)
+	}
+	return fmt.Sprintf("%d %s", count, plural)
 }

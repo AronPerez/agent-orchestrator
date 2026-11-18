@@ -17,6 +17,7 @@ ao spawn [flags]
 | `--claim-pr string` | Claim an existing PR. For review-only work, add `--no-takeover --review` | - |
 | `--kind string` | Session role: `worker` or `orchestrator` | `worker` |
 | `--harness string` | Agent harness to use (see list below) | Project `worker.agent`; required if the project has none |
+| `--host string` | Saved remote-host label or stable host ID from `~/.ao/remotes.json` | Local machine; cannot combine with `--url` or `AO_URL` |
 | `--issue string` | Issue id to associate with the session | - |
 | `--model string` | Agent model override for this session only; overrides project/role config | - |
 | `--effort string` | Reasoning effort override for this session only (for example `low`, `medium`, `high`); overrides project/role config | - |
@@ -33,6 +34,13 @@ ao spawn [flags]
 | `--tracker-provider string` | Issue tracker provider: `github` or `gitlab` | `github` |
 
 `--agent` is an alias for `--harness`.
+
+With `--host`, pass `--project` explicitly (or use `--standalone`): local
+`AO_PROJECT_ID`, `AO_SESSION_ID`, and the current directory never select a
+project on another machine. Remote `--claim-pr`, `--review`, and
+`--no-takeover` flows are not supported because their follow-up and rollback
+routes are outside the agent-coordination credential. Successful output names
+the destination machine; verify it before using the returned session ID.
 
 Available harnesses: `claude-code`, `codex`, `aider`, `opencode`, `opencode-v2`, `grok`, `droid`, `amp`, `agy`, `crush`, `cursor`, `qwen`, `gemini`, `copilot`, `goose`, `auggie`, `continue`, `devin`, `cline`, `kimi`, `muse`, `kiro`, `kilocode`, `vibe`, `pi`, `kimchi`, `prime-agent`, `autohand`, `omp`, `fx`, `unreal-agent`, `mimo-code`, `minimax-code`, `deepseek-harness`, `openhands`, `command-code`. Check `ao agent ls --refresh` for readiness on the installed build. `unreal-agent` is Chat-only; Gemini, MiMo Code, MiniMax Code, and OpenHands are Terminal UI-only.
 
@@ -69,6 +77,12 @@ ao spawn --project agent-orchestrator --kind orchestrator --name "coordinate-fix
 # Spawn a standalone worker whose deliverable is an artifact file, not a PR
 ao spawn --standalone --agent claude-code --output artifact --name "q3-report" \
   --prompt "Write a one-page summary of Q3 incidents."
+```
+
+```bash
+# Spawn on a saved machine. The output names the resolved machine and stable host ID.
+ao spawn --host build-mac --project agent-orchestrator --agent codex \
+  --name "remote-fix" --prompt "Fix the failing macOS integration test."
 ```
 
 ```bash

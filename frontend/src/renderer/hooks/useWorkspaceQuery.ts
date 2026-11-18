@@ -30,6 +30,7 @@ import { appI18n } from "../i18n";
 import {
 	type PRState,
 	type PullRequestFacts,
+	type SessionDoneReport,
 	type SessionArtifact,
 	toAgentProvider,
 	toKanbanColumn,
@@ -68,6 +69,27 @@ function toPullRequestFacts(pr: components["schemas"]["SessionPRFacts"]): PullRe
 		reviewComments: pr.reviewComments,
 		updatedAt: pr.updatedAt,
 		...(pr.stackParent ? { stackParent: pr.stackParent } : {}),
+		...(pr.tamper ? { tamper: pr.tamper } : {}),
+	};
+}
+
+function toSessionDoneReport(report: components["schemas"]["SessionDoneReportResponse"] | undefined): SessionDoneReport | undefined {
+	if (!report) return undefined;
+	return {
+		id: report.id,
+		...(report.superseded ? { superseded: true } : {}),
+		...(report.verification
+			? {
+					verification: {
+						state: report.verification.state as "passed" | "failed",
+						evidence: report.verification.evidence,
+						startedAt: report.verification.startedAt,
+						completedAt: report.verification.completedAt,
+						...(report.verification.workspaceRevision ? { workspaceRevision: report.verification.workspaceRevision } : {}),
+						...(report.verification.interactionAt ? { interactionAt: report.verification.interactionAt } : {}),
+					},
+				}
+			: {}),
 	};
 }
 
@@ -168,6 +190,7 @@ export function toWorkspaceSession(
 		isPinned: session.isPinned ?? false,
 		pinnedAt: session.pinnedAt ?? undefined,
 		prs: (session.prs ?? []).map(toPullRequestFacts),
+		latestDoneReport: toSessionDoneReport(session.latestDoneReport),
 		outputType: session.outputType,
 		...(session.requestedOutput ? { requestedOutput: session.requestedOutput } : {}),
 		artifactFiles: session.artifactFiles?.map(toSessionArtifact),
@@ -284,6 +307,7 @@ function toLocalWorkspaceSession(
 		isPinned: session.isPinned ?? false,
 		pinnedAt: session.pinnedAt ?? undefined,
 		prs: (session.prs ?? []).map(toPullRequestFacts),
+		latestDoneReport: toSessionDoneReport(session.latestDoneReport),
 		outputType: session.outputType,
 		...(session.requestedOutput ? { requestedOutput: session.requestedOutput } : {}),
 		artifactFiles: session.artifactFiles?.map(toSessionArtifact),

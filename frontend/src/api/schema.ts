@@ -1390,6 +1390,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/coordination/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List authenticated cross-machine coordination capabilities */
+        get: operations["getCoordinationCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/cues/{cueId}": {
         parameters: {
             query?: never;
@@ -6892,6 +6909,7 @@ export interface components {
             lastInteractionAt?: null | string;
             /** Format: date-time */
             lastUserMessageAt?: null | string;
+            latestDoneReport?: components["schemas"]["SessionDoneReportResponse"];
             /** @enum {string} */
             mode: "chat" | "tui";
             model?: string;
@@ -7317,6 +7335,9 @@ export interface components {
             /** Format: int64 */
             totalTokens: number;
         };
+        CoordinationCapabilitiesResponse: {
+            capabilities: string[];
+        };
         CoordinationEvent: {
             /** Format: date-time */
             createdAt: string;
@@ -7383,6 +7404,7 @@ export interface components {
         };
         CreateReportResponse: {
             id: string;
+            verification?: components["schemas"]["ReportVerificationResponse"];
         };
         CueDefinitionRequest: {
             /** @description Shell command for a command cue. At most 4096 bytes; cleared when saving agent cues. */
@@ -8241,6 +8263,16 @@ export interface components {
             open: boolean;
             url: string;
         };
+        PRTamperAssessmentResponse: {
+            /** Format: date-time */
+            assessedAt: string;
+            ciWorkflowEdited?: boolean;
+            headSha: string;
+            skipMarkersAdded?: number;
+            testCasesAdded?: number;
+            testCasesRemoved?: number;
+            testFilesDeleted?: number;
+        };
         PostPRCommentRequest: {
             attachments?: components["schemas"]["PRCommentAttachment"][];
             body: string;
@@ -8565,6 +8597,20 @@ export interface components {
             repeatCount: number;
             sessionId: string;
             state?: string;
+            verification?: components["schemas"]["ReportVerificationResponse"];
+        };
+        ReportVerificationResponse: {
+            /** Format: date-time */
+            completedAt: string;
+            evidence: string;
+            /** Format: date-time */
+            interactionAt?: null | string;
+            outputTail?: string;
+            /** Format: date-time */
+            startedAt: string;
+            /** @enum {string} */
+            state: "passed" | "failed";
+            workspaceRevision?: string;
         };
         ResolveCommentsResponse: {
             ok: boolean;
@@ -8730,6 +8776,7 @@ export interface components {
         };
         SendSessionMessageRequest: {
             attachment?: components["schemas"]["AttachmentInput"];
+            automationAuthored?: boolean;
             message: string;
             senderSessionId?: string;
             userAuthored?: boolean;
@@ -8790,10 +8837,16 @@ export interface components {
             remoteBranch?: string;
             remoteHead?: string;
             unpushed: number;
+            workspaceRevision?: string;
         };
         SessionCoordinationResponse: {
             events: components["schemas"]["CoordinationEvent"][];
             hasMore: boolean;
+        };
+        SessionDoneReportResponse: {
+            id: string;
+            superseded?: boolean;
+            verification?: components["schemas"]["ReportVerificationResponse"];
         };
         SessionHistoryResponse: {
             offset: number;
@@ -8940,6 +8993,7 @@ export interface components {
             stackParent?: number;
             /** @enum {string} */
             state: "draft" | "open" | "merged" | "closed";
+            tamper?: components["schemas"]["PRTamperAssessmentResponse"];
             /** Format: date-time */
             updatedAt: string;
             url: string;
@@ -9649,6 +9703,7 @@ export interface components {
         };
         SteerConversationRequest: {
             attachments?: components["schemas"]["ConversationImageContentRequest"][];
+            automationAuthored?: boolean;
             clientMessageId?: string;
             recoverOnly?: boolean;
             senderSessionId?: string;
@@ -14902,6 +14957,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getCoordinationCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoordinationCapabilitiesResponse"];
                 };
             };
         };

@@ -351,6 +351,18 @@ func reportAt(id string, worker domain.SessionID, created, available time.Time, 
 	return domain.ReportRecord{ID: id, SessionID: worker, ProjectID: "p", State: domain.ReportCheckpoint, Note: note, CreatedAt: created, AvailableAt: available, DeliveryState: domain.ReportPending, RepeatCount: 1}
 }
 
+func TestPreparedBatchRenderIncludesVerificationFact(t *testing.T) {
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	batch := PreparedBatch{Reports: []domain.ReportRecord{{
+		ID: "rpt_1", SessionID: "worker", ProjectID: "p", State: domain.ReportDone, Note: "done", RepeatCount: 1,
+		Verification: &domain.ReportVerification{State: domain.ReportVerificationFailed, Evidence: "verification/rpt_1.txt", StartedAt: at, CompletedAt: at},
+	}}}
+	got := batch.Render()
+	if !strings.Contains(got, "verification: failed") || !strings.Contains(got, "verification/rpt_1.txt") {
+		t.Fatalf("rendered batch = %q", got)
+	}
+}
+
 func (s *coordinatorStore) add(records ...domain.ReportRecord) {
 	s.reports = append(s.reports, records...)
 }

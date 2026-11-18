@@ -89,6 +89,9 @@ type recordingLauncher struct {
 	relayed             []string
 	relayOptions        []ports.MessageDeliveryOptions
 	relayIDs            []string
+	confirmed           []string
+	confirmAccepted     bool
+	confirmErr          error
 	stopped             []domain.SessionID
 	backgroundHarnesses []domain.AgentHarness
 	background          []ports.ChatStartConfig
@@ -238,6 +241,11 @@ func (l *recordingLauncher) RelaySessionChatTurn(_ context.Context, _ domain.Ses
 	l.relayIDs = append(l.relayIDs, clientMessageID)
 	l.relayOptions = append(l.relayOptions, options)
 	return "turn-relay", l.turnErr
+}
+
+func (l *recordingLauncher) ConfirmSessionChatTurn(_ context.Context, _ domain.SessionID, _ string, clientMessageID string, _ ports.MessageDeliveryOptions) (bool, error) {
+	l.confirmed = append(l.confirmed, clientMessageID)
+	return l.confirmAccepted, l.confirmErr
 }
 
 func (l *recordingLauncher) StopChat(_ context.Context, id domain.SessionID) error { //nolint:unparam
@@ -1951,6 +1959,25 @@ func TestSendRoutesIntoTheChatConversation(t *testing.T) {
 		}
 	}
 
+}
+
+func TestConfirmSemanticChatDistinguishesRejectedAndAcceptedDelivery(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, store, _ := newChatManager(launcher)
+	rec := domain.SessionRecord{ID: "mer-chat", ProjectID: chatTestProject, Mode: domain.SessionModeChat}
+	store.sessions[rec.ID] = rec
+
+	err := mgr.ConfirmSemantic(context.Background(), rec.ID, "coordinate", "collision-chat")
+	if !errors.Is(err, ErrSemanticDeliveryRejected) {
+		t.Fatalf("rejected confirmation error = %v, want ErrSemanticDeliveryRejected", err)
+	}
+	launcher.confirmAccepted = true
+	if err := mgr.ConfirmSemantic(context.Background(), rec.ID, "coordinate", "collision-chat"); err != nil {
+		t.Fatalf("accepted confirmation: %v", err)
+	}
+	if !slices.Equal(launcher.confirmed, []string{"collision-chat", "collision-chat"}) {
+		t.Fatalf("confirmed IDs = %v, want stable delivery identity", launcher.confirmed)
+	}
 }
 
 func TestSendChatDistinguishesAStaleExitFromAStoppedController(t *testing.T) {

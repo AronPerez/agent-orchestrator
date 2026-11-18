@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,11 +29,21 @@ import (
 type remoteTarget struct {
 	baseURL string
 	token   string
-	// label and hostID are populated only for a saved --host target. hostID is
-	// pinned on every authenticated request after an unauthenticated identity
-	// probe proves that the saved address still belongs to that installation.
+	// label and hostID are populated only for a saved --host target, where they
+	// name the destination in output and copyable commands.
 	label  string
 	hostID string
+	// expectedHostID is the saved identity for --host or the probed identity for
+	// --url/AO_URL. It is rechecked immediately before bearer use and sent as
+	// defense in depth for listeners that enforce it.
+	expectedHostID string
+	// identityPinRequired opts coordination actions into the identity contract.
+	// Older raw-URL commands predate that route and retain their compatibility.
+	identityPinRequired bool
+	// Host-local caller IDs may cross this target only after its relationship to
+	// the source daemon has been proved.
+	sourceRelationKnown bool
+	sameAsSource        bool
 	// accountUserID binds a desktop-imported credential to the Cloud account
 	// that owns it. Empty means a local pairing, which remains usable signed out.
 	accountUserID string
@@ -44,6 +55,17 @@ type remoteTarget struct {
 // remotesFileName holds saved remote daemons under the AO home directory. It
 // carries credentials, so it must be mode 0600.
 const remotesFileName = "remotes.json"
+
+var savedHostIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+var commandArgumentPattern = regexp.MustCompile(`^[A-Za-z0-9._:@%/+=,-]+$`)
+
+// remotePreflightError means the destination credential was not sent. Callers
+// that normally treat transport failures as ambiguous may safely recommend a
+// retry of the original request instead of receipt-only recovery.
+type remotePreflightError struct{ cause error }
+
+func (e remotePreflightError) Error() string { return e.cause.Error() }
+func (e remotePreflightError) Unwrap() error { return e.cause }
 
 // activeCloudAccountFile is written by the desktop beside remotes.json. It is
 // the authorization boundary for account-owned hosts; telemetry state is not,
@@ -81,6 +103,13 @@ type remoteEntry struct {
 	AccountUserID     string `json:"accountUserId,omitempty"`
 	CoordinationToken string `json:"coordinationToken,omitempty"`
 	CleanupOnly       bool   `json:"cleanupOnly,omitempty"`
+}
+
+type savedHostTargetCandidate struct {
+	Label  string
+	HostID string
+	Target *remoteTarget
+	Err    error
 }
 
 // resolveRemoteTarget resolves the remote daemon this invocation targets, or
@@ -164,10 +193,16 @@ func resolveSavedHostTargetForAccount(name, activeAccount string) (*remoteTarget
 	default:
 		return nil, fmt.Errorf("saved host %q is ambiguous in %s — give the host ID instead", name, path)
 	}
-	entry := matches[0]
+	return savedHostTargetFromEntry(matches[0], name)
+}
+
+func savedHostTargetFromEntry(entry remoteEntry, name string) (*remoteTarget, error) {
 	hostID := strings.TrimSpace(entry.HostID)
 	if hostID == "" {
 		return nil, fmt.Errorf("saved host %q has no host ID — reconnect it in the desktop app before using --host", name)
+	}
+	if !savedHostIDPattern.MatchString(hostID) {
+		return nil, fmt.Errorf("saved host %q has an invalid host ID — reconnect it in the desktop app before using --host", name)
 	}
 	token := strings.TrimSpace(entry.CoordinationToken)
 	if token == "" {
@@ -185,14 +220,64 @@ func resolveSavedHostTargetForAccount(name, activeAccount string) (*remoteTarget
 		label = hostID
 	}
 	return &remoteTarget{
-		baseURL: base, token: token, label: label, hostID: hostID,
+		baseURL: base, token: token, label: label, hostID: hostID, expectedHostID: hostID,
 		accountUserID: strings.TrimSpace(entry.AccountUserID), source: "--host",
 	}, nil
+}
+
+// resolveAllSavedHostTargetsForAccount validates every saved host visible to
+// the active account without presenting any credential. Invalid entries remain
+// in the result as machine-qualified errors so an aggregate list can keep the
+// healthy machines while explaining what it skipped.
+func resolveAllSavedHostTargetsForAccount(activeAccount string) ([]savedHostTargetCandidate, error) {
+	entries, err := loadRemoteEntries()
+	if err != nil {
+		return nil, err
+	}
+	results := make([]savedHostTargetCandidate, 0, len(entries))
+	byHostID := make(map[string]int, len(entries))
+	for _, entry := range entries {
+		if !remoteEntryVisibleToAccount(entry, activeAccount) {
+			continue
+		}
+		hostID := strings.TrimSpace(entry.HostID)
+		label := strings.TrimSpace(entry.Label)
+		if label == "" {
+			label = hostID
+		}
+		if label == "" {
+			label = "unnamed saved host"
+		}
+		if prior, ok := byHostID[hostID]; ok && hostID != "" {
+			results[prior].Target = nil
+			results[prior].Err = fmt.Errorf("saved host ID %s appears more than once", hostID)
+			continue
+		}
+		target, targetErr := savedHostTargetFromEntry(entry, label)
+		results = append(results, savedHostTargetCandidate{Label: label, HostID: hostID, Target: target, Err: targetErr})
+		if hostID != "" {
+			byHostID[hostID] = len(results) - 1
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		left, right := strings.ToLower(results[i].Label), strings.ToLower(results[j].Label)
+		if left != right {
+			return left < right
+		}
+		return results[i].HostID < results[j].HostID
+	})
+	return results, nil
 }
 
 type savedHostIdentity struct {
 	HostID     string `json:"hostId"`
 	APIVersion int    `json:"apiVersion"`
+}
+
+const coordinationCapabilityAutomationAuthored = "automation-authored"
+
+type coordinationCapabilitiesResponse struct {
+	Capabilities []string `json:"capabilities"`
 }
 
 // selectSavedHost proves the saved address still answers for the saved host ID
@@ -207,7 +292,20 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	if err != nil {
 		return err
 	}
-	if local := c.localDaemonHostID(ctx); local != "" && local == target.hostID {
+	if err := c.verifySavedHostTarget(ctx, target); err != nil {
+		return err
+	}
+	c.remote = target
+	return nil
+}
+
+func (c *commandContext) verifySavedHostTarget(ctx context.Context, target *remoteTarget) error {
+	return c.verifySavedHostTargetAgainst(ctx, target, c.localDaemonHostID(ctx))
+}
+
+func (c *commandContext) verifySavedHostTargetAgainst(ctx context.Context, target *remoteTarget, localHostID string) error {
+	localHostID = strings.TrimSpace(localHostID)
+	if localHostID != "" && localHostID == target.hostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
 	}
 	actual, err := c.probeSavedHostIdentity(ctx, target.baseURL)
@@ -217,14 +315,35 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	if actual.HostID != target.hostID {
 		return fmt.Errorf("saved host identity changed for %s: expected %s, got %s; connection refused", target.baseURL, target.hostID, actual.HostID)
 	}
-	if local := c.localDaemonHostID(ctx); local != "" && local == actual.HostID {
+	if localHostID != "" && localHostID == actual.HostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
 	}
 	if target.accountUserID != "" && c.activeCloudAccount(ctx) != target.accountUserID {
 		return errors.New("active Cloud account changed while verifying the saved host; retry with the intended account signed in")
 	}
-	c.remote = target
 	return nil
+}
+
+// remoteRetryArguments preserves the destination without its bearer. Rendering
+// is shell-specific and happens only after these values are structured.
+func (c *commandContext) remoteRetryArguments() []string {
+	if c.remote == nil {
+		return nil
+	}
+	if c.remote.source == "--host" && savedHostIDPattern.MatchString(c.remote.hostID) {
+		return []string{"--host", c.remote.hostID}
+	}
+	if c.remote.source == "--url" || c.remote.source == "AO_URL" {
+		return []string{"--url", c.remote.baseURL}
+	}
+	return nil
+}
+
+func quoteCommandArgument(value string) string {
+	if commandArgumentPattern.MatchString(value) && !strings.HasPrefix(value, "=") {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 var activeCloudUserIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -302,6 +421,116 @@ func (c *commandContext) probeSavedHostIdentity(ctx context.Context, base string
 	return identity, nil
 }
 
+// sourceDaemonHostID proves that the daemon selected by AO_RUN_FILE owns the
+// ambient source session and matches the protected AO_DATA_DIR injected when
+// that session launched. The final identity read catches replacement during
+// the lookup; the data-root identity catches a run file repointed beforehand.
+func (c *commandContext) sourceDaemonHostID(ctx context.Context, sessionID string) (string, error) {
+	launchHostID := readLocalHostID()
+	if launchHostID == "" {
+		return "", errors.New("source session launch host identity is unavailable; retry from the session that started this command")
+	}
+	base, err := c.localDaemonBase()
+	if err != nil {
+		return "", fmt.Errorf("source session daemon is unavailable: %w", err)
+	}
+	before, err := c.probeSavedHostIdentity(ctx, base)
+	if err != nil {
+		return "", fmt.Errorf("identify source session daemon: %w", err)
+	}
+	if before.HostID != launchHostID {
+		return "", fmt.Errorf("selected source daemon %s does not match this session's launch host %s; refusing host-local session attribution", before.HostID, launchHostID)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		base+"/api/v1/sessions/"+url.PathEscape(sessionID), http.NoBody)
+	if err != nil {
+		return "", err
+	}
+	client := *c.deps.HTTPClient
+	client.Timeout = probeTimeout
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req) // #nosec G704 -- base is the loopback daemon selected by the validated run file.
+	if err != nil {
+		return "", fmt.Errorf("verify source session daemon: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("source session %s is not owned by the selected local daemon (HTTP %d)", sessionID, resp.StatusCode)
+	}
+	var body struct {
+		Session struct {
+			ID string `json:"id"`
+		} `json:"session"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return "", fmt.Errorf("decode source session: %w", err)
+	}
+	if body.Session.ID != sessionID {
+		return "", fmt.Errorf("source session daemon returned %q for %q", body.Session.ID, sessionID)
+	}
+	after, err := c.probeSavedHostIdentity(ctx, base)
+	if err != nil {
+		return "", fmt.Errorf("revalidate source session daemon: %w", err)
+	}
+	if after.HostID != before.HostID {
+		return "", errors.New("source session daemon changed while resolving its host identity; retry")
+	}
+	return before.HostID, nil
+}
+
+func (c *commandContext) remoteRelationToSource(ctx context.Context, sessionID string) (sourceHostID string, sameHost bool, err error) {
+	sourceHostID, err = c.sourceDaemonHostID(ctx, sessionID)
+	if err != nil {
+		return "", false, err
+	}
+	destinationHostID := c.remote.expectedHostID
+	if destinationHostID == "" {
+		destination, probeErr := c.probeSavedHostIdentity(ctx, c.remote.baseURL)
+		if probeErr != nil {
+			return "", false, fmt.Errorf("identify destination daemon: %w", probeErr)
+		}
+		destinationHostID = destination.HostID
+		c.remote.expectedHostID = destinationHostID
+	}
+	c.remote.sourceRelationKnown = true
+	c.remote.sameAsSource = destinationHostID == sourceHostID
+	return sourceHostID, c.remote.sameAsSource, nil
+}
+
+func (c *commandContext) revalidateRemoteTarget(ctx context.Context) error {
+	if c.remote == nil {
+		return nil
+	}
+	if c.remote.expectedHostID == "" && !c.remote.identityPinRequired {
+		return nil
+	}
+	identity, err := c.probeSavedHostIdentity(ctx, c.remote.baseURL)
+	if err != nil {
+		return remotePreflightError{cause: fmt.Errorf("revalidate remote host identity: %w", err)}
+	}
+	if c.remote.expectedHostID == "" {
+		c.remote.expectedHostID = identity.HostID
+	} else if identity.HostID != c.remote.expectedHostID {
+		return remotePreflightError{cause: fmt.Errorf("remote host identity changed: expected %s, got %s; credential was not sent", c.remote.expectedHostID, identity.HostID)}
+	}
+	if c.remote.accountUserID != "" && c.activeCloudAccount(ctx) != c.remote.accountUserID {
+		return remotePreflightError{cause: errors.New("active Cloud account changed before the remote request; credential was not sent")}
+	}
+	return nil
+}
+
+func (c *commandContext) requireRemoteCoordinationCapability(ctx context.Context, capability string) error {
+	var response coordinationCapabilitiesResponse
+	if err := c.getJSON(ctx, "coordination/capabilities", &response); err != nil {
+		return fmt.Errorf("destination does not advertise %s support; upgrade Orchestrator on that machine before sending this agent-authored message: %w", capability, err)
+	}
+	for _, available := range response.Capabilities {
+		if available == capability {
+			return nil
+		}
+	}
+	return fmt.Errorf("destination does not support %s; upgrade Orchestrator on that machine before sending this agent-authored message", capability)
+}
 func (c *commandContext) localDaemonHostID(ctx context.Context) string {
 	base, err := c.localDaemonBase()
 	if err == nil {
@@ -577,6 +806,12 @@ func (c *commandContext) checkRemoteImplicitProject(explicit string) error {
 	case strings.TrimSpace(os.Getenv("AO_SESSION_ID")) != "":
 		signal = "AO_SESSION_ID"
 	}
+	if c.remote.hostID != "" {
+		return usageError{fmt.Errorf(
+			"%s describes this machine, but --host resolved saved machine %s (%s), where it could select a different project — "+
+				"pass --project <id> as it exists on that machine",
+			signal, c.remote.label, c.remote.hostID)}
+	}
 	return usageError{fmt.Errorf(
 		"%s describes this machine, and %s targets the remote daemon at %s, where it would select "+
 			"a project on that host — pass --project <id> as it exists on that host "+
@@ -664,8 +899,8 @@ func (c *commandContext) pinToLocalDaemon(command string) error {
 func (c *commandContext) authorize(req *http.Request) {
 	if c.remote != nil {
 		req.Header.Set("Authorization", "Bearer "+c.remote.token)
-		if c.remote.hostID != "" {
-			req.Header.Set("X-AO-Expected-Host-ID", c.remote.hostID)
+		if c.remote.expectedHostID != "" {
+			req.Header.Set("X-AO-Expected-Host-ID", c.remote.expectedHostID)
 		}
 	}
 }

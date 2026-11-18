@@ -70,6 +70,7 @@ type fakeSessionService struct {
 	sent                       string
 	sentAttachment             *ports.SpawnAttachment
 	sentDeliveryOptions        ports.MessageDeliveryOptions
+	sentWithOptions            bool
 	delegationInput            sessionsvc.DelegateTaskInput
 	delegationErr              error
 	sendErr                    error
@@ -521,6 +522,7 @@ func (f *fakeSessionService) SendWithOptions(_ context.Context, _ domain.Session
 	f.sent = message
 	f.sentAttachment = attachment
 	f.sentDeliveryOptions = options
+	f.sentWithOptions = true
 	return f.sendErr
 }
 
@@ -5583,6 +5585,18 @@ func TestSessionsAPI_SendCarriesCooperativeSenderWithoutHumanAuthorship(t *testi
 	}
 }
 
+func TestSessionsAPI_SendCarriesRemoteAutomationWithoutLocalSender(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/send", `{"message":"Do the next step","automationAuthored":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if !svc.sentWithOptions || svc.sentDeliveryOptions.SenderSessionID != "" || svc.sentDeliveryOptions.AuthoredByUser {
+		t.Fatalf("sentWithOptions=%v options=%+v", svc.sentWithOptions, svc.sentDeliveryOptions)
+	}
+}
+
 func TestSessionsAPI_InteractionRecencyKeepsHumanTimestampSeparate(t *testing.T) {
 	svc := newFakeSessionService()
 	srv := newSessionTestServer(t, svc)
@@ -5617,6 +5631,58 @@ func TestSessionsAPI_InteractionRecencyKeepsHumanTimestampSeparate(t *testing.T)
 	}
 	if !response.Session.LastInteractionAt.Equal(rec.Metadata.LatestUserPromptAt) {
 		t.Fatalf("new human recency=%v", response.Session.LastInteractionAt)
+	}
+}
+
+func TestSessionsAPI_ExposesLatestDoneVerificationAndPRTamperFact(t *testing.T) {
+	svc := newFakeSessionService()
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	session := svc.sessions["ao-1"]
+	session.LatestDoneReport = &domain.SessionDoneReport{
+		ID: "done-1",
+		Verification: &domain.ReportVerification{
+			State: domain.ReportVerificationPassed, Evidence: "verification/done-1.txt",
+			StartedAt: at, CompletedAt: at.Add(time.Second), WorkspaceRevision: "head-1", InteractionAt: at.Add(-time.Minute),
+		},
+		Superseded: true,
+	}
+	session.PRs = []domain.PRFacts{{
+		URL: "https://github.com/o/r/pull/1", Number: 1, CI: domain.CIPassing,
+		Tamper: &domain.PRTamperAssessment{HeadSHA: "head-1", SkipMarkersAdded: 2, AssessedAt: at},
+	}}
+	svc.sessions["ao-1"] = session
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1", "")
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var response struct {
+		Session struct {
+			LatestDoneReport struct {
+				ID           string `json:"id"`
+				Superseded   bool   `json:"superseded"`
+				Verification struct {
+					State             string    `json:"state"`
+					Evidence          string    `json:"evidence"`
+					WorkspaceRevision string    `json:"workspaceRevision"`
+					InteractionAt     time.Time `json:"interactionAt"`
+				} `json:"verification"`
+			} `json:"latestDoneReport"`
+			PRs []struct {
+				Tamper struct {
+					HeadSHA          string `json:"headSha"`
+					SkipMarkersAdded int    `json:"skipMarkersAdded"`
+				} `json:"tamper"`
+			} `json:"prs"`
+		} `json:"session"`
+	}
+	mustJSON(t, body, &response)
+	if response.Session.LatestDoneReport.ID != "done-1" || !response.Session.LatestDoneReport.Superseded || response.Session.LatestDoneReport.Verification.State != "passed" || response.Session.LatestDoneReport.Verification.Evidence != "verification/done-1.txt" || response.Session.LatestDoneReport.Verification.WorkspaceRevision != "head-1" || !response.Session.LatestDoneReport.Verification.InteractionAt.Equal(at.Add(-time.Minute)) {
+		t.Fatalf("latest done report = %+v", response.Session.LatestDoneReport)
+	}
+	if len(response.Session.PRs) != 1 || response.Session.PRs[0].Tamper.HeadSHA != "head-1" || response.Session.PRs[0].Tamper.SkipMarkersAdded != 2 {
+		t.Fatalf("PR tamper fact = %+v", response.Session.PRs)
 	}
 }
 

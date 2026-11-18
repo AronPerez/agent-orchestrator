@@ -1,7 +1,7 @@
 import { Feather } from "./icons";
 import { useRouter } from "expo-router";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { Alert, BackHandler, Keyboard, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, BackHandler, Keyboard, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import type { DashboardSession } from "./api";
 import { AgentLogo } from "./AgentLogo";
 import { haptics } from "./haptics";
@@ -46,6 +46,9 @@ export const WorkerListRow = memo(
 	onDelete,
 	onResume,
 	onRestore,
+	treeDepth,
+	treeExpanded,
+	onTreeToggle,
 }: {
 	session: DashboardSession;
 	/** Fallback for primary-only rows; hosted sessions carry their own host ID. */
@@ -72,6 +75,10 @@ export const WorkerListRow = memo(
 	onResume(): void;
 	/** Bring a terminated session back. */
 	onRestore(): void;
+	/** Present only in Fleet hierarchy rows; flat board rows keep their existing layout. */
+	treeDepth?: number;
+	treeExpanded?: boolean;
+	onTreeToggle?(): void;
 }) {
 	const t = useTheme();
 	const styles = useThemedStyles(makeStyles);
@@ -211,10 +218,15 @@ export const WorkerListRow = memo(
 			rightActions={renderRightActions()}
 			shellStyle={styles.shell}
 			foregroundStyle={styles.foreground}
-			rowStyle={styles.row}
+			rowStyle={[styles.row, treeDepth !== undefined && { paddingLeft: space.lg + treeDepth * space.lg }]}
 			// No gesture hint: a screen reader reaches pin, rename and archive as
 			// the row's actions, and announces that it has them.
 			accessibilityLabel={`${row.title}. ${visual.label}. ${row.project}.`}
+			additionalAccessibilityAction={onTreeToggle ? {
+				name: "toggleBranch",
+				label: `${treeExpanded ? "Collapse" : "Expand"} branch`,
+				onAction: onTreeToggle,
+			} : undefined}
 			onPress={openSession}
 			actions={contextActions}
 			onAction={runAction}
@@ -239,6 +251,9 @@ export const WorkerListRow = memo(
 					onRenameCommit={() => void commitRename()}
 					styles={styles}
 					t={t}
+					treeDepth={treeDepth}
+					treeExpanded={treeExpanded}
+					onTreeToggle={onTreeToggle}
 				/>
 			) : (
 				<WorkerRowContents
@@ -251,6 +266,9 @@ export const WorkerListRow = memo(
 					machine={machine}
 					styles={styles}
 					t={t}
+					treeDepth={treeDepth}
+					treeExpanded={treeExpanded}
+					onTreeToggle={onTreeToggle}
 				/>
 			)}
 		</WorkerRowInteraction>
@@ -267,11 +285,14 @@ export const WorkerListRow = memo(
 		prev.machine?.appearance.symbol === next.machine?.appearance.symbol &&
 		prev.isRenaming === next.isRenaming &&
 		prev.activeSwipeId === next.activeSwipeId &&
+			prev.treeDepth === next.treeDepth &&
+			prev.treeExpanded === next.treeExpanded &&
 		prev.session === next.session &&
 		prev.onSwipeOpen === next.onSwipeOpen && prev.onSwipeClose === next.onSwipeClose &&
 		prev.onRenameStart === next.onRenameStart && prev.onRenameCancel === next.onRenameCancel &&
 		prev.onRename === next.onRename && prev.onSetPinned === next.onSetPinned &&
-		prev.onDelete === next.onDelete && prev.onResume === next.onResume && prev.onRestore === next.onRestore,
+			prev.onDelete === next.onDelete && prev.onResume === next.onResume && prev.onRestore === next.onRestore &&
+			prev.onTreeToggle === next.onTreeToggle,
 );
 
 function WorkerRowContents({
@@ -290,6 +311,9 @@ function WorkerRowContents({
 	onRenameCommit,
 	styles,
 	t,
+	treeDepth,
+	treeExpanded,
+	onTreeToggle,
 }: {
 	row: ReturnType<typeof workerRowPresentation>;
 	visual: ReturnType<typeof statusVisual>;
@@ -306,6 +330,9 @@ function WorkerRowContents({
 	onRenameCommit?(): void;
 	styles: ReturnType<typeof makeStyles>;
 	t: Theme;
+	treeDepth?: number;
+	treeExpanded?: boolean;
+	onTreeToggle?(): void;
 }) {
 	return (
 		<>
@@ -355,10 +382,29 @@ function WorkerRowContents({
 					/>
 					{renameSaving ? <Spinner size={iconSize.md} accessibilityLabel="Saving worker name" /> : null}
 				</View>
+			) : treeDepth !== undefined ? (
+				<View style={styles.treeTitle}>
+					{onTreeToggle ? (
+						<Pressable
+							accessibilityLabel={`${treeExpanded ? "Collapse" : "Expand"} ${row.title}`}
+							accessibilityRole="button"
+							accessibilityState={{ expanded: treeExpanded }}
+							hitSlop={space.sm}
+							onPress={(event) => {
+								event.stopPropagation();
+								onTreeToggle();
+							}}
+							style={styles.treeDisclosure}
+						>
+							<AppSymbol name={treeExpanded ? "chevronDown" : "chevronForward"} size={iconSize.xs} />
+						</Pressable>
+					) : <View style={styles.treeDisclosure} />}
+					<Text style={styles.title} numberOfLines={1}>
+						{row.title}
+					</Text>
+				</View>
 			) : (
-				<Text style={styles.title} numberOfLines={1}>
-					{row.title}
-				</Text>
+				<Text style={styles.title} numberOfLines={1}>{row.title}</Text>
 			)}
 
 			{details || machine ? (
@@ -413,7 +459,9 @@ const makeStyles = (t: Theme) =>
 		eyebrow: { flexDirection: "row", alignItems: "center", gap: space.xs, minHeight: 17 },
 		project: { fontFamily: "DMSans_500Medium", flex: 1, color: t.textSecondary, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, fontWeight: "500" },
 		trailing: { fontFamily: "DMSans_500Medium", flexShrink: 0, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, fontWeight: "500", fontVariant: ["tabular-nums"] },
-		title: { fontFamily: "DMSans_600SemiBold", color: t.textPrimary, fontSize: 16, lineHeight: 21, fontWeight: "600", letterSpacing: -0.15 },
+		treeTitle: { minWidth: 0, flexDirection: "row", alignItems: "center", gap: space.xs },
+		treeDisclosure: { width: iconSize.md, minHeight: iconSize.md, alignItems: "center", justifyContent: "center" },
+		title: { fontFamily: "DMSans_600SemiBold", flexShrink: 1, color: t.textPrimary, fontSize: 16, lineHeight: 21, fontWeight: "600", letterSpacing: -0.15 },
 		metadata: { minWidth: 0, flexDirection: "row", alignItems: "center", gap: space.sm },
 		metadataSpacer: { flex: 1 },
 		details: { flex: 1, minWidth: 0, color: t.textTertiary, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, fontFamily: t.fontMono },

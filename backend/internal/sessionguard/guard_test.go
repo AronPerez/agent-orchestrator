@@ -649,29 +649,31 @@ func TestGuard_CoordinationUnderMutationCheckedRejectsBeforeRuntimeWrite(t *test
 }
 
 // TestGuard_NudgeCoordinationEnforcesSteeringAtWriteBoundary pins the binding
-// safety decision to the guard's own just-in-time read: an active session is
-// refused unless its harness declares it can be steered mid-turn, no matter what
-// the caller believed when it decided to dispatch.
+// safety decision to the guard's own just-in-time read: an active terminal
+// session needs steering support, while Chat uses the queued send path.
 func TestGuard_NudgeCoordinationEnforcesSteeringAtWriteBoundary(t *testing.T) {
 	steersCodex := func(h domain.AgentHarness) bool { return h == domain.HarnessCodex }
 	cases := []struct {
 		name    string
 		state   domain.ActivityState
 		harness domain.AgentHarness
+		mode    domain.SessionMode
 		steers  func(domain.AgentHarness) bool
 		want    Outcome
 	}{
-		{"idle delivers", domain.ActivityIdle, domain.HarnessClaudeCode, steersCodex, Sent},
-		{"active non-steering suppressed", domain.ActivityActive, domain.HarnessClaudeCode, steersCodex, SuppressedBusy},
-		{"active steering delivers", domain.ActivityActive, domain.HarnessCodex, steersCodex, Sent},
-		{"active nil predicate suppressed", domain.ActivityActive, domain.HarnessCodex, nil, SuppressedBusy},
-		{"waiting_input suppressed", domain.ActivityWaitingInput, domain.HarnessCodex, steersCodex, SuppressedAwaitingUser},
-		{"blocked suppressed", domain.ActivityBlocked, domain.HarnessCodex, steersCodex, SuppressedAwaitingUser},
+		{"idle delivers", domain.ActivityIdle, domain.HarnessClaudeCode, domain.SessionModeTUI, steersCodex, Sent},
+		{"active terminal non-steering suppressed", domain.ActivityActive, domain.HarnessClaudeCode, domain.SessionModeTUI, steersCodex, SuppressedBusy},
+		{"active terminal steering delivers", domain.ActivityActive, domain.HarnessCodex, domain.SessionModeTUI, steersCodex, Sent},
+		{"active terminal nil predicate suppressed", domain.ActivityActive, domain.HarnessCodex, domain.SessionModeTUI, nil, SuppressedBusy},
+		{"active chat queues without terminal steering", domain.ActivityActive, domain.HarnessClaudeCode, domain.SessionModeChat, steersCodex, Sent},
+		{"waiting_input suppressed", domain.ActivityWaitingInput, domain.HarnessCodex, domain.SessionModeTUI, steersCodex, SuppressedAwaitingUser},
+		{"blocked suppressed", domain.ActivityBlocked, domain.HarnessCodex, domain.SessionModeTUI, steersCodex, SuppressedAwaitingUser},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := record(tc.state, false)
 			rec.Harness = tc.harness
+			rec.Mode = tc.mode
 			msg := &fakeMessenger{}
 			g := New(&fakeStore{rec: rec, ok: true}, msg, nil)
 
