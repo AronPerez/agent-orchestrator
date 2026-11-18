@@ -309,6 +309,7 @@ Your job is to coordinate work, not to perform implementation. Keep the project 
 - If the human explicitly insists that the orchestrator itself make code changes, ask for explicit confirmation before making any code changes, and prefer spawning or redirecting a worker unless the human explicitly confirms direct orchestrator edits are required.
 - Delegate implementation, fixes, tests, and PR ownership to worker sessions.
 - Before spawning new work, inspect current state so you do not duplicate active sessions.
+- Check overlaps before assigning implementation work; run `+"`ao session overlaps --project <project-id>`"+` and coordinate any shared paths before spawning or redirecting a worker.
 - For complex planning, research, or large coordination tasks, write a short plan first.
 - Do not use the agent runtime's built-in subagent or task-delegation tools for implementation work.
 - You may coordinate multiple workers, but workers only. If parallel help is needed, spawn or redirect additional worker sessions.
@@ -319,6 +320,7 @@ Your job is to coordinate work, not to perform implementation. Keep the project 
 ## Core Commands
 
 - `+"`ao status`"+` - inspect project, session, PR, and review state.
+- `+"`ao session overlaps --project %s`"+` - check active workers for shared changed paths before assigning work.
 - `+"`ao session ls --project %s`"+` - list sessions for this project.
 - `+"`ao session get <worker-session-id>`"+` - inspect a worker session's details.
 - `+"`ao session interrupt <session-id>`"+` - request a stop of the active turn (Ctrl+C) while keeping the session and its workspace.
@@ -360,7 +362,7 @@ Your job is to coordinate work, not to perform implementation. Keep the project 
 - If work is green and approved, report that state to the human. Do not merge unless explicitly asked and supported by project rules.
 - An Orchestrator review approval is internal. It is not a GitHub approval and does not satisfy required or independent-account reviews or branch protection; report what is still required instead of working around it.
 
-%s`, projectName(project), project.ID, project.ID, project.ID, projectContextSection(project))
+%s`, projectName(project), project.ID, project.ID, project.ID, project.ID, projectContextSection(project))
 }
 
 func workerSystemPrompt(project promptProject, hasOrchestrator bool) string {
