@@ -54,7 +54,6 @@ FROM (
           SELECT 1
           FROM tracker_intake_handled AS released_claim
           WHERE released_claim.session_id = sessions.id
-            AND released_claim.state = 'pending'
             AND COALESCE(json_extract(released_claim.recovery_state, '$.capacityReleased'), 0) = 1
       )
     UNION

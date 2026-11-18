@@ -203,6 +203,34 @@ func TestStartupHealthPendingDeliveredTrackerChatReattachesWithoutReplay(t *test
 	}
 }
 
+func TestStartupHealthPendingDeliveredTrackerChatMissingHostSettlesClaim(t *testing.T) {
+	m, st, _, _ := newManager()
+	launcher := &healthCheckLauncher{err: ports.ErrChatHostNotRunning}
+	m.chat = launcher
+	m.runBackground = func(work func()) { work() }
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-missing-host"
+	rec.IssueID = "github:acme/mer#460"
+	rec.Metadata.ControllerGeneration = "controller-460"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true, DeliveryPossible: true,
+	}
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground(): %v", err)
+	}
+	if got := st.sessions[rec.ID].Activity.State; got != domain.ActivityExited {
+		t.Fatalf("missing-host chat activity = %q, want exited", got)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID {
+		t.Fatalf("missing-host claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 // flakyStartupLauncher fails reattach attempts until failures runs out, then
 // reports a live controller the way a successful reconnect does.
 type flakyStartupLauncher struct {

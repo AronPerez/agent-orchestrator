@@ -78,9 +78,25 @@ func (m *Manager) endTrackerIntakeRecovery(id domain.SessionID) {
 }
 
 func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.TrackerIntakePendingClaim) error {
+	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
+		return fmt.Errorf("recover tracker intake %s: reserve reconciliation: %w", claim.SessionID, err)
+	}
+	defer m.endAgentOperation(claim.SessionID, agentOperationReconcile)
+
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
+	if err != nil {
+		return fmt.Errorf("recover tracker intake %s: reload claim: %w", claim.SessionID, err)
+	}
+	if !pending {
+		return nil
+	}
+	claim.Recovery = reservation
 	rec, found, err := m.store.GetSession(ctx, claim.SessionID)
 	if err != nil {
 		return fmt.Errorf("recover tracker intake %s: load session: %w", claim.SessionID, err)
+	}
+	if found && (rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID) {
+		return nil
 	}
 	if !found {
 		rec = domain.SessionRecord{
@@ -137,10 +153,6 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim d
 }
 
 func (m *Manager) adoptTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim, handleID string) (bool, error) {
-	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
-		return false, fmt.Errorf("recover tracker intake %s: reserve adoption: %w", claim.SessionID, err)
-	}
-	defer m.endAgentOperation(claim.SessionID, agentOperationReconcile)
 	rec, found, err := m.store.GetSession(ctx, claim.SessionID)
 	if err != nil {
 		return false, fmt.Errorf("recover tracker intake %s: reload session: %w", claim.SessionID, err)
@@ -171,10 +183,6 @@ func (m *Manager) adoptTrackerIntakeRuntime(ctx context.Context, claim domain.Tr
 }
 
 func (m *Manager) settleAbsentTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim) error {
-	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
-		return fmt.Errorf("recover tracker intake %s: reserve absent-runtime cleanup: %w", claim.SessionID, err)
-	}
-	defer m.endAgentOperation(claim.SessionID, agentOperationReconcile)
 	rec, found, err := m.store.GetSession(ctx, claim.SessionID)
 	if err != nil {
 		return fmt.Errorf("recover tracker intake %s: reload session: %w", claim.SessionID, err)
@@ -389,11 +397,16 @@ func (m *Manager) settleInterruptedTrackerIntakeClaim(ctx context.Context, id do
 
 func trackerIntakeRecoveryForWorkspace(ws ports.WorkspaceInfo) domain.TrackerIntakeRecoveryReservation {
 	return domain.TrackerIntakeRecoveryReservation{
-		Branch:                  ws.Branch,
-		WorkspacePath:           ws.Path,
-		WorkspaceRepoPath:       ws.RepoPath,
-		WorkspaceCreationIntent: strings.TrimSpace(ws.Path) != "",
+		Branch:            ws.Branch,
+		WorkspacePath:     ws.Path,
+		WorkspaceRepoPath: ws.RepoPath,
 	}
+}
+
+func trackerIntakeRecoveryForWorkspaceCreationIntent(ws ports.WorkspaceInfo) domain.TrackerIntakeRecoveryReservation {
+	reservation := trackerIntakeRecoveryForWorkspace(ws)
+	reservation.WorkspaceCreationIntent = strings.TrimSpace(ws.Path) != ""
+	return reservation
 }
 
 func trackerIntakeWorkspaceInfo(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) ports.WorkspaceInfo {

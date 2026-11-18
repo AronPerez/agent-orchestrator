@@ -2433,7 +2433,7 @@ func (m *Manager) createSessionWorkspaceAt(ctx context.Context, project domain.P
 	var beforeCreate func(ports.WorkspaceInfo) error
 	if cfg.TrackerIntakeLimits != nil {
 		beforeCreate = func(ws ports.WorkspaceInfo) error {
-			return m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspace(ws))
+			return m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspaceCreationIntent(ws))
 		}
 	}
 	if cfg.ProjectID == "" {
@@ -3449,7 +3449,12 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 				releaseOperation = nil
 				m.runInBackground(func() {
 					defer releaseOp()
-					_, refusal := m.cleanupOne(m.backgroundContext, rec, ws)
+					var cleanupProject *ports.WorkspaceProjectInfo
+					if workspaceProject {
+						cleanupProject = &ports.WorkspaceProjectInfo{Root: ws, Worktrees: workspaceProjectRows}
+					}
+					_, refusal := m.cleanupOneWithPlan(m.backgroundContext, rec, ws, cleanupProject,
+						trackerIntakeCleanupHooksSafe(ws, cleanupProject))
 					if !refusal.refused() && workspaceProject {
 						if err := m.recordTermination(m.backgroundContext, id, true); err != nil {
 							refusal = refusedTeardownFailed
@@ -6851,6 +6856,21 @@ func (m *Manager) isWorkspaceInUse(ctx context.Context, projectID domain.Project
 // call) — most commonly because a scoped shell terminal could not be
 // confirmed closed, so reclaiming would pull the ground out from under it.
 func (m *Manager) cleanupOne(ctx context.Context, rec domain.SessionRecord, ws ports.WorkspaceInfo) (ports.WorkspaceReclaim, cleanupRefusal) {
+	return m.cleanupOneWithPlan(ctx, rec, ws, nil, true)
+}
+
+// cleanupOneWithPlan carries recovery's complete workspace-project inventory
+// and ownership decision through asynchronous cleanup. Reloading only the
+// persisted rows would lose reconstructed children, while rerunning hooks for
+// a pre-materialization intent could execute project commands in an unrelated
+// occupied directory.
+func (m *Manager) cleanupOneWithPlan(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	ws ports.WorkspaceInfo,
+	workspaceProject *ports.WorkspaceProjectInfo,
+	runCleanupHooks bool,
+) (ports.WorkspaceReclaim, cleanupRefusal) {
 	{
 		release := m.acquireWorkspaceGate(rec.ProjectID)
 
@@ -6876,9 +6896,11 @@ func (m *Manager) cleanupOne(ctx context.Context, rec domain.SessionRecord, ws p
 		m.logger.Warn("cleanup: attachment preservation failed", "sessionID", rec.ID, "error", err)
 		return ports.WorkspaceReclaimRemoved, refusedAttachmentsFailed
 	}
-	if err := m.runPreRemove(rec.ProjectID, ws.Path); err != nil {
-		m.logger.Warn("cleanup: workspace script failed; preserving workspace", "sessionID", rec.ID, "error", err)
-		return ports.WorkspaceReclaimRemoved, cleanupRefusalFor(err)
+	if runCleanupHooks {
+		if err := m.runPreRemove(rec.ProjectID, ws.Path); err != nil {
+			m.logger.Warn("cleanup: workspace script failed; preserving workspace", "sessionID", rec.ID, "error", err)
+			return ports.WorkspaceReclaimRemoved, cleanupRefusalFor(err)
+		}
 	}
 	ctx, cancelWorkspace := context.WithTimeout(m.backgroundContext, killTeardownBudget)
 	defer cancelWorkspace()
@@ -6893,10 +6915,19 @@ func (m *Manager) cleanupOne(ctx context.Context, rec domain.SessionRecord, ws p
 
 	// A fork's inherited uncommitted changes are not its own work.
 	m.dropInheritedForkChanges(ctx, rec, ws)
-	if rows, ok, rowErr := m.workspaceProjectRows(ctx, rec); rowErr != nil {
-		m.logger.Warn("cleanup: workspace rows failed", "sessionID", rec.ID, "error", rowErr)
-		return ports.WorkspaceReclaimRemoved, refusedTeardownFailed
-	} else if ok {
+	var rows []ports.WorkspaceRepoInfo
+	workspaceProjectCleanup := workspaceProject != nil
+	if workspaceProjectCleanup {
+		rows = workspaceProject.Worktrees
+	} else {
+		var rowErr error
+		rows, workspaceProjectCleanup, rowErr = m.workspaceProjectRows(ctx, rec)
+		if rowErr != nil {
+			m.logger.Warn("cleanup: workspace rows failed", "sessionID", rec.ID, "error", rowErr)
+			return ports.WorkspaceReclaimRemoved, refusedTeardownFailed
+		}
+	}
+	if workspaceProjectCleanup {
 		reclaim, err := m.destroyWorkspaceProjectRows(ctx, rows)
 		if err != nil {
 			if !expectedWorkspaceRefusal(err) {

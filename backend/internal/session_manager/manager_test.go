@@ -3466,6 +3466,165 @@ func TestReconcileTrackerIntakeCreationIntentPreservesOccupiedPath(t *testing.T)
 	}
 }
 
+func TestRequestKillTrackerIntakeCreationIntentSkipsCleanupHook(t *testing.T) {
+	m, st, _, ws := newManager()
+	m.runBackground = func(work func()) { work() }
+	m.dataDir = t.TempDir()
+	workspace := filepath.Join(m.dataDir, "worktrees", "occupied")
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	project := st.projects["mer"]
+	project.Config.PreRemove = []string{"echo ran > cleanup-marker"}
+	st.projects["mer"] = project
+	id := domain.SessionID("occupied-intent-kill")
+	issueID := domain.IssueID("github:acme/mer#1110")
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI}
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: "ao/occupied-intent-kill/root", WorkspacePath: workspace, WorkspaceRepoPath: "/repo/mer",
+		WorkspaceCreationIntent: true, CapacityReleased: true,
+	}
+	ws.destroyErr = ports.ErrWorkspaceDirty
+
+	result, err := m.RequestKill(context.Background(), id)
+	if err != nil || !result.CleanupPending {
+		t.Fatalf("RequestKill() = %+v, %v, want queued cleanup", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "cleanup-marker")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup hook ran in unowned occupied path: %v", err)
+	}
+	if st.trackerIntakePending[key] != id {
+		t.Fatal("occupied creation intent lost its no-replay fence")
+	}
+}
+
+func TestRequestKillTrackerIntakeUsesRecoveredWorkspaceProjectInventory(t *testing.T) {
+	m, st, _, ws := newManager()
+	m.runBackground = func(work func()) { work() }
+	root := t.TempDir()
+	child := filepath.Join(root, "services", "api")
+	if err := os.MkdirAll(child, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	project := st.projects["mer"]
+	project.Kind = domain.ProjectKindWorkspace
+	project.Path = "/repo/root"
+	project.Config.PreRemove = []string{"true"}
+	st.projects["mer"] = project
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "services/api"}}
+	id := domain.SessionID("partial-project-kill")
+	issueID := domain.IssueID("github:acme/mer#1111")
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI}
+	st.worktrees[id] = []domain.SessionWorktreeRecord{{
+		SessionID: id, RepoName: domain.RootWorkspaceRepoName, Branch: "ao/partial-project-kill/root",
+		WorktreePath: root, BaseSHA: "root-base", State: "active",
+	}}
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: "ao/partial-project-kill/root", WorkspacePath: root, WorkspaceRepoPath: project.Path,
+		WorkspaceCreationIntent: true, CapacityReleased: true,
+	}
+	ws.destroyInfoHook = func(info ports.WorkspaceInfo) {
+		if info.Path == child {
+			ws.destroyErr = ports.ErrWorkspaceDirty
+		} else {
+			ws.destroyErr = nil
+		}
+	}
+
+	result, err := m.RequestKill(context.Background(), id)
+	if err != nil || !result.CleanupPending {
+		t.Fatalf("RequestKill() = %+v, %v, want queued cleanup", result, err)
+	}
+	if ws.destroyed != 1 || ws.lastDestroyInfo.Path != child {
+		t.Fatalf("background cleanup destroyed %d workspaces, last=%+v; want dirty recovered child checked before root", ws.destroyed, ws.lastDestroyInfo)
+	}
+	if st.trackerIntakePending[key] != id {
+		t.Fatal("dirty recovered child did not preserve the pending claim")
+	}
+}
+
+func TestKillTrackerIntakeConfirmedWorkspaceRunsCleanupHook(t *testing.T) {
+	m, st, _, _ := newManager()
+	workspace := t.TempDir()
+	project := st.projects["mer"]
+	project.Config.PreRemove = []string{"echo ran > cleanup-marker"}
+	st.projects["mer"] = project
+	rec := mkLive("confirmed-workspace-kill")
+	rec.IssueID = "github:acme/mer#1112"
+	rec.Metadata.WorkspacePath = workspace
+	rec.Metadata.WorkspaceRepoPath = "/repo/mer"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = trackerIntakeRecoveryForWorkspace(workspaceInfo(rec))
+
+	freed, err := m.Kill(context.Background(), rec.ID)
+	if err != nil || !freed {
+		t.Fatalf("Kill() = %t, %v", freed, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "cleanup-marker")); err != nil {
+		t.Fatalf("confirmed workspace cleanup hook did not run: %v", err)
+	}
+}
+
+func TestScheduledTrackerIntakeCleanupReloadsClaimBeforeTeardown(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("stale-cleanup")
+	issueID := domain.IssueID("github:acme/mer#1113")
+	key := "mer\x00" + string(issueID)
+	workspace := "/ws/stale-cleanup"
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, IsTerminated: true}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: workspace, WorkspaceRepoPath: "/repo/mer", DeliveryPossible: true, CapacityReleased: true,
+	}
+	var queued func()
+	m.runBackground = func(work func()) { queued = work }
+	if err := m.ScheduleTrackerIntakeClaimReconciliation(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if queued == nil {
+		t.Fatal("claim reconciliation was not queued")
+	}
+	delete(st.trackerIntakePending, key)
+	delete(st.trackerIntakeRecovery, id)
+	restored := mkLive(id)
+	restored.IssueID = issueID
+	restored.Metadata.WorkspacePath = workspace
+	st.sessions[id] = restored
+
+	queued()
+	if ws.destroyed != 0 {
+		t.Fatalf("stale queued cleanup destroyed restored workspace %d time(s)", ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimFencesWorkspaceTeardown(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("fenced-cleanup")
+	issueID := domain.IssueID("github:acme/mer#1114")
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/fenced-cleanup", WorkspaceRepoPath: "/repo/mer",
+		WorkspaceCreationIntent: true, CapacityReleased: true,
+	}
+	fenced := false
+	ws.destroyInfoHook = func(ports.WorkspaceInfo) {
+		fenced = m.agentOperationIs(id, agentOperationReconcile)
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !fenced {
+		t.Fatal("tracker intake workspace teardown ran without the session reconcile fence")
+	}
+}
+
 func TestScheduleTrackerIntakeClaimReconciliationDoesNotBlockCaller(t *testing.T) {
 	m, st, _, ws := newManager()
 	id := domain.SessionID("slow-cleanup")

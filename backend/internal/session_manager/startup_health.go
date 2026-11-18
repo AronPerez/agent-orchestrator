@@ -35,6 +35,14 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 		return fmt.Errorf("check session %s: tracker intake claim: %w", rec.ID, err)
 	}
 	if pendingIntake {
+		current, found, err := m.store.GetSession(ctx, rec.ID)
+		if err != nil {
+			return fmt.Errorf("check session %s: reload tracker intake owner: %w", rec.ID, err)
+		}
+		if !found || current.IsTerminated {
+			return nil
+		}
+		rec = current
 		if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 			if intakeRecovery.DeliveryPossible && !intakeRecovery.CapacityReleased {
 				return m.reconnectPendingTrackerIntakeChat(ctx, rec, project)
@@ -100,7 +108,7 @@ func (m *Manager) reconnectPendingTrackerIntakeChat(ctx context.Context, rec dom
 		_, err := m.resumeChatController(ctx, "check pending tracker intake", rec, project,
 			workspaceInfo(rec), false, true, "", domain.SessionInterfaceTransitionHistoryStrict)
 		if errors.Is(err, ports.ErrChatHostNotRunning) {
-			return m.recordAgentExited(ctx, rec)
+			return m.settleMissingTrackerIntakeChatHost(ctx, rec)
 		}
 		if err != nil {
 			return err
@@ -108,6 +116,19 @@ func (m *Manager) reconnectPendingTrackerIntakeChat(ctx context.Context, rec dom
 	}
 	if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
 		return fmt.Errorf("check session %s: commit reattached tracker intake chat: %w", rec.ID, err)
+	}
+	return nil
+}
+
+func (m *Manager) settleMissingTrackerIntakeChatHost(ctx context.Context, rec domain.SessionRecord) error {
+	if err := m.recordAgentExited(ctx, rec); err != nil {
+		return err
+	}
+	if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+		return fmt.Errorf("check session %s: release missing tracker intake chat capacity: %w", rec.ID, err)
+	}
+	if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+		return fmt.Errorf("check session %s: preserve missing tracker intake chat claim: %w", rec.ID, err)
 	}
 	return nil
 }

@@ -319,6 +319,34 @@ func TestListPendingTrackerIntakeClaimsIncludesMissingAndTerminatedOwners(t *tes
 	}
 }
 
+func TestHandledTrackerIntakeClaimWithReleasedCapacityDoesNotConsumeSlot(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, store, "demo")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 1, MaxStartsPerPass: 1}
+
+	first := sampleRecord("demo")
+	first.IssueID = "github:acme/demo#320"
+	created, err := store.CreateTrackerIntakeSession(ctx, first, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReserveTrackerIntakeRecovery(ctx, created.ID, domain.TrackerIntakeRecoveryReservation{
+		DeliveryPossible: true, CapacityReleased: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitTrackerIntakeSession(ctx, created.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	second := sampleRecord("demo")
+	second.IssueID = "github:acme/demo#321"
+	if _, err := store.CreateTrackerIntakeSession(ctx, second, limits); err != nil {
+		t.Fatalf("CreateTrackerIntakeSession(second) error = %v, want released handled capacity", err)
+	}
+}
+
 func TestTrackerIntakeRuntimeReservationAtomicallyCheckpointsRecoveryIdentity(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
