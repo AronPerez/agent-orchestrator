@@ -58,9 +58,63 @@ type Service struct {
 }
 
 // MutationGate serializes standing-answer changes with delivery. The gate is
-// shared by the service and deliverer so an answer cannot become authoritative
-// halfway through dispatching the entry it replaces.
-type MutationGate struct{ mu sync.Mutex }
+// shared by the service and deliverer, but scoped per call so one slow provider
+// cannot block unrelated decisions.
+type MutationGate struct {
+	mu    sync.Mutex
+	calls map[string]*callMutation
+}
+
+type callMutation struct {
+	token chan struct{}
+	refs  int
+}
+
+func (g *MutationGate) acquire(ctx context.Context, callID string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	if g.calls == nil {
+		g.calls = make(map[string]*callMutation)
+	}
+	lock := g.calls[callID]
+	if lock == nil {
+		lock = &callMutation{token: make(chan struct{}, 1)}
+		lock.token <- struct{}{}
+		g.calls[callID] = lock
+	}
+	lock.refs++
+	g.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		g.drop(callID, lock)
+		return nil, ctx.Err()
+	case <-lock.token:
+		if err := ctx.Err(); err != nil {
+			lock.token <- struct{}{}
+			g.drop(callID, lock)
+			return nil, err
+		}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			lock.token <- struct{}{}
+			g.drop(callID, lock)
+		})
+	}, nil
+}
+
+func (g *MutationGate) drop(callID string, lock *callMutation) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	lock.refs--
+	if lock.refs == 0 && g.calls[callID] == lock {
+		delete(g.calls, callID)
+	}
+}
 
 type fallbackOutcomeGrant struct {
 	callID   string
@@ -226,8 +280,11 @@ func (s *Service) Get(ctx context.Context, callID string) (Detail, error) {
 
 // Answer records the person's standing answer to an open call.
 func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input AnswerInput) (domain.DecisionCall, error) {
-	s.mutationGate.mu.Lock()
-	defer s.mutationGate.mu.Unlock()
+	unlock, err := s.mutationGate.acquire(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	defer unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -250,8 +307,11 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 
 // Dismiss records that the person declined to choose from a pending call.
 func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string) (domain.DecisionCall, error) {
-	s.mutationGate.mu.Lock()
-	defer s.mutationGate.mu.Unlock()
+	unlock, err := s.mutationGate.acquire(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	defer unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -305,8 +365,11 @@ func planFirstStateBeforeDelivery(answer domain.DecisionAnsweredPayload) domain.
 
 // RecordOutcome closes an in-progress call with the result of carrying it out.
 func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string, input OutcomeInput) (domain.DecisionCall, error) {
-	s.mutationGate.mu.Lock()
-	defer s.mutationGate.mu.Unlock()
+	unlock, err := s.mutationGate.acquire(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	defer unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -340,8 +403,11 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 
 // Withdraw closes a pending call at the owning session's request.
 func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (domain.DecisionCall, error) {
-	s.mutationGate.mu.Lock()
-	defer s.mutationGate.mu.Unlock()
+	unlock, err := s.mutationGate.acquire(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	defer unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -357,8 +423,11 @@ func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (dom
 
 // Retire changes whether a completed call still applies.
 func (s *Service) Retire(ctx context.Context, actor Actor, callID string, retired bool) (domain.DecisionCall, error) {
-	s.mutationGate.mu.Lock()
-	defer s.mutationGate.mu.Unlock()
+	unlock, err := s.mutationGate.acquire(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	defer unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err

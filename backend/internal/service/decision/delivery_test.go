@@ -555,6 +555,70 @@ func TestDelivererSerializesPlanApprovalWithChangedAnswer(t *testing.T) {
 	}
 }
 
+func TestBlockedPlanDeliveryDoesNotBlockUnrelatedDecisionMutation(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	unrelated := raiseDecision(t, fixture, fixture.w1)
+	messenger := &blockingDecisionMessenger{
+		fakeDecisionMessenger: newFakeDecisionMessenger(), block: fixture.loose,
+		started: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	deliverer := newTestDeliverer(fixture.store, messenger, "h_a")
+	deliverer.mutationGate = fixture.service.mutationGate
+	deliverer.attemptTimeout = time.Second
+	delivered := make(chan error, 1)
+	go func() {
+		_, err := deliverer.RunDue(context.Background())
+		delivered <- err
+	}()
+	<-messenger.started
+
+	answered := make(chan error, 1)
+	go func() {
+		_, err := fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, unrelated.ID, AnswerInput{
+			Choice: domain.DecisionChoiceOption, Option: 1,
+		})
+		answered <- err
+	}()
+	var answerErr error
+	blocked := false
+	select {
+	case answerErr = <-answered:
+	case <-time.After(100 * time.Millisecond):
+		blocked = true
+	}
+	close(messenger.release)
+	if blocked {
+		answerErr = <-answered
+	}
+	if deliveryErr := <-delivered; deliveryErr != nil || answerErr != nil || blocked {
+		t.Fatalf("unrelated mutation blocked=%v answerErr=%v deliveryErr=%v", blocked, answerErr, deliveryErr)
+	}
+}
+
+func TestDelivererBoundsBlockedPlanDelivery(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	messenger := &blockingDecisionMessenger{
+		fakeDecisionMessenger: newFakeDecisionMessenger(), block: fixture.loose,
+		started: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	deliverer := newTestDeliverer(fixture.store, messenger, "h_a")
+	deliverer.mutationGate = fixture.service.mutationGate
+	deliverer.attemptTimeout = 20 * time.Millisecond
+
+	pending, err := deliverer.RunDue(context.Background())
+	if err != nil || pending != 1 {
+		t.Fatalf("RunDue() pending=%d err=%v, want one retryable delivery", pending, err)
+	}
+}
+
 func TestDelivererRequiresANoteThenAcceptsTheReplacementPlanCall(t *testing.T) {
 	fixture := newDecisionService(t)
 	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.w1, domain.PlanFirstPending); err != nil || !updated {

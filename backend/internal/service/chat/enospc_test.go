@@ -221,6 +221,49 @@ func TestSendIfIdleDoesNotAcceptPreparedDeferredTurn(t *testing.T) {
 	}
 }
 
+func TestSendIfIdleDoesNotAcceptDeferredPromptFailure(t *testing.T) {
+	promptErr := errors.New("ACP prompt failed before provider acceptance")
+	base := newFakeConversation()
+	provider := &deferredConversation{fakeConversation: base}
+	provider.start = func(providerTurnID string) error {
+		base.emit(
+			ports.ChatEvent{Kind: ports.ChatEventTurnStarted, ProviderTurnID: providerTurnID},
+			ports.ChatEvent{Kind: ports.ChatEventTurnCompleted, ProviderTurnID: providerTurnID, TurnState: domain.TurnStateFailed, Err: promptErr},
+		)
+		return nil
+	}
+	h := newHarnessWithConversation(t, provider)
+	ctx := context.Background()
+	msg := ports.ChatUserMessage{
+		Text: "Approved", ClientMessageID: "decision:dent-deferred-prompt-failure",
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+	}
+
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || sent {
+		t.Fatalf("initial SendIfIdle = (%v, %v), want unconfirmed deferred start", sent, err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		snapshot, err := h.st.LoadConversationSnapshot(ctx, h.ctrl.ConversationID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Turns) == 1 && snapshot.Turns[0].State == domain.TurnStateFailed {
+			if snapshot.Turns[0].ProviderDeliveryState != domain.ProviderDeliveryAttempted {
+				t.Fatalf("provider delivery state = %q, want attempted", snapshot.Turns[0].ProviderDeliveryState)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("deferred prompt failure was not projected: %+v", snapshot.Turns)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, chatsvc.ErrSteerDeliveryUncertain) || sent {
+		t.Fatalf("failed prompt retry = (%v, %v), want unconfirmed delivery", sent, err)
+	}
+}
+
 func TestConfirmSessionChatTurnRecoversAcceptedUnboundDelivery(t *testing.T) {
 	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
 		return &enospcBindStore{Store: st}

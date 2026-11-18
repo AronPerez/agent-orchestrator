@@ -238,9 +238,9 @@ func addSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, row
 }
 
 // renameSource uses the exact identity first. A plan-approval row gets one
-// narrow fallback on filesystems without birth times: device+inode survives a
-// rename followed by an edit, while the changed modification time does not.
-// Keeping this exception role-scoped preserves the ordinary inode-reuse guard.
+// narrow fallback when birth or generation proves the inode is still the same
+// file after an edit. A bare device+inode is never enough because it can be
+// recycled after deletion.
 func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, observed domain.FileIdentity) (domain.SessionArtifactRecord, bool) {
 	if source, ok := sources[observed]; ok {
 		return source, true
@@ -249,7 +249,8 @@ func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, 
 		stored := source.File
 		if source.Role == domain.SessionArtifactRolePlanApproval &&
 			stored.Ino != 0 && stored.Dev == observed.Dev && stored.Ino == observed.Ino &&
-			stored.Birth == 0 && observed.Birth == 0 && stored.Generation == observed.Generation {
+			stored.Birth == observed.Birth && stored.Generation == observed.Generation &&
+			(stored.Birth != 0 || stored.Generation != 0) {
 			return source, true
 		}
 	}

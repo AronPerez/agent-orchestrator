@@ -141,9 +141,9 @@ func TestObservationApplyKeepsPlanApprovalRoleAcrossRenameBeforePersistence(t *t
 	}
 }
 
-func TestObservationApplyKeepsEditedPlanApprovalRoleAcrossRenameWithoutBirthTime(t *testing.T) {
-	stored := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 13}
-	observed := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 17}
+func TestObservationApplyKeepsEditedPlanApprovalRoleAcrossRenameWithBirthTime(t *testing.T) {
+	stored := domain.FileIdentity{Dev: 7, Ino: 11, Birth: 5, ModTime: 13}
+	observed := domain.FileIdentity{Dev: 7, Ino: 11, Birth: 5, ModTime: 17}
 	row := domain.SessionArtifactRecord{
 		ID: "approval", Path: "plan.md", File: stored, Role: domain.SessionArtifactRolePlanApproval,
 	}
@@ -162,6 +162,19 @@ func TestObservationApplyKeepsEditedPlanApprovalRoleAcrossRenameWithoutBirthTime
 	addSource(sources, row)
 	if matched, ok := renameSource(sources, observed); ok {
 		t.Fatalf("ordinary modified inode matched as rename: %+v", matched)
+	}
+}
+
+func TestRenameSourceRejectsRecycledPlanApprovalInodeWithoutBirthOrGeneration(t *testing.T) {
+	row := domain.SessionArtifactRecord{
+		ID: "approval", Path: "plan.md", Role: domain.SessionArtifactRolePlanApproval,
+		File: domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 13},
+	}
+	sources := map[domain.FileIdentity]domain.SessionArtifactRecord{}
+	addSource(sources, row)
+	observed := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 17}
+	if matched, ok := renameSource(sources, observed); ok {
+		t.Fatalf("recycled inode matched as approval rename: %+v", matched)
 	}
 }
 

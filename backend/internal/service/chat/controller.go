@@ -2183,9 +2183,6 @@ func (c *Controller) dispatch(
 			}
 			return domain.ConversationTurn{}, fmt.Errorf("start turn: %w", err)
 		}
-		if err := c.store.MarkTurnProviderDeliveryAccepted(ctx, turnID); err != nil {
-			return domain.ConversationTurn{}, fmt.Errorf("mark deferred provider delivery accepted: %w", err)
-		}
 	}
 	if len(followers) > 0 {
 		if err := c.store.CompleteQueuedBatch(context.WithoutCancel(ctx), c.conversation.ID, followers, ref.ProviderTurnID, "", c.now()); err != nil {
@@ -2194,12 +2191,16 @@ func (c *Controller) dispatch(
 		}
 	}
 
+	deliveryState := domain.ProviderDeliveryAccepted
+	if hasDeferredStart {
+		deliveryState = domain.ProviderDeliveryAttempted
+	}
 	return domain.ConversationTurn{
 		ID:                    turnID,
 		ConversationID:        c.conversation.ID,
 		HandledBySessionID:    c.sessionID,
 		ProviderTurnID:        ref.ProviderTurnID,
-		ProviderDeliveryState: domain.ProviderDeliveryAccepted,
+		ProviderDeliveryState: deliveryState,
 		State:                 domain.TurnStateRunning,
 		RequestedAt:           requestedAt,
 	}, nil
@@ -3474,9 +3475,6 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 					c.captureArtifactBaseline(ctx, false)
 				}
 			}
-			if err := c.store.MarkTurnProviderDeliveryAcceptedByProviderID(ctx, c.conversation.ID, event.ProviderTurnID); err != nil {
-				return fmt.Errorf("mark provider-started turn %s accepted: %w", event.ProviderTurnID, err)
-			}
 		}
 		return nil
 
@@ -3506,9 +3504,11 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 		if failureCode == "" && state == domain.TurnStateFailed && errors.Is(event.Err, ports.ErrChatAuthRequired) {
 			failureCode = domain.ConversationFailureAuthRequired
 		}
-		if event.ProviderTurnID != "" {
+		// Deferred drivers only prove acceptance when the provider successfully
+		// completes session/prompt. Local start and failed completion are not proof.
+		if state == domain.TurnStateCompleted && event.ProviderTurnID != "" {
 			if err := c.store.MarkTurnProviderDeliveryAcceptedByProviderID(ctx, c.conversation.ID, event.ProviderTurnID); err != nil {
-				return fmt.Errorf("mark completed provider turn %s accepted: %w", event.ProviderTurnID, err)
+				return fmt.Errorf("mark provider-accepted turn %s accepted: %w", event.ProviderTurnID, err)
 			}
 		}
 		if err := c.store.SettleTurnWithFailureCode(
