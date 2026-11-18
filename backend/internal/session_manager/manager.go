@@ -4537,30 +4537,28 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 			return RestoreResult{}, relaunchFailed("after-start prompt", fmt.Errorf("%s %s: after-start prompt: %w", operation, rec.ID, err))
 		}
 	}
-	// A tracker intake worker whose first launch stopped before its prompt was
-	// delivered can be resumed from the saved prompt. That relaunch is itself a
-	// delivery attempt: persist the no-replay fence at the same boundary used by
-	// a fresh intake launch, then promote the pending claim only after delivery
-	// succeeds. Native restore and handoff/switch prompts do not replay the issue.
+	// Every pending tracker-intake relaunch replaces the stopped generation in
+	// its durable recovery fence before touching the runtime. Saved-prompt
+	// fallback is also a new delivery attempt: in-command delivery is fenced in
+	// that reservation, while after-start delivery is fenced at the prompt write.
+	// Native restore and handoff/switch prompts do not replay the issue.
 	trackerIntakeSavedPrompt := mode == RestoreModeSavedPrompt && !switching && !savedNote && strings.TrimSpace(savedPrompt) != ""
 	var trackerIntakePriorReservation domain.TrackerIntakeRecoveryReservation
-	trackerIntakePending := false
-	trackerIntakeDeliveryMarked := false
-	if trackerIntakeSavedPrompt {
-		trackerIntakePriorReservation, trackerIntakePending, err = m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
-		if err != nil {
-			m.cleanupSystemPromptDir(rec.ID)
-			return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: load pending tracker intake claim: %w", operation, rec.ID, err))
-		}
+	trackerIntakePriorReservation, trackerIntakePending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+	if err != nil {
+		m.cleanupSystemPromptDir(rec.ID)
+		return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: load pending tracker intake claim: %w", operation, rec.ID, err))
 	}
+	trackerIntakeDeliveryPossible := trackerIntakePriorReservation.DeliveryPossible ||
+		(trackerIntakeSavedPrompt && delivery == ports.PromptDeliveryInCommand)
 	markTrackerIntakeDelivery := func() error {
-		if !trackerIntakePending || trackerIntakePriorReservation.DeliveryPossible || trackerIntakeDeliveryMarked {
+		if !trackerIntakePending || trackerIntakeDeliveryPossible {
 			return nil
 		}
 		if err := m.markTrackerIntakeDeliveryPossible(ctx, rec.ID); err != nil {
 			return err
 		}
-		trackerIntakeDeliveryMarked = true
+		trackerIntakeDeliveryPossible = true
 		return nil
 	}
 	if err := m.validateAgentBinary(argv); err != nil {
@@ -4606,11 +4604,13 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 			return RestoreResult{}, fmt.Errorf("%s %s: reserve switch launch: %w", operation, rec.ID, err)
 		}
 	}
-	if trackerIntakePending && delivery == ports.PromptDeliveryInCommand {
-		if err := markTrackerIntakeDelivery(); err != nil {
+	trackerIntakeRuntimeReserved := false
+	if trackerIntakePending {
+		if err := m.reserveTrackerIntakeRuntime(ctx, rec.ID, ws, launchID, runtimeCfg, trackerIntakeDeliveryPossible); err != nil {
 			m.cleanupSystemPromptDir(rec.ID)
-			return RestoreResult{}, relaunchFailed("tracker intake delivery fence", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
+			return RestoreResult{}, relaunchFailed("tracker intake runtime fence", fmt.Errorf("%s %s: reserve relaunched runtime: %w", operation, rec.ID, err))
 		}
+		trackerIntakeRuntimeReserved = true
 	}
 	if restartHandle == nil {
 		handle, err = m.runtime.Create(ctx, runtimeCfg)
@@ -4618,19 +4618,27 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		handle, err = m.restartRuntime(ctx, *restartHandle, runtimeCfg)
 	}
 	if err != nil {
-		// A definite no-effect failure occurred before the in-command task could
-		// run, so restore the exact stopped-generation reservation and keep this
-		// issue retryable. Possible runtime effects retain DeliveryPossible even
-		// when adapter cleanup succeeded: the task may already have executed.
-		if trackerIntakeDeliveryMarked {
-			if _, possible := runtimeCreateEffect(err); !possible {
-				if restoreErr := m.store.ReserveTrackerIntakeRecovery(ctx, rec.ID, trackerIntakePriorReservation); restoreErr != nil {
-					err = errors.Join(err, restoreErr)
-				}
+		// An unclassified Create error is pre-effect by the Runtime contract. A
+		// Restart error is conservative instead: tmux can fail its post-respawn
+		// probe after the saved prompt has started. Only an explicit EffectNone
+		// classification proves that a restart did not replace the process.
+		definiteNoEffect := restartHandle == nil
+		var effect ports.RuntimeEffectError
+		if errors.As(err, &effect) {
+			definiteNoEffect = effect.EffectOutcome() == ports.RuntimeEffectNone
+		}
+		if trackerIntakeRuntimeReserved && definiteNoEffect {
+			if restoreErr := m.store.ReserveTrackerIntakeRecovery(ctx, rec.ID, trackerIntakePriorReservation); restoreErr != nil {
+				err = errors.Join(err, restoreErr)
 			}
 		}
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, relaunchFailed("runtime", fmt.Errorf("%s %s: runtime: %w", operation, rec.ID, agentlaunch.RedactError(err, project.Config.Env)))
+	}
+	if trackerIntakePending {
+		if err := m.reserveTrackerIntakeRuntimeHandle(ctx, rec.ID, ws, launchID, handle, trackerIntakeDeliveryPossible); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake runtime fence", fmt.Errorf("%s %s: reserve relaunched runtime handle: %w", operation, rec.ID, err))
+		}
 	}
 	// A runtime accepting Restart only proves that its supervisor was created.
 	// Keep the previous launch (and stale/release references) until the exact
@@ -4726,7 +4734,7 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 	if savedNote {
 		m.clearHandoffNote(ctx, rec.ID)
 	}
-	if trackerIntakePending {
+	if trackerIntakePending && trackerIntakeDeliveryPossible {
 		if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
 			return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: commit restored tracker intake claim: %w", operation, rec.ID, err))
 		}

@@ -8726,6 +8726,137 @@ func TestRestore_SavedPromptPossibleRuntimeEffectKeepsDeliveryFenced(t *testing.
 	}
 }
 
+func TestRestore_PendingTrackerClaimReservesRelaunchedRuntimeBeforePublication(t *testing.T) {
+	tests := []struct {
+		name                 string
+		agent                func() ports.Agent
+		agentSessionID       string
+		wantDeliveryPossible bool
+	}{
+		{
+			name: "saved prompt in command",
+			agent: func() ports.Agent {
+				return &recordingAgent{}
+			},
+			wantDeliveryPossible: true,
+		},
+		{
+			name: "saved prompt after start",
+			agent: func() ports.Agent {
+				return &composedAfterStartAgent{afterStartAgent: afterStartAgent{recordingAgent: &recordingAgent{}}}
+			},
+		},
+		{
+			name: "native restore",
+			agent: func() ports.Agent {
+				return &recordingAgent{}
+			},
+			agentSessionID: "native-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			issueID := domain.IssueID("github:acme/mer#118")
+			key := "mer\x00" + string(issueID)
+			st.sessions["mer-1"] = domain.SessionRecord{
+				ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task", AgentSessionID: tt.agentSessionID,
+				},
+			}
+			st.trackerIntakePending[key] = "mer-1"
+			st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"old-runtime"},
+				CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+			}
+			rt := &fakeRuntime{createIDs: []string{"new-runtime"}}
+			m := New(Deps{
+				Runtime: rt, Agents: singleAgent{agent: tt.agent()}, Workspace: &fakeWorkspace{}, Store: st,
+				Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st, markSpawnedErr: errors.New("publication interrupted")},
+				LookPath: func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+				t.Fatal("Restore error = nil, want interrupted publication")
+			}
+			reservation := st.trackerIntakeRecovery["mer-1"]
+			if reservation.RuntimeLaunchID == "" || reservation.RuntimeLaunchID == "stopped-launch" ||
+				len(reservation.RuntimeHandleIDs) != 1 || reservation.RuntimeHandleIDs[0] != "new-runtime" {
+				t.Fatalf("reserved runtime = launch %q handles %v, want new generation/new-runtime", reservation.RuntimeLaunchID, reservation.RuntimeHandleIDs)
+			}
+			if reservation.DeliveryPossible != tt.wantDeliveryPossible || reservation.CapacityReleased || reservation.CleanupConfirmed {
+				t.Fatalf("reserved recovery = %+v, want delivery=%v with stale release/cleanup cleared", reservation, tt.wantDeliveryPossible)
+			}
+		})
+	}
+}
+
+func TestResume_SavedPromptRestartErrorRequiresExplicitNoEffectToClearFence(t *testing.T) {
+	tests := []struct {
+		name              string
+		restartErr        error
+		wantDelivery      bool
+		wantOldGeneration bool
+	}{
+		{
+			name:         "unclassified post-respawn failure",
+			restartErr:   errors.New("restart probe failed after respawn"),
+			wantDelivery: true,
+		},
+		{
+			name: "explicit no effect",
+			restartErr: fakeRuntimeEffectError{
+				err: errors.New("restart rejected before respawn"), effect: ports.RuntimeEffectNone, cleanup: ports.RuntimeCleanupNotAttempted,
+			},
+			wantOldGeneration: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			issueID := domain.IssueID("github:acme/mer#119")
+			key := "mer\x00" + string(issueID)
+			st.sessions["mer-1"] = domain.SessionRecord{
+				ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task",
+					RuntimeHandleID: "h1", RuntimeLaunchID: "stopped-launch",
+				},
+			}
+			st.trackerIntakePending[key] = "mer-1"
+			prior := domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"h1"},
+				CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+			}
+			st.trackerIntakeRecovery["mer-1"] = prior
+			base := &fakeRuntime{
+				aliveByHandle: map[string]bool{"h1": true}, exitedLaunches: map[string]bool{"stopped-launch": true},
+			}
+			rt := &fakeRestartRuntime{fakeRuntime: base, restartErr: tt.restartErr}
+			m := New(Deps{
+				Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+				Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+				LookPath: func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); err == nil {
+				t.Fatal("ResumeAgentWithMode error = nil, want restart failure")
+			}
+			reservation := st.trackerIntakeRecovery["mer-1"]
+			if reservation.DeliveryPossible != tt.wantDelivery {
+				t.Fatalf("DeliveryPossible = %v, want %v after %s", reservation.DeliveryPossible, tt.wantDelivery, tt.name)
+			}
+			if gotOldGeneration := reservation.RuntimeLaunchID == prior.RuntimeLaunchID; gotOldGeneration != tt.wantOldGeneration {
+				t.Fatalf("old generation retained = %v, want %v; reservation=%+v", gotOldGeneration, tt.wantOldGeneration, reservation)
+			}
+		})
+	}
+}
+
 func TestRestore_OpenCodeWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) {
 	st := newFakeStore()
 	st.sessions["mer-1"] = domain.SessionRecord{
