@@ -22,10 +22,11 @@ const (
 )
 
 type windowsWorkspaceProcessTree struct {
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	job    windows.Handle
-	closed bool
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	job         windows.Handle
+	rootProcess windows.Handle
+	closed      bool
 }
 
 type jobBasicAccountingInformation struct {
@@ -77,7 +78,7 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 		return nil, errors.Join(cause, tree.Close())
 	}
 	process, err := windows.OpenProcess(
-		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE,
 		false,
 		uint32(cmd.Process.Pid),
 	)
@@ -85,10 +86,11 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 		return cleanup(fmt.Errorf("open suspended verification process: %w", err))
 	}
 	err = windows.AssignProcessToJobObject(job, process)
-	_ = windows.CloseHandle(process)
 	if err != nil {
+		_ = windows.CloseHandle(process)
 		return cleanup(fmt.Errorf("assign verification process to job: %w", err))
 	}
+	tree.rootProcess = process
 	assigned = true
 	if ctx.Err() != nil {
 		_ = tree.terminate()
@@ -105,9 +107,24 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 }
 
 func (t *windowsWorkspaceProcessTree) Wait() (bool, error) {
-	waitErr := t.cmd.Wait()
+	// Cmd.Wait also waits for copied output pipes. A background child can keep
+	// those pipes open after the shell exits, so anchor cleanup to the root
+	// process handle before waiting for exec.Cmd to drain and reap it.
+	rootWaitErr := waitForWindowsProcess(t.rootProcess)
 	survived, stopErr := t.stopSurvivors()
-	return survived, errors.Join(waitErr, stopErr)
+	waitErr := t.cmd.Wait()
+	return survived, errors.Join(rootWaitErr, waitErr, stopErr)
+}
+
+func waitForWindowsProcess(process windows.Handle) error {
+	status, err := windows.WaitForSingleObject(process, windows.INFINITE)
+	if err != nil {
+		return err
+	}
+	if status != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("wait for verification root process: unexpected status %d", status)
+	}
+	return nil
 }
 
 func (t *windowsWorkspaceProcessTree) terminate() error {
@@ -169,13 +186,20 @@ func waitForWindowsJobEmpty(job windows.Handle, timeout time.Duration) (bool, er
 func (t *windowsWorkspaceProcessTree) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.closed || t.job == 0 {
+	if t.closed {
 		return nil
 	}
 	t.closed = true
-	err := windows.CloseHandle(t.job)
+	var jobErr, processErr error
+	if t.job != 0 {
+		jobErr = windows.CloseHandle(t.job)
+	}
 	t.job = 0
-	return err
+	if t.rootProcess != 0 {
+		processErr = windows.CloseHandle(t.rootProcess)
+	}
+	t.rootProcess = 0
+	return errors.Join(jobErr, processErr)
 }
 
 func resumeProcessThreads(pid uint32) error {
