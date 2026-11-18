@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { aoBridge } from "../lib/bridge";
 import type { CloudCpNotification } from "../lib/cloud-cp/types";
+import type { DecisionInboxEntry } from "../lib/decision-inbox";
 import {
 	applyNotificationsCleared,
 	type NotificationDTO,
@@ -18,6 +19,7 @@ const {
 	clearOneMock,
 	cloudNotificationsMock,
 	connectMock,
+	decisionInboxMock,
 	fetchNextPageMock,
 	markAllMock,
 	navigateMock,
@@ -30,6 +32,7 @@ const {
 	clearOneMock: vi.fn(),
 	cloudNotificationsMock: vi.fn(),
 	connectMock: vi.fn(),
+	decisionInboxMock: vi.fn(),
 	fetchNextPageMock: vi.fn(),
 	markAllMock: vi.fn(),
 	navigateMock: vi.fn(),
@@ -142,6 +145,22 @@ function cloudNotificationsResult(items: CloudCpNotification[]) {
 
 const emptyCloudResult = cloudNotificationsResult([]);
 
+const pendingDecision: DecisionInboxEntry = {
+	sourceHostId: "local",
+	sourceHostLabel: "",
+	call: {
+		id: "dec_1", link: "ao://decisions/dec_1", state: "needs_you", stateLabel: "Needs you",
+		title: "Which release path should checkout use?",
+		context: "The fast path reaches customers today but skips the extended soak.",
+		options: [
+			{ label: "Ship today", consequence: "Release after the focused checks.", recommended: true },
+			{ label: "Soak overnight", consequence: "Delay release by one day." },
+		],
+		links: [], projectId: "proj-1", projectName: "acme/app", hostId: "h_local", machineLabel: "Mac mini",
+		ownerSessionId: "sess-1", ownerSessionName: "Checkout flow", raisedAt: "2026-11-18T10:00:00Z", retired: false,
+	},
+};
+
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigateMock, useParams: () => paramsMock() }));
 
 vi.mock("../hooks/useNotificationsQuery", () => ({
@@ -154,6 +173,8 @@ vi.mock("../hooks/useNotificationsQuery", () => ({
 vi.mock("../hooks/useCloudNotifications", () => ({
 	useCloudNotifications: (status: "all" | "unread" | "read") => cloudNotificationsMock(status),
 }));
+
+vi.mock("../hooks/useDecisionInbox", () => ({ useDecisionInbox: (enabled: boolean) => decisionInboxMock(enabled) }));
 
 vi.mock("../hooks/useRestoreSession", () => ({
 	useRestoreSession: () => restoreSessionMock,
@@ -239,6 +260,10 @@ beforeEach(() => {
 	cloudClearAllMock.mockReset().mockResolvedValue(undefined);
 	cloudClearOneMock.mockReset().mockResolvedValue(undefined);
 	cloudNotificationsMock.mockReset().mockReturnValue(emptyCloudResult);
+	decisionInboxMock.mockReset().mockReturnValue({
+		entries: [], isLoading: false, loadFailed: false, pending: undefined, answerError: undefined,
+		answer: vi.fn(), retry: vi.fn(),
+	});
 	connectMock.mockReset();
 	paramsMock.mockReset().mockReturnValue({});
 	useUiStore.setState({ visibleTerminalKindBySession: {} });
@@ -322,6 +347,23 @@ describe("NotificationRuntime", () => {
 });
 
 describe("NotificationCenter", () => {
+	it("shows ledger calls before notification history and answers them without leaving the bell", async () => {
+		const answer = vi.fn();
+		decisionInboxMock.mockReturnValue({
+			entries: [pendingDecision], isLoading: false, loadFailed: false, pending: undefined, answerError: undefined,
+			answer, retry: vi.fn(),
+		});
+		renderNotificationCenter();
+		await clickOpen();
+
+		const decisionTitle = screen.getByText(pendingDecision.call.title);
+		const notificationTitle = screen.getByText(/Fix checkout totals/);
+		expect(decisionTitle.compareDocumentPosition(notificationTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		await userEvent.click(screen.getByRole("button", { name: /Ship today/ }));
+		expect(answer).toHaveBeenCalledWith(pendingDecision, 1);
+		expect(screen.getByRole("dialog", { name: "Notifications" })).toBeInTheDocument();
+	});
+
 	it("subscribes to workspace metadata only while the panel is open", async () => {
 		renderNotificationCenter();
 
