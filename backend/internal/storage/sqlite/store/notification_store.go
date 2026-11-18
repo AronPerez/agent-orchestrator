@@ -136,29 +136,21 @@ func (s *Store) ResolveSessionNotifications(
 	typ domain.NotificationType,
 	at time.Time,
 ) ([]domain.NotificationRecord, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	var rows []gen.Notification
-	err := s.inTx(ctx, "resolve session notifications", func(q *gen.Queries) error {
-		var err error
-		rows, err = q.ResolveSessionNotificationsByType(ctx, gen.ResolveSessionNotificationsByTypeParams{
-			ResolvedAt: nullTime(at),
-			SessionID:  &id,
-			Type:       typ,
+	rows, err := s.resolveNotifications(ctx, "resolve session notifications",
+		func(q *gen.Queries) ([]gen.Notification, error) {
+			return q.ResolveSessionNotificationsByType(ctx, gen.ResolveSessionNotificationsByTypeParams{
+				ResolvedAt: nullTime(at), SessionID: &id, Type: typ,
+			})
+		},
+		func(q *gen.Queries) (int64, error) {
+			return q.DeleteDismissedSessionNotificationsByType(ctx, gen.DeleteDismissedSessionNotificationsByTypeParams{
+				SessionID: &id, Type: typ,
+			})
 		})
-		if err != nil {
-			return err
-		}
-		_, err = q.DeleteDismissedSessionNotificationsByType(ctx, gen.DeleteDismissedSessionNotificationsByTypeParams{
-			SessionID: &id,
-			Type:      typ,
-		})
-		return err
-	})
 	if err != nil {
 		return nil, fmt.Errorf("resolve session notifications %s/%s: %w", id, typ, err)
 	}
-	return notificationsFromGen(rows), nil
+	return rows, nil
 }
 
 // ResolvePRNotifications marks every open notification of one type on a PR
@@ -169,29 +161,21 @@ func (s *Store) ResolvePRNotifications(
 	typ domain.NotificationType,
 	at time.Time,
 ) ([]domain.NotificationRecord, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	var rows []gen.Notification
-	err := s.inTx(ctx, "resolve pr notifications", func(q *gen.Queries) error {
-		var err error
-		rows, err = q.ResolvePRNotificationsByType(ctx, gen.ResolvePRNotificationsByTypeParams{
-			ResolvedAt: nullTime(at),
-			PRURL:      prURL,
-			Type:       typ,
+	rows, err := s.resolveNotifications(ctx, "resolve pr notifications",
+		func(q *gen.Queries) ([]gen.Notification, error) {
+			return q.ResolvePRNotificationsByType(ctx, gen.ResolvePRNotificationsByTypeParams{
+				ResolvedAt: nullTime(at), PRURL: prURL, Type: typ,
+			})
+		},
+		func(q *gen.Queries) (int64, error) {
+			return q.DeleteDismissedPRNotificationsByType(ctx, gen.DeleteDismissedPRNotificationsByTypeParams{
+				PRURL: prURL, Type: typ,
+			})
 		})
-		if err != nil {
-			return err
-		}
-		_, err = q.DeleteDismissedPRNotificationsByType(ctx, gen.DeleteDismissedPRNotificationsByTypeParams{
-			PRURL: prURL,
-			Type:  typ,
-		})
-		return err
-	})
 	if err != nil {
 		return nil, fmt.Errorf("resolve pr notifications %s/%s: %w", prURL, typ, err)
 	}
-	return notificationsFromGen(rows), nil
+	return rows, nil
 }
 
 // ResolveDecisionNotifications marks a call's open notification resolved and
@@ -203,27 +187,44 @@ func (s *Store) ResolveDecisionNotifications(
 	typ domain.NotificationType,
 	at time.Time,
 ) ([]domain.NotificationRecord, error) {
+	rows, err := s.resolveNotifications(ctx, "resolve decision notifications",
+		func(q *gen.Queries) ([]gen.Notification, error) {
+			return q.ResolveDecisionNotificationsByCall(ctx, gen.ResolveDecisionNotificationsByCallParams{
+				ResolvedAt: nullTime(at), DecisionCallID: callID, Type: typ,
+			})
+		},
+		func(q *gen.Queries) (int64, error) {
+			return q.DeleteDismissedDecisionNotificationsByCall(ctx, gen.DeleteDismissedDecisionNotificationsByCallParams{
+				DecisionCallID: callID, Type: typ,
+			})
+		})
+	if err != nil {
+		return nil, fmt.Errorf("resolve decision notifications %s/%s: %w", callID, typ, err)
+	}
+	return rows, nil
+}
+
+// resolveNotifications resolves visible open rows and deletes their dismissed
+// tombstones in one transaction, so a resolved issue never leaves dedupe state.
+func (s *Store) resolveNotifications(
+	ctx context.Context,
+	op string,
+	resolve func(*gen.Queries) ([]gen.Notification, error),
+	deleteDismissed func(*gen.Queries) (int64, error),
+) ([]domain.NotificationRecord, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	var rows []gen.Notification
-	err := s.inTx(ctx, "resolve decision notifications", func(q *gen.Queries) error {
+	err := s.inTx(ctx, op, func(q *gen.Queries) error {
 		var err error
-		rows, err = q.ResolveDecisionNotificationsByCall(ctx, gen.ResolveDecisionNotificationsByCallParams{
-			ResolvedAt:     nullTime(at),
-			DecisionCallID: callID,
-			Type:           typ,
-		})
-		if err != nil {
+		if rows, err = resolve(q); err != nil {
 			return err
 		}
-		_, err = q.DeleteDismissedDecisionNotificationsByCall(ctx, gen.DeleteDismissedDecisionNotificationsByCallParams{
-			DecisionCallID: callID,
-			Type:           typ,
-		})
+		_, err = deleteDismissed(q)
 		return err
 	})
 	if err != nil {
-		return nil, fmt.Errorf("resolve decision notifications %s/%s: %w", callID, typ, err)
+		return nil, err
 	}
 	return notificationsFromGen(rows), nil
 }

@@ -131,7 +131,7 @@ func TestEnrichDecisionNoProject(t *testing.T) {
 func TestEnrichDecisionNormalizesLabelsToOneLine(t *testing.T) {
 	t.Parallel()
 	intent := decisionIntent()
-	intent.DecisionProjectName = "agent\n orchestrator‮"
+	intent.DecisionProjectName = "agent\n orchestrator\u202e"
 	intent.DecisionStreamName = "bell\twork"
 	rec, err := enrich(intent)
 	if err != nil {

@@ -99,18 +99,21 @@ INSERT INTO notifications (
 		t.Fatal(err)
 	}
 	var remaining []string
-	rows, err := db.Query(`SELECT id FROM notifications ORDER BY id`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			t.Fatal(err)
+	if err := func() error {
+		rows, err := db.Query(`SELECT id FROM notifications ORDER BY id`)
+		if err != nil {
+			return err
 		}
-		remaining = append(remaining, id)
-	}
-	if err := rows.Close(); err != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			remaining = append(remaining, id)
+		}
+		return rows.Err()
+	}(); err != nil {
 		t.Fatal(err)
 	}
 	if len(remaining) != 1 || remaining[0] != "decision-1" {
