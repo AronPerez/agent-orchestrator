@@ -54,8 +54,9 @@ FROM (
           SELECT 1
           FROM tracker_intake_handled AS released_claim
           WHERE released_claim.session_id = sessions.id
-            AND sessions.activity_state IN ('', 'exited')
             AND COALESCE(json_extract(released_claim.recovery_state, '$.capacityReleased'), 0) = 1
+            AND sessions.runtime_launch_id = COALESCE(json_extract(released_claim.recovery_state, '$.releasedRuntimeLaunchId'), '')
+            AND sessions.controller_generation = COALESCE(json_extract(released_claim.recovery_state, '$.releasedControllerGeneration'), '')
       )
     UNION
     SELECT session_id
@@ -95,7 +96,16 @@ WHERE session_id = ? AND state = 'pending';
 -- name: CommitStoppedTrackerIntakeSession :execrows
 UPDATE tracker_intake_handled
 SET state = 'handled',
-    recovery_state = json_set(recovery_state, '$.capacityReleased', json('true')),
+    recovery_state = json_set(
+        recovery_state,
+        '$.capacityReleased', json('true'),
+        '$.releasedRuntimeLaunchId', COALESCE((
+            SELECT runtime_launch_id FROM sessions WHERE sessions.id = tracker_intake_handled.session_id
+        ), ''),
+        '$.releasedControllerGeneration', COALESCE((
+            SELECT controller_generation FROM sessions WHERE sessions.id = tracker_intake_handled.session_id
+        ), '')
+    ),
     recorded_at = ?
 WHERE session_id = ? AND state = 'pending';
 

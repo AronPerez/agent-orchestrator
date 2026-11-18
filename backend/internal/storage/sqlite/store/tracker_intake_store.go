@@ -416,11 +416,13 @@ func (s *Store) ListTrackerIntakeHandled(ctx context.Context, projectID domain.P
 			}
 		}
 		out = append(out, domain.TrackerIntakeHandledRecord{
-			ProjectID:        domain.ProjectID(row.ProjectID),
-			IssueID:          issueID,
-			SessionID:        domain.SessionID(row.SessionID),
-			HandledAt:        row.RecordedAt,
-			CapacityReleased: recovery.CapacityReleased,
+			ProjectID:                    domain.ProjectID(row.ProjectID),
+			IssueID:                      issueID,
+			SessionID:                    domain.SessionID(row.SessionID),
+			HandledAt:                    row.RecordedAt,
+			CapacityReleased:             recovery.CapacityReleased,
+			ReleasedRuntimeLaunchID:      recovery.ReleasedRuntimeLaunchID,
+			ReleasedControllerGeneration: recovery.ReleasedControllerGeneration,
 		})
 	}
 	return out, nil

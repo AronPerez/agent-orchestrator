@@ -48,7 +48,10 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 				return m.reconnectPendingTrackerIntakeChat(ctx, rec, project)
 			}
 			if !intakeRecovery.DeliveryPossible {
-				return m.reconcileInterruptedTrackerIntake(ctx, rec, intakeRecovery)
+				// The per-claim background job owns interrupted launch teardown.
+				// Cleanup hooks intentionally have no default timeout, so running
+				// them in the startup live pass could hold every daemon gate shut.
+				return nil
 			}
 		}
 		// Pending terminal claims are reconciled independently from this live

@@ -204,6 +204,10 @@ func (f *fakeStore) CommitStoppedTrackerIntakeSession(_ context.Context, id doma
 		if pendingID == id {
 			reservation := f.trackerIntakeRecovery[id]
 			reservation.CapacityReleased = true
+			if rec, found := f.sessions[id]; found {
+				reservation.ReleasedRuntimeLaunchID = rec.Metadata.RuntimeLaunchID
+				reservation.ReleasedControllerGeneration = rec.Metadata.ControllerGeneration
+			}
 			f.trackerIntakeRecovery[id] = reservation
 			delete(f.trackerIntakePending, key)
 			f.trackerIntakeHandled[key] = id

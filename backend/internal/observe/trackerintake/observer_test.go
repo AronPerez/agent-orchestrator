@@ -428,6 +428,35 @@ func TestPollDoesNotChargeReleasedPendingOwnerAgainstCapacity(t *testing.T) {
 	}
 }
 
+func TestIntakeSessionStateReleasesOnlyTheStoppedGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		currentLaunch string
+		wantActive    int
+	}{
+		{name: "same generation cleaning up", currentLaunch: "launch-stopped", wantActive: 0},
+		{name: "restored generation", currentLaunch: "launch-restored", wantActive: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessions := []domain.SessionRecord{{
+				ID: "demo-1", ProjectID: "demo", IssueID: "github:acme/demo#1",
+				Activity: domain.Activity{State: domain.ActivityActive},
+				Metadata: domain.SessionMetadata{RuntimeLaunchID: tc.currentLaunch},
+			}}
+			pending := []domain.TrackerIntakePendingClaim{{
+				ProjectID: "demo", IssueID: "github:acme/demo#1", SessionID: "demo-1",
+				Recovery: domain.TrackerIntakeRecoveryReservation{
+					CapacityReleased: true, ReleasedRuntimeLaunchID: "launch-stopped",
+				},
+			}}
+			_, active := intakeSessionState(sessions, pending, nil, "demo")
+			if active != tc.wantActive {
+				t.Fatalf("active sessions = %d, want %d", active, tc.wantActive)
+			}
+		})
+	}
+}
+
 func TestIntakeSessionStateExcludesTerminatedAndOtherProjectSessions(t *testing.T) {
 	sessions := []domain.SessionRecord{
 		{ID: "demo-1", ProjectID: "demo", IssueID: "github:acme/demo#12", IsTerminated: true},

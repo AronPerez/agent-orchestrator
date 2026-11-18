@@ -354,14 +354,14 @@ func intakeSessionState(
 ) (map[domain.IssueID]bool, int) {
 	seen := make(map[domain.IssueID]bool)
 	active := make(map[domain.SessionID]struct{})
-	released := make(map[domain.SessionID]struct{})
+	released := make(map[domain.SessionID]domain.TrackerIntakeRecoveryReservation)
 	for _, claim := range pending {
 		if claim.ProjectID != projectID {
 			continue
 		}
 		seen[claim.IssueID] = true
 		if claim.Recovery.CapacityReleased {
-			released[claim.SessionID] = struct{}{}
+			released[claim.SessionID] = claim.Recovery
 			continue
 		}
 		active[claim.SessionID] = struct{}{}
@@ -372,7 +372,11 @@ func intakeSessionState(
 		}
 		seen[claim.IssueID] = true
 		if claim.CapacityReleased {
-			released[claim.SessionID] = struct{}{}
+			released[claim.SessionID] = domain.TrackerIntakeRecoveryReservation{
+				CapacityReleased:             true,
+				ReleasedRuntimeLaunchID:      claim.ReleasedRuntimeLaunchID,
+				ReleasedControllerGeneration: claim.ReleasedControllerGeneration,
+			}
 		}
 	}
 	for _, sess := range sessions {
@@ -380,7 +384,7 @@ func intakeSessionState(
 			continue
 		}
 		seen[sess.IssueID] = true
-		if _, ok := released[sess.ID]; ok && (sess.Activity.State == "" || sess.Activity.State == domain.ActivityExited) {
+		if release, ok := released[sess.ID]; ok && release.ReleasesCapacityFor(sess) {
 			continue
 		}
 		active[sess.ID] = struct{}{}

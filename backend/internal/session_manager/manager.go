@@ -2771,11 +2771,33 @@ func (m *Manager) markTrackerIntakeCapacityReleased(ctx context.Context, id doma
 	if !pending {
 		return nil
 	}
-	reservation.CapacityReleased = true
+	reservation, err = m.trackerIntakeCapacityReleaseProof(ctx, id, reservation)
+	if err != nil {
+		return err
+	}
 	if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
 		return fmt.Errorf("release tracker intake capacity for %s: %w", id, err)
 	}
 	return nil
+}
+
+func (m *Manager) trackerIntakeCapacityReleaseProof(
+	ctx context.Context,
+	id domain.SessionID,
+	reservation domain.TrackerIntakeRecoveryReservation,
+) (domain.TrackerIntakeRecoveryReservation, error) {
+	rec, found, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return reservation, fmt.Errorf("load tracker intake owner before releasing capacity: %w", err)
+	}
+	reservation.CapacityReleased = true
+	reservation.ReleasedRuntimeLaunchID = ""
+	reservation.ReleasedControllerGeneration = ""
+	if found {
+		reservation.ReleasedRuntimeLaunchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+		reservation.ReleasedControllerGeneration = strings.TrimSpace(rec.Metadata.ControllerGeneration)
+	}
+	return reservation, nil
 }
 
 func (m *Manager) releaseTrackerIntakeAfterConfirmedCleanup(ctx context.Context, id domain.SessionID) error {
@@ -2798,7 +2820,10 @@ func (m *Manager) confirmTrackerIntakeCleanup(ctx context.Context, id domain.Ses
 		return fmt.Errorf("confirm tracker intake cleanup for %s: pending claim is missing", id)
 	}
 	reservation.CleanupConfirmed = true
-	reservation.CapacityReleased = true
+	reservation, err = m.trackerIntakeCapacityReleaseProof(cleanupCtx, id, reservation)
+	if err != nil {
+		return err
+	}
 	if err := m.store.ReserveTrackerIntakeRecovery(cleanupCtx, id, reservation); err != nil {
 		return fmt.Errorf("confirm tracker intake cleanup for %s: %w", id, err)
 	}

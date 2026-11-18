@@ -184,11 +184,13 @@ func (c TrackerIntakeConfig) Validate() error {
 // tracker item. It survives session termination and deletion so an open issue
 // is not re-spawned forever. IssueID includes the provider and native identity.
 type TrackerIntakeHandledRecord struct {
-	ProjectID        ProjectID
-	IssueID          IssueID
-	SessionID        SessionID
-	HandledAt        time.Time
-	CapacityReleased bool
+	ProjectID                    ProjectID
+	IssueID                      IssueID
+	SessionID                    SessionID
+	HandledAt                    time.Time
+	CapacityReleased             bool
+	ReleasedRuntimeLaunchID      string
+	ReleasedControllerGeneration string
 }
 
 // TrackerIntakeRecoveryReservation is the durable fence written before an
@@ -211,10 +213,35 @@ type TrackerIntakeRecoveryReservation struct {
 	// cleaning it up and retrying could duplicate arbitrary external effects.
 	DeliveryPossible bool `json:"deliveryPossible,omitempty"`
 	// CapacityReleased means lifecycle has proved that no runtime or controller
-	// remains active. DeliveryPossible still prevents replay, while this flag
-	// lets unrelated issues use the freed project slot during workspace cleanup.
+	// remains active for the released generation below. DeliveryPossible still
+	// prevents replay, while this flag lets unrelated issues use the freed
+	// project slot during workspace cleanup. A later generation counts again.
 	CapacityReleased bool `json:"capacityReleased,omitempty"`
-	CleanupConfirmed bool `json:"cleanupConfirmed,omitempty"`
+	// ReleasedRuntimeLaunchID and ReleasedControllerGeneration identify the
+	// exact owner generation proved stopped when CapacityReleased was recorded.
+	ReleasedRuntimeLaunchID      string `json:"releasedRuntimeLaunchId,omitempty"`
+	ReleasedControllerGeneration string `json:"releasedControllerGeneration,omitempty"`
+	CleanupConfirmed             bool   `json:"cleanupConfirmed,omitempty"`
+}
+
+// ReleasesCapacityFor reports whether the stopped-generation proof still
+// applies to this session row. Resuming either controller rotates its identity,
+// so a restored worker consumes capacity again without discarding the issue's
+// no-replay fence.
+func (r TrackerIntakeRecoveryReservation) ReleasesCapacityFor(rec SessionRecord) bool {
+	return r.CapacityReleased &&
+		strings.TrimSpace(r.ReleasedRuntimeLaunchID) == strings.TrimSpace(rec.Metadata.RuntimeLaunchID) &&
+		strings.TrimSpace(r.ReleasedControllerGeneration) == strings.TrimSpace(rec.Metadata.ControllerGeneration)
+}
+
+// ReleasesCapacityFor reports whether this handled record's stopped-generation
+// proof still applies to the supplied session row.
+func (r TrackerIntakeHandledRecord) ReleasesCapacityFor(rec SessionRecord) bool {
+	return TrackerIntakeRecoveryReservation{
+		CapacityReleased:             r.CapacityReleased,
+		ReleasedRuntimeLaunchID:      r.ReleasedRuntimeLaunchID,
+		ReleasedControllerGeneration: r.ReleasedControllerGeneration,
+	}.ReleasesCapacityFor(rec)
 }
 
 // TrackerIntakePendingClaim is the durable recovery worklist. It deliberately

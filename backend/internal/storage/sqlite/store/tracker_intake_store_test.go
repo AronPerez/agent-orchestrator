@@ -359,6 +359,7 @@ func TestStoppedHandledTrackerIntakeClaimReleasesCapacityUntilRestored(t *testin
 		t.Fatal(err)
 	}
 	created.Activity.State = domain.ActivityIdle
+	created.Metadata.RuntimeLaunchID = "launch-restored"
 	if err := store.UpdateSession(ctx, created); err != nil {
 		t.Fatal(err)
 	}

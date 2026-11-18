@@ -140,6 +140,16 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 	if found && trackerIntakeClaimDefersToSessionHealth(rec, claim.Recovery) {
 		return nil
 	}
+	if found && !rec.IsTerminated && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat &&
+		claim.Recovery.DeliveryPossible && !claim.Recovery.CapacityReleased && rec.Activity.State == domain.ActivityExited {
+		// The initial turn may have crossed the provider boundary, but this
+		// controller exited after startup. Reconnect only to prove the provider
+		// host present or absent; never replay the prompt. The per-claim job and
+		// operation fence isolate a slow provider check from unrelated projects.
+		recoveryCtx, cancel := context.WithTimeout(ctx, m.statusVerificationLimit)
+		defer cancel()
+		return m.checkSessionHealth(recoveryCtx, rec)
+	}
 	if claim.Recovery.DeliveryPossible && found && !rec.IsTerminated && !claim.Recovery.CapacityReleased {
 		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec)
 	}
@@ -147,8 +157,13 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 }
 
 func trackerIntakeClaimDefersToSessionHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
-	return reservation.DeliveryPossible && !reservation.CapacityReleased && !rec.IsTerminated &&
-		(domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || strings.TrimSpace(rec.Metadata.RuntimeHandleID) != "")
+	if !reservation.DeliveryPossible || reservation.CapacityReleased || rec.IsTerminated {
+		return false
+	}
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		return rec.Activity.State != domain.ActivityExited
+	}
+	return strings.TrimSpace(rec.Metadata.RuntimeHandleID) != ""
 }
 
 func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim, rec domain.SessionRecord) error {
