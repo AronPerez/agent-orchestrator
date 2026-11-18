@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,9 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 func prepareAllHostsTest(t *testing.T, localSessionID string) (string, testConfig) {
@@ -245,6 +249,221 @@ func TestSessionListAllHostsBoundsSnapshotAfterIdentitySucceeds(t *testing.T) {
 	}
 	if len(got.Meta.Hosts) != 2 || got.Meta.Hosts[1].HostID != "h_stalled" || got.Meta.Hosts[1].Error == "" {
 		t.Fatalf("hosts = %#v, want structured stalled-host failure", got.Meta.Hosts)
+	}
+}
+
+func TestSessionListAllHostsDoesNotBlockRemotesOnStalledLocalIdentity(t *testing.T) {
+	home := aoHome(t)
+	cfg := setConfigEnv(t)
+	t.Setenv("AO_DATA_DIR", "")
+
+	oldTimeout := allHostsSnapshotTimeout
+	allHostsSnapshotTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { allHostsSnapshotTimeout = oldTimeout })
+
+	releaseLocal := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseLocal) }) })
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/identity" {
+			http.NotFound(w, r)
+			return
+		}
+		select {
+		case <-releaseLocal:
+			_, _ = io.WriteString(w, `{"hostId":"h_local","apiVersion":1}`)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(local.Close)
+	writeRunFileFor(t, cfg, local)
+
+	remoteStarted := make(chan struct{}, 1)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/identity" {
+			select {
+			case remoteStarted <- struct{}{}:
+			default:
+			}
+		}
+		allHostsHandler(t, "h_remote", "remote-1", "aoc_remote").ServeHTTP(w, r)
+	}))
+	t.Cleanup(remote.Close)
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "remote", URL: remote.URL, HostID: "h_remote", CoordinationToken: "aoc_remote",
+	})
+
+	type cliResult struct {
+		out, errOut string
+		err         error
+	}
+	done := make(chan cliResult, 1)
+	go func() {
+		out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+			"session", "ls", "--all-hosts", "--all", "--include-terminated", "--json")
+		done <- cliResult{out: out, errOut: errOut, err: err}
+	}()
+
+	select {
+	case <-remoteStarted:
+	case <-time.After(300 * time.Millisecond):
+		releaseOnce.Do(func() { close(releaseLocal) })
+		result := <-done
+		t.Fatalf("saved-host discovery waited for local identity; err=%v stderr=%s", result.err, result.errOut)
+	}
+
+	var result cliResult
+	select {
+	case result = <-done:
+	case <-time.After(2 * time.Second):
+		releaseOnce.Do(func() { close(releaseLocal) })
+		t.Fatal("session ls did not finish after the local identity deadline")
+	}
+	if result.err != nil {
+		t.Fatalf("session ls --all-hosts: %v\nstderr=%s", result.err, result.errOut)
+	}
+	var got sessionListOutput
+	if err := json.Unmarshal([]byte(result.out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 1 || got.Data[0].HostID != "h_remote" {
+		t.Fatalf("data = %#v, want healthy remote result despite stalled local identity", got.Data)
+	}
+}
+
+func TestSessionListAllHostsPinsLocalSnapshotToIdentityDaemon(t *testing.T) {
+	home := aoHome(t)
+	cfg := setConfigEnv(t)
+	t.Setenv("AO_DATA_DIR", "")
+	writeRemotes(t, home, 0o600)
+
+	var replacementSessionRequests atomic.Int32
+	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"h_replacement","apiVersion":1}`)
+		case "/api/v1/sessions":
+			replacementSessionRequests.Add(1)
+			_, _ = io.WriteString(w, `{"sessions":[`+sessionJSON("replacement-1", "demo", "worker", "idle", false)+`]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(replacement.Close)
+	replacementPort := serverPort(t, replacement.URL)
+
+	var identityRequests atomic.Int32
+	var switchErr atomic.Value
+	original := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			if identityRequests.Add(1) == 1 {
+				if err := runfile.Write(cfg.runFile, runfile.Info{
+					PID: os.Getpid(), Port: replacementPort, StartedAt: time.Unix(100, 0).UTC(),
+				}); err != nil {
+					switchErr.Store(err)
+				}
+			}
+			_, _ = io.WriteString(w, `{"hostId":"h_original","apiVersion":1}`)
+		case "/api/v1/sessions":
+			_, _ = io.WriteString(w, `{"sessions":[`+sessionJSON("original-1", "demo", "worker", "idle", false)+`]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(original.Close)
+	writeRunFileFor(t, cfg, original)
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "ls", "--all-hosts", "--all", "--include-terminated", "--json")
+	if err != nil {
+		t.Fatalf("session ls --all-hosts: %v\nstderr=%s", err, errOut)
+	}
+	if stored := switchErr.Load(); stored != nil {
+		t.Fatalf("switch run file: %v", stored)
+	}
+	var got sessionListOutput
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 1 || got.Data[0].HostID != "h_original" || got.Data[0].ID != "original-1" {
+		t.Fatalf("data = %#v, want snapshot pinned to h_original", got.Data)
+	}
+	if got := replacementSessionRequests.Load(); got != 0 {
+		t.Fatalf("replacement daemon received %d session request(s), want none", got)
+	}
+}
+
+func TestSessionListAllHostsRevalidatesAccountDuringSnapshot(t *testing.T) {
+	home, _ := prepareAllHostsTest(t, "local-1")
+	writeActiveCloudAccount(t, home, "user-a")
+	startedAt, ok := processStartedAt(context.Background(), os.Getpid())
+	if !ok {
+		t.Fatal("could not read test process start time")
+	}
+	markerB, err := json.Marshal(activeCloudAccountMarker{
+		UserID: "user-b", DesktopPID: os.Getpid(), DesktopStartedAtMS: startedAt.UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(home, ".ao", activeCloudAccountFile)
+
+	var sessionRequests atomic.Int32
+	var switchErr atomic.Value
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"h_account","apiVersion":1}`)
+		case "/api/v1/sessions":
+			if got := r.Header.Get("Authorization"); got != "Bearer aoc_account" {
+				t.Errorf("sessions Authorization = %q", got)
+			}
+			requestNumber := sessionRequests.Add(1)
+			if requestNumber == 1 {
+				_, _ = io.WriteString(w, `{"sessions":[]`)
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				if err := os.WriteFile(markerPath, append(markerB, '\n'), 0o600); err != nil {
+					switchErr.Store(err)
+				}
+				_, _ = io.WriteString(w, `}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(remote.Close)
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "account", URL: remote.URL, HostID: "h_account", CoordinationToken: "aoc_account", AccountUserID: "user-a",
+	})
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "ls", "--all-hosts", "--all", "--json")
+	if err != nil {
+		t.Fatalf("session ls --all-hosts: %v\nstderr=%s", err, errOut)
+	}
+	if stored := switchErr.Load(); stored != nil {
+		t.Fatalf("switch active Cloud account: %v", stored)
+	}
+	if got := sessionRequests.Load(); got != 1 {
+		t.Fatalf("remote received %d authenticated session requests, want one before the account switch", got)
+	}
+	var got sessionListOutput
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 1 || got.Data[0].HostID != "h_local" {
+		t.Fatalf("data = %#v, want only the local snapshot after account switch", got.Data)
+	}
+	if len(got.Meta.Hosts) != 2 || got.Meta.Hosts[1].HostID != "h_account" || !strings.Contains(got.Meta.Hosts[1].Error, "Cloud account changed") {
+		t.Fatalf("hosts = %#v, want structured account-switch failure", got.Meta.Hosts)
 	}
 }
 

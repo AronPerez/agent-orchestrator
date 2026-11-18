@@ -814,25 +814,23 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 		hostID    string
 		hostLabel string
 		local     bool
+		localBase string
 		target    *remoteTarget
 	}
 
-	localHostID, localIdentityErr := c.localHostIDForList(ctx)
+	localBase, localBaseErr := c.localDaemonBase()
 	candidates, discoveryErr := resolveAllSavedHostTargetsForAccount(c.activeCloudAccount(ctx))
 	tasks := make([]listTask, 0, len(candidates)+1)
 	results := make([]allHostSessionListResult, 0, len(candidates)+1)
-	if localIdentityErr != nil {
-		results = append(results, allHostSessionListResult{HostLabel: "this machine", Local: true, Err: localIdentityErr})
+	if localBaseErr != nil {
+		results = append(results, allHostSessionListResult{HostLabel: "this machine", Local: true, Err: localBaseErr})
 	} else {
-		tasks = append(tasks, listTask{hostID: localHostID, hostLabel: "this machine", local: true})
+		tasks = append(tasks, listTask{hostLabel: "this machine", local: true, localBase: localBase})
 	}
 	if discoveryErr != nil {
 		results = append(results, allHostSessionListResult{HostLabel: "saved hosts", Err: fmt.Errorf("discover saved hosts: %w", discoveryErr)})
 	} else {
 		for _, candidate := range candidates {
-			if localHostID != "" && candidate.HostID == localHostID {
-				continue
-			}
 			if candidate.Err != nil {
 				results = append(results, allHostSessionListResult{HostID: candidate.HostID, HostLabel: candidate.Label, Err: candidate.Err})
 				continue
@@ -843,6 +841,18 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 
 	resultCh := make(chan allHostSessionListResult, len(tasks))
 	sem := make(chan struct{}, 4)
+	var localIdentityMu sync.RWMutex
+	var localHostIDValue string
+	localHostID := func() string {
+		localIdentityMu.RLock()
+		defer localIdentityMu.RUnlock()
+		return localHostIDValue
+	}
+	setLocalHostID := func(hostID string) {
+		localIdentityMu.Lock()
+		localHostIDValue = hostID
+		localIdentityMu.Unlock()
+	}
 	var wg sync.WaitGroup
 	for _, task := range tasks {
 		wg.Add(1)
@@ -860,15 +870,54 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 			hostCtx, cancel := context.WithTimeout(ctx, allHostsSnapshotTimeout)
 			defer cancel()
 			hostContext := *c
-			hostContext.remote = task.target
-			if task.target != nil {
-				if err := c.verifySavedHostTargetAgainst(hostCtx, task.target, localHostID); err != nil {
+			if task.local {
+				hostContext.remote = nil
+				hostContext.pinnedBase = task.localBase
+				identity, err := c.localHostIDForList(hostCtx, task.localBase)
+				if err != nil {
 					result.Err = err
 					resultCh <- result
 					return
 				}
+				result.HostID = identity
+				setLocalHostID(identity)
+				result.Snapshot, result.Err = hostContext.fetchSessionListSnapshot(hostCtx, opts)
+				if result.Err == nil {
+					after, err := c.localHostIDForList(hostCtx, task.localBase)
+					switch {
+					case err != nil:
+						result.Err = fmt.Errorf("revalidate local host identity: %w", err)
+					case after != identity:
+						result.Err = errors.New("local daemon identity changed while listing sessions; retry")
+					}
+				}
+				resultCh <- result
+				return
+			}
+
+			target := task.target
+			hostContext.remote = target
+			guard := func(guardCtx context.Context) error {
+				if current := localHostID(); current != "" && current == target.hostID {
+					return fmt.Errorf("saved host %q is this AO installation itself", target.label)
+				}
+				if target.accountUserID != "" && c.activeCloudAccount(guardCtx) != target.accountUserID {
+					return errors.New("active Cloud account changed while reading the saved host; retry with the intended account signed in")
+				}
+				return nil
+			}
+			hostContext.beforeRequest = guard
+			if err := c.verifySavedHostTargetAgainst(hostCtx, target, localHostID()); err != nil {
+				result.Err = err
+				resultCh <- result
+				return
 			}
 			result.Snapshot, result.Err = hostContext.fetchSessionListSnapshot(hostCtx, opts)
+			if result.Err == nil {
+				if err := guard(hostCtx); err != nil {
+					result.Err = err
+				}
+			}
 			resultCh <- result
 		}()
 	}
@@ -877,6 +926,22 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 	for result := range resultCh {
 		results = append(results, result)
 	}
+	localIDs := make(map[string]struct{}, 1)
+	for _, result := range results {
+		if result.Local && result.HostID != "" {
+			localIDs[result.HostID] = struct{}{}
+		}
+	}
+	filtered := results[:0]
+	for _, result := range results {
+		if !result.Local {
+			if _, duplicate := localIDs[result.HostID]; duplicate {
+				continue
+			}
+		}
+		filtered = append(filtered, result)
+	}
+	results = filtered
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -910,13 +975,10 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 	return writeAllHostSessionList(cmd, results, c.deps.Now())
 }
 
-func (c *commandContext) localHostIDForList(ctx context.Context) (string, error) {
-	var identity savedHostIdentity
-	if err := c.getJSON(ctx, "identity", &identity); err != nil {
+func (c *commandContext) localHostIDForList(ctx context.Context, base string) (string, error) {
+	identity, err := c.probeSavedHostIdentity(ctx, base)
+	if err != nil {
 		return "", fmt.Errorf("read local host identity: %w", err)
-	}
-	if strings.TrimSpace(identity.HostID) == "" || identity.HostID == "local" || identity.APIVersion != 1 {
-		return "", errors.New("local daemon returned no compatible stable host identity")
 	}
 	return identity.HostID, nil
 }
