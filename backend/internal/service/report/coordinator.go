@@ -215,16 +215,8 @@ func (c *Coordinator) activeOrchestrator(ctx context.Context, projectID domain.P
 	if err != nil {
 		return domain.SessionRecord{}, false, err
 	}
-	var selected domain.SessionRecord
-	for _, rec := range recs {
-		if rec.Kind != domain.KindOrchestrator || rec.IsTerminated || rec.Activity.State == domain.ActivityExited {
-			continue
-		}
-		if selected.ID == "" || rec.CreatedAt.After(selected.CreatedAt) {
-			selected = rec
-		}
-	}
-	return selected, selected.ID != "", nil
+	selected, ok := domain.ActiveOrchestrator(recs)
+	return selected, ok, nil
 }
 
 // PreparedBatch is a token-fenced durable batch awaiting acceptance.

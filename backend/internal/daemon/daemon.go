@@ -72,6 +72,7 @@ import (
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/computeruse"
 	cuesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/cue"
+	decisionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/decision"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
 	fsbrowsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/fsbrowser"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubpat"
@@ -838,6 +839,10 @@ func Run(buildVersion string) (retErr error) {
 	if !ok {
 		return errors.New("wire report delivery: session manager lacks semantic send support")
 	}
+	decisionSessions, ok := sessMgr.(decisionMessageSession)
+	if !ok {
+		return errors.New("wire decision delivery: session manager lacks attributed send support")
+	}
 	var reportCoordinator *reportsvc.Coordinator
 	verificationRunner := verification.NewRunner()
 	evidenceArtifacts := reportEvidenceArtifacts{
@@ -1203,6 +1208,24 @@ func Run(buildVersion string) (retErr error) {
 	if identityErr != nil {
 		log.Warn("could not establish host identity; /api/v1/identity will report unimplemented", "error", identityErr)
 	}
+	var decisionDeliverer *decisionsvc.Deliverer
+	decisionSvc := decisionsvc.New(decisionsvc.Deps{
+		Store: store, HostID: hostIdentity.HostID,
+		OnAppended: func(domain.DecisionEntry) {
+			if decisionDeliverer != nil {
+				decisionDeliverer.Wake()
+			}
+		},
+	})
+	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
+		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
+		FallbackAuthorizer: decisionSvc,
+	})
+	decisionDeliveryDone := decisionDeliverer.Start(ctx)
+	defer func() {
+		stop()
+		<-decisionDeliveryDone
+	}()
 
 	// Managed remote-access connector. Reap first: a daemon that died without
 	// stopping its connector leaves a public tunnel to this machine running
@@ -1310,6 +1333,7 @@ func Run(buildVersion string) (retErr error) {
 		Reviews:                     reviewSvc,
 		Notifications:               notifier,
 		Reports:                     reportSvc,
+		Decisions:                   decisionSvc,
 		NotificationStream:          notificationHub,
 		Push:                        pushRegistry,
 		Presence:                    presenceTracker,
@@ -1735,6 +1759,25 @@ func (a reportEvidenceArtifacts) Register(ctx context.Context, id domain.Session
 
 func (a reportEvidenceArtifacts) Unregister(ctx context.Context, id domain.SessionID, reference string) error {
 	return a.unregister(ctx, id, reference)
+}
+
+type decisionMessageSession interface {
+	SendWithOptions(context.Context, domain.SessionID, string, *ports.SpawnAttachment, ports.MessageDeliveryOptions) error
+}
+
+type decisionMessenger struct {
+	sessions decisionMessageSession
+}
+
+func (m decisionMessenger) DeliverAsPerson(ctx context.Context, id domain.SessionID, message string, at time.Time) error {
+	err := m.sessions.SendWithOptions(ctx, id, message, nil, ports.MessageDeliveryOptions{
+		InteractionAt:  at,
+		AuthoredByUser: true,
+	})
+	if errors.Is(err, sessionmanager.ErrNotFound) || errors.Is(err, sessionmanager.ErrTerminated) || errors.Is(err, sessionmanager.ErrAgentExited) {
+		return fmt.Errorf("%w: %w", decisionsvc.ErrSessionEnded, err)
+	}
+	return err
 }
 
 // sessionConversationService adds an explicit Stop turn endpoint. The existing

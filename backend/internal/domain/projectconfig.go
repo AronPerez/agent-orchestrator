@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -108,6 +109,17 @@ type ProjectConfig struct {
 	// the feature but check with the user or orchestrator before using it.
 	// Read at spawn, when the worker prompt is built.
 	WorkersRequestReview bool `json:"workersRequestReview,omitempty"`
+
+	// CollisionRadar configures paths omitted from project overlap warnings.
+	// A basename applies in every repository directory; a slash-containing path
+	// is matched exactly against the workspace-relative changed path.
+	CollisionRadar CollisionRadarConfig `json:"collisionRadar,omitempty"`
+}
+
+// CollisionRadarConfig keeps deterministic overlap warnings quiet for files
+// that are expected to change in parallel, such as generated output.
+type CollisionRadarConfig struct {
+	IgnorePaths []string `json:"ignorePaths,omitempty"`
 }
 
 const (
@@ -279,6 +291,9 @@ func (c ProjectConfig) Validate() error {
 	if err := c.AgentConfig.Validate(); err != nil {
 		return err
 	}
+	if err := c.CollisionRadar.Validate(); err != nil {
+		return err
+	}
 	if err := validateNameComponent("sessionPrefix", c.SessionPrefix); err != nil {
 		return err
 	}
@@ -345,6 +360,26 @@ func (c ProjectConfig) Validate() error {
 	}
 	if n := len(c.OrchestratorPrompt); n > maxOrchestratorPromptBytes {
 		return fmt.Errorf("orchestratorPrompt: %d bytes exceeds max %d", n, maxOrchestratorPromptBytes)
+	}
+	return nil
+}
+
+// Validate rejects ambiguous or escaping ignore paths. Paths are slash-based
+// because workspace manifests use repository-relative slash paths on every OS.
+func (c CollisionRadarConfig) Validate() error {
+	seen := make(map[string]struct{}, len(c.IgnorePaths))
+	for _, raw := range c.IgnorePaths {
+		if raw == "" || raw != strings.TrimSpace(raw) || strings.Contains(raw, `\`) || path.IsAbs(raw) {
+			return fmt.Errorf("collisionRadar.ignorePaths contains invalid path %q", raw)
+		}
+		clean := path.Clean(raw)
+		if clean == "." || clean != raw || clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("collisionRadar.ignorePaths contains invalid path %q", raw)
+		}
+		if _, duplicate := seen[clean]; duplicate {
+			return fmt.Errorf("collisionRadar.ignorePaths contains duplicate path %q", raw)
+		}
+		seen[clean] = struct{}{}
 	}
 	return nil
 }

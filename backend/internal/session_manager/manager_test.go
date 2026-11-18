@@ -11435,6 +11435,51 @@ func newSendTestManager(t *testing.T, agent ports.Agent, messenger ports.AgentMe
 	return m
 }
 
+type postWriteConfirmationFailureStore struct {
+	*fakeStore
+	sent           bool
+	postWriteReads int
+	err            error
+}
+
+func (s *postWriteConfirmationFailureStore) GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
+	if s.sent {
+		s.postWriteReads++
+		if s.postWriteReads == 2 {
+			return domain.SessionRecord{}, false, s.err
+		}
+	}
+	return s.fakeStore.GetSession(ctx, id)
+}
+
+func TestSend_PostWriteConfirmationFailureIsUnconfirmed(t *testing.T) {
+	base := newFakeStore()
+	base.sessions["s1"] = pastStartupGate(domain.SessionRecord{
+		ID: "s1", Harness: domain.HarnessClaudeCode, Activity: domain.Activity{State: domain.ActivityIdle},
+	})
+	readErr := errors.New("confirmation read failed")
+	store := &postWriteConfirmationFailureStore{fakeStore: base, err: readErr}
+	messenger := &fakeMessenger{}
+	messenger.onSend = func(_ domain.SessionID, message string) {
+		if message != "" {
+			store.sent = true
+		}
+	}
+	m := newSendTestManager(t, signalingAgent{}, messenger, base)
+	m.store = store
+
+	err := m.SendWithOptions(context.Background(), "s1", "carry out the decision", nil, ports.MessageDeliveryOptions{AuthoredByUser: true})
+	if !errors.Is(err, ErrDeliveryUnconfirmed) {
+		t.Fatalf("Send error = %v, want ErrDeliveryUnconfirmed", err)
+	}
+	if !errors.Is(err, readErr) {
+		t.Fatalf("Send error = %v, want wrapped confirmation error %v", err, readErr)
+	}
+	if len(messenger.msgs) != 1 {
+		t.Fatalf("Send calls = %d, want the original delivered prompt only", len(messenger.msgs))
+	}
+}
+
 // pastStartupGate marks a TUI session as having received its first hook
 // callback so send-path tests exercise post-startup behavior.
 func pastStartupGate(rec domain.SessionRecord) domain.SessionRecord {
@@ -12994,11 +13039,30 @@ func TestSendEmptyNudgeDoesNotBecomeCoordinationPrompt(t *testing.T) {
 type interactionCountingStore struct {
 	*fakeStore
 	calls int
+	err   error
 }
 
 func (s *interactionCountingStore) RecordSessionInteraction(context.Context, domain.SessionID, string, time.Time) error {
 	s.calls++
-	return nil
+	return s.err
+}
+
+func TestSendInteractionWriteFailureIsUnconfirmed(t *testing.T) {
+	base := newFakeStore()
+	base.sessions["s1"] = pastStartupGate(domain.SessionRecord{ID: "s1", Harness: domain.HarnessClaudeCode})
+	writeErr := errors.New("interaction write failed")
+	store := &interactionCountingStore{fakeStore: base, err: writeErr}
+	messenger := &fakeMessenger{}
+	m := newSendTestManager(t, fakeAgent{}, messenger, base)
+	m.store = store
+
+	err := m.SendWithOptions(context.Background(), "s1", "coordination", nil, ports.MessageDeliveryOptions{SenderSessionID: "orchestrator-1"})
+	if !errors.Is(err, ErrDeliveryUnconfirmed) || !errors.Is(err, writeErr) {
+		t.Fatalf("Send error = %v, want ErrDeliveryUnconfirmed and %v", err, writeErr)
+	}
+	if len(messenger.msgs) != 1 {
+		t.Fatalf("Send calls = %d, want the original delivered prompt only", len(messenger.msgs))
+	}
 }
 
 func TestSendRecordsInteractionOnlyForDirectTerminalSender(t *testing.T) {

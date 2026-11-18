@@ -167,14 +167,19 @@ type WorkspaceManifest struct {
 	CompareBaseSHA   string
 	CompareBaseRef   string
 	CompareMode      WorkspaceCompareMode
-	Files            []WorkspaceFileSummary
-	Sections         WorkspaceFileSections
-	Summary          WorkspaceSummary
-	Truncated        bool
-	Stale            bool
-	Refreshing       bool
-	Degraded         bool
-	DegradedCode     string
+	// CompareIncomplete reports that at least one repository fell back to HEAD
+	// because its base could not be resolved. Workspace projects can retain an
+	// aggregate base mode when only a child repository fell back, so this cannot
+	// be inferred from CompareMode alone.
+	CompareIncomplete bool
+	Files             []WorkspaceFileSummary
+	Sections          WorkspaceFileSections
+	Summary           WorkspaceSummary
+	Truncated         bool
+	Stale             bool
+	Refreshing        bool
+	Degraded          bool
+	DegradedCode      string
 }
 
 // WorkspaceHistory is the non-critical commit metadata loaded after the
@@ -1252,36 +1257,43 @@ func (s *Service) resolveWorkspaceChanges(
 	ctx context.Context, id domain.SessionID, root string,
 	resolve func(ctx context.Context) workspaceCompareTarget,
 ) (workspaceCompareTarget, workspaceChangeSet, error) {
+	type loadResult struct {
+		entry  workspaceCacheEntry
+		flight *workspaceCacheEntry
+	}
 	key := workspaceCacheKey{session: id, root: root}
 	if cached, ok := s.workspaceCache.get(key); ok {
 		return cached.compare, cached.changes, nil
 	}
 	v, err, _ := s.workspaceGroup.Do(key.String(), func() (any, error) {
+		entry := s.workspaceCache.beginLoad(key)
+		defer s.workspaceCache.finishLoad(key, entry, false)
 		// A concurrent caller may have already populated the cache while this
 		// call was queued behind the singleflight lock — re-check before
 		// doing the work again.
 		if cached, ok := s.workspaceCache.get(key); ok {
-			return cached, nil
+			return loadResult{entry: cached, flight: entry}, nil
 		}
-		entry := s.workspaceCache.beginLoad(key)
-		defer s.workspaceCache.finishLoad(key, entry, false)
 		compare := resolve(ctx)
 		changes, err := workspaceChangeMaps(ctx, root, compare.gitBase())
 		if err != nil {
-			return nil, err
+			return loadResult{flight: entry}, err
 		}
 		*entry = workspaceCacheEntry{at: s.now(), compare: compare, changes: changes}
 		s.workspaceCache.finishLoad(key, entry, true)
-		return *entry, nil
+		return loadResult{entry: *entry, flight: entry}, nil
 	})
+	result, ok := v.(loadResult)
+	if ok {
+		s.workspaceCache.finishFlight(key, result.flight)
+	}
 	if err != nil {
 		return workspaceCompareTarget{}, workspaceChangeSet{}, err
 	}
-	entry, ok := v.(workspaceCacheEntry)
 	if !ok {
 		return workspaceCompareTarget{}, workspaceChangeSet{}, fmt.Errorf("resolveWorkspaceChanges: unexpected singleflight result type %T", v)
 	}
-	return entry.compare, entry.changes, nil
+	return result.entry.compare, result.entry.changes, nil
 }
 
 func workspaceFileDetail(ctx context.Context, id domain.SessionID, root, prefix, rel string, section WorkspaceFileSection, compare workspaceCompareTarget, changes workspaceChangeSet) (WorkspaceFileDetail, error) {

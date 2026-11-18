@@ -35,6 +35,15 @@ type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
 
 const DEFAULT_BRANCH_AUTO = "auto";
 
+export function projectSupportsWorkerContracts(
+	hostId: string | undefined,
+	config: Pick<ProjectConfig, "workerContracts">,
+): boolean {
+	// The bundled daemon moves with this renderer. A remote daemon is only
+	// known to understand the strict config field once it has returned it.
+	return hostId === undefined || config.workerContracts !== undefined;
+}
+
 type SettingsSaveResult = {
 	savedKey: string;
 	replacementError: string | null;
@@ -128,6 +137,7 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 	const remoteProjectQuery = useRemoteProjectQuery(hostId ?? "", projectId);
 	const config = project.config ?? {};
 	const isScratchProject = project.kind === "scratch";
+	const workerContractsSupported = projectSupportsWorkerContracts(hostId, config);
 	const { settings } = useSettings(hostId);
 	const intakeVisible = !isScratchProject && !!settings?.trackerIntakeEnabled;
 	const workspace = hostId ? remoteProjectQuery.data : workspaceQuery.data?.find((item) => item.id === projectId);
@@ -154,6 +164,11 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 		reviewerEffort: config.reviewers?.[0]?.agentConfig?.effort ?? config.agentConfig?.effort ?? "",
 		reviewerPermissions: config.reviewers?.[0]?.agentConfig?.permissions ?? config.agentConfig?.permissions ?? "",
 		autoReview: config.autoReview ?? false,
+		stallMinutes: String(
+			(config.workerContracts?.stallMinutes ?? 0) > 0
+				? config.workerContracts?.stallMinutes
+				: 15,
+		),
 		workersRequestReview: config.workersRequestReview ?? false,
 		intakeEnabled: intake.enabled ?? false,
 		intakeRepo: intake.repo ?? "",
@@ -245,6 +260,12 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 					),
 					autoReview: values.autoReview,
 					workersRequestReview: values.workersRequestReview || undefined,
+					...(workerContractsSupported ? {
+						workerContracts: {
+							...config.workerContracts,
+							stallMinutes: Number(values.stallMinutes ?? 15),
+						},
+					} : {}),
 				};
 		const { error } = await (hostId ? clientForHost(hostId) : apiClient).PUT("/api/v1/projects/{id}", {
 			params: { path: { id: projectId } },
@@ -315,7 +336,7 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 		}
 	};
 	return <ProjectSettingsEditor initialValues={initialValues} section={section} disabled={!hostConnected}
-		capabilities={{ workflow: !isScratchProject, sessionPrefix: !isScratchProject, intake: intakeVisible, reviewer: !isScratchProject, requiredAgents: true, workersRequestReview: !isScratchProject }}
+		capabilities={{ workflow: !isScratchProject, sessionPrefix: !isScratchProject, intake: intakeVisible, reviewer: !isScratchProject, requiredAgents: true, workersRequestReview: !isScratchProject, workerContracts: !isScratchProject && workerContractsSupported }}
 		details={[{ label: t("settings.project.path"), value: project.path, href: hostId ? undefined : `file://${encodeURI(project.path)}` }, { label: t("settings.project.repo"), value: project.repo || "—", href: project.repo ? repositoryHref(project.repo) : undefined }]}
 		workspaceRepos={project.kind === "workspace" ? project.workspaceRepos ?? [] : undefined} repository={project.repo}
 		modelScope={() => projectId} defaultReviewer={(draft) => WORKER_DEFAULT_REVIEWERS[draft.workerAgent] ?? "claude-code"}
