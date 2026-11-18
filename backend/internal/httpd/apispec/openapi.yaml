@@ -4271,6 +4271,53 @@ paths:
       summary: List decision kinds and which ones a project reserves
       tags:
       - decisions
+  /api/v1/decisions/observe:
+    get:
+      operationId: observeDecisions
+      parameters:
+      - description: Project id. Required from the person's surfaces; a calling session
+          always gets its own project.
+        in: query
+        name: project
+        schema:
+          description: Project id. Required from the person's surfaces; a calling
+            session always gets its own project.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionObserveResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Report how often sessions predicted the person's answers in observe
+        mode
+      tags:
+      - decisions
   /api/v1/desktop/sessions/{sessionId}/artifacts:
     get:
       operationId: getDesktopSessionArtifacts
@@ -21860,6 +21907,50 @@ components:
       required:
       - label
       - url
+      type: object
+    DecisionObserveResponse:
+      properties:
+        mode:
+          enum:
+          - "off"
+          - observe
+          type: string
+        projectId:
+          type: string
+        rows:
+          items:
+            $ref: '#/components/schemas/DecisionObserveRowResponse'
+          type: array
+      required:
+      - mode
+      - rows
+      type: object
+    DecisionObserveRowResponse:
+      properties:
+        agreed:
+          type: integer
+        answered:
+          description: Calls with both a prediction and the person's answer.
+          type: integer
+        calls:
+          description: Calls of this kind that were not withdrawn.
+          type: integer
+        differed:
+          type: integer
+        kind:
+          type: string
+        label:
+          type: string
+        reserved:
+          type: boolean
+      required:
+      - kind
+      - label
+      - reserved
+      - calls
+      - answered
+      - agreed
+      - differed
       type: object
     DecisionOptionPayload:
       properties:

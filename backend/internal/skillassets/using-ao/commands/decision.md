@@ -18,6 +18,7 @@ ao decision outcome <id> --for-answer <answer-entry-id> --text <one-line-outcome
 ao decision withdraw <id>
 ao decision retire <id> [--undo]
 ao decision kinds [--project <id>] [--json]
+ao decision observe [--project <id>] [--json]
 ```
 
 ## When to raise a call
@@ -77,6 +78,9 @@ default, `--kind` is optional. In mode `observe`:
   it, even when it differs. Orchestrator keeps your prediction beside the
   answer so the human can see where your judgment matches theirs.
 - A prediction on a reserved kind is refused.
+
+`ao decision observe` shows, per kind, how many observe-mode calls were
+answered and how often the answer matched the prediction.
 
 For a prepared request, pass `--file <path>` or use `--file -` for standard
 input. The JSON shape is:

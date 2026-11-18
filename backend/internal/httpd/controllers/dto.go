@@ -176,6 +176,25 @@ type DecisionKindsResponse struct {
 	Kinds     []DecisionKindResponse `json:"kinds"`
 }
 
+// DecisionObserveRowResponse counts one decision kind's calls raised in observe mode.
+type DecisionObserveRowResponse struct {
+	Kind     string `json:"kind"`
+	Label    string `json:"label"`
+	Reserved bool   `json:"reserved"`
+	Calls    int    `json:"calls" description:"Calls of this kind that were not withdrawn."`
+	Answered int    `json:"answered" description:"Calls with both a prediction and the person's answer."`
+	Agreed   int    `json:"agreed"`
+	Differed int    `json:"differed"`
+}
+
+// DecisionObserveResponse reports how often sessions predicted the person's
+// answer, per decision kind, for calls raised in observe mode.
+type DecisionObserveResponse struct {
+	ProjectID string                       `json:"projectId,omitempty"`
+	Mode      string                       `json:"mode" enum:"off,observe"`
+	Rows      []DecisionObserveRowResponse `json:"rows"`
+}
+
 // ListDecisionsQuery selects a decision scope or full-text search.
 type ListDecisionsQuery struct {
 	Scope string `query:"scope,omitempty" enum:"mine,needs_you" description:"Which calls to list. Defaults to needs_you. Ignored when q is given."`

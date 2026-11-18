@@ -56,6 +56,22 @@ type decisionKindsAPIResponse struct {
 	Kinds     []decisionKindAPI `json:"kinds"`
 }
 
+type decisionObserveRowAPI struct {
+	Kind     string `json:"kind"`
+	Label    string `json:"label"`
+	Reserved bool   `json:"reserved"`
+	Calls    int    `json:"calls"`
+	Answered int    `json:"answered"`
+	Agreed   int    `json:"agreed"`
+	Differed int    `json:"differed"`
+}
+
+type decisionObserveAPIResponse struct {
+	ProjectID string                  `json:"projectId,omitempty"`
+	Mode      string                  `json:"mode"`
+	Rows      []decisionObserveRowAPI `json:"rows"`
+}
+
 type decisionCallAPI struct {
 	ID                string              `json:"id"`
 	Link              string              `json:"link"`
@@ -172,6 +188,7 @@ func newDecisionCommand(ctx *commandContext) *cobra.Command {
 		newDecisionWithdrawCommand(ctx),
 		newDecisionRetireCommand(ctx),
 		newDecisionKindsCommand(ctx),
+		newDecisionObserveCommand(ctx),
 	)
 	return cmd
 }
@@ -294,6 +311,70 @@ func decisionRaiseRequest(cmd *cobra.Command, opts decisionRaiseOptions) (decisi
 	return request, nil
 }
 
+func decisionProjectPath(base, project string) string {
+	if project = strings.TrimSpace(project); project != "" {
+		return base + "?project=" + url.QueryEscape(project)
+	}
+	return base
+}
+
+func newDecisionObserveCommand(ctx *commandContext) *cobra.Command {
+	var project string
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "observe",
+		Short: "Show how often sessions predicted the person's answers in observe mode",
+		Args:  usageArgs(cobra.NoArgs),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var response decisionObserveAPIResponse
+			if err := ctx.getJSON(cmd.Context(), decisionProjectPath("decisions/observe", project), &response); err != nil {
+				return err
+			}
+			if jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), response)
+			}
+			return writeDecisionObserve(cmd.OutOrStdout(), response)
+		},
+	}
+	cmd.Flags().StringVar(&project, "project", "", "Project id (the person's shell only; a session always gets its own project)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON")
+	return cmd
+}
+
+func writeDecisionObserve(w io.Writer, report decisionObserveAPIResponse) error {
+	project := report.ProjectID
+	if project == "" {
+		project = "(none)"
+	}
+	if _, err := fmt.Fprintf(w, "Project %s · autonomy mode: %s\n", project, report.Mode); err != nil {
+		return err
+	}
+	if len(report.Rows) == 0 {
+		_, err := fmt.Fprintln(w, "No calls raised in observe mode yet.")
+		return err
+	}
+	for _, row := range report.Rows {
+		name := fmt.Sprintf("%s (%s)", row.Label, row.Kind)
+		var line string
+		if row.Reserved {
+			line = fmt.Sprintf("  %s, reserved: %s", name, plural(row.Calls, "call"))
+		} else {
+			line = fmt.Sprintf("  %s: %s, %d answered, %d agreed, %d differed", name, plural(row.Calls, "call"), row.Answered, row.Agreed, row.Differed)
+		}
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
 func newDecisionKindsCommand(ctx *commandContext) *cobra.Command {
 	var project string
 	var jsonOutput bool
@@ -302,10 +383,7 @@ func newDecisionKindsCommand(ctx *commandContext) *cobra.Command {
 		Short: "List decision kinds and which ones the project reserves for the person",
 		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			path := "decisions/kinds"
-			if project = strings.TrimSpace(project); project != "" {
-				path += "?project=" + url.QueryEscape(project)
-			}
+			path := decisionProjectPath("decisions/kinds", project)
 			var response decisionKindsAPIResponse
 			if err := ctx.getJSON(cmd.Context(), path, &response); err != nil {
 				return err

@@ -629,6 +629,8 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersDecisionKindsQuery":               "DecisionKindsQuery",
 	"ControllersDecisionKindResponse":             "DecisionKindResponse",
 	"ControllersDecisionKindsResponse":            "DecisionKindsResponse",
+	"ControllersDecisionObserveRowResponse":       "DecisionObserveRowResponse",
+	"ControllersDecisionObserveResponse":          "DecisionObserveResponse",
 	"ControllersClearNotificationsResponse":       "ClearNotificationsResponse",
 	"ControllersUsageHookMetadata":                "UsageHookMetadata",
 	"ControllersListUsageSessionsQuery":           "ListUsageSessionsQuery",
@@ -1110,6 +1112,11 @@ func decisionOperations() []operation {
 			method: http.MethodGet, path: "/api/v1/decisions/kinds", id: "listDecisionKinds", tag: "decisions",
 			summary: "List decision kinds and which ones a project reserves", pathParams: []any{controllers.DecisionKindsQuery{}},
 			resps: append([]respUnit{{http.StatusOK, controllers.DecisionKindsResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/decisions/observe", id: "observeDecisions", tag: "decisions",
+			summary: "Report how often sessions predicted the person's answers in observe mode", pathParams: []any{controllers.DecisionKindsQuery{}},
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionObserveResponse{}}}, commonErrors...),
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/decisions/{id}", id: "getDecision", tag: "decisions",
