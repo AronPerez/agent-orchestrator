@@ -49,28 +49,13 @@ var defaultOverlapIgnoredBasenames = map[string]struct{}{
 // manifests and publishes those snapshots into the shared manifest cache. It
 // stores no derived collision status.
 func (s *Service) ProjectOverlaps(ctx context.Context, projectID domain.ProjectID) (ProjectOverlapResult, error) {
-	project, found, err := s.store.GetProject(ctx, string(projectID))
+	project, active, err := s.activeProjectOverlapSessions(ctx, projectID)
 	if err != nil {
-		return ProjectOverlapResult{}, fmt.Errorf("get project %s: %w", projectID, err)
-	}
-	if !found {
-		return ProjectOverlapResult{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+		return ProjectOverlapResult{}, err
 	}
 	if project.Kind.WithDefault() == domain.ProjectKindScratch {
 		return emptyProjectOverlapResult(projectID), nil
 	}
-	records, err := s.store.ListSessions(ctx, projectID)
-	if err != nil {
-		return ProjectOverlapResult{}, fmt.Errorf("list project sessions: %w", err)
-	}
-	active := records[:0]
-	for _, record := range records {
-		if record.IsTerminated || record.IsTaskPreparation || record.NeedsImportResume() || strings.TrimSpace(record.Metadata.WorkspacePath) == "" {
-			continue
-		}
-		active = append(active, record)
-	}
-	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
 
 	manifests := make([]WorkspaceManifest, len(active))
 	unavailable := make([]bool, len(active))
@@ -108,6 +93,70 @@ func (s *Service) ProjectOverlaps(ctx context.Context, projectID domain.ProjectI
 	derived := projectOverlapsFromManifests(projectID, bySession, project.Config.CollisionRadar.IgnorePaths)
 	derived.UnavailableSessionIDs = result.UnavailableSessionIDs
 	return derived, nil
+}
+
+// ProjectOverlapWatchPaths returns the live worktree roots whose filesystem
+// changes can invalidate a project's collision radar. Missing workspaces are
+// reported by ProjectOverlaps and do not prevent healthy sessions from being
+// watched.
+func (s *Service) ProjectOverlapWatchPaths(ctx context.Context, projectID domain.ProjectID) ([]string, error) {
+	project, active, err := s.activeProjectOverlapSessions(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if project.Kind.WithDefault() == domain.ProjectKindScratch {
+		return []string{}, nil
+	}
+	seen := make(map[string]struct{})
+	paths := make([]string, 0, len(active))
+	for _, record := range active {
+		workspacePaths, watchErr := s.WorkspaceWatchPaths(ctx, record.ID)
+		if watchErr != nil {
+			if overlapWorkspaceUnavailable(watchErr) {
+				continue
+			}
+			return nil, fmt.Errorf("list overlap watch paths for %s: %w", record.ID, watchErr)
+		}
+		for _, workspacePath := range workspacePaths {
+			workspacePath = strings.TrimSpace(workspacePath)
+			if workspacePath == "" {
+				continue
+			}
+			if _, ok := seen[workspacePath]; ok {
+				continue
+			}
+			seen[workspacePath] = struct{}{}
+			paths = append(paths, workspacePath)
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func (s *Service) activeProjectOverlapSessions(ctx context.Context, projectID domain.ProjectID) (domain.ProjectRecord, []domain.SessionRecord, error) {
+	project, found, err := s.store.GetProject(ctx, string(projectID))
+	if err != nil {
+		return domain.ProjectRecord{}, nil, fmt.Errorf("get project %s: %w", projectID, err)
+	}
+	if !found {
+		return domain.ProjectRecord{}, nil, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	}
+	if project.Kind.WithDefault() == domain.ProjectKindScratch {
+		return project, []domain.SessionRecord{}, nil
+	}
+	records, err := s.store.ListSessions(ctx, projectID)
+	if err != nil {
+		return domain.ProjectRecord{}, nil, fmt.Errorf("list project sessions: %w", err)
+	}
+	active := records[:0]
+	for _, record := range records {
+		if record.IsTerminated || record.IsTaskPreparation || record.NeedsImportResume() || strings.TrimSpace(record.Metadata.WorkspacePath) == "" {
+			continue
+		}
+		active = append(active, record)
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
+	return project, active, nil
 }
 
 func overlapWorkspaceUnavailable(err error) bool {

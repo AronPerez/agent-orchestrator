@@ -5568,5 +5568,19 @@
 	"shell.deleteCloudProjectTitle": "Excluir projeto",
 	"shell.deleteCloudProjectLead": "Isso excluirá {{name}} permanentemente",
 	"shell.deleteCloudProjectConfirm": "Excluir permanentemente",
-	"shell.cloudProjectDeleted": "{{name}} excluído"
+	"shell.cloudProjectDeleted": "{{name}} excluído",
+	"collisionRadar.badge": "Sobreposição",
+	"collisionRadar.cardAria_one": "1 arquivo alterado se sobrepõe ao trabalho de {{sessions}}",
+	"collisionRadar.cardAria_many": "{{count}} arquivos alterados se sobrepõem ao trabalho de {{sessions}}",
+	"collisionRadar.cardAria_other": "{{count}} arquivos alterados se sobrepõem ao trabalho de {{sessions}}",
+	"collisionRadar.title": "Possível colisão",
+	"collisionRadar.incompleteTitle": "Verificação de colisões incompleta",
+	"collisionRadar.summary": "{{sessions}} também alterou arquivos neste espaço de trabalho.",
+	"collisionRadar.incomplete": "Não foi possível comparar algumas alterações do espaço de trabalho. Esta lista pode estar incompleta.",
+	"collisionRadar.unavailableBadge": "Verificação indisponível",
+	"collisionRadar.unavailableTitle": "Verificação de colisões indisponível",
+	"collisionRadar.unavailable": "Nenhum resultado da verificação de colisões está disponível.",
+	"collisionRadar.staleBadge": "Verificação desatualizada",
+	"collisionRadar.staleTitle": "Verificação de colisões desatualizada",
+	"collisionRadar.stale": "Não foi possível atualizar a verificação de colisões. Exibindo o último resultado."
 }
