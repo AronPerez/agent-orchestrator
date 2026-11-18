@@ -110,18 +110,19 @@ final class AOESObservationTracker: @unchecked Sendable {
 			lock.lock()
 			guard var current = runs[runID], current.connectionID == connectionID else {
 				lock.unlock()
-				return true
+				return false
 			}
 			guard !current.pending.isEmpty else {
 				current.acknowledged = true
 				current.acknowledgementInProgress = false
+				let ready = !current.terminal
 				if current.terminal {
 					runs.removeValue(forKey: runID)
 				} else {
 					runs[runID] = current
 				}
 				lock.unlock()
-				return true
+				return ready
 			}
 			let pending = current.pending.map { PendingDelivery(deliver: current.deliver, observation: $0) }
 			current.pending.removeAll()

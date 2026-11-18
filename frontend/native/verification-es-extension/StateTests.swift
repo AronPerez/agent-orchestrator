@@ -121,9 +121,9 @@ private enum StateTests {
 		try expect(recorder.observations.isEmpty, "invalid readiness flushed observations")
 
 		let ready = AOESReadyForObservationsRequest(version: AOESProtocol.version, runID: runID)
-		var readyAccepted = false
+		var readyAccepted = true
 		service.readyForObservations(try AOESWireCodec.encode(ready)) { readyAccepted = $0 }
-		try expect(readyAccepted, "client readiness was rejected")
+		try expect(!readyAccepted, "readiness succeeded after a terminal source failure")
 		try expect(recorder.observations.count == 1, "buffered source failure was not delivered")
 		try expect(recorder.observations[0].failure == .sourceDisconnected, "buffered source failure changed")
 		try expect(!tracker.acknowledge(runID, connectionID: connectionID), "terminal registration remained active")
