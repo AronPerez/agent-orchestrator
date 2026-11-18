@@ -5394,5 +5394,18 @@
 	"fleet.noSummary": "No summary",
 	"fleet.stale": "Could not refresh sessions. Showing the last snapshot.",
 	"fleet.historyNotFound": "Communication history was not found on this host.",
-	"fleet.historyUnsupported": "Communication history is not supported by this host."
+	"fleet.historyUnsupported": "Communication history is not supported by this host.",
+	"collisionRadar.badge": "Çakışma",
+	"collisionRadar.cardAria_one": "Değiştirilen 1 dosya {{sessions}} ile çakışıyor",
+	"collisionRadar.cardAria_other": "Değiştirilen {{count}} dosya {{sessions}} ile çakışıyor",
+	"collisionRadar.title": "Olası çakışma",
+	"collisionRadar.incompleteTitle": "Çakışma taraması tamamlanmadı",
+	"collisionRadar.summary": "{{sessions}} da bu çalışma alanındaki dosyaları değiştirdi.",
+	"collisionRadar.incomplete": "Bazı çalışma alanı değişiklikleri karşılaştırılamadı. Bu liste eksik olabilir.",
+	"collisionRadar.unavailableBadge": "Tarama kullanılamıyor",
+	"collisionRadar.unavailableTitle": "Çakışma taraması kullanılamıyor",
+	"collisionRadar.unavailable": "Çakışma taraması sonucu kullanılamıyor.",
+	"collisionRadar.staleBadge": "Tarama eski",
+	"collisionRadar.staleTitle": "Çakışma taraması eski",
+	"collisionRadar.stale": "Çakışma taraması yenilenemedi. Son sonuç gösteriliyor."
 }
