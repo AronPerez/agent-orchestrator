@@ -263,9 +263,14 @@ func TestSend_SteerUncertainExposesHandleForRecovery(t *testing.T) {
 	if req.ClientMessageID == "" {
 		t.Fatal("clientMessageId is empty")
 	}
-	wantRecovery := "--steer --recover-only --client-message-id " + req.ClientMessageID
-	if !strings.Contains(err.Error(), wantRecovery) {
-		t.Fatalf("err = %q, want recovery command containing %q", err, wantRecovery)
+	errText := recoveryErrorText(t, err.Error())
+	for _, want := range []string{"--steer", "--recover-only"} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("err = %q, want recovery command containing %q", err, want)
+		}
+	}
+	if !recoveryArgumentPresent(errText, "--client-message-id", req.ClientMessageID) {
+		t.Fatalf("err = %q, want recovery command with delivery handle %q", err, req.ClientMessageID)
 	}
 }
 
@@ -296,8 +301,9 @@ func TestSend_SteerTransportFailureExposesRetryHandle(t *testing.T) {
 	if err == nil || req.ClientMessageID == "" {
 		t.Fatalf("err = %v clientMessageId = %q", err, req.ClientMessageID)
 	}
-	if !strings.Contains(err.Error(), "outcome is unknown") ||
-		!strings.Contains(err.Error(), "--client-message-id "+req.ClientMessageID) {
+	errText := recoveryErrorText(t, err.Error())
+	if !strings.Contains(errText, "outcome is unknown") ||
+		!recoveryArgumentPresent(errText, "--client-message-id", req.ClientMessageID) {
 		t.Fatalf("err = %q, want safe retry handle %q", err, req.ClientMessageID)
 	}
 }
@@ -332,8 +338,9 @@ func TestSend_SteerMalformedSuccessExposesRetryHandle(t *testing.T) {
 			if err == nil || req.ClientMessageID == "" {
 				t.Fatalf("err = %v clientMessageId = %q", err, req.ClientMessageID)
 			}
-			if !strings.Contains(err.Error(), "outcome is unknown") ||
-				!strings.Contains(err.Error(), "--client-message-id "+req.ClientMessageID) {
+			errText := recoveryErrorText(t, err.Error())
+			if !strings.Contains(errText, "outcome is unknown") ||
+				!recoveryArgumentPresent(errText, "--client-message-id", req.ClientMessageID) {
 				t.Fatalf("err = %q, want safe retry handle %q", err, req.ClientMessageID)
 			}
 		})
@@ -361,8 +368,9 @@ func TestSend_SteerServerFailureExposesRetryHandle(t *testing.T) {
 	if err == nil || req.ClientMessageID == "" {
 		t.Fatalf("err = %v clientMessageId = %q", err, req.ClientMessageID)
 	}
-	if !strings.Contains(err.Error(), "outcome is unknown") ||
-		!strings.Contains(err.Error(), "--client-message-id "+req.ClientMessageID) {
+	errText := recoveryErrorText(t, err.Error())
+	if !strings.Contains(errText, "outcome is unknown") ||
+		!recoveryArgumentPresent(errText, "--client-message-id", req.ClientMessageID) {
 		t.Fatalf("err = %q, want safe retry handle %q", err, req.ClientMessageID)
 	}
 }
