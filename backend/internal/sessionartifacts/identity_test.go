@@ -213,6 +213,39 @@ func TestObservationApplyConservativelyKeepsUnwitnessedPlanApprovalRole(t *testi
 	}
 }
 
+func TestRenameSourceRejectsRegisteredApprovalWithConflictingWitness(t *testing.T) {
+	registeredAt := time.Now()
+	tests := []struct {
+		name     string
+		stored   domain.FileIdentity
+		observed domain.FileIdentity
+	}{
+		{
+			name:     "birth time",
+			stored:   domain.FileIdentity{Dev: 7, Ino: 11, Birth: 5},
+			observed: domain.FileIdentity{Dev: 7, Ino: 11, Birth: 6},
+		},
+		{
+			name:     "generation",
+			stored:   domain.FileIdentity{Dev: 7, Ino: 11, Generation: 5},
+			observed: domain.FileIdentity{Dev: 7, Ino: 11, Generation: 6},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := domain.SessionArtifactRecord{
+				ID: "approval", Path: "plan.md", File: tt.stored, Role: domain.SessionArtifactRolePlanApproval,
+				RegisteredAt: &registeredAt,
+			}
+			sources := map[domain.FileIdentity]domain.SessionArtifactRecord{}
+			addSource(sources, row)
+			if matched, ok := renameSource(sources, tt.observed, nil); ok {
+				t.Fatalf("conflicting %s matched as approval rename: %+v", tt.name, matched)
+			}
+		})
+	}
+}
+
 func TestObserveLoadsPlanApprovalPin(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plan.md")

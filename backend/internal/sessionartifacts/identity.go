@@ -261,6 +261,7 @@ func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, 
 			return source, true
 		}
 		if source.Role == domain.SessionArtifactRolePlanApproval && source.RegisteredAt != nil && pin.Ino == 0 &&
+			stored.Birth == 0 && observed.Birth == 0 && stored.Generation == 0 && observed.Generation == 0 &&
 			stored.Dev != 0 && stored.Dev == observed.Dev && stored.Ino != 0 && stored.Ino == observed.Ino {
 			return source, true
 		}

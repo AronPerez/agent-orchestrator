@@ -24,6 +24,7 @@ type Store interface {
 	ListSessions(context.Context, domain.ProjectID) ([]domain.SessionRecord, error)
 	GetProject(context.Context, string) (domain.ProjectRecord, bool, error)
 	AppendDecisionEntry(context.Context, domain.DecisionEntry, time.Time) (domain.DecisionEntry, domain.DecisionCall, error)
+	AppendDecisionEntries(context.Context, []domain.DecisionEntry, time.Time) ([]domain.DecisionEntry, []domain.DecisionCall, error)
 	SetSessionPlanFirstState(context.Context, domain.SessionID, domain.PlanFirstState) (bool, error)
 	GetDecisionCall(context.Context, string) (domain.DecisionCall, bool, error)
 	ListDecisionEntries(context.Context, string) ([]domain.DecisionEntry, error)
@@ -237,6 +238,8 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 	if err := domain.ValidateDecisionRaise(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
+	var pendingPlanCall domain.DecisionCall
+	var hasPendingPlanCall bool
 	if isPlanFirstCall(domain.DecisionCall{Raised: payload}) {
 		unlock, err := s.mutationGate.acquire(ctx, planFirstMutationKey(session.ID))
 		if err != nil {
@@ -246,7 +249,8 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 		if err := s.holdPlanFirstOwnerGate(ctx, session.ID, domain.PlanFirstPending); err != nil {
 			return domain.DecisionCall{}, err
 		}
-		if err := s.withdrawPendingPlanFirstCall(ctx, actor, session.ID); err != nil {
+		pendingPlanCall, hasPendingPlanCall, err = s.pendingPlanFirstCall(ctx, session.ID)
+		if err != nil {
 			return domain.DecisionCall{}, err
 		}
 	}
@@ -260,6 +264,27 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 		ID: s.newID("dent_"), Origin: s.hostID, CallID: callID,
 		Kind: domain.DecisionKindRaised, Payload: raw, WrittenAt: now,
 		AuthorKind: domain.DecisionAuthorSession, AuthorSession: session.ID,
+	}
+	if hasPendingPlanCall {
+		withdrawn, err := json.Marshal(struct{}{})
+		if err != nil {
+			return domain.DecisionCall{}, err
+		}
+		withdrawal := domain.DecisionEntry{
+			ID: s.newID("dent_"), Origin: s.hostID, CallID: pendingPlanCall.ID,
+			Kind: domain.DecisionKindWithdrawn, Payload: withdrawn, WrittenAt: now,
+			AuthorKind: domain.DecisionAuthorSession, AuthorSession: session.ID,
+		}
+		stored, calls, err := s.store.AppendDecisionEntries(ctx, []domain.DecisionEntry{entry, withdrawal}, now)
+		if err != nil {
+			return domain.DecisionCall{}, err
+		}
+		if s.onAppended != nil {
+			for _, appended := range stored {
+				s.onAppended(appended)
+			}
+		}
+		return calls[0], nil
 	}
 	stored, call, err := s.store.AppendDecisionEntry(ctx, entry, now)
 	if err != nil {
@@ -399,13 +424,12 @@ func (s *Service) rejectSupersededPlanCall(ctx context.Context, call domain.Deci
 	return nil
 }
 
-func (s *Service) withdrawPendingPlanFirstCall(ctx context.Context, actor Actor, ownerID domain.SessionID) error {
+func (s *Service) pendingPlanFirstCall(ctx context.Context, ownerID domain.SessionID) (domain.DecisionCall, bool, error) {
 	current, found, err := newestPlanFirstCall(ctx, s.store, s.hostID, ownerID)
 	if err != nil || !found || current.State != domain.DecisionStateNeedsYou {
-		return err
+		return domain.DecisionCall{}, false, err
 	}
-	_, err = s.append(ctx, actor, current.ID, domain.DecisionKindWithdrawn, struct{}{})
-	return err
+	return current, true, nil
 }
 
 // RecordOutcome closes an in-progress call with the result of carrying it out.
