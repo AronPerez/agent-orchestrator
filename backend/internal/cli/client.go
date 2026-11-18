@@ -159,6 +159,10 @@ func (c *commandContext) daemonBase() (string, error) {
 	if c.remote != nil {
 		return c.remote.baseURL, nil
 	}
+	return c.localDaemonBase()
+}
+
+func (c *commandContext) localDaemonBase() (string, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return "", err
