@@ -398,7 +398,9 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 	}
 	cfg.launchToken = launchToken
 	if err := spawnDetached(ctx, cfg); err != nil {
-		clearLaunchIntent(cfg.DataDir, cfg.SessionID, launchToken)
+		if !errors.Is(err, ErrOwnershipInconclusive) {
+			clearLaunchIntent(cfg.DataDir, cfg.SessionID, launchToken)
+		}
 		return nil, err
 	}
 	deadline := time.Now().Add(startupTimeout)

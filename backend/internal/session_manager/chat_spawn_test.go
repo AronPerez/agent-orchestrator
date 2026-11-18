@@ -73,6 +73,7 @@ type recordingLauncher struct {
 	preflightErr      error
 	preStartErr       error
 	startErr          error
+	stopErr           error
 	turnBeforeSendErr error
 	turnErr           error
 	live              bool
@@ -261,7 +262,7 @@ func (l *recordingLauncher) ConfirmSessionChatTurn(_ context.Context, _ domain.S
 func (l *recordingLauncher) StopChat(_ context.Context, id domain.SessionID) error { //nolint:unparam
 
 	l.stopped = append(l.stopped, id)
-	return nil
+	return l.stopErr
 }
 
 func (l *recordingLauncher) HasLiveChatController(domain.SessionID) bool {
@@ -490,6 +491,43 @@ func TestChatTrackerIntakePreSendErrorReleasesClaimForRetry(t *testing.T) {
 	}
 	if len(launcher.turns) != 1 {
 		t.Fatalf("retry turns = %v, want delivered prompt", launcher.turns)
+	}
+}
+
+func TestChatTrackerIntakePostSpawnStartErrorKeepsClaimUntilHostIsFenced(t *testing.T) {
+	startErr := context.DeadlineExceeded
+	launcher := &recordingLauncher{
+		startErr: startErr,
+		stopErr:  fmt.Errorf("unpublished host: %w", ports.ErrChatRecoveryInconclusive),
+	}
+	m, st, _ := newChatManager(launcher)
+	ws := m.workspace.(*fakeWorkspace)
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, IssueID: "github:acme/mer#83", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, RequestedMode: domain.SessionModeChat,
+		Prompt: "fix it", TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, startErr) {
+		t.Fatalf("Spawn() error = %v, want post-spawn start failure", err)
+	}
+	key := "mer\x00github:acme/mer#83"
+	id := st.trackerIntakePending[key]
+	if id == "" {
+		t.Fatal("post-spawn failure released its pending intake claim")
+	}
+	if len(launcher.stopped) != 1 || launcher.stopped[0] != id {
+		t.Fatalf("host stop attempts = %v, want %s", launcher.stopped, id)
+	}
+	if got := st.trackerIntakeRecovery[id]; !got.ControllerPossible || got.CapacityReleased || got.CleanupConfirmed {
+		t.Fatalf("post-spawn recovery reservation = %+v, want possible controller still charged", got)
+	}
+	if got := st.sessions[id]; got.IsTerminated {
+		t.Fatalf("post-spawn failure terminated the fenced session: %+v", got)
+	}
+	if ws.destroyed != 0 || ws.projectDestroyed != 0 {
+		t.Fatalf("post-spawn failure destroyed a workspace with a possible host: single=%d project=%d", ws.destroyed, ws.projectDestroyed)
 	}
 }
 

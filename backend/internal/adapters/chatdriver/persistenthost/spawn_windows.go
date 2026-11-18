@@ -35,5 +35,11 @@ func spawnDetached(ctx context.Context, cfg Config) error {
 		_ = cmd.Wait()
 		return fmt.Errorf("publish detached chat host readiness: %w", err)
 	}
-	return cmd.Process.Release()
+	if err := cmd.Process.Release(); err != nil {
+		// Readiness already admitted the detached child, which may have started
+		// its provider. Preserve the launch fence for recovery instead of turning
+		// a process-handle failure into proof that no external effect occurred.
+		return fmt.Errorf("%w: release detached chat host: %w", ErrOwnershipInconclusive, err)
+	}
+	return nil
 }

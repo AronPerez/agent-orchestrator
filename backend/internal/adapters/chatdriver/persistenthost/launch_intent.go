@@ -226,6 +226,9 @@ func awaitLaunchReady(ctx context.Context, cfg Config) error {
 }
 
 func launchTokenFromEnv(env []string) (string, []string) {
+	if env == nil {
+		return "", nil
+	}
 	token := ""
 	clean := make([]string, 0, len(env))
 	prefix := launchIDEnv + "="
@@ -240,6 +243,9 @@ func launchTokenFromEnv(env []string) (string, []string) {
 }
 
 func envWithLaunchToken(env []string, token string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
 	_, clean := launchTokenFromEnv(env)
 	return append(clean, launchIDEnv+"="+token)
 }
@@ -299,6 +305,13 @@ func probeUnpublishedHost(dataDir, sessionID string) error {
 }
 
 func probeLaunchToken(dataDir, sessionID, token string) error {
+	return probeLaunchTokenWithExitProbe(dataDir, sessionID, token, processalive.Exited)
+}
+
+func probeLaunchTokenWithExitProbe(
+	dataDir, sessionID, token string,
+	exited func(int) bool,
+) error {
 	intent, intentErr := readLaunchIntent(dataDir, sessionID, token)
 	ready, readyErr := readLaunchReady(dataDir, sessionID, token)
 	if intentErr != nil && !errors.Is(intentErr, os.ErrNotExist) {
@@ -308,15 +321,29 @@ func probeLaunchToken(dataDir, sessionID, token string) error {
 		return fmt.Errorf("%w: read chat host launch readiness: %w", ErrOwnershipInconclusive, readyErr)
 	}
 	if readyErr == nil {
-		if !processalive.Exited(ready.HostPID) {
+		if !exited(ready.HostPID) {
 			return fmt.Errorf("%w: unpublished chat host process %d is not proven absent", ErrOwnershipInconclusive, ready.HostPID)
 		}
 		clearLaunchIntent(dataDir, sessionID, token)
 		return nil
 	}
 	if intentErr == nil {
-		if !processalive.Exited(intent.ParentPID) {
+		if !exited(intent.ParentPID) {
 			return fmt.Errorf("%w: chat host launcher %d has not published readiness", ErrOwnershipInconclusive, intent.ParentPID)
+		}
+		// The launcher cannot publish after Exited reports conclusive absence.
+		// Re-read after that proof so a readiness file published between the
+		// first read and the exit observation still fences the admitted child.
+		ready, readyErr = readLaunchReady(dataDir, sessionID, token)
+		if readyErr == nil {
+			if !exited(ready.HostPID) {
+				return fmt.Errorf("%w: unpublished chat host process %d is not proven absent", ErrOwnershipInconclusive, ready.HostPID)
+			}
+			clearLaunchIntent(dataDir, sessionID, token)
+			return nil
+		}
+		if !errors.Is(readyErr, os.ErrNotExist) {
+			return fmt.Errorf("%w: re-read chat host launch readiness: %w", ErrOwnershipInconclusive, readyErr)
 		}
 		clearLaunchIntent(dataDir, sessionID, token)
 	}

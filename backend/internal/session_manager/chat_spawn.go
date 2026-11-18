@@ -282,15 +282,21 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	}
 
 	var (
-		controllerCommitted bool
-		completionErr       error
+		controllerCommitted    bool
+		providerStartAttempted bool
+		completionErr          error
 	)
+	var beforeProviderStart func(context.Context) error
 	if in.cfg.TrackerIntakeLimits != nil {
 		reservation := trackerIntakeRecoveryForWorkspace(in.workspace)
 		reservation.ControllerPossible = true
 		if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
 			m.rollbackSeedSpawnWorkspace(ctx, in.record, in.workspace, in.workspaceProject, false, in.promptQueued)
 			return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+		beforeProviderStart = func(context.Context) error {
+			providerStartAttempted = true
+			return nil
 		}
 	}
 	_, err = m.chat.StartChat(ctx, ChatStart{
@@ -311,6 +317,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		AdditionalDirectories:   workspaceProjectDirectories(in.workspace.Path, in.workspaceProject),
 		MCPServers:              m.aoMCPServers(ctx, in.cfg.Harness, env),
 		ExpectedControllerOwner: in.record.ControllerOwner(),
+		BeforeProviderStart:     beforeProviderStart,
 		PrepareControllerEnv: func(launchCtx context.Context, expected domain.SessionControllerOwner) (map[string]string, error) {
 			prepared, launchEnv, prepareErr := m.prepareChatControllerEnv(
 				launchCtx, in.record, in.project.Config.Env, expected,
@@ -358,7 +365,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		},
 	})
 	if err != nil {
-		if completionErr != nil || controllerCommitted {
+		if completionErr != nil || controllerCommitted || providerStartAttempted {
 			controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
 			if in.cfg.TrackerIntakeLimits != nil && !controllerStopped {
 				if completionErr != nil {

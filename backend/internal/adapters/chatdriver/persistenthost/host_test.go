@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1035,5 +1036,63 @@ func TestUnpublishedLiveHostRemainsFencedBeforeLockAndDescriptor(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, "host.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovery launched or published a competing host: %v", err)
+	}
+}
+
+func TestLaunchProbeRechecksReadinessAfterLauncherExit(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "readiness-race"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+
+	checks := 0
+	var publishErr error
+	err = probeLaunchTokenWithExitProbe(dataDir, sessionID, token, func(int) bool {
+		checks++
+		if checks == 1 {
+			// The initial readiness read already missed. Publish exactly while
+			// recovery observes the launcher exit, before it may clear the intent.
+			publishErr = publishLaunchReady(dataDir, sessionID, token, os.Getpid())
+			return true
+		}
+		return false
+	})
+	if publishErr != nil {
+		t.Fatal(publishErr)
+	}
+	if !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("probe error = %v, want ErrOwnershipInconclusive", err)
+	}
+	if checks != 2 {
+		t.Fatalf("process exit checks = %d, want launcher then admitted child", checks)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); err != nil {
+		t.Fatalf("probe removed readiness for the admitted child: %v", err)
+	}
+}
+
+func TestLaunchIDEnvironmentPreservesInheritanceAndStaysOutOfProvider(t *testing.T) {
+	const inheritedKey = "AO_CHAT_HOST_INHERITED_TEST"
+	t.Setenv(inheritedKey, "present")
+	token := strings.Repeat("ab", 32)
+	hostEnv := envWithLaunchToken(nil, token)
+	gotToken, providerEnv := launchTokenFromEnv(hostEnv)
+	if gotToken != token {
+		t.Fatalf("launch id = %q, want %q", gotToken, token)
+	}
+	var inherited bool
+	for _, entry := range providerEnv {
+		if entry == inheritedKey+"=present" {
+			inherited = true
+		}
+		if strings.HasPrefix(entry, launchIDEnv+"=") {
+			t.Fatalf("provider environment retained internal launch id: %q", entry)
+		}
+	}
+	if !inherited {
+		t.Fatal("nil environment no longer inherits the parent environment")
 	}
 }
