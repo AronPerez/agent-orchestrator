@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 	markRemote: vi.fn(),
 	navigate: vi.fn(),
 	clientForHost: vi.fn(),
+	decisionInbox: vi.fn(),
 	fetchOlder: vi.fn(),
 }));
 
@@ -98,6 +99,7 @@ vi.mock("../hooks/useWorkspaceQuery", () => ({
 vi.mock("../hooks/useCloudNotifications", () => ({
 	useCloudNotifications: () => ({ data: { items: [], unreadCount: 0 }, isLoading: false, markAllRead: vi.fn() }),
 }));
+vi.mock("../hooks/useDecisionInbox", () => ({ useDecisionInbox: (enabled: boolean) => mocks.decisionInbox(enabled) }));
 vi.mock("../hooks/useRestoreSession", () => ({ useRestoreSession: () => vi.fn() }));
 vi.mock("../lib/host-clients", () => ({ clientForHost: (hostId: string) => mocks.clientForHost(hostId) }));
 
@@ -112,6 +114,10 @@ beforeEach(() => {
 	remoteTerminatedA = false;
 	remoteErrorB = false;
 	mocks.markLocal.mockResolvedValue(1);
+	mocks.decisionInbox.mockReturnValue({
+		entries: [], isLoading: false, loadFailed: false, pending: undefined, answerError: undefined,
+		answer: vi.fn(), retry: vi.fn(),
+	});
 	mocks.markRemote.mockResolvedValue({ data: { updatedCount: 1 } });
 	mocks.clearRemote.mockResolvedValue({ data: { notification: hostB }, response: { status: 200 } });
 	mocks.clearLocal.mockResolvedValue(local);

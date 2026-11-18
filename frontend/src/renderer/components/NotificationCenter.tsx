@@ -51,6 +51,7 @@ import { captureRendererEvent } from "../lib/telemetry";
 import { captureTopbarAction } from "../lib/topbar-telemetry";
 import { recordManualWorkerOpen } from "../lib/session-management-telemetry";
 import { cn } from "../lib/utils";
+import { DecisionInbox } from "./DecisionInbox";
 import { Button } from "./ui/button";
 import { Pressable } from "./ui/pressable";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/popover";
@@ -58,6 +59,7 @@ import { TooltipProvider } from "./ui/tooltip";
 import { useCloudNotifications } from "../hooks/useCloudNotifications";
 import { useCloudCp } from "../hooks/useCloudCp";
 import { useCloudOrg } from "../hooks/useCloudOrg";
+import { useDecisionInbox } from "../hooks/useDecisionInbox";
 import { clearRemoteNotification, clearRemoteNotifications, connectRemoteNotificationStreams, fetchRemoteNotificationsPage, markRemoteNotificationsRead, remoteNotificationsQueryKey, useRemoteNotificationHosts } from "../hooks/useRemoteNotifications";
 import type { CloudCpNotification } from "../lib/cloud-cp/types";
 
@@ -366,6 +368,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 	const allQuery = useNotificationsQuery("all", open);
 	const remoteUnread = useRemoteNotificationHosts("unread");
 	const remoteAll = useRemoteNotificationHosts("all", open);
+	const decisionInbox = useDecisionInbox(open);
 	// CloudNotificationRuntime keeps this list live; the panel only reads it.
 	// Its response also carries the server's total unread count for the badge.
 	const cloudAll = useCloudNotifications("all", { live: false });
@@ -744,7 +747,10 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 		];
 		return merged.sort((a, b) => Date.parse(b.kind === "cloud" ? b.item.createdAt : b.notification.createdAt) - Date.parse(a.kind === "cloud" ? a.item.createdAt : a.notification.createdAt));
 	}, [entries, visibleCloudItems]);
-	const isEmpty = rows.length === 0;
+	const notificationRowsEmpty = rows.length === 0;
+	const decisionContent = decisionInbox.entries.length > 0 || decisionInbox.isLoading || decisionInbox.loadFailed;
+	const isEmpty = notificationRowsEmpty && !decisionContent;
+	const rowCount = rows.length + decisionInbox.entries.length;
 
 	return (
 		<Popover onOpenChange={setPanelOpen} open={open}>
@@ -782,15 +788,15 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 					<div className="flex min-w-0 items-center gap-2">
 						<Bell className="size-icon-md shrink-0 text-muted-foreground" aria-hidden="true" />
 						<h2 className="truncate text-control font-medium text-foreground">{t("notify.title")}</h2>
-						{!isEmpty ? (
+						{rowCount > 0 ? (
 							<span aria-hidden="true" className="rounded-sm bg-interactive-active px-1.5 py-0.5 font-mono text-caption leading-none tabular-nums text-muted-foreground">
-								{rows.length}
+								{rowCount}
 							</span>
 						) : null}
 					</div>
 					<div className="flex shrink-0 items-center gap-1">
 						<Button
-							disabled={isEmpty || localLoading || clearingAll || clearAll.isPending}
+							disabled={notificationRowsEmpty || localLoading || clearingAll || clearAll.isPending}
 							onClick={handleClearAll}
 							size="sm"
 							type="button"
@@ -863,7 +869,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 				) : null}
 				{(localLoadFailed || remoteLoadFailed) && isEmpty ? (
 					<NotificationEmpty icon={CircleAlert} message={t("notify.loadFailed")} />
-				) : localLoading || (remoteLoading && isEmpty) ? (
+				) : (localLoading && !decisionContent) || (remoteLoading && isEmpty) ? (
 					<NotificationEmpty icon={LoaderCircle} message={t("notify.loading")} />
 				) : isEmpty ? (
 					<NotificationEmpty icon={CheckCheck} message={t("notify.emptyAll")} />
@@ -875,6 +881,15 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 						onScroll={loadEarlierOnScroll}
 						role="list"
 					>
+						<DecisionInbox
+							answerError={decisionInbox.answerError}
+							entries={decisionInbox.entries}
+							isLoading={decisionInbox.isLoading}
+							loadFailed={decisionInbox.loadFailed}
+							onAnswer={decisionInbox.answer}
+							onRetry={decisionInbox.retry}
+							pending={decisionInbox.pending}
+						/>
 						{rows.map((row) => {
 							if (row.kind === "cloud") {
 								const cloud = row.item;
