@@ -10,7 +10,7 @@ const fixtures = vi.hoisted(() => ({
 	getItem: vi.fn(async (_key: string) => null as string | null),
 	setItem: vi.fn(async (_key: string, _value: string) => {}),
 	getSession: vi.fn(),
-	archiveOptions: null as null | { active: boolean; exhaustive: boolean },
+	archiveOptions: null as null | { active: boolean; exhaustive: boolean; refreshToken: number },
 	archive: {
 		rows: [] as HostedSession[], total: 0, loading: false, error: null as string | null,
 		hasMore: false, loadMore: vi.fn(), retry: vi.fn(),
@@ -59,7 +59,7 @@ vi.mock("react-native", async () => {
 });
 vi.mock("./store", () => ({ useApp: () => fixtures.app }));
 vi.mock("./archive/useArchivedSessions", () => ({
-	useArchivedSessions: (_sources: unknown, options: { active: boolean; exhaustive: boolean }) => {
+	useArchivedSessions: (_sources: unknown, options: { active: boolean; exhaustive: boolean; refreshToken: number }) => {
 		fixtures.archiveOptions = options;
 		return fixtures.archive;
 	},
@@ -361,6 +361,26 @@ describe("FleetTreeList", () => {
 		const parent = view.root.findAllByType("WorkerListRow" as never)
 			.find((row) => row.props.session.id === "Parent")!;
 		expect(parent.props.session.displayName).toBe("Archive parent");
+	});
+
+	it("updates an archive-sourced ancestor while its archive refreshes", async () => {
+		fixtures.archive.rows = [worker("Parent", {
+			displayName: "Archive parent",
+			status: "terminated",
+			isTerminated: true,
+		})];
+		fixtures.archive.total = 1;
+		const view = render([worker("Child", { parentSessionId: "Parent" })], [], "open");
+		const refreshToken = fixtures.archiveOptions!.refreshToken;
+
+		let parent = view.root.findAllByType("WorkerListRow" as never)
+			.find((row) => row.props.session.id === "Parent")!;
+		await act(async () => parent.props.onRename("Renamed parent"));
+		parent = view.root.findAllByType("WorkerListRow" as never)
+			.find((row) => row.props.session.id === "Parent")!;
+
+		expect(parent.props.session.displayName).toBe("Renamed parent");
+		expect(fixtures.archiveOptions!.refreshToken).toBe(refreshToken + 1);
 	});
 
 	it("serializes archive restore and opens the restored session", async () => {

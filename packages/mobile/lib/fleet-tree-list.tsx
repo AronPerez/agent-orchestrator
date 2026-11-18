@@ -388,15 +388,21 @@ export function FleetTreeList({
 	}, []);
 	const updateLookedUpAncestor = useCallback((session: DashboardSession, changes: Partial<DashboardSession>) => {
 		const key = hostedSessionKey(session);
+		if (liveKeys.has(key)) return;
+		const hostId = sessionHostId(session);
+		if (!hostId) return;
 		const current = lookedUpAncestorsRef.current;
-		const cached = current.get(key);
-		if (!cached) return;
+		const cached: HostedSession = current.get(key) ?? {
+			...session,
+			hostId,
+			hostName: hostsById.get(hostId)?.name ?? hostId,
+		};
 		const next = new Map(current);
 		next.set(key, { ...cached, ...changes });
 		lookedUpAncestorsRef.current = next;
 		setLookedUpAncestors(next);
 		setArchiveRefresh((value) => value + 1);
-	}, []);
+	}, [hostsById, liveKeys]);
 	const dropLookedUpAncestor = useCallback((session: DashboardSession) => {
 		const key = hostedSessionKey(session);
 		const current = lookedUpAncestorsRef.current;
