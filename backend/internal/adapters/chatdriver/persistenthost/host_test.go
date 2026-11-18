@@ -1101,6 +1101,27 @@ func TestRunClearsLaunchIntentBeforeLateReadiness(t *testing.T) {
 	}
 }
 
+func TestPublishReadinessRechecksIntentAfterCancellation(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "cancel-during-publication"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = publishLaunchReadyAfterIntentRead(dataDir, sessionID, token, os.Getpid(), func() {
+		clearLaunchIntent(dataDir, sessionID, token)
+	})
+	if err == nil {
+		t.Fatal("readiness publication succeeded after launch cancellation")
+	}
+	if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canceled launch intent remains: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("readiness published after cancellation: %v", err)
+	}
+}
+
 func TestLaunchProbeClearsReadinessFromPriorBoot(t *testing.T) {
 	dataDir := t.TempDir()
 	sessionID := "prior-boot"
@@ -1177,6 +1198,105 @@ func TestPriorBootOwnershipIgnoresReusedDescriptorAndLockPID(t *testing.T) {
 	}
 }
 
+func TestPriorBootRetirementSerializesReplacementPublication(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "retirement-replacement"
+	oldToken := writePriorBootReusedPIDOwnership(t, dataDir, sessionID)
+
+	validated := make(chan struct{})
+	continueRetirement := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- retirePriorBootHostOwnershipAfterValidation(dataDir, sessionID, func() {
+			close(validated)
+			<-continueRetirement
+		})
+	}()
+	select {
+	case <-validated:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first retirement did not reach validated ownership")
+	}
+
+	newToken, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishLaunchReady(dataDir, sessionID, newToken, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, newToken) })
+
+	type replacementResult struct {
+		release func()
+		err     error
+	}
+	replacementDone := make(chan replacementResult, 1)
+	go func() {
+		release, lockErr := acquireHostLock(dataDir, sessionID)
+		if lockErr == nil {
+			lockErr = writeDescriptor(dataDir, Descriptor{
+				Version: ProtocolVersion, SessionID: sessionID, Address: "127.0.0.1:1",
+				Token: "replacement", PID: os.Getpid(),
+			})
+		}
+		replacementDone <- replacementResult{release: release, err: lockErr}
+	}()
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- retirePriorBootHostOwnership(dataDir, sessionID) }()
+
+	close(continueRetirement)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first retirement: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first retirement did not finish")
+	}
+	var replacement replacementResult
+	select {
+	case replacement = <-replacementDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement publication did not finish")
+	}
+	if replacement.err != nil {
+		if replacement.release != nil {
+			replacement.release()
+		}
+		t.Fatalf("replacement publication: %v", replacement.err)
+	}
+	if replacement.release == nil {
+		t.Fatal("replacement did not acquire host lock")
+	}
+	t.Cleanup(replacement.release)
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second retirement: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second retirement did not finish")
+	}
+
+	d, err := readDescriptor(dataDir, sessionID)
+	if err != nil {
+		t.Fatalf("read replacement descriptor: %v", err)
+	}
+	if d.Token != "replacement" {
+		t.Fatalf("descriptor token = %q, want replacement", d.Token)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, "host.lock")); err != nil {
+		t.Fatalf("replacement host lock missing: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, newToken); err != nil {
+		t.Fatalf("replacement readiness missing: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, oldToken); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prior-boot readiness remains: %v", err)
+	}
+}
+
 func TestPriorBootAbandonedIntentIgnoresReusedLauncherPID(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1236,7 +1356,7 @@ func TestPriorBootAbandonedIntentIgnoresReusedLauncherPID(t *testing.T) {
 	}
 }
 
-func writePriorBootReusedPIDOwnership(t *testing.T, dataDir, sessionID string) {
+func writePriorBootReusedPIDOwnership(t *testing.T, dataDir, sessionID string) string {
 	t.Helper()
 	token, err := reserveLaunchIntent(dataDir, sessionID)
 	if err != nil {
@@ -1276,6 +1396,7 @@ func writePriorBootReusedPIDOwnership(t *testing.T, dataDir, sessionID string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	return token
 }
 
 func priorBootIDForTest(t *testing.T) string {

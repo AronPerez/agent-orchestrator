@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/datadirlock"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
 )
@@ -205,6 +206,18 @@ func lockPath(dataDir, sessionID string) (string, error) {
 	return filepath.Join(dir, "host.lock"), nil
 }
 
+func acquireHostOwnershipMutationLock(dataDir, sessionID string) (*datadirlock.Lock, error) {
+	dir, err := hostDir(dataDir, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	lock, err := datadirlock.Acquire(context.Background(), filepath.Join(dir, ".ownership-lock"), startupTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("%w: lock chat host ownership: %w", ErrOwnershipInconclusive, err)
+	}
+	return lock, nil
+}
+
 func acquireHostLock(dataDir, sessionID string) (func(), error) {
 	if err := retirePriorBootHostOwnership(dataDir, sessionID); err != nil {
 		return nil, err
@@ -219,6 +232,11 @@ func acquireHostLock(dataDir, sessionID string) (func(), error) {
 	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // Directories need execute permission; access is owner-only.
 		return nil, err
 	}
+	ownershipLock, err := acquireHostOwnershipMutationLock(dataDir, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = ownershipLock.Release() }()
 	path, _ := lockPath(dataDir, sessionID)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // AO-owned capability directory.
 	if errors.Is(err, os.ErrExist) {
@@ -288,6 +306,11 @@ func writeDescriptor(dataDir string, d Descriptor) error {
 	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // Directories need execute permission; access is owner-only.
 		return err
 	}
+	ownershipLock, err := acquireHostOwnershipMutationLock(dataDir, d.SessionID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = ownershipLock.Release() }()
 	b, err := json.Marshal(d)
 	if err != nil {
 		return err

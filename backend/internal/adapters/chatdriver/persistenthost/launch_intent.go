@@ -93,12 +93,23 @@ func reserveLaunchIntent(dataDir, sessionID string) (string, error) {
 }
 
 func publishLaunchReady(dataDir, sessionID, token string, hostPID int) error {
+	return publishLaunchReadyAfterIntentRead(dataDir, sessionID, token, hostPID, nil)
+}
+
+func publishLaunchReadyAfterIntentRead(
+	dataDir, sessionID, token string,
+	hostPID int,
+	afterIntentRead func(),
+) error {
 	intent, err := readLaunchIntent(dataDir, sessionID, token)
 	if err != nil {
 		return err
 	}
 	if intent.Token != token || intent.ParentPID != os.Getpid() || hostPID <= 0 {
 		return errors.New("chat host launch intent ownership changed")
+	}
+	if afterIntentRead != nil {
+		afterIntentRead()
 	}
 	bootID, err := currentBootIdentity()
 	if err != nil {
@@ -112,7 +123,18 @@ func publishLaunchReady(dataDir, sessionID, token string, hostPID int) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomicLaunchFile(path, b)
+	if err := writeAtomicLaunchFile(path, b); err != nil {
+		return err
+	}
+	current, err := readLaunchIntent(dataDir, sessionID, token)
+	if err != nil || current != intent {
+		_ = os.Remove(path)
+		if err != nil {
+			return fmt.Errorf("confirm chat host launch intent: %w", err)
+		}
+		return errors.New("chat host launch intent changed during readiness publication")
+	}
+	return nil
 }
 
 func writeAtomicLaunchFile(path string, b []byte) error {
@@ -188,10 +210,12 @@ func readLaunchJSON(path string, out any) error {
 }
 
 func clearLaunchIntent(dataDir, sessionID, token string) {
-	if path, err := launchReadyPath(dataDir, sessionID, token); err == nil {
+	// Remove authorization first. A concurrent publisher rechecks this exact
+	// intent after writing readiness and removes any late readiness record.
+	if path, err := launchIntentPath(dataDir, sessionID, token); err == nil {
 		_ = os.Remove(path)
 	}
-	if path, err := launchIntentPath(dataDir, sessionID, token); err == nil {
+	if path, err := launchReadyPath(dataDir, sessionID, token); err == nil {
 		_ = os.Remove(path)
 	}
 }
@@ -263,14 +287,25 @@ func envWithLaunchToken(env []string, token string) []string {
 // retirePriorBootHostOwnership removes ownership files only when every durable
 // launch record proves that its host belonged to an earlier machine boot.
 func retirePriorBootHostOwnership(dataDir, sessionID string) error {
+	return retirePriorBootHostOwnershipAfterValidation(dataDir, sessionID, nil)
+}
+
+func retirePriorBootHostOwnershipAfterValidation(dataDir, sessionID string, afterValidation func()) error {
 	dir, err := hostDir(dataDir, sessionID)
 	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
 		return nil
+	} else if err != nil {
+		return fmt.Errorf("%w: inspect prior-boot chat host directory: %w", ErrOwnershipInconclusive, err)
 	}
+	ownershipLock, err := acquireHostOwnershipMutationLock(dataDir, sessionID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = ownershipLock.Release() }()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("%w: inspect prior-boot chat host ownership: %w", ErrOwnershipInconclusive, err)
 	}
@@ -339,6 +374,9 @@ func retirePriorBootHostOwnership(dataDir, sessionID string) error {
 		}
 	} else if !errors.Is(readErr, os.ErrNotExist) {
 		return fmt.Errorf("%w: inspect prior-boot chat host lock: %w", ErrOwnershipInconclusive, readErr)
+	}
+	if afterValidation != nil {
+		afterValidation()
 	}
 	descriptor, _ := descriptorPath(dataDir, sessionID)
 	if err := os.Remove(descriptor); err != nil && !errors.Is(err, os.ErrNotExist) {
