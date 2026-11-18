@@ -4,6 +4,7 @@ package verification
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -13,18 +14,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
-
-var isProcessInJobForTest = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
-
-func TestWindowsJobAccountingLayout(t *testing.T) {
-	if got, want := unsafe.Offsetof(jobBasicAccountingInformation{}.ActiveProcesses), uintptr(40); got != want {
-		t.Fatalf("ActiveProcesses offset = %d, want %d", got, want)
-	}
-}
 
 func TestWorkspaceStepAllowsACleanWindowsCommand(t *testing.T) {
 	env := newStepEnvironment(os.Environ(), nil)
@@ -40,11 +32,11 @@ func TestWorkspaceStepStopsAWindowsJobChildAfterTheShellExits(t *testing.T) {
 	}
 	workspace := t.TempDir()
 	readyFile := filepath.Join(workspace, "child-ready")
-	survivorFile := filepath.Join(workspace, "child-survived")
+	pidFile := filepath.Join(workspace, "child.pid")
 	env := newStepEnvironment(os.Environ(), map[string]string{
 		"GO_WANT_VERIFICATION_WINDOWS_LAUNCHER": "1",
 		"VERIFY_CHILD_READY":                    readyFile,
-		"VERIFY_CHILD_SURVIVED":                 survivorFile,
+		"VERIFY_CHILD_PID":                      pidFile,
 	})
 	command := syscall.EscapeArg(executable) + ` -test.run=^TestVerificationWindowsLauncherHelper$`
 
@@ -55,10 +47,7 @@ func TestWorkspaceStepStopsAWindowsJobChildAfterTheShellExits(t *testing.T) {
 	if _, err := os.Stat(readyFile); err != nil {
 		t.Fatalf("background child never started: %v", err)
 	}
-	time.Sleep(1500 * time.Millisecond)
-	if _, err := os.Stat(survivorFile); !os.IsNotExist(err) {
-		t.Fatalf("background child survived Windows job cleanup: %v", err)
-	}
+	assertWindowsProcessStopped(t, awaitWindowsChildPID(t, pidFile))
 }
 
 func TestWindowsJobOwnsGrandchildBeforeShellExit(t *testing.T) {
@@ -68,13 +57,11 @@ func TestWindowsJobOwnsGrandchildBeforeShellExit(t *testing.T) {
 	}
 	workspace := t.TempDir()
 	readyFile := filepath.Join(workspace, "child-ready")
-	survivorFile := filepath.Join(workspace, "child-survived")
 	pidFile := filepath.Join(workspace, "child.pid")
 	releaseFile := filepath.Join(workspace, "release-launcher")
 	env := newStepEnvironment(os.Environ(), map[string]string{
 		"GO_WANT_VERIFICATION_WINDOWS_LAUNCHER": "1",
 		"VERIFY_CHILD_READY":                    readyFile,
-		"VERIFY_CHILD_SURVIVED":                 survivorFile,
 		"VERIFY_CHILD_PID":                      pidFile,
 		"VERIFY_LAUNCHER_RELEASE":               releaseFile,
 	})
@@ -108,7 +95,7 @@ func TestWindowsJobOwnsGrandchildBeforeShellExit(t *testing.T) {
 		t.Fatalf("open child %d: %v", childPID, err)
 	}
 	defer windows.CloseHandle(child) //nolint:errcheck // test-only OS handle cleanup
-	inJob, membershipErr := windowsProcessInJobForTest(child, tree.job)
+	inJob, membershipErr := isProcessInJob(child, tree.job)
 	if err = os.WriteFile(releaseFile, []byte("release"), 0o600); err != nil {
 		_ = tree.terminate()
 	}
@@ -188,10 +175,7 @@ func TestVerificationWindowsChildHelper(t *testing.T) {
 	if err := os.WriteFile(os.Getenv("VERIFY_CHILD_READY"), []byte("ready"), 0o600); err != nil {
 		os.Exit(5)
 	}
-	time.Sleep(time.Second)
-	if err := os.WriteFile(os.Getenv("VERIFY_CHILD_SURVIVED"), []byte("survived"), 0o600); err != nil {
-		os.Exit(6)
-	}
+	time.Sleep(30 * time.Second)
 	os.Exit(0)
 }
 
@@ -212,15 +196,19 @@ func awaitWindowsChildPID(t *testing.T, path string) int {
 	return 0
 }
 
-func windowsProcessInJobForTest(process, job windows.Handle) (bool, error) {
-	var inJob int32
-	result, _, callErr := isProcessInJobForTest.Call(
-		uintptr(process),
-		uintptr(job),
-		uintptr(unsafe.Pointer(&inJob)),
-	)
-	if result == 0 {
-		return false, callErr
+func assertWindowsProcessStopped(t *testing.T, pid int) {
+	t.Helper()
+	process, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_TERMINATE, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return
 	}
-	return inJob != 0, nil
+	if err != nil {
+		t.Fatalf("open child %d after cleanup: %v", pid, err)
+	}
+	defer windows.CloseHandle(process) //nolint:errcheck // test-only OS handle cleanup
+	status, waitErr := windows.WaitForSingleObject(process, 0)
+	if waitErr != nil || status != windows.WAIT_OBJECT_0 {
+		_ = windows.TerminateProcess(process, 1)
+		t.Fatalf("child %d survived job cleanup: status=%d error=%v", pid, status, waitErr)
+	}
 }
