@@ -5122,11 +5122,40 @@ func (m *Manager) preserveFailedReconcileRelaunch(ctx context.Context, before do
 	return false, errors.New("session changed while recording failed relaunch")
 }
 
-// reconcileReap kills the leaked tmux session of a session the DB already marks
-// terminated. This covers the teardown that marked the row terminated but failed
-// to kill the runtime (e.g. ForceDestroy/Destroy errored after MarkTerminated).
-// Destroy is idempotent, so an already-gone session is a no-op.
-func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) error {
+// reconcileReap kills the leaked tmux session of a session the DB still marks
+// terminated. The startup snapshot is only a candidate: claim recovery or a
+// user operation may already be adopting a replacement generation. Reaping
+// shares the session operation fence, reloads the row, and yields every pending
+// tracker claim to its exact-generation reconciler before touching a runtime.
+func (m *Manager) reconcileReap(ctx context.Context, snapshot domain.SessionRecord) error {
+	if err := m.beginAgentOperation(ctx, snapshot.ID, agentOperationReconcile); err != nil {
+		if errors.Is(err, errAgentOperationInProgress) {
+			return nil
+		}
+		return fmt.Errorf("reconcile reap %s: reserve: %w", snapshot.ID, err)
+	}
+	defer m.endAgentOperation(snapshot.ID, agentOperationReconcile)
+
+	rec, found, err := m.store.GetSession(ctx, snapshot.ID)
+	if err != nil {
+		return fmt.Errorf("reconcile reap %s: reload: %w", snapshot.ID, err)
+	}
+	if !found || !rec.IsTerminated {
+		return nil
+	}
+	if !snapshot.CreatedAt.IsZero() && !snapshot.CreatedAt.Equal(rec.CreatedAt) {
+		return nil
+	}
+	if strings.TrimSpace(rec.Metadata.RuntimeHandleID) != strings.TrimSpace(snapshot.Metadata.RuntimeHandleID) ||
+		strings.TrimSpace(rec.Metadata.RuntimeLaunchID) != strings.TrimSpace(snapshot.Metadata.RuntimeLaunchID) {
+		return nil
+	}
+	if _, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID); err != nil {
+		return fmt.Errorf("reconcile reap %s: inspect tracker intake claim: %w", rec.ID, err)
+	} else if pending {
+		return nil
+	}
+
 	handle := runtimeHandle(rec.Metadata)
 	if handle.ID == "" {
 		return nil

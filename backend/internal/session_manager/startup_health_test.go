@@ -314,6 +314,74 @@ func TestStartupHealthPendingDeliveredTrackerChatRunsPastAsyncClaimInspection(t 
 	}
 }
 
+func TestStartupReaperDoesNotDestroyPendingTrackerIntakeAdoption(t *testing.T) {
+	m, st, rt, _ := newManager()
+	id := domain.SessionID("mer-intake-adoption")
+	issueID := domain.IssueID("github:acme/mer#4611")
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		IsTerminated: true, Activity: domain.Activity{State: domain.ActivityExited},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/intake-adoption", Branch: "b",
+			RuntimeHandleID: "replacement-runtime", RuntimeLaunchID: "replacement-launch",
+		},
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/intake-adoption", RuntimeLaunchID: "replacement-launch",
+		RuntimeHandleIDs: []string{"replacement-runtime"}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{"replacement-runtime": true}
+
+	claimStarted := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClaim) }) }
+	defer release()
+	var hookMu sync.Mutex
+	firstLookup := true
+	st.trackerIntakeRecoveryHook = func(domain.SessionID) {
+		hookMu.Lock()
+		block := firstLookup
+		firstLookup = false
+		hookMu.Unlock()
+		if block {
+			close(claimStarted)
+			<-releaseClaim
+		}
+	}
+	m.runBackground = func(work func()) {
+		go work()
+		select {
+		case <-claimStarted:
+		case <-time.After(time.Second):
+			t.Fatal("claim reconciliation did not begin")
+		}
+	}
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground(): %v", err)
+	}
+	if rt.destroyed != 0 {
+		t.Fatalf("startup reaper destroyed pending replacement %d time(s)", rt.destroyed)
+	}
+	release()
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if err := m.WaitBackgroundWorkers(waitCtx); err != nil {
+		t.Fatalf("WaitBackgroundWorkers(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityIdle ||
+		got.Metadata.RuntimeHandleID != "replacement-runtime" || got.Metadata.RuntimeLaunchID != "replacement-launch" {
+		t.Fatalf("adopted startup owner = %+v, want live replacement", got)
+	}
+	if rt.destroyed != 0 || st.trackerIntakePending[key] != id {
+		t.Fatalf("startup adoption destroyed runtime=%d or settled pending=%q", rt.destroyed, st.trackerIntakePending[key])
+	}
+}
+
 func TestStartupHealthPendingDeliveredTrackerChatMissingHostSettlesClaim(t *testing.T) {
 	m, st, _, _ := newManager()
 	launcher := &healthCheckLauncher{err: ports.ErrChatHostNotRunning}

@@ -8945,6 +8945,95 @@ func TestReconcileTrackerIntakeAdoptsInterruptedRelaunchGeneration(t *testing.T)
 	}
 }
 
+func TestReconcileTrackerIntakeRepublishesTerminatedMatchingRuntime(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-matching-runtime")
+	issueID := domain.IssueID("github:acme/mer#1211")
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		IsTerminated: true, Activity: domain.Activity{State: domain.ActivityExited},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/terminated-matching-runtime", Branch: "b", Prompt: "continue the task",
+			RuntimeHandleID: "new-runtime", RuntimeLaunchID: "new-launch",
+		},
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-matching-runtime", RuntimeLaunchID: "new-launch",
+		RuntimeHandleIDs: []string{"new-runtime"}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{"new-runtime": true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityIdle ||
+		got.Metadata.RuntimeHandleID != "new-runtime" || got.Metadata.RuntimeLaunchID != "new-launch" {
+		t.Fatalf("republished session = %+v, want live matching generation", got)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != id {
+		t.Fatalf("republication destroyed runtime=%d workspace=%d or settled pending=%q",
+			rt.destroyed, ws.destroyed, st.trackerIntakePending[key])
+	}
+}
+
+func TestReconcileTrackerIntakePublishedOwnerRequiresExactDeadProof(t *testing.T) {
+	tests := []struct {
+		name         string
+		probe        ports.FencedProbeResult
+		wantErr      bool
+		wantActivity domain.ActivityState
+	}{
+		{
+			name:         "alive stale exit is republished",
+			probe:        ports.FencedProbeResult{Liveness: ports.FencedAlive},
+			wantActivity: domain.ActivityIdle,
+		},
+		{
+			name:    "unknown owner remains fenced",
+			probe:   ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			wantErr: true, wantActivity: domain.ActivityExited,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, st, rt, ws := newManager()
+			id := domain.SessionID("published-owner")
+			issueID := domain.IssueID("github:acme/mer#1212")
+			key := "mer\x00" + string(issueID)
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/published-owner", Branch: "b",
+					RuntimeHandleID: "published-runtime", RuntimeLaunchID: "published-launch",
+				},
+			}
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/published-owner", RuntimeLaunchID: "published-launch",
+				RuntimeHandleIDs: []string{"published-runtime"}, RelaunchPublished: true,
+			}
+			rt.fencedResult = tt.probe
+
+			err := m.ReconcileTrackerIntakeClaims(context.Background())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, wantErr=%v", err, tt.wantErr)
+			}
+			if got := st.sessions[id]; got.IsTerminated || got.Activity.State != tt.wantActivity {
+				t.Fatalf("published owner = %+v, want activity %q and resumable row", got, tt.wantActivity)
+			}
+			if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != id {
+				t.Fatalf("uncertain published owner destroyed runtime=%d workspace=%d or settled pending=%q",
+					rt.destroyed, ws.destroyed, st.trackerIntakePending[key])
+			}
+		})
+	}
+}
+
 func TestReconcileTrackerIntakeUndeliveredRelaunchUsesReservedGeneration(t *testing.T) {
 	for _, terminated := range []bool{false, true} {
 		t.Run(fmt.Sprintf("terminated=%t", terminated), func(t *testing.T) {
@@ -12979,6 +13068,7 @@ func TestReconcileReap_TerminatedButAliveTmuxDestroyed(t *testing.T) {
 		ID: "t1", ProjectID: "p1", IsTerminated: true,
 		Metadata: domain.SessionMetadata{RuntimeHandleID: "t1"},
 	}
+	st.sessions[rec.ID] = rec
 
 	if err := m.reconcileReap(context.Background(), rec); err != nil {
 		t.Fatalf("reconcileReap: %v", err)
@@ -13000,6 +13090,7 @@ func TestReconcileReap_TerminatedAndDeadTmuxLeftAlone(t *testing.T) {
 		ID: "t2", ProjectID: "p1", IsTerminated: true,
 		Metadata: domain.SessionMetadata{RuntimeHandleID: "t2"},
 	}
+	st.sessions[rec.ID] = rec
 	if err := m.reconcileReap(context.Background(), rec); err != nil {
 		t.Fatalf("reconcileReap: %v", err)
 	}

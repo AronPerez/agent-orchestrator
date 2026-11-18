@@ -161,8 +161,9 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		defer cancel()
 		return m.checkSessionHealth(recoveryCtx, rec)
 	}
-	if claim.Recovery.DeliveryPossible && found && !claim.Recovery.CapacityReleased &&
-		domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
+	if found && !claim.Recovery.CapacityReleased &&
+		domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat &&
+		(claim.Recovery.DeliveryPossible || claim.Recovery.RelaunchPublished) {
 		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec)
 	}
 	return m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
@@ -243,12 +244,16 @@ func (m *Manager) adoptTrackerIntakeRuntime(ctx context.Context, claim domain.Tr
 	if err != nil {
 		return false, fmt.Errorf("recover tracker intake %s: reload claim: %w", claim.SessionID, err)
 	}
-	if !found || !pending || reservation.CapacityReleased || !reservation.DeliveryPossible ||
+	if !found || !pending || reservation.CapacityReleased ||
+		(!reservation.DeliveryPossible && !reservation.RelaunchPublished) ||
 		rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID {
 		return false, nil
 	}
-	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat ||
-		trackerIntakeRuntimeReservationMatchesSession(rec, reservation) {
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		return false, nil
+	}
+	if trackerIntakeRuntimeReservationMatchesSession(rec, reservation) &&
+		!rec.IsTerminated && rec.Activity.State != domain.ActivityExited {
 		return false, nil
 	}
 	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
