@@ -122,6 +122,7 @@ type SessionService interface {
 	StageAttachments(ctx context.Context, id domain.SessionID, attachments []ports.SpawnAttachment) ([]string, error)
 	WorkspaceWatchPaths(ctx context.Context, id domain.SessionID) ([]string, error)
 	GetWorkspaceManifest(ctx context.Context, id domain.SessionID) (sessionsvc.WorkspaceManifest, error)
+	ProjectOverlaps(ctx context.Context, projectID domain.ProjectID) (sessionsvc.ProjectOverlapResult, error)
 	RefreshWorkspaceManifest(ctx context.Context, id domain.SessionID) (sessionsvc.WorkspaceManifest, error)
 	ReconcileWorkspaceManifest(ctx context.Context, id domain.SessionID) (sessionsvc.WorkspaceManifest, error)
 	GetWorkspaceHistory(ctx context.Context, id domain.SessionID, view sessionsvc.WorkspaceView) (sessionsvc.WorkspaceHistory, error)
@@ -297,6 +298,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Get("/orchestrators", c.listOrchestrators)
 	r.Post("/orchestrators", c.spawnOrchestrator)
 	r.Post("/orchestrators/delegate", c.delegateTask)
+	r.Get("/projects/{id}/overlaps", c.projectOverlaps)
 	r.Post("/projects/{id}/tasks/prepare", c.prepareTask)
 	r.Delete("/task-preparations/{token}", c.cancelTaskPreparation)
 	r.Get("/orchestrators/{id}", c.getOrchestrator)
@@ -1177,6 +1179,19 @@ func (c *SessionsController) getWorkspaceManifest(w http.ResponseWriter, r *http
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, workspaceManifestResponse(manifest))
+}
+
+func (c *SessionsController) projectOverlaps(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{id}/overlaps")
+		return
+	}
+	overlaps, err := c.Svc.ProjectOverlaps(r.Context(), domain.ProjectID(chi.URLParam(r, "id")))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, projectOverlapsResponse(overlaps))
 }
 
 func (c *SessionsController) getWorkspaceHistory(w http.ResponseWriter, r *http.Request) {
@@ -3305,6 +3320,40 @@ func workspaceManifestResponse(manifest sessionsvc.WorkspaceManifest) WorkspaceM
 		Refreshing:       manifest.Refreshing,
 		Degraded:         manifest.Degraded,
 		DegradedCode:     manifest.DegradedCode,
+	}
+}
+
+func projectOverlapsResponse(result sessionsvc.ProjectOverlapResult) ProjectOverlapsResponse {
+	overlaps := make([]ProjectOverlapResponse, 0, len(result.Overlaps))
+	for _, overlap := range result.Overlaps {
+		paths := append([]string(nil), overlap.Paths...)
+		if paths == nil {
+			paths = []string{}
+		}
+		overlaps = append(overlaps, ProjectOverlapResponse{
+			SessionA: overlap.SessionA,
+			SessionB: overlap.SessionB,
+			Paths:    paths,
+		})
+	}
+	truncated := append([]domain.SessionID(nil), result.TruncatedSessionIDs...)
+	if truncated == nil {
+		truncated = []domain.SessionID{}
+	}
+	unresolvedBases := append([]domain.SessionID(nil), result.UnresolvedBaseSessionIDs...)
+	if unresolvedBases == nil {
+		unresolvedBases = []domain.SessionID{}
+	}
+	unavailable := append([]domain.SessionID(nil), result.UnavailableSessionIDs...)
+	if unavailable == nil {
+		unavailable = []domain.SessionID{}
+	}
+	return ProjectOverlapsResponse{
+		ProjectID:                result.ProjectID,
+		Overlaps:                 overlaps,
+		TruncatedSessionIDs:      truncated,
+		UnresolvedBaseSessionIDs: unresolvedBases,
+		UnavailableSessionIDs:    unavailable,
 	}
 }
 

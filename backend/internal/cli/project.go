@@ -120,6 +120,10 @@ type containerReapConfig struct {
 	Disabled bool `json:"disabled,omitempty"`
 }
 
+type collisionRadarConfig struct {
+	IgnorePaths []string `json:"ignorePaths,omitempty"`
+}
+
 type workerContractConfig struct {
 	StallMinutes int `json:"stallMinutes,omitempty"`
 }
@@ -153,6 +157,7 @@ type projectConfig struct {
 	// of another field never silently turns it off.
 	WorkersRequestReview bool                 `json:"workersRequestReview,omitempty"`
 	Reviewers            []reviewerConfig     `json:"reviewers,omitempty"`
+	CollisionRadar       collisionRadarConfig `json:"collisionRadar,omitempty"`
 	WorkerContracts      workerContractConfig `json:"workerContracts,omitempty"`
 }
 

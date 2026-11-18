@@ -2439,7 +2439,8 @@ func TestWorkspaceProjectCompareModeStaysBaseWithPartialFallback(t *testing.T) {
 		{SessionID: "ws-1", RepoName: "api", WorktreePath: child, BaseSHA: "missing-base"},
 	}
 
-	files, err := (&Service{store: st}).ListWorkspaceFiles(context.Background(), "ws-1")
+	svc := NewWithDeps(Deps{Store: st})
+	files, err := svc.ListWorkspaceFiles(context.Background(), "ws-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2448,6 +2449,13 @@ func TestWorkspaceProjectCompareModeStaysBaseWithPartialFallback(t *testing.T) {
 	}
 	if files.CompareBaseSHA != "" {
 		t.Fatalf("workspace compare sha = %q, want empty for mixed repo bases", files.CompareBaseSHA)
+	}
+	manifest, err := svc.ReconcileWorkspaceManifest(context.Background(), "ws-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.CompareIncomplete {
+		t.Fatal("workspace manifest did not report the child repository's unresolved base")
 	}
 }
 

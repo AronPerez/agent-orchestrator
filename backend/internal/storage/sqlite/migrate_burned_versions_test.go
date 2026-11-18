@@ -279,6 +279,7 @@ var shippedMigrations = map[int64]string{
 	20261116173733857: "20261116173733857_timestamp_repair_progress.sql",
 	20261117154920868: "20261117154920868_tracker_intake_handled.sql",
 	20261117154943678: "20261117154943678_session_contract.sql",
+	20261117155101469: "20261117155101469_decision_ledger.sql",
 	20261117173439521: "20261117173439521_session_contract_supervision.sql",
 	20261117183702303: "20261117183702303_allow_session_stalled_notifications.sql",
 }
