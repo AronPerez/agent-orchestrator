@@ -161,21 +161,19 @@ export function buildFleetTree<Session extends FleetTreeSession>(
 		for (const item of scope.sessions) machine.sessions.set(item.id, item);
 	}
 
-	return [...projects.values()].flatMap(({ key, project, projectLinkId, machines }) => {
+	return [...projects.values()].map(({ key, project, projectLinkId, machines }) => {
 		const machineNodes = [...machines.values()].map(({ projectId, machine, sessions }) =>
-			buildMachine(projectId, machine, [...sessions.values()], options.showArchived === true))
-			.filter((node) => node.sessions.length > 0);
-		if (machineNodes.length === 0) return [];
+			buildMachine(projectId, machine, [...sessions.values()], options.showArchived === true));
 		const rollup = emptyFleetRollup();
 		for (const node of machineNodes) addRollup(rollup, node.rollup);
-		return [{
+		return {
 			type: "project" as const,
 			key,
 			project,
 			projectLinkId,
 			rollup,
 			machines: machineNodes,
-		}];
+		};
 	});
 }
 

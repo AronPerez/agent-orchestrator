@@ -117,7 +117,7 @@ export function buildMobileFleetTree({
 		});
 	}
 
-	return buildFleetTree([...grouped.entries()].map(([key, rows]) => {
+	const tree = buildFleetTree([...grouped.entries()].map(([key, rows]) => {
 		const first = rows[0]!;
 		const project = projectsByScope.get(key);
 		const host = hostsById.get(first.hostId);
@@ -134,4 +134,8 @@ export function buildMobileFleetTree({
 			sessions: rows,
 		};
 	}));
+	return tree.flatMap((project) => {
+		const machines = project.machines.filter((machine) => machine.sessions.length > 0);
+		return machines.length > 0 ? [{ ...project, machines }] : [];
+	});
 }

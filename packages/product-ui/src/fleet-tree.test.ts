@@ -133,12 +133,14 @@ describe("buildFleetTree", () => {
 		expect(manager.role).toBe("manager");
 	});
 
-	it("omits scopes whose sessions are all hidden by archive filtering", () => {
+	it("keeps registered scopes whose sessions are hidden by archive filtering", () => {
 		const archived = scope("ao", "server", [
 			session("archived", "terminated", { isTerminated: true }),
 		]);
 
-		expect(buildFleetTree([archived])).toEqual([]);
+		const active = buildFleetTree([archived]);
+		expect(active).toHaveLength(1);
+		expect(active[0]!.machines[0]!.sessions).toEqual([]);
 		expect(buildFleetTree([archived], { showArchived: true })).toHaveLength(1);
 	});
 

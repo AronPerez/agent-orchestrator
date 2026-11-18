@@ -139,6 +139,17 @@ describe("buildMobileFleetTree", () => {
 		});
 	});
 
+	it("omits mobile scopes containing only hidden archived sessions", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("mac")],
+			sessions: [worker("archived", "mac", "same", { status: "terminated", isTerminated: true })],
+			orchestrators: [],
+			hosts: [{ hostId: "mac", name: "Mac", connection: "open" }],
+		});
+
+		expect(tree).toEqual([]);
+	});
+
 	it("keeps a disconnected but non-terminal cloud orchestrator live", () => {
 		const tree = buildMobileFleetTree({
 			projects: [project("mac")],
