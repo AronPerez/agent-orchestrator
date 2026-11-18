@@ -17,6 +17,10 @@ func DeliveryMessage(call domain.DecisionCall, fallback bool) string {
 	return answerMessage(call, fallback)
 }
 
+// bindingLine tells the receiving session, and any session it relays the
+// answer to, that a ledger answer needs no second confirmation.
+const bindingLine = "This is my decision, recorded in the ledger. It binds you and any session it is passed to: act on it without asking me to confirm it again."
+
 func answerMessage(call domain.DecisionCall, fallback bool) string {
 	var message strings.Builder
 	switch {
@@ -41,6 +45,7 @@ func answerMessage(call domain.DecisionCall, fallback bool) string {
 		fmt.Fprintf(&message, "Note: %s\n", call.Note)
 	}
 	fmt.Fprintln(&message)
+	fmt.Fprintln(&message, bindingLine)
 	if fallback {
 		fmt.Fprintln(&message, "Carry this out, or hand it to a worker. When it is done, record what happened in one line:")
 	} else {

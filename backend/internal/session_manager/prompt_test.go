@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 func TestBuildTaskPrompt_IssueContextStaysInTaskPrompt(t *testing.T) {
@@ -371,6 +373,56 @@ func TestBuildSystemPromptTellsEveryRoleHowToAskTheHumanToDecide(t *testing.T) {
 				t.Errorf("decision section heading appears %d times, want 1", count)
 			}
 		})
+	}
+}
+
+func TestBuildSystemPromptMakesLedgerAnswersBindAndAsksForUrgency(t *testing.T) {
+	for name, cfg := range map[string]systemPromptConfig{
+		"worker":            {Role: sessionPromptRoleWorker, OrchestratorSessionID: "shop-1"},
+		"standalone worker": {Role: sessionPromptRoleWorker, Standalone: true},
+		"orchestrator":      {Role: sessionPromptRoleOrchestrator},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := buildSystemPromptText(cfg)
+			for _, want := range []string{
+				"binds every session, however it reaches you",
+				"check it with `ao decision show <call-link>`",
+				"Never ask the human to confirm it again in your own thread.",
+				"Pass `--urgency blocking` only when all your remaining work depends on the answer.",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("prompt missing %q", want)
+				}
+			}
+			if strings.Contains(got, "## Reserved Decisions") {
+				t.Error("a project in mode off must not get the autonomy section")
+			}
+		})
+	}
+}
+
+func TestBuildSystemPromptAddsObserveModeSectionForOptedInProjects(t *testing.T) {
+	project := promptProject{ID: "shop", Autonomy: domain.AutonomyConfig{Mode: domain.AutonomyObserve}}
+	for name, cfg := range map[string]systemPromptConfig{
+		"worker":       {Role: sessionPromptRoleWorker, OrchestratorSessionID: "shop-1", Project: project},
+		"orchestrator": {Role: sessionPromptRoleOrchestrator, Project: project},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := buildSystemPromptText(cfg)
+			if count := strings.Count(got, "## Reserved Decisions (observe mode)"); count != 1 {
+				t.Fatalf("observe section appears %d times, want 1", count)
+			}
+			if !strings.Contains(got, "`--would-decide <n> --why <reason> --undo <how the human could undo it>`") {
+				t.Error("observe section missing the prediction flags")
+			}
+		})
+	}
+}
+
+func TestPromptProjectContextCarriesAutonomy(t *testing.T) {
+	record := domain.ProjectRecord{ID: "shop", Config: domain.ProjectConfig{Autonomy: domain.AutonomyConfig{Mode: domain.AutonomyObserve}}}
+	if got := promptProjectContext("shop", record); got.Autonomy.Mode != domain.AutonomyObserve {
+		t.Fatalf("promptProjectContext autonomy = %+v", got.Autonomy)
 	}
 }
 
