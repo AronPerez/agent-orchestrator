@@ -87,8 +87,9 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 		return usageError{errors.New("usage: --message is required")}
 	}
 	senderSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+	sourceSessionID := senderSessionID
 	userAuthored := senderSessionID == ""
-	automationAuthored := c.remote != nil && senderSessionID != ""
+	automationAuthored := false
 	message := opts.message
 	session := strings.TrimSpace(opts.session)
 	if session == "" {
@@ -97,21 +98,30 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	if err := c.selectSavedHostIfSet(ctx, opts.host); err != nil {
 		return err
 	}
-	if !opts.recoverOnly && senderSessionID != "" {
-		if c.remote != nil {
-			sourceHostID := readLocalHostID()
-			if sourceHostID == "" {
-				return errors.New("local host identity is unavailable; open the Orchestrator desktop once before sending an agent-authored cross-machine message")
+	sourceHostID := ""
+	sameHost := c.remote == nil
+	if c.remote != nil && senderSessionID != "" {
+		var err error
+		sourceHostID, sameHost, err = c.remoteRelationToSource(ctx, senderSessionID)
+		if err != nil {
+			return err
+		}
+		if !sameHost {
+			if err := c.requireRemoteCoordinationCapability(ctx, coordinationCapabilityAutomationAuthored); err != nil {
+				return fmt.Errorf("remote automation provenance is unavailable: %w", err)
 			}
-			message = "[from " + senderSessionID + " on " + sourceHostID + "] " + message
-		} else {
-			message = "[from " + senderSessionID + "] " + message
+			automationAuthored = true
+			// Session IDs are host-local. Keep only the host-qualified readable
+			// source; do not let the destination resolve a same-named session.
+			senderSessionID = ""
 		}
 	}
-	if c.remote != nil {
-		// Session IDs are host-local. Keep only the host-qualified readable source
-		// above; do not let the destination resolve a same-named local session.
-		senderSessionID = ""
+	if !opts.recoverOnly && sourceSessionID != "" {
+		if c.remote != nil && !sameHost {
+			message = "[from " + sourceSessionID + " on " + sourceHostID + "] " + message
+		} else {
+			message = "[from " + sourceSessionID + "] " + message
+		}
 	}
 
 	// PathEscape: session ids are already "-"/digit safe, but may later come

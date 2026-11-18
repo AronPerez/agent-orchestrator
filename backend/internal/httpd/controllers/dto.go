@@ -3372,6 +3372,14 @@ type IdentityResponse struct {
 	APIVersion int    `json:"apiVersion"`
 }
 
+// CoordinationCapabilitiesResponse is the authenticated compatibility
+// contract for cross-machine agent actions. The public identity probe stays
+// deliberately minimal; callers present a credential before learning which
+// coordination semantics this daemon supports.
+type CoordinationCapabilitiesResponse struct {
+	Capabilities []string `json:"capabilities"`
+}
+
 // TelemetryIdentityResponse is the body of GET /api/v1/telemetry/identity. A
 // phone paired to this desktop identifies only a signed-in AO Cloud user ID.
 // Without one, DistinctID is the desktop install ID and stays anonymous. The

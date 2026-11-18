@@ -59,6 +59,7 @@ func newPairingHost(t *testing.T) *pairingHost {
 	mountMobileDevices(router, &controllers.MobileDevicesController{Registry: registry, Access: bridge})
 	router.Route("/api/v1", func(r chi.Router) {
 		(&controllers.PushController{Registry: registry, Devices: devices, Access: bridge}).Register(r)
+		(&controllers.IdentityController{HostID: bridge.HostID}).Register(r)
 	})
 	router.Get("/api/v1/sessions", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	router.Get("/api/v1/sessions/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -229,6 +230,7 @@ func TestCoordinationTokenIsLimitedToAgentCoordinationRoutes(t *testing.T) {
 		method string
 		path   string
 	}{
+		{http.MethodGet, "/api/v1/coordination/capabilities"},
 		{http.MethodGet, "/api/v1/projects"},
 		{http.MethodGet, "/api/v1/projects/p1"},
 		{http.MethodPost, "/api/v1/agents/readiness/ensure"},
