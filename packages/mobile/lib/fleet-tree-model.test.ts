@@ -97,6 +97,28 @@ describe("buildMobileFleetTree", () => {
 		expect(tree[0]!.rollup).toMatchObject({ action: 2, working: 0 });
 	});
 
+	it("does not join a cross-host parent to a colliding local session", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("box")],
+			sessions: [
+				worker("parent", "box", "same"),
+				worker("child", "box", "same", { parentHostId: "mac", parentSessionId: "parent" }),
+			],
+			orchestrators: [],
+			hosts: [{ hostId: "box", name: "Build box", connection: "open" }],
+		});
+
+		const rows = flattenFleetSessions(tree[0]!.machines[0]!.sessions, new Set());
+		expect(rows.map(({ node, depth }) => [node.session.id, depth])).toEqual([
+			["parent", 0],
+			["child", 0],
+		]);
+		expect(rows[1]!.node).toMatchObject({
+			parentUnavailable: true,
+			parentAddress: { machineId: "mac", sessionId: "parent" },
+		});
+	});
+
 	it("keeps a disconnected but non-terminal cloud orchestrator live", () => {
 		const tree = buildMobileFleetTree({
 			projects: [project("mac")],

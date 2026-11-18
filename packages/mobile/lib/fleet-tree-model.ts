@@ -105,6 +105,7 @@ export function buildMobileFleetTree({
 			projectId: item.projectId,
 			hostId: item.hostId,
 			title: sessionTitle(item),
+			parentHostId: item.parentHostId,
 			parentSessionId: item.parentSessionId,
 			kind: item.kind === "orchestrator" ? "orchestrator" : "worker",
 			status,

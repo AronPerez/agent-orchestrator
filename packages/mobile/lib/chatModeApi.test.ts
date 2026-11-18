@@ -99,15 +99,15 @@ describe("mobile Chat API boundaries", () => {
 		expect(result.sessions[0]).toMatchObject({ isPinned: true, pinnedAt: "2026-08-09T10:00:00Z", lastActivityAt: "2026-08-08T10:00:00Z" });
 	});
 
-	it("preserves the daemon parent session id used by the fleet hierarchy", async () => {
+	it("preserves the daemon parent address used by the fleet hierarchy", async () => {
 		vi.mocked(fetch)
-			.mockResolvedValueOnce(response({ sessions: [{ id: "child", projectId: "p-1", mode: "chat", parentSessionId: "manager" }], archived: { total: 0, byProject: {} } }))
+			.mockResolvedValueOnce(response({ sessions: [{ id: "child", projectId: "p-1", mode: "chat", parentHostId: "mac", parentSessionId: "manager" }], archived: { total: 0, byProject: {} } }))
 			.mockResolvedValueOnce(response({ sessions: [] }))
 			.mockResolvedValueOnce(response({ projects: [{ id: "p-1", name: "Project" }] }));
 
 		const result = await getSessions(cfg);
 
-		expect(result.sessions[0]).toMatchObject({ id: "child", parentSessionId: "manager" });
+		expect(result.sessions[0]).toMatchObject({ id: "child", parentHostId: "mac", parentSessionId: "manager" });
 	});
 
 	it("looks up one historical fleet ancestor with cancellation", async () => {

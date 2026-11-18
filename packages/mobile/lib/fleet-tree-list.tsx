@@ -65,7 +65,7 @@ type ArchiveStatusRow = { kind: "archive-status"; key: string };
 export type MobileFleetRow = ProjectRow | MachineRow | SessionRow | ArchiveHeaderRow | ArchivedSessionRow | ArchiveStatusRow;
 
 type MissingAncestor = { key: string; hostId: string; sessionId: string };
-type LineageRow = { id: string; hostId: string; parentSessionId?: string };
+type LineageRow = { id: string; hostId: string; parentHostId?: string; parentSessionId?: string };
 type AncestorController = { hostId: string; controller: AbortController };
 type AncestorFailure = { hostId: string; count: number; retryAt: number };
 type AncestorRetryTimer = { hostId: string; timer: ReturnType<typeof setTimeout> };
@@ -90,8 +90,9 @@ function resolveFleetLineage(
 		const rowKey = hostedRowKey(row.hostId, row.id);
 		if (visited.has(rowKey)) return;
 		visited.add(rowKey);
-		if (!row.parentSessionId || row.parentSessionId === row.id) return;
-		const parentKey = hostedRowKey(row.hostId, row.parentSessionId);
+		const parentHostId = row.parentHostId || row.hostId;
+		if (!row.parentSessionId || (parentHostId === row.hostId && row.parentSessionId === row.id)) return;
+		const parentKey = hostedRowKey(parentHostId, row.parentSessionId);
 		const available = current.get(parentKey);
 		if (available) {
 			visit(available);
@@ -99,7 +100,7 @@ function resolveFleetLineage(
 		}
 		const historical = history.get(parentKey);
 		if (!historical) {
-			missing.set(parentKey, { key: parentKey, hostId: row.hostId, sessionId: row.parentSessionId });
+			missing.set(parentKey, { key: parentKey, hostId: parentHostId, sessionId: row.parentSessionId });
 			return;
 		}
 		ancestors.set(parentKey, historical);
