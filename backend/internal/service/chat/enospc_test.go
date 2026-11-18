@@ -34,6 +34,19 @@ type enospcBindStore struct {
 	failed bool
 }
 
+type enospcProviderInputStore struct {
+	chatsvc.Store
+	failed bool
+}
+
+func (s *enospcProviderInputStore) RecordProviderInput(ctx context.Context, turnID, text string) error {
+	if !s.failed {
+		s.failed = true
+		return syscall.ENOSPC
+	}
+	return s.Store.RecordProviderInput(ctx, turnID, text)
+}
+
 type reconnectedReceiptConversation struct{ *receiptConversation }
 
 func (*reconnectedReceiptConversation) ReconnectedLive() bool { return true }
@@ -76,6 +89,46 @@ func TestSendRetryAfterENOSPCDoesNotDuplicateProviderTurn(t *testing.T) {
 	after, err := h.st.LoadConversationSnapshot(ctx, h.ctrl.ConversationID())
 	if err != nil || len(after.Turns) != 1 || len(after.Messages) != 1 {
 		t.Fatalf("snapshot after retries: turns=%d messages=%d err=%v", len(after.Turns), len(after.Messages), err)
+	}
+}
+
+func TestConfirmSessionChatTurnRejectsFailureBeforeProviderDispatch(t *testing.T) {
+	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
+		return &enospcProviderInputStore{Store: st}
+	})
+	ctx := context.Background()
+	const deliveryID = "collision-undispatched"
+	options := ports.MessageDeliveryOptions{}
+
+	if _, err := h.svc.RelaySessionChatTurn(ctx, testSession, "coordinate", deliveryID, options); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("RelaySessionChatTurn error = %v, want ENOSPC before provider dispatch", err)
+	}
+	if got := h.conv.sendCallCount(); got != 0 {
+		t.Fatalf("provider calls = %d, want 0", got)
+	}
+	accepted, err := h.svc.ConfirmSessionChatTurn(ctx, testSession, "coordinate", deliveryID, options)
+	if err != nil || accepted {
+		t.Fatalf("ConfirmSessionChatTurn = (%v, %v), want definite rejection", accepted, err)
+	}
+}
+
+func TestConfirmSessionChatTurnKeepsAcceptedUnboundDeliveryAmbiguous(t *testing.T) {
+	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
+		return &enospcBindStore{Store: st}
+	})
+	ctx := context.Background()
+	const deliveryID = "collision-unbound"
+	options := ports.MessageDeliveryOptions{}
+
+	if _, err := h.svc.RelaySessionChatTurn(ctx, testSession, "coordinate", deliveryID, options); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("RelaySessionChatTurn error = %v, want ENOSPC after provider acceptance", err)
+	}
+	if got := h.conv.sendCallCount(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	accepted, err := h.svc.ConfirmSessionChatTurn(ctx, testSession, "coordinate", deliveryID, options)
+	if accepted || !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
+		t.Fatalf("ConfirmSessionChatTurn = (%v, %v), want ambiguous accepted write", accepted, err)
 	}
 }
 

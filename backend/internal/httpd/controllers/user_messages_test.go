@@ -54,6 +54,7 @@ func TestUserMessageRecordedOnlyForHumanSends(t *testing.T) {
 		{"steer", "steer", chatsvc.SteerOrSendResult{}, map[string]any{"text": "focus", "clientMessageId": "a"},
 			[]userMessageCall{{id: "p1-1", isSteer: true}}},
 		{"agent steer", "steer", chatsvc.SteerOrSendResult{}, map[string]any{"text": "focus", "clientMessageId": "a", "senderSessionId": "orch-1"}, nil},
+		{"remote agent steer", "steer", chatsvc.SteerOrSendResult{}, map[string]any{"text": "focus", "clientMessageId": "remote", "automationAuthored": true}, nil},
 		{"steer-or-send that steered", "steer-or-send", chatsvc.SteerOrSendResult{Steered: true}, map[string]any{"text": "x", "clientMessageId": "b"},
 			[]userMessageCall{{id: "p1-1", isSteer: true}}},
 		// A fallback send is a Chat message, counted where it is inserted.

@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
@@ -68,6 +69,23 @@ func TestMobileLANRejectsReassignedAddressWithSamePassword(t *testing.T) {
 	}
 	if got := request("h_A", "wrong"); got.Code != http.StatusUnauthorized || calls != 2 {
 		t.Fatalf("unauthenticated request: status=%d calls=%d", got.Code, calls)
+	}
+}
+
+func TestLoopbackRouterRejectsRequestPinnedToAnotherHost(t *testing.T) {
+	router := NewRouterWithControl(config.Config{}, discardLogger(), nil, APIDeps{HostID: "h_B"}, ControlDeps{})
+	request := func(expectedHostID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/identity", nil)
+		req.Header.Set("X-AO-Expected-Host-ID", expectedHostID)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+	if got := request("h_A"); got.Code != http.StatusMisdirectedRequest || !strings.Contains(got.Body.String(), `"code":"HOST_ID_MISMATCH"`) {
+		t.Fatalf("stale host request: status=%d body=%q", got.Code, got.Body.String())
+	}
+	if got := request("h_B"); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"hostId":"h_B"`) {
+		t.Fatalf("matching host request: status=%d body=%q", got.Code, got.Body.String())
 	}
 }
 

@@ -329,6 +329,33 @@ func TestAddInitialDirectoriesBoundsWatchCount(t *testing.T) {
 	}
 }
 
+func TestWatchWithStatusReportsWatchCapDegradation(t *testing.T) {
+	root := t.TempDir()
+	for i := range 4 {
+		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("dir-%02d", i), "nested"), 0o755); err != nil {
+			t.Fatalf("mkdir tree: %v", err)
+		}
+	}
+	previous := maxWatchedDirectories
+	maxWatchedDirectories = 1
+	defer func() { maxWatchedDirectories = previous }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	subscription, err := WatchWithStatus(ctx, root)
+	if err != nil {
+		t.Fatalf("WatchWithStatus: %v", err)
+	}
+	select {
+	case _, ok := <-subscription.Degraded:
+		if !ok {
+			t.Fatal("degraded channel closed before reporting partial coverage")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch cap did not report degraded coverage")
+	}
+}
+
 func TestAddCreatedTreeSharesWatchBudgetWithInitialWalk(t *testing.T) {
 	root := t.TempDir()
 	existing := filepath.Join(root, "initial")

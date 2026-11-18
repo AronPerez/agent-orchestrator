@@ -67,3 +67,26 @@ func TestGetIdentityExposesNothingBeyondIDAndVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestGetCoordinationCapabilitiesAdvertisesAutomationProvenance(t *testing.T) {
+	srv := identityServer(t, "h_abc")
+
+	res, err := http.Get(srv.URL + "/api/v1/coordination/capabilities")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", res.StatusCode)
+	}
+	var got struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Capabilities) != 1 || got.Capabilities[0] != "automation-authored" {
+		t.Fatalf("capabilities = %v, want [automation-authored]", got.Capabilities)
+	}
+}

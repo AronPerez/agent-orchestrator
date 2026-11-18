@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
+	"runtime"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -24,18 +27,20 @@ type sendOptions struct {
 // POST /api/v1/sessions/{id}/send. The CLI keeps its own copy so it need not
 // import httpd.
 type sendAPIRequest struct {
-	UserAuthored    bool   `json:"userAuthored,omitempty"`
-	SenderSessionID string `json:"senderSessionId,omitempty"`
-	Message         string `json:"message"`
+	UserAuthored       bool   `json:"userAuthored,omitempty"`
+	AutomationAuthored bool   `json:"automationAuthored,omitempty"`
+	SenderSessionID    string `json:"senderSessionId,omitempty"`
+	Message            string `json:"message"`
 }
 
 // The steering DTOs mirror the daemon conversation API without coupling the
 // thin CLI to the HTTP controller package.
 type conversationMessageAPIRequest struct {
-	Text            string `json:"text"`
-	ClientMessageID string `json:"clientMessageId"`
-	SenderSessionID string `json:"senderSessionId,omitempty"`
-	RecoverOnly     bool   `json:"recoverOnly,omitempty"`
+	Text               string `json:"text"`
+	ClientMessageID    string `json:"clientMessageId"`
+	SenderSessionID    string `json:"senderSessionId,omitempty"`
+	AutomationAuthored bool   `json:"automationAuthored,omitempty"`
+	RecoverOnly        bool   `json:"recoverOnly,omitempty"`
 }
 
 type steerOrSendAPIResponse struct {
@@ -70,63 +75,115 @@ func newSendCommand(ctx *commandContext) *cobra.Command {
 }
 
 func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) error {
+	opts.clientMessageID = strings.TrimSpace(opts.clientMessageID)
 	if opts.recoverOnly && !opts.steer {
 		return usageError{errors.New("usage: --recover-only requires --steer")}
 	}
-	if strings.TrimSpace(opts.clientMessageID) != "" && !opts.steer {
+	if opts.clientMessageID != "" && !opts.steer {
 		return usageError{errors.New("usage: --client-message-id requires --steer")}
 	}
-	if opts.recoverOnly && strings.TrimSpace(opts.clientMessageID) == "" {
+	if opts.recoverOnly && opts.clientMessageID == "" {
 		return usageError{errors.New("usage: --recover-only requires --client-message-id")}
 	}
 	if !opts.recoverOnly && strings.TrimSpace(opts.message) == "" {
 		return usageError{errors.New("usage: --message is required")}
 	}
-	message := opts.message
-	if sender := strings.TrimSpace(os.Getenv("AO_SESSION_ID")); !opts.recoverOnly && sender != "" {
-		message = "[from " + sender + "] " + message
+	senderSessionID := callerSession()
+	if opts.recoverOnly {
+		// Receipt recovery does not send a message and therefore needs neither
+		// source provenance nor a live source daemon.
+		senderSessionID = ""
 	}
+	sourceSessionID := senderSessionID
+	userAuthored := senderSessionID == ""
+	automationAuthored := false
+	message := opts.message
 	session := strings.TrimSpace(opts.session)
 	if session == "" {
 		return usageError{errors.New("usage: --session is required")}
+	}
+	if c.remote != nil {
+		c.remote.identityPinRequired = true
+	}
+	sourceHostID := ""
+	sameHost := c.remote == nil
+	if !opts.recoverOnly && c.remote != nil && senderSessionID != "" {
+		var err error
+		sourceHostID, sameHost, err = c.remoteRelationToSource(ctx, senderSessionID)
+		if err != nil {
+			return err
+		}
+		if !sameHost {
+			if err := c.requireRemoteCoordinationCapability(ctx, coordinationCapabilityAutomationAuthored); err != nil {
+				return fmt.Errorf("remote automation provenance is unavailable: %w", err)
+			}
+			automationAuthored = true
+			// Session IDs are host-local. Keep only the host-qualified readable
+			// source; do not let the destination resolve a same-named session.
+			senderSessionID = ""
+		}
+	}
+	if !opts.recoverOnly && sourceSessionID != "" {
+		if c.remote != nil && !sameHost {
+			message = "[from " + sourceSessionID + " on " + sourceHostID + "] " + message
+		} else {
+			message = "[from " + sourceSessionID + "] " + message
+		}
 	}
 
 	// PathEscape: session ids are already "-"/digit safe, but may later come
 	// from sanitized issue refs; keep the URL well-formed regardless.
 	path := "sessions/" + url.PathEscape(session)
 	if !opts.steer {
-		return c.postJSON(ctx, path+"/send", sendAPIRequest{Message: message, SenderSessionID: strings.TrimSpace(os.Getenv("AO_SESSION_ID")), UserAuthored: strings.TrimSpace(os.Getenv("AO_SESSION_ID")) == ""}, nil)
+		if err := c.postJSON(ctx, path+"/send", sendAPIRequest{
+			Message: message, SenderSessionID: senderSessionID,
+			UserAuthored: userAuthored, AutomationAuthored: automationAuthored,
+		}, nil); err != nil {
+			return err
+		}
+		if suffix := c.resolvedBySuffix(); suffix != "" {
+			_, _ = fmt.Fprintf(c.deps.Out, "Message accepted%s; agent action is not confirmed.\n", suffix)
+		}
+		return nil
 	}
-	return c.steerMessage(ctx, path, message, strings.TrimSpace(opts.clientMessageID), opts.recoverOnly)
+	return c.steerMessage(ctx, path, message, senderSessionID, opts.clientMessageID, automationAuthored, opts.recoverOnly)
 }
 
 func (c *commandContext) steerMessage(
 	ctx context.Context,
-	sessionPath, message, clientMessageID string,
-	recoverOnly bool,
+	sessionPath, message, senderSessionID, clientMessageID string,
+	automationAuthored, recoverOnly bool,
 ) error {
 	if clientMessageID == "" {
 		clientMessageID = uuid.NewString()
 	}
 	var result steerOrSendAPIResponse
 	err := c.postJSON(ctx, sessionPath+"/conversation/steer-or-send", conversationMessageAPIRequest{
-		Text: message, ClientMessageID: clientMessageID, SenderSessionID: strings.TrimSpace(os.Getenv("AO_SESSION_ID")), RecoverOnly: recoverOnly,
+		Text: message, ClientMessageID: clientMessageID, SenderSessionID: senderSessionID,
+		AutomationAuthored: automationAuthored, RecoverOnly: recoverOnly,
 	}, &result)
 	if err != nil {
+		var preflightErr remotePreflightError
+		if errors.As(err, &preflightErr) {
+			if recoverOnly {
+				return fmt.Errorf("%w; recovery request was not sent; retry the same recovery command with delivery handle %s", err, clientMessageID)
+			}
+			return fmt.Errorf("%w; steering request was not sent; retry the original command with the same --client-message-id %s", err, clientMessageID)
+		}
 		var responseErr apiResponseError
 		hasResponseErr := errors.As(err, &responseErr)
 		if hasResponseErr && responseErr.ErrorBody.Code == "CHAT_STEER_UNCERTAIN" {
 			if recoverOnly {
 				return fmt.Errorf("%w; delivery handle %s remains unresolved and was not resent", err, clientMessageID)
 			}
-			return fmt.Errorf(
-				"%w; recover this delivery without resending it: ao send --session %s --steer --recover-only --client-message-id %s",
-				err, strings.TrimPrefix(sessionPath, "sessions/"), clientMessageID)
+			return fmt.Errorf("%w; recover this delivery without resending it: %s", err,
+				c.steeringRecoveryCommand(strings.TrimPrefix(sessionPath, "sessions/"), clientMessageID))
 		}
 		if errors.Is(err, errDaemonUnavailable) || !hasResponseErr || responseErr.StatusCode >= 500 {
 			return fmt.Errorf(
-				"%w; outcome is unknown for delivery handle %s; retry safely with --client-message-id %s",
-				err, clientMessageID, clientMessageID)
+				"%w; outcome is unknown for delivery handle %s; recover without resending it: %s",
+				err, clientMessageID,
+				c.steeringRecoveryCommand(strings.TrimPrefix(sessionPath, "sessions/"), clientMessageID))
 		}
 		return err
 	}
@@ -134,21 +191,58 @@ func (c *commandContext) steerMessage(
 	if result.Outcome == "steered" {
 		if recoverOnly {
 			_, _ = fmt.Fprintf(c.deps.Out,
-				"Recovered steering receipt for turn %s with delivery handle %s; agent action is not confirmed.\n",
-				result.ProviderTurnID, clientMessageID)
+				"Recovered steering receipt%s for turn %s with delivery handle %s; agent action is not confirmed.\n",
+				c.resolvedBySuffix(), result.ProviderTurnID, clientMessageID)
 			return nil
 		}
 		_, _ = fmt.Fprintf(c.deps.Out,
-			"Steering accepted by provider for active turn %s with delivery handle %s; agent action is not confirmed.\n",
-			result.ProviderTurnID, clientMessageID)
+			"Steering accepted%s by provider for active turn %s with delivery handle %s; agent action is not confirmed.\n",
+			c.resolvedBySuffix(), result.ProviderTurnID, clientMessageID)
 		return nil
 	}
 	if result.Duplicate {
-		_, _ = fmt.Fprintln(c.deps.Out, "Message was already accepted; delivery state is unchanged.")
+		_, _ = fmt.Fprintf(c.deps.Out, "Message was already accepted%s; delivery state is unchanged.\n", c.resolvedBySuffix())
 		return nil
 	}
 	_, _ = fmt.Fprintf(c.deps.Out,
-		"No active turn to steer. Message accepted as a normal Chat turn in %s state with delivery handle %s; provider delivery is not confirmed.\n",
-		result.State, clientMessageID)
+		"No active turn to steer. Message accepted%s as a normal Chat turn in %s state with delivery handle %s; provider delivery is not confirmed.\n",
+		c.resolvedBySuffix(), result.State, clientMessageID)
 	return nil
+}
+
+func (c *commandContext) steeringRecoveryCommand(sessionID, clientMessageID string) string {
+	return c.steeringRecoveryCommandForOS(runtime.GOOS, sessionID, clientMessageID)
+}
+
+func (c *commandContext) steeringRecoveryCommandForOS(goos, sessionID, clientMessageID string) string {
+	remoteArgs := c.remoteRetryArguments()
+	args := make([]string, 0, 1+len(remoteArgs)+6)
+	args = append(args, "send")
+	args = append(args, remoteArgs...)
+	args = append(args, "--session", sessionID, "--steer", "--recover-only", "--client-message-id", clientMessageID)
+	if goos == "windows" {
+		return powershellEncodedAOCommand(args)
+	}
+	rendered := []string{"ao"}
+	for _, arg := range args {
+		rendered = append(rendered, quoteCommandArgument(arg))
+	}
+	return strings.Join(rendered, " ")
+}
+
+// powershellEncodedAOCommand is safe to paste into PowerShell or Command
+// Prompt: the outer command contains only Base64, and PowerShell receives each
+// original value as a single-quoted literal after decoding it.
+func powershellEncodedAOCommand(args []string) string {
+	parts := make([]string, 0, 1+len(args))
+	parts = append(parts, "& ao")
+	for _, arg := range args {
+		parts = append(parts, "'"+strings.ReplaceAll(arg, "'", "''")+"'")
+	}
+	units := utf16.Encode([]rune(strings.Join(parts, " ")))
+	raw := make([]byte, len(units)*2)
+	for i, unit := range units {
+		binary.LittleEndian.PutUint16(raw[2*i:], unit)
+	}
+	return "powershell.exe -NoProfile -EncodedCommand " + base64.StdEncoding.EncodeToString(raw)
 }
