@@ -165,6 +165,34 @@ WHERE type = 'needs_input'
        OR activity_state NOT IN ('waiting_input', 'blocked')
   );
 
+-- A decision notification is stale once its call is no longer in Needs you,
+-- or its call row is absent (the projection is rebuilt before this runs, so
+-- absence means the call is gone). Read rows for a still-waiting call stay open:
+-- reading acknowledges, it does not resolve.
+-- name: ResolveStaleDecisionNotifications :many
+UPDATE notifications
+SET resolved_at = sqlc.arg(resolved_at)
+WHERE type = 'decision_needed'
+  AND resolved_at IS NULL
+  AND dismissed_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM decision_calls c
+    WHERE c.call_id = notifications.decision_call_id
+      AND c.state = 'needs_you'
+  )
+RETURNING *;
+
+-- name: DeleteStaleDismissedDecisionNotifications :execrows
+DELETE FROM notifications
+WHERE type = 'decision_needed'
+  AND resolved_at IS NULL
+  AND dismissed_at IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM decision_calls c
+    WHERE c.call_id = notifications.decision_call_id
+      AND c.state = 'needs_you'
+  );
+
 -- name: GetOpenNotificationByDedupe :one
 SELECT *
 FROM notifications

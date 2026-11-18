@@ -230,8 +230,9 @@ func (s *Store) ResolveDecisionNotifications(
 
 // ReconcileResolvedNotifications closes open notifications whose resolving
 // transition happened while the daemon was down, by re-reading the durable
-// session and PR facts. Without it a restart can strand a needs-input row in
-// the unresolved list forever.
+// session, PR, and decision-call facts. Without it a restart can strand a
+// needs-input row in the unresolved list forever, or keep announcing a call
+// that was answered, dismissed, or withdrawn while the daemon was down.
 //
 // Ready-to-merge is judged in Go rather than SQL: readiness is more than
 // open/closed, and the SCM observer persists PR facts before it asks lifecycle
@@ -286,6 +287,14 @@ func (s *Store) ReconcileResolvedNotifications(ctx context.Context, at time.Time
 			return fmt.Errorf("delete dismissed needs-input notifications: %w", err)
 		}
 		resolved = notificationsFromGen(needsInput)
+		decisions, err := q.ResolveStaleDecisionNotifications(ctx, nullTime(at))
+		if err != nil {
+			return fmt.Errorf("reconcile decision notifications: %w", err)
+		}
+		if _, err := q.DeleteStaleDismissedDecisionNotifications(ctx); err != nil {
+			return fmt.Errorf("delete dismissed decision notifications: %w", err)
+		}
+		resolved = append(resolved, notificationsFromGen(decisions)...)
 		for _, prURL := range stalePRs {
 			rows, err := q.ResolvePRNotificationsByType(ctx, gen.ResolvePRNotificationsByTypeParams{
 				ResolvedAt: nullTime(at),

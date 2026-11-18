@@ -197,6 +197,26 @@ func (q *Queries) DeleteResolvedDismissedNotifications(ctx context.Context) (int
 	return result.RowsAffected()
 }
 
+const deleteStaleDismissedDecisionNotifications = `-- name: DeleteStaleDismissedDecisionNotifications :execrows
+DELETE FROM notifications
+WHERE type = 'decision_needed'
+  AND resolved_at IS NULL
+  AND dismissed_at IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM decision_calls c
+    WHERE c.call_id = notifications.decision_call_id
+      AND c.state = 'needs_you'
+  )
+`
+
+func (q *Queries) DeleteStaleDismissedDecisionNotifications(ctx context.Context) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteStaleDismissedDecisionNotifications)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteStaleDismissedNeedsInputNotifications = `-- name: DeleteStaleDismissedNeedsInputNotifications :execrows
 DELETE FROM notifications
 WHERE type = 'needs_input'
@@ -727,6 +747,62 @@ type ResolveSessionNotificationsByTypeParams struct {
 
 func (q *Queries) ResolveSessionNotificationsByType(ctx context.Context, arg ResolveSessionNotificationsByTypeParams) ([]Notification, error) {
 	rows, err := q.db.QueryContext(ctx, resolveSessionNotificationsByType, arg.ResolvedAt, arg.SessionID, arg.Type)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Notification{}
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.ProjectID,
+			&i.PRURL,
+			&i.Type,
+			&i.Title,
+			&i.Body,
+			&i.Status,
+			&i.CreatedAt,
+			&i.ResolvedAt,
+			&i.DismissedAt,
+			&i.SourceKey,
+			&i.DecisionCallID,
+			&i.DecisionOriginHostID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const resolveStaleDecisionNotifications = `-- name: ResolveStaleDecisionNotifications :many
+UPDATE notifications
+SET resolved_at = ?1
+WHERE type = 'decision_needed'
+  AND resolved_at IS NULL
+  AND dismissed_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM decision_calls c
+    WHERE c.call_id = notifications.decision_call_id
+      AND c.state = 'needs_you'
+  )
+RETURNING id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at, dismissed_at, source_key, decision_call_id, decision_origin_host_id
+`
+
+// A decision notification is stale once its call is no longer in Needs you,
+// or its call row is absent (the projection is rebuilt before this runs, so
+// absence means the call is gone). Read rows for a still-waiting call stay open:
+// reading acknowledges, it does not resolve.
+func (q *Queries) ResolveStaleDecisionNotifications(ctx context.Context, resolvedAt sql.NullTime) ([]Notification, error) {
+	rows, err := q.db.QueryContext(ctx, resolveStaleDecisionNotifications, resolvedAt)
 	if err != nil {
 		return nil, err
 	}
