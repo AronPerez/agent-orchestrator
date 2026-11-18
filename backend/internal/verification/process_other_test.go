@@ -408,6 +408,32 @@ func TestUnixCleanupKillsAlreadyFrozenProcessesAfterAScanFailure(t *testing.T) {
 	}
 }
 
+func TestUnixCleanupMarksUnconfirmedCleanup(t *testing.T) {
+	process := unixOwnedProcess{pid: 42, start: "owned"}
+	hooks := unixProcessHooks{
+		owned: func(context.Context) ([]unixOwnedProcess, error) {
+			return []unixOwnedProcess{process}, nil
+		},
+		signal: func(_ unixOwnedProcess, signal syscall.Signal) error {
+			if signal == syscall.SIGKILL {
+				return syscall.EPERM
+			}
+			return nil
+		},
+		wait: time.Millisecond,
+		poll: time.Microsecond,
+	}
+
+	_, err := stopOwnedUnixProcesses(context.Background(), hooks)
+	if err == nil {
+		t.Fatal("cleanup succeeded despite an unkillable owned process")
+	}
+	var uncertain interface{ cleanupUncertain() }
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("cleanup error = %v, want cleanup uncertainty marker", err)
+	}
+}
+
 func TestUnixCleanupUsesBoundedPostExitOwnershipSweeps(t *testing.T) {
 	process := unixOwnedProcess{pid: 4242, start: "owned"}
 	scanCalls := 0

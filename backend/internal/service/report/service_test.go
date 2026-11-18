@@ -100,6 +100,7 @@ func TestCreateDonePersistsVerificationEvidenceAndReturnsFailureOnce(t *testing.
 	dataDir := t.TempDir()
 	artifactDir := filepath.Join(dataDir, "artifacts", "ao-7")
 	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	deadline := started.Add(time.Hour)
 	failed := verification.Result{
 		Passed: false, FailedStep: 1, OutputTail: "FAIL expected green\n",
 		StartedAt: started, CompletedAt: started.Add(2 * time.Second),
@@ -108,7 +109,7 @@ func TestCreateDonePersistsVerificationEvidenceAndReturnsFailureOnce(t *testing.
 	artifacts := &fakeEvidenceArtifacts{}
 	st := &fakeStore{
 		ok: true, projectOK: true,
-		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker, Goal: "ship it", Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao", ArtifactDir: artifactDir}},
+		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker, Goal: "ship it", TimeboxDeadlineAt: &deadline, Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao", ArtifactDir: artifactDir}},
 		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"go test ./..."}, Env: map[string]string{"CI": "true"}}},
 	}
 	svc := New(Deps{Store: st, Verifier: verifier, EvidenceArtifacts: artifacts, DataDir: dataDir, NewID: func() string { return "rpt_1" }, Now: func() time.Time { return started }})
