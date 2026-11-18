@@ -779,6 +779,14 @@ func TestWindowsRecoveryCommandEncodesArbitraryArguments(t *testing.T) {
 	}
 }
 
+func TestPOSIXRecoveryCommandQuotesLeadingEqualsHandle(t *testing.T) {
+	c := &commandContext{remote: &remoteTarget{source: "--host", hostID: testSavedHostID}}
+	command := c.steeringRecoveryCommandForOS("linux", "remote-1", "=git")
+	if !strings.Contains(command, "--client-message-id '=git'") || strings.Contains(command, "--client-message-id =git") {
+		t.Fatalf("POSIX recovery command did not quote leading equals handle: %q", command)
+	}
+}
+
 func decodePowerShellCommand(t *testing.T, command string) string {
 	t.Helper()
 	const prefix = "powershell.exe -NoProfile -EncodedCommand "

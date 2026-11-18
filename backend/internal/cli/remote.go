@@ -273,7 +273,7 @@ func (c *commandContext) remoteRetryArguments() []string {
 }
 
 func quoteCommandArgument(value string) string {
-	if commandArgumentPattern.MatchString(value) {
+	if commandArgumentPattern.MatchString(value) && !strings.HasPrefix(value, "=") {
 		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
