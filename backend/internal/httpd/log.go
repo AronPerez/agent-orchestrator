@@ -53,8 +53,12 @@ func requestLoggerWithCapture(log *slog.Logger, sink ports.EventSink, captureHTT
 					"remote", r.RemoteAddr,
 				}
 				captured := capturedErr()
-				if captured.Err != nil && ww.Status() >= http.StatusInternalServerError {
-					attrs = append(attrs, "error", captured.Err)
+				if captured.Err != nil {
+					_, errorCode := telemetrymeta.ErrorKindAndCode(captured.Err)
+					if ww.Status() >= http.StatusInternalServerError ||
+						(ww.Status() == http.StatusConflict && errorCode == "WORKSPACE_PROVISION_FAILED") {
+						attrs = append(attrs, "error", captured.Err)
+					}
 				}
 				log.Info("http request", attrs...)
 				if status := ww.Status(); status >= http.StatusBadRequest && status < http.StatusInternalServerError {

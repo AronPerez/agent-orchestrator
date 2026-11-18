@@ -3206,6 +3206,7 @@ func sessionView(r *http.Request, s domain.Session) SessionView {
 	}
 	if isAgentCoordinationRequest(r.Context()) {
 		view.ProvisionError = ""
+		view.PreviewURL = ""
 	}
 	return view
 }

@@ -17,11 +17,13 @@ export type RemoteHostView = {
 };
 
 export function toHostViews(entries: RemoteEntry[]): RemoteHostView[] {
-	return entries.map(({ hostId, label, url, accountUserId }) => ({ hostId: hostId ?? "", label, url, ...(accountUserId ? { accountUserId } : {}) }));
+	return entries
+		.filter((entry) => !entry.cleanupOnly)
+		.map(({ hostId, label, url, accountUserId }) => ({ hostId: hostId ?? "", label, url, ...(accountUserId ? { accountUserId } : {}) }));
 }
 
 export async function findRemote(path: string, url: string, hostId?: string): Promise<RemoteEntry> {
-	const entry = (await readRemotes(path)).find((candidate) => candidate.url === url && (!hostId || candidate.hostId === hostId));
+	const entry = (await readRemotes(path)).find((candidate) => !candidate.cleanupOnly && candidate.url === url && (!hostId || candidate.hostId === hostId));
 	if (!entry) throw new Error(`no saved host for ${url}`);
 	return entry;
 }

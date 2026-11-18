@@ -288,6 +288,22 @@ func (i *Identity) Snapshot() ports.TelemetryIdentity {
 	return snap
 }
 
+// CloudUserBinding returns the desktop's durable account binding even when
+// telemetry export is opted out. It rereads the marker because the desktop
+// removes it before its asynchronous daemon handoff on sign-out.
+func (i *Identity) CloudUserBinding() (id string, known bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.persistFailed {
+		return "", false
+	}
+	bound, err := readTrimmed(filepath.Join(i.dataDir, boundUserFile))
+	if err != nil || !cloudUserIDPattern.MatchString(bound) {
+		return "", false
+	}
+	return bound, true
+}
+
 // eventAttributes avoids another marker read while constructing an export.
 // The sender checks ExportSuppressed immediately before each HTTP attempt.
 func (i *Identity) eventAttributes() (cloudUserID, githubLogin string) {

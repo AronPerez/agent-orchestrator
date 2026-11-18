@@ -1,12 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLocalHostIdentity, IncompatibleRemoteVersionError, pairDevice, probeRemote, readAuthErrorCode, readRemoteIdentity } from "./remote-request";
+import {
+	createLocalHostIdentity,
+	IncompatibleRemoteVersionError,
+	issueCoordinationToken,
+	pairDevice,
+	probeCoordinationToken,
+	probeRemote,
+	readAuthErrorCode,
+	readRemoteIdentity,
+	revokeCoordinationToken,
+} from "./remote-request";
 
 const entry = { label: "workbox", url: "http://192.0.2.1:3011", password: "pw" };
 
 // Typed as fetch so `mock.calls` carries fetch's argument tuple — an untyped
 // `vi.fn(async () => …)` records a zero-length tuple and indexing it is a type error.
 function fakeFetch(status: number, body: unknown = {}) {
-	return vi.fn<typeof fetch>(async () => new Response(JSON.stringify(body), { status }));
+	return vi.fn<typeof fetch>(async () => new Response(status === 204 ? null : JSON.stringify(body), { status }));
 }
 
 // A body that is not JSON at all, the way an SPA catch-all answers every path.
@@ -157,6 +167,89 @@ describe("pairDevice", () => {
 		await expect(pairDevice(host, "secret", device, fakeFetch(200, { hostId: "h_vm", token: "b".repeat(64) }))).resolves.toEqual({ kind: "offline" });
 		await expect(pairDevice(host, "secret", device, vi.fn<typeof fetch>(async () => { throw new TypeError("fetch failed"); }))).resolves.toEqual({ kind: "offline" });
 	});
+});
+
+describe("coordination credentials", () => {
+	const host = { ...entry, hostId: "h_workbox" };
+	const token = "aoc_" + "c".repeat(64);
+	const device = { name: "Test Mac", platform: "darwin", clientId: "h_this_mac" };
+
+	it("issues a host-pinned, route-filtered credential with the full saved credential", async () => {
+		const fetchImpl = fakeFetch(200, { hostId: "h_workbox", deviceId: "dev_coord", token, scope: "agent-coordination" });
+		await expect(issueCoordinationToken(host, device, fetchImpl)).resolves.toEqual({ kind: "issued", token, deviceId: "dev_coord" });
+		const [url, init] = fetchImpl.mock.calls[0];
+		expect(url).toBe("http://192.0.2.1:3011/api/v1/remote-host/coordination-token");
+		expect(init?.method).toBe("POST");
+		expect(init?.redirect).toBe("error");
+		expect(new Headers(init?.headers).get("authorization")).toBe("Bearer pw");
+		expect(new Headers(init?.headers).get("x-ao-expected-host-id")).toBe("h_workbox");
+		expect(JSON.parse(String(init?.body))).toEqual(device);
+	});
+
+	it.each([
+		[401, "unauthorized"],
+		[403, "unauthorized"],
+		[404, "unsupported"],
+		[405, "unsupported"],
+		[501, "unsupported"],
+		[409, "offline"],
+		[500, "offline"],
+	])("maps issue status %i to %s", async (status, kind) => {
+		await expect(issueCoordinationToken(host, device, fakeFetch(status))).resolves.toEqual({ kind });
+	});
+
+	it("refuses an issued credential whose host, scope, or token shape is wrong", async () => {
+		await expect(issueCoordinationToken(host, device, fakeFetch(200, { hostId: "h_other", token, scope: "agent-coordination" }))).resolves.toEqual({ kind: "offline" });
+		await expect(issueCoordinationToken(host, device, fakeFetch(200, { hostId: "h_workbox", token, scope: "full" }))).resolves.toEqual({ kind: "offline" });
+		await expect(issueCoordinationToken(host, device, fakeFetch(200, { hostId: "h_workbox", token: "wrong", scope: "agent-coordination" }))).resolves.toEqual({ kind: "offline" });
+		await expect(issueCoordinationToken(host, device, fakeFetch(200, { hostId: "h_workbox", token: "aod_" + "c".repeat(64), scope: "agent-coordination" }))).resolves.toEqual({ kind: "offline" });
+		await expect(issueCoordinationToken(host, device, fakeFetch(200, { hostId: "h_workbox", deviceId: "", token, scope: "agent-coordination" }))).resolves.toEqual({ kind: "offline" });
+	});
+
+	it("probes only the coordination route with the route-filtered credential", async () => {
+		const fetchImpl = fakeFetch(200, { sessions: [] });
+		await expect(probeCoordinationToken({ ...host, coordinationToken: token }, fetchImpl)).resolves.toBe("valid");
+		const [url, init] = fetchImpl.mock.calls[0];
+		expect(url).toBe("http://192.0.2.1:3011/api/v1/sessions?active=true");
+		expect(init?.method).toBe("GET");
+		expect(init?.redirect).toBe("error");
+		expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${token}`);
+		expect(new Headers(init?.headers).get("x-ao-expected-host-id")).toBe("h_workbox");
+	});
+
+	it.each([[401, "invalid"], [403, "invalid"], [404, "offline"], [500, "offline"]])("maps probe status %i to %s", async (status, result) => {
+		await expect(probeCoordinationToken({ ...host, coordinationToken: token }, fakeFetch(status))).resolves.toBe(result);
+	});
+
+	it("preserves an explicit device revocation", async () => {
+		await expect(probeCoordinationToken(
+			{ ...host, coordinationToken: token },
+			fakeFetch(401, { code: "DEVICE_REVOKED" }),
+		)).resolves.toBe("revoked");
+	});
+
+	it("retires a host-pinned coordination device without following redirects", async () => {
+		const fetchImpl = fakeFetch(204);
+		await expect(revokeCoordinationToken(host, "dev_coord", fetchImpl)).resolves.toBe("retired");
+		const [url, init] = fetchImpl.mock.calls[0];
+		expect(url).toBe("http://192.0.2.1:3011/api/v1/remote-host/coordination-token/dev_coord");
+		expect(init?.method).toBe("DELETE");
+		expect(init?.redirect).toBe("error");
+		expect(new Headers(init?.headers).get("authorization")).toBe("Bearer pw");
+		expect(new Headers(init?.headers).get("x-ao-expected-host-id")).toBe("h_workbox");
+	});
+
+	it("treats only the coordination device's not-found envelope as already retired", async () => {
+		await expect(revokeCoordinationToken(host, "dev_coord", fakeFetch(404, { code: "COORDINATION_TOKEN_NOT_FOUND" }))).resolves.toBe("retired");
+		await expect(revokeCoordinationToken(host, "dev_coord", fakeFetch(404, { code: "NOT_FOUND" }))).resolves.toBe("unsupported");
+		await expect(revokeCoordinationToken(host, "dev_coord", fakeTextFetch(404, "missing route"))).resolves.toBe("unsupported");
+	});
+
+	it.each([[401, "unauthorized"], [403, "unauthorized"], [405, "unsupported"], [501, "unsupported"], [500, "offline"]])(
+		"maps revoke status %i to %s", async (status, result) => {
+			await expect(revokeCoordinationToken(host, "dev_coord", fakeFetch(status))).resolves.toBe(result);
+		},
+	);
 });
 
 describe("readAuthErrorCode", () => {
