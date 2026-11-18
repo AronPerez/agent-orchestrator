@@ -1124,7 +1124,9 @@ func TestReconcileProjectOverlapNoticesDoesNotRecordSentWithError(t *testing.T) 
 	store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo"}
 	nudger := &recordingOverlapNudger{
 		outcomes: map[domain.SessionID][]sessionguard.Outcome{"demo-a": {sessionguard.Sent, sessionguard.Sent}},
-		errors:   map[domain.SessionID][]error{"demo-a": {errors.New("composer busy after admission"), nil}},
+		errors: map[domain.SessionID][]error{"demo-a": {
+			fmt.Errorf("%w: prompt submission was not observed", sessionmanager.ErrSemanticAcceptanceUnsupported), nil,
+		}},
 	}
 	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
 	result := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}}}
@@ -1146,6 +1148,34 @@ func TestReconcileProjectOverlapNoticesDoesNotRecordSentWithError(t *testing.T) 
 	}
 	if nudger.calls[0].confirmOnly || !nudger.calls[2].confirmOnly {
 		t.Fatalf("ambiguous retry calls=%+v, want initial send followed by confirmation only", nudger.calls)
+	}
+}
+
+func TestReconcileProjectOverlapNoticesRetriesSemanticPreflightWithFreshAttempt(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = domain.SessionRecord{ID: "demo-a", ProjectID: "demo"}
+	store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo"}
+	nudger := &recordingOverlapNudger{
+		outcomes: map[domain.SessionID][]sessionguard.Outcome{"demo-a": {sessionguard.Sent, sessionguard.Sent}},
+		errors: map[domain.SessionID][]error{"demo-a": {
+			fmt.Errorf("mode-aware send: %w", sessionmanager.ErrSemanticDeliveryNotAttempted), nil,
+		}},
+	}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	result := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}}}
+
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), result); !errors.Is(err, sessionmanager.ErrSemanticDeliveryNotAttempted) {
+		t.Fatalf("preflight reconcile error = %v, want delivery-not-attempted", err)
+	}
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), result); err != nil {
+		t.Fatalf("supported retry reconcile: %v", err)
+	}
+	if len(nudger.calls) != 3 || nudger.calls[2].sessionID != "demo-a" || nudger.calls[2].confirmOnly {
+		t.Fatalf("preflight retry calls = %+v, want a fresh send for demo-a", nudger.calls)
+	}
+	if nudger.calls[0].deliveryID == nudger.calls[2].deliveryID {
+		t.Fatalf("preflight retry reused attempt id %q, want a fresh delivery", nudger.calls[0].deliveryID)
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/memcode"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/opencodev2"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/gitworktree"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/scratch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -11875,23 +11876,39 @@ func TestSendSemanticTUIReadsReceiptBeforeLaterOwnerExit(t *testing.T) {
 }
 
 func TestSendSemanticTUIRejectsAdapterWithoutAcceptanceSignal(t *testing.T) {
+	const deliveryID = "report-batch:unsupported"
 	st := newFakeStore()
 	st.sessions["s1"] = pastStartupGate(domain.SessionRecord{
-		ID: "s1", Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeTUI,
+		ID: "s1", Harness: domain.HarnessOpenCodeV2, Mode: domain.SessionModeTUI,
 		Activity: domain.Activity{State: domain.ActivityIdle},
 		Metadata: domain.SessionMetadata{RuntimeLaunchID: "launch-1"},
 	})
 	receipts := newFakeSemanticReceiptStore(st)
-	msg := &fakeMessenger{}
-	m := newSendTestManager(t, signalingAgent{}, msg, st)
+	msg := &fakeMessenger{onSend: func(id domain.SessionID, message string) {
+		if got, ok := domain.ReportDeliveryID(message); !ok || got != deliveryID {
+			t.Fatalf("delivery envelope = %q, %v", got, ok)
+		}
+		receipts.accept(id, "launch-1", deliveryID)
+	}}
+	m := newSendTestManager(t, opencodev2.New(), msg, st)
 	m.store = receipts
 
-	err := m.SendSemantic(context.Background(), "s1", "report", "report-batch:unsupported")
-	if !errors.Is(err, ErrSemanticAcceptanceUnsupported) {
+	err := m.SendSemantic(context.Background(), "s1", "report", deliveryID)
+	if !errors.Is(err, ErrSemanticAcceptanceUnsupported) || !errors.Is(err, ErrSemanticDeliveryNotAttempted) {
 		t.Fatalf("SendSemantic error = %v", err)
 	}
 	if len(msg.msgs) != 0 {
 		t.Fatalf("pane writes = %d, want 0", len(msg.msgs))
+	}
+	rec := st.sessions["s1"]
+	rec.Harness = domain.HarnessClaudeCode
+	st.sessions["s1"] = rec
+	m.agents = singleAgent{agent: semanticSignalingAgent{}}
+	if err := m.SendSemantic(context.Background(), "s1", "report", deliveryID); err != nil {
+		t.Fatalf("supported SendSemantic retry: %v", err)
+	}
+	if len(msg.msgs) != 1 {
+		t.Fatalf("retry pane writes = %d, want 1", len(msg.msgs))
 	}
 }
 

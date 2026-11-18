@@ -338,7 +338,7 @@ func (m sessionLifecycleMessenger) SendSemantic(ctx context.Context, id domain.S
 		SendSemantic(context.Context, domain.SessionID, string, string) error
 	})
 	if !ok {
-		return sessionmanager.ErrSemanticAcceptanceUnsupported
+		return sessionmanager.ErrSemanticDeliveryNotAttempted
 	}
 	return semantic.SendSemantic(ctx, id, message, deliveryID)
 }
@@ -681,7 +681,7 @@ func (m *modeAwareMessenger) SendSemantic(ctx context.Context, id domain.Session
 		SendSemantic(context.Context, domain.SessionID, string, string) error
 	})
 	if !ok {
-		return sessionmanager.ErrSemanticAcceptanceUnsupported
+		return sessionmanager.ErrSemanticDeliveryNotAttempted
 	}
 	return semantic.SendSemantic(ctx, id, message, deliveryID)
 }

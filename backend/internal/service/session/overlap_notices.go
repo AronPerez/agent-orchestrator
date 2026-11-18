@@ -681,7 +681,8 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 
 func projectOverlapNoticeDefinitelyUnsent(err error) bool {
 	return errors.Is(err, sessionmanager.ErrComposerBusy) ||
-		errors.Is(err, sessionmanager.ErrSemanticDeliveryRejected)
+		errors.Is(err, sessionmanager.ErrSemanticDeliveryRejected) ||
+		errors.Is(err, sessionmanager.ErrSemanticDeliveryNotAttempted)
 }
 
 func (s *Service) deleteInactiveProjectOverlapNoticeAttempts(
