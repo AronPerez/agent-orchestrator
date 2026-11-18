@@ -26,7 +26,10 @@ type fakeDecisionService struct {
 	raise    decisionsvc.RaiseInput
 	scope    decisionsvc.Scope
 	query    string
+	limit    int
 	searches int
+	boards   int
+	board    decisionsvc.Board
 	id       string
 	action   string
 	answer   decisionsvc.AnswerInput
@@ -64,8 +67,16 @@ func (f *fakeDecisionService) List(_ context.Context, actor decisionsvc.Actor, s
 	return []domain.DecisionCall{sampleDecisionCall()}, nil
 }
 
-func (f *fakeDecisionService) Search(_ context.Context, actor decisionsvc.Actor, query string) ([]domain.DecisionCall, error) {
-	f.actor, f.query = actor, query
+func (f *fakeDecisionService) Board(_ context.Context) (decisionsvc.Board, error) {
+	f.boards++
+	if f.err != nil {
+		return decisionsvc.Board{}, f.err
+	}
+	return f.board, nil
+}
+
+func (f *fakeDecisionService) Search(_ context.Context, actor decisionsvc.Actor, query string, limit int) ([]domain.DecisionCall, error) {
+	f.actor, f.query, f.limit = actor, query, limit
 	f.searches++
 	if f.err != nil {
 		return nil, f.err

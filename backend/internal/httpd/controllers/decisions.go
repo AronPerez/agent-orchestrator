@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -25,7 +26,8 @@ type DecisionService interface {
 	Raise(context.Context, decisionsvc.Actor, decisionsvc.RaiseInput) (domain.DecisionCall, error)
 	Get(context.Context, string) (decisionsvc.Detail, error)
 	List(context.Context, decisionsvc.Actor, decisionsvc.Scope) ([]domain.DecisionCall, error)
-	Search(context.Context, decisionsvc.Actor, string) ([]domain.DecisionCall, error)
+	Board(context.Context) (decisionsvc.Board, error)
+	Search(context.Context, decisionsvc.Actor, string, int) ([]domain.DecisionCall, error)
 	Answer(context.Context, decisionsvc.Actor, string, decisionsvc.AnswerInput) (domain.DecisionCall, error)
 	Dismiss(context.Context, decisionsvc.Actor, string, string) (domain.DecisionCall, error)
 	RecordOutcome(context.Context, decisionsvc.Actor, string, decisionsvc.OutcomeInput) (domain.DecisionCall, error)
@@ -40,6 +42,7 @@ type DecisionsController struct{ Svc DecisionService }
 func (c *DecisionsController) Register(r chi.Router) {
 	r.Post("/decisions", c.raise)
 	r.Get("/decisions", c.list)
+	r.Get("/decisions/board", c.board)
 	r.Get("/decisions/{id}", c.get)
 	r.Post("/decisions/{id}/answer", c.answer)
 	r.Post("/decisions/{id}/dismiss", c.dismiss)
@@ -93,7 +96,13 @@ func (c *DecisionsController) list(w http.ResponseWriter, r *http.Request) {
 		err   error
 	)
 	if hasQuery {
-		calls, err = c.Svc.Search(r.Context(), actor, query)
+		limit, ok := decisionSearchLimit(values)
+		if !ok {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "DECISION_LIMIT_INVALID",
+				"limit must be a whole number of at least 1", nil)
+			return
+		}
+		calls, err = c.Svc.Search(r.Context(), actor, query, limit)
 	} else {
 		scope := decisionsvc.Scope(r.URL.Query().Get("scope"))
 		if scope == "" {
@@ -108,6 +117,42 @@ func (c *DecisionsController) list(w http.ResponseWriter, r *http.Request) {
 	response := ListDecisionsResponse{Calls: make([]DecisionCallResponse, len(calls))}
 	for i := range calls {
 		response.Calls[i] = decisionCallResponse(calls[i])
+	}
+	envelope.WriteJSON(w, http.StatusOK, response)
+}
+
+// decisionSearchLimit reads an optional page size for q. Absent means the
+// service default; values above the maximum are capped rather than refused.
+func decisionSearchLimit(values map[string][]string) (int, bool) {
+	raw, present := values["limit"]
+	if !present {
+		return 0, true
+	}
+	limit, err := strconv.Atoi(strings.TrimSpace(raw[0]))
+	if err != nil || limit < 1 {
+		return 0, false
+	}
+	return min(limit, decisionsvc.MaxDecisionSearchLimit), true
+}
+
+func (c *DecisionsController) board(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/decisions/board")
+		return
+	}
+	board, err := c.Svc.Board(r.Context())
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_BOARD_FAILED", "Unable to load decisions")
+		return
+	}
+	response := DecisionBoardResponse{
+		Calls:         make([]DecisionCallResponse, len(board.Calls)),
+		NeedsYouCount: board.NeedsYouCount,
+		ServingHostID: board.ServingHostID,
+		DoneSince:     board.DoneSince,
+	}
+	for i := range board.Calls {
+		response.Calls[i] = decisionCallResponse(board.Calls[i])
 	}
 	envelope.WriteJSON(w, http.StatusOK, response)
 }

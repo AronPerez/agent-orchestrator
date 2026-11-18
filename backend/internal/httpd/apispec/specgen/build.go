@@ -622,6 +622,7 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersDecisionCallResponse":             "DecisionCallResponse",
 	"ControllersListDecisionsQuery":               "ListDecisionsQuery",
 	"ControllersListDecisionsResponse":            "ListDecisionsResponse",
+	"ControllersDecisionBoardResponse":            "DecisionBoardResponse",
 	"ControllersDecisionIDParam":                  "DecisionIDParam",
 	"ControllersDecisionEntryResponse":            "DecisionEntryResponse",
 	"ControllersDecisionDetailResponse":           "DecisionDetailResponse",
@@ -1101,6 +1102,11 @@ func decisionOperations() []operation {
 			method: http.MethodGet, path: "/api/v1/decisions", id: "listDecisions", tag: "decisions",
 			summary: "List or search decision calls", pathParams: []any{controllers.ListDecisionsQuery{}},
 			resps: append([]respUnit{{http.StatusOK, controllers.ListDecisionsResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/decisions/board", id: "getDecisionBoard", tag: "decisions",
+			summary: "Get the Decisions page board",
+			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionBoardResponse{}}}, commonErrors...),
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/decisions/{id}", id: "getDecision", tag: "decisions",

@@ -28,6 +28,7 @@ type Store interface {
 	ListDecisionEntries(context.Context, string) ([]domain.DecisionEntry, error)
 	ListDecisionCallsForSession(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
 	ListDecisionCallsByState(context.Context, domain.DecisionCallState, int) ([]domain.DecisionCall, error)
+	ListDecisionCallsForBoard(context.Context, time.Time) ([]domain.DecisionCall, error)
 	ListDecisionStreams(context.Context) ([]domain.DecisionStream, error)
 	SearchDecisionCalls(context.Context, string, domain.ProjectID, bool, int) ([]domain.DecisionCall, error)
 }
@@ -122,6 +123,25 @@ const (
 	ScopeMine     Scope = "mine"
 	ScopeNeedsYou Scope = "needs_you"
 )
+
+// DecisionBoardDoneWindow is how long a non-retired Done call stays on the
+// board after its outcome. Older Done calls remain searchable history.
+const DecisionBoardDoneWindow = 7 * 24 * time.Hour
+
+// DefaultDecisionSearchLimit and MaxDecisionSearchLimit bound one search page.
+const (
+	DefaultDecisionSearchLimit = 20
+	MaxDecisionSearchLimit     = 100
+)
+
+// Board is the bounded live snapshot behind the Decisions page and its
+// Needs-you count.
+type Board struct {
+	Calls         []domain.DecisionCall
+	NeedsYouCount int
+	ServingHostID string
+	DoneSince     time.Time
+}
 
 // Detail combines a call read model with its immutable history.
 type Detail struct {
@@ -345,8 +365,33 @@ func (s *Service) List(ctx context.Context, actor Actor, scope Scope) ([]domain.
 	return s.withStreams(ctx, calls)
 }
 
-// Search returns text matches with the actor's project ranked first.
-func (s *Service) Search(ctx context.Context, actor Actor, query string) ([]domain.DecisionCall, error) {
+// Board returns every active call plus non-retired Done calls from the last
+// seven days, labelled only from what each call recorded.
+func (s *Service) Board(ctx context.Context) (Board, error) {
+	since := s.now().UTC().Add(-DecisionBoardDoneWindow)
+	calls, err := s.store.ListDecisionCallsForBoard(ctx, since)
+	if err != nil {
+		return Board{}, err
+	}
+	calls, err = s.withStreams(ctx, calls)
+	if err != nil {
+		return Board{}, err
+	}
+	if calls == nil {
+		calls = []domain.DecisionCall{}
+	}
+	board := Board{Calls: calls, ServingHostID: s.hostID, DoneSince: since}
+	for _, call := range calls {
+		if call.State == domain.DecisionStateNeedsYou {
+			board.NeedsYouCount++
+		}
+	}
+	return board, nil
+}
+
+// Search returns up to limit text matches across every state and age, with
+// the actor's project ranked first. A non-positive limit uses the default.
+func (s *Service) Search(ctx context.Context, actor Actor, query string, limit int) ([]domain.DecisionCall, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, apierr.Invalid("DECISION_QUERY_REQUIRED", "Say what to search for.", nil)
 	}
@@ -354,7 +399,11 @@ func (s *Service) Search(ctx context.Context, actor Actor, query string) ([]doma
 	if err != nil {
 		return nil, err
 	}
-	calls, err := s.store.SearchDecisionCalls(ctx, query, project, hasProject, 20)
+	if limit <= 0 {
+		limit = DefaultDecisionSearchLimit
+	}
+	limit = min(limit, MaxDecisionSearchLimit)
+	calls, err := s.store.SearchDecisionCalls(ctx, query, project, hasProject, limit)
 	if err != nil {
 		return nil, err
 	}
