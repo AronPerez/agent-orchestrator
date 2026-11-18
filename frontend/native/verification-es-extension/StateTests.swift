@@ -51,7 +51,7 @@ private final class ObservationRecorder: @unchecked Sendable {
 private enum StateTests {
 	static func main() throws {
 		try testRegistrationAndOrderedLifecycle()
-		try testFailureBeforeRegistrationAcknowledgementIsBuffered()
+		try testServiceWaitsForClientReadiness()
 		try testSequenceGapFailsClosed()
 		try testDuplicateSequenceFailsClosed()
 		try testSourceFailureFailsClosed()
@@ -94,22 +94,36 @@ private enum StateTests {
 		try expect(observations[1].previous == child && observations[1].process == executed, "exec identities were wrong")
 	}
 
-	private static func testFailureBeforeRegistrationAcknowledgementIsBuffered() throws {
+	private static func testServiceWaitsForClientReadiness() throws {
 		let tracker = AOESObservationTracker()
 		let root = AOESProcessIdentity(pid: 150, pidVersion: 1)
 		let runID = UUID()
 		let connectionID = UUID()
 		let recorder = ObservationRecorder()
-		let reply = tracker.register(
-			AOESRegisterRootRequest(version: AOESProtocol.version, runID: runID, root: root),
+		let service = AOESXPCConnectionService(
 			connectionID: connectionID,
-			deliver: recorder.append
+			tracker: tracker,
+			observationSink: recorder.append
 		)
+		let request = AOESRegisterRootRequest(version: AOESProtocol.version, runID: runID, root: root)
+		var encodedReply: Data?
+		service.registerRoot(try AOESWireCodec.encode(request)) { encodedReply = $0 }
+		let reply = try AOESWireCodec.decode(AOESRegistrationReply.self, from: encodedReply ?? Data())
 		try expect(reply.accepted, "root registration failed")
 
 		tracker.sourceFailed(.sourceDisconnected)
-		try expect(recorder.observations.isEmpty, "source failure escaped before registration acknowledgement")
-		try expect(tracker.acknowledge(runID, connectionID: connectionID), "failed registration could not be acknowledged")
+		try expect(recorder.observations.isEmpty, "source failure escaped before client readiness")
+
+		let wrongVersion = AOESReadyForObservationsRequest(version: AOESProtocol.version + 1, runID: runID)
+		var wrongVersionAccepted = true
+		service.readyForObservations(try AOESWireCodec.encode(wrongVersion)) { wrongVersionAccepted = $0 }
+		try expect(!wrongVersionAccepted, "unsupported readiness version was accepted")
+		try expect(recorder.observations.isEmpty, "invalid readiness flushed observations")
+
+		let ready = AOESReadyForObservationsRequest(version: AOESProtocol.version, runID: runID)
+		var readyAccepted = false
+		service.readyForObservations(try AOESWireCodec.encode(ready)) { readyAccepted = $0 }
+		try expect(readyAccepted, "client readiness was rejected")
 		try expect(recorder.observations.count == 1, "buffered source failure was not delivered")
 		try expect(recorder.observations[0].failure == .sourceDisconnected, "buffered source failure changed")
 		try expect(!tracker.acknowledge(runID, connectionID: connectionID), "terminal registration remained active")

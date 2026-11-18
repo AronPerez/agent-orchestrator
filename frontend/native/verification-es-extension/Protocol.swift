@@ -52,6 +52,11 @@ struct AOESRegistrationReply: Codable, Equatable, Sendable {
 	let error: AOESRegistrationError?
 }
 
+struct AOESReadyForObservationsRequest: Codable, Equatable, Sendable {
+	let version: UInt16
+	let runID: UUID
+}
+
 struct AOESUnregisterRunRequest: Codable, Equatable, Sendable {
 	let version: UInt16
 	let runID: UUID

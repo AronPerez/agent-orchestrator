@@ -2,6 +2,7 @@ import Foundation
 
 @objc protocol AOESControlXPCProtocol {
 	func registerRoot(_ payload: Data, withReply reply: @escaping (Data) -> Void)
+	func readyForObservations(_ payload: Data, withReply reply: @escaping (Bool) -> Void)
 	func unregisterRun(_ payload: Data, withReply reply: @escaping (Bool) -> Void)
 }
 
@@ -13,11 +14,24 @@ final class AOESXPCConnectionService: NSObject, AOESControlXPCProtocol, @uncheck
 	private let connectionID: UUID
 	private let tracker: AOESObservationTracker
 	private weak var connection: NSXPCConnection?
+	private let observationSink: AOESObservationTracker.Delivery?
 
 	init(connectionID: UUID, tracker: AOESObservationTracker, connection: NSXPCConnection) {
 		self.connectionID = connectionID
 		self.tracker = tracker
 		self.connection = connection
+		observationSink = nil
+	}
+
+	init(
+		connectionID: UUID,
+		tracker: AOESObservationTracker,
+		observationSink: @escaping AOESObservationTracker.Delivery
+	) {
+		self.connectionID = connectionID
+		self.tracker = tracker
+		connection = nil
+		self.observationSink = observationSink
 	}
 
 	func registerRoot(_ payload: Data, withReply reply: @escaping (Data) -> Void) {
@@ -29,14 +43,11 @@ final class AOESXPCConnectionService: NSObject, AOESControlXPCProtocol, @uncheck
 			return
 		}
 		let registration = tracker.register(request, connectionID: connectionID) { [weak self] observation in
-			self?.send(observation)
+			self?.deliver(observation)
 		}
 		do {
 			let response = try AOESWireCodec.encode(registration)
 			reply(response)
-			if registration.accepted {
-				_ = tracker.acknowledge(request.runID, connectionID: connectionID)
-			}
 		} catch {
 			_ = tracker.unregister(
 				AOESUnregisterRunRequest(version: AOESProtocol.version, runID: request.runID),
@@ -44,6 +55,18 @@ final class AOESXPCConnectionService: NSObject, AOESControlXPCProtocol, @uncheck
 			)
 			reply(encodedRegistrationError(.invalidMessage))
 		}
+	}
+
+	func readyForObservations(_ payload: Data, withReply reply: @escaping (Bool) -> Void) {
+		guard let request = try? AOESWireCodec.decode(AOESReadyForObservationsRequest.self, from: payload),
+			request.version == AOESProtocol.version
+		else {
+			reply(false)
+			return
+		}
+		// The caller sends this only after processing registration and installing
+		// receive state, so observations may safely arrive before this method replies.
+		reply(tracker.acknowledge(request.runID, connectionID: connectionID))
 	}
 
 	func unregisterRun(_ payload: Data, withReply reply: @escaping (Bool) -> Void) {
@@ -54,7 +77,11 @@ final class AOESXPCConnectionService: NSObject, AOESControlXPCProtocol, @uncheck
 		reply(tracker.unregister(request, connectionID: connectionID))
 	}
 
-	private func send(_ observation: AOESObservation) {
+	private func deliver(_ observation: AOESObservation) {
+		if let observationSink {
+			observationSink(observation)
+			return
+		}
 		guard let payload = try? AOESWireCodec.encode(observation), let connection else {
 			tracker.connectionClosed(connectionID)
 			return

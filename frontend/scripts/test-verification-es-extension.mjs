@@ -23,6 +23,7 @@ const compile = spawnSync("xcrun", [
 		"WireCodec.swift",
 		"PeerRequirement.swift",
 		"ObservationTracker.swift",
+		"XPCService.swift",
 		"EndpointSecuritySource.swift",
 		"StateTests.swift",
 	].map((file) => path.join(source, file)),
