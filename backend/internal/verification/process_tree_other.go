@@ -6,12 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
 	"time"
-
-	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 )
 
 const (
@@ -22,6 +21,8 @@ const (
 )
 
 var errUnixProcessGone = errors.New("verification process is gone")
+
+var verificationProcessStartForWatchFn = verificationProcessStartForWatch
 
 type unixOwnedProcess struct {
 	pid   int
@@ -67,21 +68,57 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 	if err != nil {
 		return nil, err
 	}
-	aoprocess.ConfigureTreeCancellation(cmd)
-	if err = cmd.Start(); err != nil {
+	gateReader, gateWriter, err := prepareUnixProcessStartGate(cmd)
+	if err != nil {
 		return nil, errors.Join(err, closeOwnership())
 	}
-	start, err := verificationProcessStartForWatch(cmd.Process.Pid)
+	closeGate := func() error { return errors.Join(gateReader.Close(), gateWriter.Close()) }
+	configureUnixWorkspaceProcess(cmd)
+	if err = cmd.Start(); err != nil {
+		return nil, errors.Join(err, closeGate(), closeOwnership())
+	}
+	_ = gateReader.Close()
+	start, err := verificationProcessStartForWatchFn(cmd.Process.Pid)
 	if err != nil {
+		_ = gateWriter.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, errors.Join(fmt.Errorf("identify verification process: %w", err), closeOwnership())
+		return nil, errors.Join(
+			fmt.Errorf("identify verification process: %w", err),
+			closeOwnership(),
+		)
 	}
 	descendants := sharedUnixDescendantObserver.watch(unixOwnedProcess{pid: cmd.Process.Pid, start: start})
+	if err = ctx.Err(); err == nil {
+		_, err = gateWriter.Write([]byte{'\n'})
+	}
+	_ = gateWriter.Close()
+	if err != nil {
+		sharedUnixDescendantObserver.unwatch(descendants)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("release verification process: %w", err),
+			closeOwnership(),
+		)
+	}
 	return &unixWorkspaceProcessTree{
 		cmd: cmd, descendants: descendants,
 		hooks: defaultUnixProcessHooks(ownership, descendants), closeOwnership: closeOwnership,
 	}, nil
+}
+
+func prepareUnixProcessStartGate(cmd *exec.Cmd) (*os.File, *os.File, error) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("create verification start gate: %w", err)
+	}
+	fd := 3 + len(cmd.ExtraFiles)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, reader)
+	if err = configureUnixProcessStartGate(cmd, fd); err != nil {
+		return nil, nil, errors.Join(err, reader.Close(), writer.Close())
+	}
+	return reader, writer, nil
 }
 
 func (t *unixWorkspaceProcessTree) Wait() (bool, error) {

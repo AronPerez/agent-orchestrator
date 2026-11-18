@@ -81,6 +81,45 @@ func TestWorkspaceStepPreservesProjectFileDescriptors(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStepDoesNotStartProjectBeforeIdentityCapture(t *testing.T) {
+	workspace := t.TempDir()
+	pidFile := filepath.Join(workspace, "child.pid")
+	original := verificationProcessStartForWatchFn
+	verificationProcessStartForWatchFn = func(int) (string, error) {
+		deadline := time.Now().Add(250 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(pidFile); err == nil {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return "", errors.New("injected identity failure")
+	}
+	t.Cleanup(func() { verificationProcessStartForWatchFn = original })
+	env := newStepEnvironment(os.Environ(), map[string]string{"VERIFY_CHILD_PID": pidFile})
+	cmd := workspaceStepCommand(
+		context.Background(),
+		`sleep 60 >/dev/null 2>&1 & echo $! > "$VERIFY_CHILD_PID"`,
+	)
+	cmd.Dir = workspace
+	cmd.Env = append([]string(nil), env.list...)
+	cmd.Stdin = strings.NewReader("")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	tree, err := startWorkspaceProcessTree(context.Background(), cmd)
+	if tree != nil || err == nil || !strings.Contains(err.Error(), "injected identity failure") {
+		t.Fatalf("startWorkspaceProcessTree() = tree %v, error %v", tree, err)
+	}
+	if raw, readErr := os.ReadFile(pidFile); readErr == nil {
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if pid > 0 && processAlive(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		t.Fatalf("project command started before identity capture; child pid %d", pid)
+	} else if !os.IsNotExist(readErr) {
+		t.Fatalf("read child pid: %v", readErr)
+	}
+}
+
 func TestWorkspaceStepDrainsOwnershipDescriptorWrites(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
