@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 
 	"github.com/google/uuid"
@@ -86,7 +85,12 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	if !opts.recoverOnly && strings.TrimSpace(opts.message) == "" {
 		return usageError{errors.New("usage: --message is required")}
 	}
-	senderSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+	senderSessionID := callerSession()
+	if opts.recoverOnly {
+		// Receipt recovery does not send a message and therefore needs neither
+		// source provenance nor a live source daemon.
+		senderSessionID = ""
+	}
 	sourceSessionID := senderSessionID
 	userAuthored := senderSessionID == ""
 	automationAuthored := false
@@ -100,7 +104,7 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	}
 	sourceHostID := ""
 	sameHost := c.remote == nil
-	if c.remote != nil && senderSessionID != "" {
+	if !opts.recoverOnly && c.remote != nil && senderSessionID != "" {
 		var err error
 		sourceHostID, sameHost, err = c.remoteRelationToSource(ctx, senderSessionID)
 		if err != nil {
@@ -162,14 +166,14 @@ func (c *commandContext) steerMessage(
 			if recoverOnly {
 				return fmt.Errorf("%w; delivery handle %s remains unresolved and was not resent", err, clientMessageID)
 			}
-			return fmt.Errorf(
-				"%w; recover this delivery without resending it: ao send%s --session %s --steer --recover-only --client-message-id %s",
-				err, c.savedHostRetryArgs(), strings.TrimPrefix(sessionPath, "sessions/"), clientMessageID)
+			return fmt.Errorf("%w; recover this delivery without resending it: %s", err,
+				c.steeringRecoveryCommand(strings.TrimPrefix(sessionPath, "sessions/"), clientMessageID))
 		}
 		if errors.Is(err, errDaemonUnavailable) || !hasResponseErr || responseErr.StatusCode >= 500 {
 			return fmt.Errorf(
-				"%w; outcome is unknown for delivery handle %s; retry safely with --client-message-id %s",
-				err, clientMessageID, clientMessageID)
+				"%w; outcome is unknown for delivery handle %s; recover without resending it: %s",
+				err, clientMessageID,
+				c.steeringRecoveryCommand(strings.TrimPrefix(sessionPath, "sessions/"), clientMessageID))
 		}
 		return err
 	}
@@ -194,4 +198,9 @@ func (c *commandContext) steerMessage(
 		"No active turn to steer. Message accepted%s as a normal Chat turn in %s state with delivery handle %s; provider delivery is not confirmed.\n",
 		c.resolvedBySuffix(), result.State, clientMessageID)
 	return nil
+}
+
+func (c *commandContext) steeringRecoveryCommand(sessionID, clientMessageID string) string {
+	return fmt.Sprintf("ao send%s --session %s --steer --recover-only --client-message-id %s",
+		c.remoteRetryArgs(), quoteCommandArgument(sessionID), quoteCommandArgument(clientMessageID))
 }

@@ -37,15 +37,14 @@ func configureSavedHost(t *testing.T, handler http.Handler) *httptest.Server {
 	}))
 	t.Cleanup(local.Close)
 	writeRunFileFor(t, cfg, local)
-	// An isolated desktop uses AO_DATA_DIR/remotes.json. These CLI boundary
-	// tests use the ordinary ~/.ao/remotes.json layout and retain only the
-	// separately isolated AO_RUN_FILE from setConfigEnv.
-	t.Setenv("AO_DATA_DIR", "")
-	identityDir := filepath.Join(home, ".ao", "data", "mobile")
+	// The desktop-owned host store is independent of the protected data root
+	// injected into this launched session.
+	t.Setenv(remotesFileEnv, filepath.Join(home, ".ao", remotesFileName))
+	identityDir := filepath.Join(cfg.dataDir, "mobile")
 	if err := os.MkdirAll(identityDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(identityDir, "identity.json"), []byte(`{"hostId":"h_wrong_data_dir"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(identityDir, "identity.json"), []byte(`{"hostId":"`+testLocalHostID+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(handler)
@@ -122,8 +121,11 @@ func TestSpawnSavedHostPinsMachineAndOmitsUnqualifiedParent(t *testing.T) {
 	}
 	want := []string{
 		"GET /api/v1/identity",
+		"GET /api/v1/identity",
 		"GET /api/v1/projects/demo",
+		"GET /api/v1/identity",
 		"POST /api/v1/agents/readiness/ensure",
+		"GET /api/v1/identity",
 		"POST /api/v1/sessions",
 	}
 	if strings.Join(paths, "\n") != strings.Join(want, "\n") {
@@ -226,23 +228,141 @@ func TestSendSavedHostPinsAndNamesEveryWrite(t *testing.T) {
 	}
 }
 
+func TestSendSavedHostUserShellIsHumanAuthored(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		path string
+		body string
+	}{
+		{name: "send", args: []string{"--message", "continue"}, path: "/api/v1/sessions/remote-1/send", body: `{"ok":true}`},
+		{name: "steer", args: []string{"--steer", "--message", "continue"}, path: "/api/v1/sessions/remote-1/conversation/steer-or-send", body: `{"outcome":"steered","providerTurnId":"turn-1"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AO_SESSION_ID", "local-source")
+			t.Setenv("AO_SHELL_TERMINAL", "1")
+			var payload map[string]any
+			var capabilityRequests int
+			configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/identity" {
+					writeSavedHostIdentity(t, w, r)
+					return
+				}
+				if r.URL.Path == "/api/v1/coordination/capabilities" {
+					capabilityRequests++
+				}
+				requireSavedHostRequest(t, r)
+				if r.Method != http.MethodPost || r.URL.Path != tc.path {
+					http.NotFound(w, r)
+					return
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+
+			args := append([]string{"send", "--host", testSavedHostLabel, "--session", "remote-1"}, tc.args...)
+			if _, stderr, err := executeCLI(t, Deps{}, args...); err != nil {
+				t.Fatalf("user-shell send: %v stderr=%s", err, stderr)
+			}
+			if capabilityRequests != 0 {
+				t.Fatalf("capability requests = %d, want none for a human-authored shell command", capabilityRequests)
+			}
+			if payload["senderSessionId"] != nil || payload["automationAuthored"] != nil {
+				t.Fatalf("payload = %v, want no agent provenance", payload)
+			}
+			messageKey := "message"
+			if tc.name == "steer" {
+				messageKey = "text"
+			}
+			if got := payload[messageKey]; got != "continue" {
+				t.Fatalf("%s = %v, want unprefixed human message", messageKey, got)
+			}
+		})
+	}
+}
+
 func TestSendSavedHostRecoveryKeepsTarget(t *testing.T) {
-	t.Setenv("AO_SESSION_ID", "")
+	for _, status := range []int{http.StatusConflict, http.StatusInternalServerError} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Setenv("AO_SESSION_ID", "")
+			configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/identity" {
+					writeSavedHostIdentity(t, w, r)
+					return
+				}
+				requireSavedHostRequest(t, r)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				code := "INTERNAL"
+				if status == http.StatusConflict {
+					code = "CHAT_STEER_UNCERTAIN"
+				}
+				_, _ = io.WriteString(w, `{"error":"failure","code":"`+code+`","message":"unknown"}`)
+			}))
+
+			_, _, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel, "--session", "remote-1",
+				"--steer", "--client-message-id", "delivery-1", "--message", "correct course")
+			if err == nil || !strings.Contains(err.Error(), "ao send --host h_desk") || !strings.Contains(err.Error(), "--recover-only") {
+				t.Fatalf("err = %v, want host-qualified recovery command", err)
+			}
+		})
+	}
+}
+
+func TestSendRawURLRecoveryKeepsTarget(t *testing.T) {
+	for _, status := range []int{http.StatusConflict, http.StatusInternalServerError} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Setenv("AO_SESSION_ID", "")
+			t.Setenv("AO_TOKEN", "raw-url-secret")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				code := "INTERNAL"
+				if status == http.StatusConflict {
+					code = "CHAT_STEER_UNCERTAIN"
+				}
+				_, _ = io.WriteString(w, `{"error":"failure","code":"`+code+`","message":"unknown"}`)
+			}))
+			t.Cleanup(srv.Close)
+
+			_, _, err := executeCLI(t, Deps{}, "send", "--url", srv.URL, "--session", "remote-1",
+				"--steer", "--client-message-id", "delivery-1", "--message", "correct course")
+			if err == nil || !strings.Contains(err.Error(), "--url") || !strings.Contains(err.Error(), srv.URL) ||
+				!strings.Contains(err.Error(), "--recover-only") || strings.Contains(err.Error(), "raw-url-secret") {
+				t.Fatalf("err = %v, want URL-qualified credential-free recovery command", err)
+			}
+		})
+	}
+}
+
+func TestSendSavedHostRecoverOnlyDoesNotNeedSourceDaemon(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "local-source")
+	var request conversationMessageAPIRequest
 	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/identity" {
 			writeSavedHostIdentity(t, w, r)
 			return
 		}
 		requireSavedHostRequest(t, r)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		_, _ = io.WriteString(w, `{"error":"conflict","code":"CHAT_STEER_UNCERTAIN","message":"unknown"}`)
+		_, _ = io.WriteString(w, `{"outcome":"steered","providerTurnId":"turn-1"}`)
 	}))
+	if err := os.Remove(os.Getenv("AO_RUN_FILE")); err != nil {
+		t.Fatal(err)
+	}
 
-	_, _, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel, "--session", "remote-1",
-		"--steer", "--client-message-id", "delivery-1", "--message", "correct course")
-	if err == nil || !strings.Contains(err.Error(), "ao send --host h_desk") {
-		t.Fatalf("err = %v, want host-qualified recovery command", err)
+	if _, stderr, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel, "--session", "remote-1",
+		"--steer", "--recover-only", "--client-message-id", "delivery-1"); err != nil {
+		t.Fatalf("recover-only: %v stderr=%s", err, stderr)
+	}
+	if !request.RecoverOnly || request.SenderSessionID != "" || request.AutomationAuthored {
+		t.Fatalf("request = %+v, want provenance-free receipt recovery", request)
 	}
 }
 
@@ -295,6 +415,84 @@ func TestSendSavedHostAgentSourceRequiresSelectedDaemon(t *testing.T) {
 	}
 }
 
+func TestSendSavedHostRejectsRepointedSourceDaemonWithCollidingSession(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "local-source")
+	var authenticatedDestinationRequests int
+	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/identity" {
+			writeSavedHostIdentity(t, w, r)
+			return
+		}
+		authenticatedDestinationRequests++
+		http.NotFound(w, r)
+	}))
+
+	impostor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"h_repointed","apiVersion":1}`)
+		case "/api/v1/sessions/local-source":
+			_, _ = io.WriteString(w, `{"session":{"id":"local-source"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(impostor.Close)
+	writeRunFileFor(t, testConfig{runFile: os.Getenv("AO_RUN_FILE")}, impostor)
+
+	_, _, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel,
+		"--session", "remote-1", "--message", "continue")
+	if err == nil || !strings.Contains(err.Error(), "does not match this session's launch host") {
+		t.Fatalf("err = %v, want fail-closed source launch identity mismatch", err)
+	}
+	if authenticatedDestinationRequests != 0 {
+		t.Fatalf("authenticated destination requests = %d, want none", authenticatedDestinationRequests)
+	}
+}
+
+func TestExplicitURLPinsIdentityBeforeSendingHostLocalIDs(t *testing.T) {
+	cfg := setConfigEnv(t)
+	t.Setenv("AO_SESSION_ID", "local-source")
+	t.Setenv("AO_TOKEN", "same-daemon-token")
+	identityDir := filepath.Join(cfg.dataDir, "mobile")
+	if err := os.MkdirAll(identityDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(identityDir, "identity.json"), []byte(`{"hostId":"h_selected"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var identityCalls, authenticatedRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			identityCalls++
+			hostID := "h_selected"
+			if identityCalls >= 4 {
+				hostID = "h_reassigned"
+			}
+			_, _ = io.WriteString(w, `{"hostId":"`+hostID+`","apiVersion":1}`)
+		case "/api/v1/sessions/local-source":
+			_, _ = io.WriteString(w, `{"session":{"id":"local-source"}}`)
+		default:
+			authenticatedRequests++
+			_, _ = io.WriteString(w, `{"ok":true}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{}, "send", "--url", srv.URL,
+		"--session", "target", "--message", "continue")
+	if err == nil || !strings.Contains(err.Error(), "remote host identity changed") || !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("err = %v, want identity-change refusal", err)
+	}
+	if authenticatedRequests != 0 {
+		t.Fatalf("authenticated requests = %d, want none after identity reassignment", authenticatedRequests)
+	}
+}
+
 func TestExplicitURLToSelectedDaemonPreservesLocalLineageAndAttribution(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -321,6 +519,13 @@ func TestExplicitURLToSelectedDaemonPreservesLocalLineageAndAttribution(t *testi
 			cfg := setConfigEnv(t)
 			t.Setenv("AO_SESSION_ID", "local-source")
 			t.Setenv("AO_TOKEN", "same-daemon-token")
+			identityDir := filepath.Join(cfg.dataDir, "mobile")
+			if err := os.MkdirAll(identityDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(identityDir, "identity.json"), []byte(`{"hostId":"h_selected"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			captured := map[string]any{}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -334,11 +539,23 @@ func TestExplicitURLToSelectedDaemonPreservesLocalLineageAndAttribution(t *testi
 				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/readiness/ensure":
 					_, _ = io.WriteString(w, authorizedAgentsJSON("codex"))
 				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
+					if got := r.Header.Get("X-AO-Expected-Host-ID"); got != "h_selected" {
+						t.Fatalf("expected host header = %q, want h_selected", got)
+					}
+					if got := r.Header.Get("X-AO-Caller-Session"); got != "local-source" {
+						t.Fatalf("caller header = %q, want local-source", got)
+					}
 					if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 						t.Fatal(err)
 					}
 					_, _ = io.WriteString(w, `{"session":{"id":"child","status":"idle","displayName":"Local child"}}`)
 				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/target/send":
+					if got := r.Header.Get("X-AO-Expected-Host-ID"); got != "h_selected" {
+						t.Fatalf("expected host header = %q, want h_selected", got)
+					}
+					if got := r.Header.Get("X-AO-Caller-Session"); got != "local-source" {
+						t.Fatalf("caller header = %q, want local-source", got)
+					}
 					if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 						t.Fatal(err)
 					}
@@ -371,11 +588,20 @@ func TestExplicitURLToSelectedDaemonPreservesLocalLineageAndAttribution(t *testi
 	}
 }
 
-func TestSavedHostRetryArgsUsesPortableGeneratedHostID(t *testing.T) {
-	c := &commandContext{remote: &remoteTarget{hostID: testSavedHostID}}
-	if got, want := c.savedHostRetryArgs(), ` --host h_desk`; got != want {
-		t.Fatalf("savedHostRetryArgs() = %q, want %q", got, want)
-	}
+func TestRemoteRetryArgsPreservesTargetWithoutCredentials(t *testing.T) {
+	t.Run("saved host", func(t *testing.T) {
+		c := &commandContext{remote: &remoteTarget{source: "--host", hostID: testSavedHostID}}
+		if got, want := c.remoteRetryArgs(), ` --host h_desk`; got != want {
+			t.Fatalf("remoteRetryArgs() = %q, want %q", got, want)
+		}
+	})
+	t.Run("raw url", func(t *testing.T) {
+		c := &commandContext{remote: &remoteTarget{source: "--url", baseURL: "https://desk.example/a path", token: "must-not-leak"}}
+		got := c.remoteRetryArgs()
+		if !strings.Contains(got, "--url") || !strings.Contains(got, "desk.example") || strings.Contains(got, "must-not-leak") {
+			t.Fatalf("remoteRetryArgs() = %q, want quoted URL without credential", got)
+		}
+	})
 }
 
 func TestSavedHostRejectsUnsafeHostIDBeforeRenderingCommands(t *testing.T) {
