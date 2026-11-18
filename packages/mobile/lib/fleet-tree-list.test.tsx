@@ -1,6 +1,6 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DashboardSession } from "./api";
+import { ApiError, type DashboardSession } from "./api";
 import type { ArchiveSource } from "./archive/useArchivedSessions";
 import type { HostedProject, HostedSession } from "./hostedRows";
 
@@ -27,7 +27,14 @@ vi.mock("expo-router", () => ({
 	useRouter: () => ({ push: fixtures.push }),
 	useFocusEffect: (callback: () => void | (() => void)) => { fixtures.blur = callback() ?? (() => {}); },
 }));
-vi.mock("./api", () => ({ getSession: fixtures.getSession }));
+vi.mock("./api", () => ({
+	getSession: fixtures.getSession,
+	ApiError: class ApiError extends Error {
+		constructor(readonly status: number, message: string) {
+			super(message);
+		}
+	},
+}));
 vi.mock("@react-native-async-storage/async-storage", () => ({
 	default: { getItem: fixtures.getItem, setItem: fixtures.setItem },
 }));
@@ -101,21 +108,29 @@ function render(
 ): ReactTestRenderer {
 	let view!: ReactTestRenderer;
 	act(() => {
-		view = create(
-			<FleetTreeList
-				contentBottomInset={0}
-				archiveSources={archiveSources}
-				hosts={[{ hostId: "box", name: "Build box", connection }]}
-				onRefresh={() => {}}
-				orchestrators={[]}
-				projects={[project]}
-				refreshing={false}
-				sessions={sessions}
-			/>,
-		);
+		view = create(fleetList(sessions, archiveSources, connection));
 	});
 	mountedViews.push(view);
 	return view;
+}
+
+function fleetList(
+	sessions: HostedSession[],
+	archiveSources: readonly ArchiveSource[] = [],
+	connection: "closed" | "connecting" | "open" = "closed",
+) {
+	return (
+		<FleetTreeList
+			contentBottomInset={0}
+			archiveSources={archiveSources}
+			hosts={[{ hostId: "box", name: "Build box", connection }]}
+			onRefresh={() => {}}
+			orchestrators={[]}
+			projects={[project]}
+			refreshing={false}
+			sessions={sessions}
+		/>
+	);
 }
 
 afterEach(() => {
@@ -215,7 +230,7 @@ describe("FleetTreeList", () => {
 			hostId: undefined,
 			hostName: undefined,
 		};
-		const view = render([worker("Child", { parentSessionId: "Past orchestrator" })]);
+		const view = render([worker("Child", { parentSessionId: "Past orchestrator" })], [], "open");
 
 		expect(fixtures.getSession).toHaveBeenCalledWith(
 			expect.objectContaining({ hostId: "box" }),
@@ -226,11 +241,48 @@ describe("FleetTreeList", () => {
 			answer(historical);
 			await new Promise((resolve) => setTimeout(resolve, 0));
 		});
-		const labels = view.root.findAllByType("Pressable" as never)
-			.map((row) => row.props.accessibilityLabel)
-			.filter(Boolean);
-		expect(labels).toEqual(expect.arrayContaining([expect.stringContaining("Past orchestrator, Orchestrator")]));
+		const orchestratorRow = view.root.findAllByType("Pressable" as never).find((row) =>
+			String(row.props.accessibilityLabel).includes("Past orchestrator, Orchestrator"))!;
+		expect(orchestratorRow).toBeTruthy();
+		expect(orchestratorRow.props.accessibilityActions).toEqual([
+			{ name: "toggleBranch", label: "Collapse branch" },
+		]);
+		act(() => orchestratorRow.props.onAccessibilityAction({ nativeEvent: { actionName: "toggleBranch" } }));
+		expect(view.root.findAllByType("WorkerListRow" as never)).toHaveLength(0);
 		expect(fixtures.archiveOptions).toMatchObject({ active: false, exhaustive: false });
+	});
+
+	it("gates ancestor lookup on an open host and retries after reconnect", async () => {
+		const child = worker("Child", { parentSessionId: "Parent" });
+		fixtures.getSession
+			.mockRejectedValueOnce(new Error("temporary timeout"))
+			.mockResolvedValueOnce(worker("Parent", { status: "terminated", isTerminated: true }));
+		const view = render([child]);
+
+		expect(fixtures.getSession).not.toHaveBeenCalled();
+		act(() => view.update(fleetList([child], [], "open")));
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+		expect(fixtures.getSession).toHaveBeenCalledTimes(1);
+
+		act(() => view.update(fleetList([child], [], "closed")));
+		act(() => view.update(fleetList([child], [], "open")));
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+		expect(fixtures.getSession).toHaveBeenCalledTimes(2);
+	});
+
+	it("serializes lookups and blocks the host after authentication rejection", async () => {
+		let rejectLookup!: (cause: unknown) => void;
+		fixtures.getSession.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectLookup = reject; }));
+		render([
+			worker("First", { parentSessionId: "Parent one" }),
+			worker("Second", { parentSessionId: "Parent two" }),
+		], [], "open");
+
+		expect(fixtures.getSession).toHaveBeenCalledTimes(1);
+		await act(async () => rejectLookup(new ApiError(401, "Unauthorized")));
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+		expect(fixtures.getSession).toHaveBeenCalledTimes(1);
 	});
 
 	it("serializes archive restore and opens the restored session", async () => {

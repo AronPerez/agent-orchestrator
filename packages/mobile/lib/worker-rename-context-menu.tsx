@@ -15,6 +15,7 @@ export function WorkerRowContextMenu({
 	onAction,
 	accessibilityLabel,
 	accessibilityHint,
+	additionalAccessibilityAction,
 	style,
 }: WorkerRowContextMenuProps) {
 	const t = useTheme();
@@ -46,8 +47,15 @@ export function WorkerRowContextMenu({
 				accessibilityRole="button"
 				accessibilityLabel={accessibilityLabel}
 				accessibilityHint={accessibilityHint}
-				accessibilityActions={workerAccessibilityActions(actions)}
+				accessibilityActions={[
+					...workerAccessibilityActions(actions),
+					...(additionalAccessibilityAction ? [{ name: additionalAccessibilityAction.name, label: additionalAccessibilityAction.label }] : []),
+				]}
 				onAccessibilityAction={(event) => {
+					if (event.nativeEvent.actionName === additionalAccessibilityAction?.name) {
+						additionalAccessibilityAction.onAction();
+						return;
+					}
 					const id = workerActionNamed(actions, event.nativeEvent.actionName);
 					if (id) onAction(id);
 				}}

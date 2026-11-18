@@ -10,7 +10,11 @@ import { WorkerRowContextMenu } from "./worker-rename-context-menu.ios";
 
 let renderer: ReactTestRenderer | undefined;
 afterEach(() => act(() => renderer?.unmount()));
-function mount(onAction = vi.fn()) {
+function mount(onAction = vi.fn(), additionalAccessibilityAction?: {
+	name: string;
+	label: string;
+	onAction(): void;
+}) {
 	Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 	act(() => {
 		renderer = create(
@@ -19,6 +23,7 @@ function mount(onAction = vi.fn()) {
 				onAction={onAction}
 				actions={[{ id: "open", title: "Open" }, { id: "unpin", title: "Unpin" }, { id: "delete", title: "Archive session", destructive: true }]}
 				accessibilityLabel="Polish workers"
+				additionalAccessibilityAction={additionalAccessibilityAction}
 				style={{ minHeight: 76 }}
 			>
 				{createElement("RowContent")}
@@ -42,4 +47,20 @@ it("offers the menu's actions to VoiceOver", () => {
 	expect(row.props.accessibilityActions).toEqual([{ name: "unpin", label: "Unpin" }, { name: "delete", label: "Archive session" }]);
 	act(() => row.props.onAccessibilityAction({ nativeEvent: { actionName: "unpin" } }));
 	expect(onAction).toHaveBeenCalledWith("unpin");
+});
+
+it("offers a branch disclosure action on the whole row", () => {
+	const onToggle = vi.fn();
+	const row = mount(vi.fn(), {
+		name: "toggleBranch",
+		label: "Expand branch",
+		onAction: onToggle,
+	}).root.findByType("Pressable" as never);
+	expect(row.props.accessibilityActions).toEqual([
+		{ name: "unpin", label: "Unpin" },
+		{ name: "delete", label: "Archive session" },
+		{ name: "toggleBranch", label: "Expand branch" },
+	]);
+	act(() => row.props.onAccessibilityAction({ nativeEvent: { actionName: "toggleBranch" } }));
+	expect(onToggle).toHaveBeenCalledTimes(1);
 });

@@ -19,7 +19,7 @@ import {
 	type FleetSessionNode,
 } from "../../product-ui/src/fleet-tree";
 import { AppSymbol } from "./AppSymbol";
-import { getSession, type DashboardSession } from "./api";
+import { ApiError, getSession, type DashboardSession } from "./api";
 import { ArchivedWorkerRow } from "./archived-worker-row";
 import { useArchivedSessions, type ArchiveSource } from "./archive/useArchivedSessions";
 import { isArchived } from "./agentsView";
@@ -64,6 +64,10 @@ export type MobileFleetRow = ProjectRow | MachineRow | SessionRow | ArchiveHeade
 
 type MissingAncestor = { key: string; hostId: string; sessionId: string };
 type LineageRow = { id: string; hostId: string; parentSessionId?: string };
+type AncestorController = { hostId: string; controller: AbortController };
+
+const ANCESTOR_RETRY_BASE_MS = 1_000;
+const ANCESTOR_RETRY_MAX_MS = 30_000;
 
 function resolveFleetLineage(
 	liveSessions: readonly HostedSession[],
@@ -247,28 +251,71 @@ export function FleetTreeList({
 		() => resolveFleetLineage(liveSessions, orchestrators, [...archiveCandidates, ...lookedUpAncestors.values()]),
 		[archiveCandidates, liveSessions, lookedUpAncestors, orchestrators],
 	);
-	const ancestorAttempts = useRef(new Map<string, number>());
-	const ancestorControllers = useRef(new Map<string, AbortController>());
+	const [ancestorRequestEpoch, setAncestorRequestEpoch] = useState(0);
+	const ancestorControllers = useRef(new Map<string, AncestorController>());
+	const ancestorMissingAtRefresh = useRef(new Map<string, number>());
+	const ancestorAuthBlockedHosts = useRef(new Set<string>());
+	const ancestorHostFailures = useRef(new Map<string, { count: number; retryAt: number }>());
+	const ancestorRetryTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+	const previousHostConnections = useRef(new Map<string, MobileFleetHost["connection"]>());
+	useEffect(() => {
+		const next = new Map(hosts.map((host) => [host.hostId, host.connection]));
+		let recovered = false;
+		for (const host of hosts) {
+			const previous = previousHostConnections.current.get(host.hostId);
+			if (host.connection === "open" && previous !== undefined && previous !== "open") {
+				ancestorAuthBlockedHosts.current.delete(host.hostId);
+				ancestorHostFailures.current.delete(host.hostId);
+				const timer = ancestorRetryTimers.current.get(host.hostId);
+				if (timer) clearTimeout(timer);
+				ancestorRetryTimers.current.delete(host.hostId);
+				recovered = true;
+			}
+		}
+		previousHostConnections.current = next;
+		if (recovered) setAncestorRequestEpoch((value) => value + 1);
+	}, [hosts]);
 	useEffect(() => {
 		const missingKeys = new Set(lineage.missing.map((request) => request.key));
-		for (const key of ancestorAttempts.current.keys()) {
-			if (!missingKeys.has(key)) ancestorAttempts.current.delete(key);
+		for (const key of ancestorMissingAtRefresh.current.keys()) {
+			if (!missingKeys.has(key)) ancestorMissingAtRefresh.current.delete(key);
 		}
-		for (const [key, controller] of ancestorControllers.current) {
-			if (!missingKeys.has(key)) {
-				controller.abort();
+		for (const [key, active] of ancestorControllers.current) {
+			if (!missingKeys.has(key) || hostsById.get(active.hostId)?.connection !== "open") {
+				active.controller.abort();
 				ancestorControllers.current.delete(key);
 			}
 		}
+		const busyHosts = new Set([...ancestorControllers.current.values()].map((active) => active.hostId));
+		const scheduleRetry = (hostId: string, retryAt: number) => {
+			if (ancestorRetryTimers.current.has(hostId)) return;
+			const timer = setTimeout(() => {
+				ancestorRetryTimers.current.delete(hostId);
+				setAncestorRequestEpoch((value) => value + 1);
+			}, Math.max(0, retryAt - Date.now()));
+			ancestorRetryTimers.current.set(hostId, timer);
+		};
 		for (const request of lineage.missing) {
-			if (ancestorControllers.current.has(request.key) || ancestorAttempts.current.get(request.key) === archiveRefresh) continue;
+			if (hostsById.get(request.hostId)?.connection !== "open") continue;
+			if (ancestorAuthBlockedHosts.current.has(request.hostId) || busyHosts.has(request.hostId)) continue;
+			if (ancestorMissingAtRefresh.current.get(request.key) === archiveRefresh) continue;
+			const failure = ancestorHostFailures.current.get(request.hostId);
+			if (failure && failure.retryAt > Date.now()) {
+				scheduleRetry(request.hostId, failure.retryAt);
+				continue;
+			}
 			const config = configForHost(request.hostId);
 			if (!config) continue;
-			ancestorAttempts.current.set(request.key, archiveRefresh);
 			const controller = new AbortController();
-			ancestorControllers.current.set(request.key, controller);
+			ancestorControllers.current.set(request.key, { hostId: request.hostId, controller });
+			busyHosts.add(request.hostId);
 			void getSession(config, request.sessionId, { signal: controller.signal }).then((session) => {
-				if (controller.signal.aborted || session.id !== request.sessionId) return;
+				if (controller.signal.aborted) return;
+				if (session.id !== request.sessionId) {
+					ancestorMissingAtRefresh.current.set(request.key, archiveRefresh);
+					return;
+				}
+				ancestorHostFailures.current.delete(request.hostId);
 				const hosted: HostedSession = {
 					...session,
 					hostId: request.hostId,
@@ -279,16 +326,31 @@ export function FleetTreeList({
 					next.set(request.key, hosted);
 					return next;
 				});
-			}).catch(() => {
-				// A deleted or temporarily unreachable parent remains explicitly unavailable.
+			}).catch((cause) => {
+				if (controller.signal.aborted) return;
+				if (cause instanceof ApiError && (cause.status === 401 || cause.status === 403)) {
+					ancestorAuthBlockedHosts.current.add(request.hostId);
+					return;
+				}
+				if (cause instanceof ApiError && cause.status === 404) {
+					ancestorMissingAtRefresh.current.set(request.key, archiveRefresh);
+					return;
+				}
+				const count = (ancestorHostFailures.current.get(request.hostId)?.count ?? 0) + 1;
+				const retryAt = Date.now() + Math.min(ANCESTOR_RETRY_MAX_MS, ANCESTOR_RETRY_BASE_MS * (2 ** (count - 1)));
+				ancestorHostFailures.current.set(request.hostId, { count, retryAt });
+				scheduleRetry(request.hostId, retryAt);
 			}).finally(() => {
-				if (ancestorControllers.current.get(request.key) === controller) ancestorControllers.current.delete(request.key);
+				if (ancestorControllers.current.get(request.key)?.controller === controller) ancestorControllers.current.delete(request.key);
+				if (!controller.signal.aborted) setAncestorRequestEpoch((value) => value + 1);
 			});
 		}
-	}, [archiveRefresh, configForHost, hostsById, lineage.missing]);
+	}, [ancestorRequestEpoch, archiveRefresh, configForHost, hostsById, lineage.missing]);
 	useEffect(() => () => {
-		for (const controller of ancestorControllers.current.values()) controller.abort();
+		for (const active of ancestorControllers.current.values()) active.controller.abort();
 		ancestorControllers.current.clear();
+		for (const timer of ancestorRetryTimers.current.values()) clearTimeout(timer);
+		ancestorRetryTimers.current.clear();
 	}, []);
 	const treeSessions = useMemo(() => {
 		const byAddress = new Map<string, HostedSession>();
@@ -573,6 +635,10 @@ export function FleetTreeList({
 		}
 		return (
 			<Pressable
+				accessibilityActions={expandable ? [{
+					name: "toggleBranch",
+					label: `${expanded ? "Collapse" : "Expand"} branch`,
+				}] : undefined}
 				accessibilityLabel={[
 					`Open ${item.node.session.title}`,
 					role,
@@ -581,6 +647,9 @@ export function FleetTreeList({
 					hasDescendantRollup ? descendants : undefined,
 				].filter(Boolean).join(", ")}
 				accessibilityRole="button"
+				onAccessibilityAction={expandable ? (event) => {
+					if (event.nativeEvent.actionName === "toggleBranch") toggle(item.key);
+				} : undefined}
 				onPress={() => router.push({
 					pathname: "/session/[id]",
 					params: { id: item.node.session.id, projectId: item.node.projectId, hostId: item.node.machineId },

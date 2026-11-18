@@ -222,6 +222,11 @@ export const WorkerListRow = memo(
 			// No gesture hint: a screen reader reaches pin, rename and archive as
 			// the row's actions, and announces that it has them.
 			accessibilityLabel={`${row.title}. ${visual.label}. ${row.project}.`}
+			additionalAccessibilityAction={onTreeToggle ? {
+				name: "toggleBranch",
+				label: `${treeExpanded ? "Collapse" : "Expand"} branch`,
+				onAction: onTreeToggle,
+			} : undefined}
 			onPress={openSession}
 			actions={contextActions}
 			onAction={runAction}

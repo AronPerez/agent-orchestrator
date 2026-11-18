@@ -251,12 +251,18 @@ describe("WorkerListRow", () => {
 		});
 
 		const disclosure = renderer.root.findByProps({ accessibilityLabel: "Expand Polish workers" });
+		const interaction = renderer.root.findByType("RowInteraction" as never);
+		expect(interaction.props.additionalAccessibilityAction).toMatchObject({
+			name: "toggleBranch",
+			label: "Expand branch",
+		});
+		act(() => interaction.props.additionalAccessibilityAction.onAction());
 		const stopPropagation = vi.fn();
 		act(() => disclosure.props.onPress({ stopPropagation }));
 
 		expect(disclosure.props.accessibilityState).toEqual({ expanded: false });
 		expect(stopPropagation).toHaveBeenCalledTimes(1);
-		expect(onTreeToggle).toHaveBeenCalledTimes(1);
+		expect(onTreeToggle).toHaveBeenCalledTimes(2);
 		expect(router.push).not.toHaveBeenCalled();
 		act(() => renderer.unmount());
 	});
