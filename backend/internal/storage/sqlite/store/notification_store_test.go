@@ -706,3 +706,85 @@ func TestNotificationStore_MarkNotificationsReadOnlyTouchesGivenIDs(t *testing.T
 		t.Fatalf("unread count = %d err=%v, want 1 (ntf_3 must stay reachable)", count, err)
 	}
 }
+
+func decisionNotificationRecord(id, callID string, at time.Time) domain.NotificationRecord {
+	return domain.NotificationRecord{
+		ID:                   id,
+		Type:                 domain.NotificationDecisionNeeded,
+		Title:                "Decision needed · ao",
+		Body:                 "Ship it?",
+		Status:               domain.NotificationUnread,
+		CreatedAt:            at,
+		SourceKey:            "decision:" + callID,
+		DecisionCallID:       callID,
+		DecisionOriginHostID: "h_origin",
+	}
+}
+
+func TestNotificationStore_DecisionNotificationIsSessionless(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	created, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_dec", "dec_1", now))
+	if err != nil || !inserted {
+		t.Fatalf("CreateNotification inserted=%v err=%v", inserted, err)
+	}
+	if created.SessionID != "" || created.ProjectID != "" || created.DecisionCallID != "dec_1" ||
+		created.DecisionOriginHostID != "h_origin" || created.Type != domain.NotificationDecisionNeeded {
+		t.Fatalf("created = %+v", created)
+	}
+	// An empty session_id would violate the sessions foreign key, so a
+	// successful insert proves the row stored NULL.
+	unresolved, err := s.ListNotifications(ctx, domain.NotificationListUnresolved, time.Time{}, "", 10)
+	if err != nil || len(unresolved) != 1 || unresolved[0].DecisionCallID != "dec_1" {
+		t.Fatalf("unresolved=%+v err=%v", unresolved, err)
+	}
+	count, err := s.CountUnresolvedNotifications(ctx)
+	if err != nil || count != 1 {
+		t.Fatalf("unresolved count=%d err=%v", count, err)
+	}
+}
+
+func TestNotificationStore_DecisionNotificationDedupesByCall(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_a", "dec_1", now)); err != nil || !inserted {
+		t.Fatalf("first create inserted=%v err=%v", inserted, err)
+	}
+	existing, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_b", "dec_1", now.Add(time.Second)))
+	if err != nil || inserted || existing.ID != "ntf_a" {
+		t.Fatalf("retry existing=%+v inserted=%v err=%v", existing, inserted, err)
+	}
+	rows, err := s.ListNotifications(ctx, domain.NotificationListAll, time.Time{}, "", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestNotificationStore_SessionDeleteKeepsDecisionNotifications(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	sess, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, _, err := s.CreateNotification(ctx, domain.NotificationRecord{
+		ID: "ntf_session", SessionID: sess.ID, ProjectID: sess.ProjectID, Type: domain.NotificationNeedsInput,
+		Title: "needs input", Status: domain.NotificationUnread, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_dec", "dec_1", now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteSession(ctx, sess.ID); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	rows, err := s.ListNotifications(ctx, domain.NotificationListAll, time.Time{}, "", 10)
+	if err != nil || len(rows) != 1 || rows[0].ID != "ntf_dec" {
+		t.Fatalf("after session delete rows=%+v err=%v", rows, err)
+	}
+}

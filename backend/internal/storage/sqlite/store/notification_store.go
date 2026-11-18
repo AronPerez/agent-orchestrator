@@ -30,16 +30,18 @@ func (s *Store) CreateNotification(ctx context.Context, rec domain.NotificationR
 		return existing, false, nil
 	}
 	row, err := s.qw.CreateNotification(ctx, gen.CreateNotificationParams{
-		ID:        rec.ID,
-		SessionID: rec.SessionID,
-		ProjectID: optionalProjectID(rec.ProjectID),
-		PRURL:     rec.PRURL,
-		Type:      rec.Type,
-		Title:     rec.Title,
-		Body:      rec.Body,
-		Status:    rec.Status,
-		CreatedAt: rec.CreatedAt,
-		SourceKey: rec.SourceKey,
+		ID:                   rec.ID,
+		SessionID:            notificationSessionID(rec.SessionID),
+		ProjectID:            optionalProjectID(rec.ProjectID),
+		PRURL:                rec.PRURL,
+		Type:                 rec.Type,
+		Title:                rec.Title,
+		Body:                 rec.Body,
+		Status:               rec.Status,
+		CreatedAt:            rec.CreatedAt,
+		SourceKey:            rec.SourceKey,
+		DecisionCallID:       rec.DecisionCallID,
+		DecisionOriginHostID: rec.DecisionOriginHostID,
 	})
 	if err != nil {
 		if isSQLiteUnique(err) {
@@ -141,14 +143,14 @@ func (s *Store) ResolveSessionNotifications(
 		var err error
 		rows, err = q.ResolveSessionNotificationsByType(ctx, gen.ResolveSessionNotificationsByTypeParams{
 			ResolvedAt: nullTime(at),
-			SessionID:  id,
+			SessionID:  &id,
 			Type:       typ,
 		})
 		if err != nil {
 			return err
 		}
 		_, err = q.DeleteDismissedSessionNotificationsByType(ctx, gen.DeleteDismissedSessionNotificationsByTypeParams{
-			SessionID: id,
+			SessionID: &id,
 			Type:      typ,
 		})
 		return err
@@ -365,7 +367,7 @@ func (s *Store) DeleteNotification(ctx context.Context, id string) (domain.Notif
 
 func (s *Store) getOpenNotificationByDedupe(ctx context.Context, rec domain.NotificationRecord) (domain.NotificationRecord, bool, error) {
 	row, err := s.qw.GetOpenNotificationByDedupe(ctx, gen.GetOpenNotificationByDedupeParams{
-		SessionID: rec.SessionID,
+		SessionID: notificationSessionID(rec.SessionID),
 		Type:      rec.Type,
 		PRURL:     rec.PRURL,
 	})
@@ -385,18 +387,37 @@ func isSQLiteUnique(err error) bool {
 
 func notificationFromGen(row gen.Notification) domain.NotificationRecord {
 	return domain.NotificationRecord{
-		ID:         row.ID,
-		SessionID:  row.SessionID,
-		ProjectID:  projectIDValue(row.ProjectID),
-		PRURL:      row.PRURL,
-		Type:       row.Type,
-		Title:      row.Title,
-		Body:       row.Body,
-		Status:     row.Status,
-		CreatedAt:  row.CreatedAt,
-		ResolvedAt: timeFromNull(row.ResolvedAt),
-		SourceKey:  row.SourceKey,
+		ID:                   row.ID,
+		SessionID:            notificationSessionIDValue(row.SessionID),
+		ProjectID:            projectIDValue(row.ProjectID),
+		PRURL:                row.PRURL,
+		Type:                 row.Type,
+		Title:                row.Title,
+		Body:                 row.Body,
+		Status:               row.Status,
+		CreatedAt:            row.CreatedAt,
+		ResolvedAt:           timeFromNull(row.ResolvedAt),
+		SourceKey:            row.SourceKey,
+		DecisionCallID:       row.DecisionCallID,
+		DecisionOriginHostID: row.DecisionOriginHostID,
 	}
+}
+
+// notificationSessionID stores a decision notification's empty session as
+// NULL: a call may have no local session, and an empty string would violate
+// the sessions foreign key.
+func notificationSessionID(id domain.SessionID) *domain.SessionID {
+	if id == "" {
+		return nil
+	}
+	return &id
+}
+
+func notificationSessionIDValue(id *domain.SessionID) domain.SessionID {
+	if id == nil {
+		return ""
+	}
+	return *id
 }
 
 func notificationsFromGen(rows []gen.Notification) []domain.NotificationRecord {
