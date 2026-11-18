@@ -5927,9 +5927,25 @@ func errorsIs(err, target error) bool {
 func TestInitialPromptIsAttributedToTheUser(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
+	preWriteCalls := 0
+	if _, err := h.svc.StartChatTurn(ctx, "missing-session", "must not send", func() error {
+		preWriteCalls++
+		return nil
+	}); err == nil {
+		t.Fatal("StartChatTurn(missing controller) error = nil")
+	}
+	if preWriteCalls != 0 {
+		t.Fatalf("missing controller ran pre-write callback %d times, want 0", preWriteCalls)
+	}
 
-	if _, err := h.svc.StartChatTurn(ctx, testSession, "Explain the whole design system"); err != nil {
+	if _, err := h.svc.StartChatTurn(ctx, testSession, "Explain the whole design system", func() error {
+		preWriteCalls++
+		return nil
+	}); err != nil {
 		t.Fatalf("StartChatTurn: %v", err)
+	}
+	if preWriteCalls != 1 {
+		t.Fatalf("successful initial turn pre-write callbacks = %d, want 1", preWriteCalls)
 	}
 
 	snapshot := h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool {

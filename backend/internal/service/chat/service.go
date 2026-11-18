@@ -2667,10 +2667,15 @@ type StartResult = ports.ChatControllerStarted
 // It goes through the controller rather than the mode-gated Send, because the
 // session row is still being written when spawn calls this: reading the persisted
 // mode here would race the write that sets it.
-func (s *Service) StartChatTurn(ctx context.Context, id domain.SessionID, text string) (string, error) {
+func (s *Service) StartChatTurn(ctx context.Context, id domain.SessionID, text string, beforeSend func() error) (string, error) {
 	controller, err := s.Controller(id)
 	if err != nil {
 		return "", err
+	}
+	if beforeSend != nil {
+		if err := beforeSend(); err != nil {
+			return "", err
+		}
 	}
 	turn, err := controller.Send(ctx, ports.ChatUserMessage{
 		Text:               text,

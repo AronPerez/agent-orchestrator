@@ -243,8 +243,10 @@ func TestTrackerIntakeConfirmedStoppedDeliveryFenceDoesNotConsumeConcurrentCapac
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if deleted, err := store.DeleteSession(ctx, created.ID); err != nil || !deleted {
-		t.Fatalf("DeleteSession() = %t, %v", deleted, err)
+	created.IsTerminated = true
+	created.Activity = domain.Activity{State: domain.ActivityExited}
+	if err := store.UpdateSession(ctx, created); err != nil {
+		t.Fatalf("UpdateSession(terminated owner): %v", err)
 	}
 
 	second := sampleRecord("demo")

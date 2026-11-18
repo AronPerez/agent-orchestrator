@@ -782,7 +782,13 @@ func (c *transitionChat) StartChat(ctx context.Context, cfg ChatStart) (ChatStar
 	}
 	return started, nil
 }
-func (*transitionChat) StartChatTurn(context.Context, domain.SessionID, string) (string, error) {
+
+func (*transitionChat) StartChatTurn(_ context.Context, _ domain.SessionID, _ string, beforeSend func() error) (string, error) {
+	if beforeSend != nil {
+		if err := beforeSend(); err != nil {
+			return "", err
+		}
+	}
 	return "", nil
 }
 func (c *transitionChat) RelaySessionChatTurn(_ context.Context, _ domain.SessionID, text, clientMessageID string, _ ports.MessageDeliveryOptions) (string, error) {

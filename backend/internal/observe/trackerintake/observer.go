@@ -52,7 +52,7 @@ type Spawner interface {
 }
 
 type claimReconciler interface {
-	ReconcileTrackerIntakeClaims(context.Context) error
+	ScheduleTrackerIntakeClaimReconciliation(context.Context) error
 }
 
 // TrackerResolver picks the tracker adapter for a project's configured
@@ -155,7 +155,7 @@ func (o *Observer) Poll(ctx context.Context) error {
 		return nil
 	}
 	if reconciler, ok := o.spawner.(claimReconciler); ok {
-		if err := reconciler.ReconcileTrackerIntakeClaims(ctx); err != nil {
+		if err := reconciler.ScheduleTrackerIntakeClaimReconciliation(ctx); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}

@@ -211,6 +211,19 @@ func (g *Guard) Deliver(ctx context.Context, id domain.SessionID, msg string) (O
 	return g.send(ctx, id, msg, g.refuseDeliver)
 }
 
+// DeliverChecked is Deliver plus one caller-owned checkpoint immediately
+// before the pane write. Suppressed deliveries never run preWrite, so callers
+// may safely use it to persist an ambiguous-delivery fence only after every
+// guard policy has admitted the write.
+func (g *Guard) DeliverChecked(
+	ctx context.Context,
+	id domain.SessionID,
+	msg string,
+	preWrite func(context.Context, domain.SessionRecord) error,
+) (Outcome, error) {
+	return g.sendThenChecked(ctx, id, msg, g.refuseDeliver, preWrite, nil, nil)
+}
+
 // DeliverWithComposerCheck is Deliver plus two optional callbacks, both run
 // while the same input lease is held. composerBusy checks for an unsent human
 // draft in the composer on the just-in-time session read, immediately before

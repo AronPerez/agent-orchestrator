@@ -69,15 +69,16 @@ type recordingLauncher struct {
 	// Empty preserves the default identity used by ordinary Chat fixtures.
 	providerConversationID string
 
-	permissionModes  []ports.PermissionMode
-	preflightErr     error
-	startErr         error
-	turnErr          error
-	live             bool
-	beforeStart      func(ChatStart)
-	afterReady       func()
-	providerBoundary *domain.ConversationBranch
-	liveReconnect    bool
+	permissionModes   []ports.PermissionMode
+	preflightErr      error
+	startErr          error
+	turnBeforeSendErr error
+	turnErr           error
+	live              bool
+	beforeStart       func(ChatStart)
+	afterReady        func()
+	providerBoundary  *domain.ConversationBranch
+	liveReconnect     bool
 
 	preflighted          []domain.AgentHarness
 	preflightPermissions []ports.PermissionMode
@@ -219,7 +220,15 @@ func (l *recordingLauncher) StartChat(ctx context.Context, cfg ChatStart) (ChatS
 	return started, nil
 }
 
-func (l *recordingLauncher) StartChatTurn(_ context.Context, _ domain.SessionID, text string) (string, error) {
+func (l *recordingLauncher) StartChatTurn(_ context.Context, _ domain.SessionID, text string, beforeSend func() error) (string, error) {
+	if l.turnBeforeSendErr != nil {
+		return "", l.turnBeforeSendErr
+	}
+	if beforeSend != nil {
+		if err := beforeSend(); err != nil {
+			return "", err
+		}
+	}
 	l.turns = append(l.turns, text)
 	return "turn-1", l.turnErr
 }
@@ -432,6 +441,37 @@ func TestChatTrackerIntakeTurnErrorPreservesPossibleDelivery(t *testing.T) {
 	reservation := st.trackerIntakeRecovery[id]
 	if !reservation.ControllerPossible || !reservation.DeliveryPossible {
 		t.Fatalf("Chat recovery reservation = %+v, want controller and delivery fences", reservation)
+	}
+}
+
+func TestChatTrackerIntakePreSendErrorReleasesClaimForRetry(t *testing.T) {
+	lookupErr := errors.New("controller not registered")
+	launcher := &recordingLauncher{turnBeforeSendErr: lookupErr}
+	m, st, _ := newChatManager(launcher)
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID: chatTestProject, IssueID: "github:acme/mer#82", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, RequestedMode: domain.SessionModeChat,
+		Prompt: "fix it", TrackerIntakeLimits: &limits,
+	}
+
+	if _, _, _, err := m.Spawn(context.Background(), cfg); !errors.Is(err, lookupErr) {
+		t.Fatalf("Spawn() error = %v, want controller lookup error", err)
+	}
+	key := "mer\x00github:acme/mer#82"
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("pre-send failure kept intake claim: pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if len(launcher.turns) != 0 || len(launcher.stopped) != 1 {
+		t.Fatalf("pre-send turns/stops = %v/%v, want no turn and one cleanup", launcher.turns, launcher.stopped)
+	}
+
+	launcher.turnBeforeSendErr = nil
+	if _, _, _, err := m.Spawn(context.Background(), cfg); err != nil {
+		t.Fatalf("Spawn(retry): %v", err)
+	}
+	if len(launcher.turns) != 1 {
+		t.Fatalf("retry turns = %v, want delivered prompt", launcher.turns)
 	}
 }
 
@@ -2018,7 +2058,12 @@ type deadlineConsumingChatLauncher struct {
 	cancel context.CancelFunc
 }
 
-func (l *deadlineConsumingChatLauncher) StartChatTurn(_ context.Context, _ domain.SessionID, text string) (string, error) {
+func (l *deadlineConsumingChatLauncher) StartChatTurn(_ context.Context, _ domain.SessionID, text string, beforeSend func() error) (string, error) {
+	if beforeSend != nil {
+		if err := beforeSend(); err != nil {
+			return "", err
+		}
+	}
 	l.turns = append(l.turns, text)
 	l.cancel()
 	return "", context.DeadlineExceeded

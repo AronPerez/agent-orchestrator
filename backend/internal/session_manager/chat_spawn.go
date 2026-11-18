@@ -42,7 +42,7 @@ type ChatLauncher interface {
 	// StartChatTurn delivers the initial prompt as a normal turn. There is no
 	// paste-and-Enter equivalent in chat mode: the provider either accepts the
 	// turn or reports why.
-	StartChatTurn(ctx context.Context, id domain.SessionID, text string) (string, error)
+	StartChatTurn(ctx context.Context, id domain.SessionID, text string, beforeSend func() error) (string, error)
 	// RelaySessionChatTurn preserves delivery identity, authorship, and acceptance
 	// time. A durable clientMessageID makes queued retries idempotent.
 	RelaySessionChatTurn(ctx context.Context, id domain.SessionID, text, clientMessageID string, options ports.MessageDeliveryOptions) (string, error)
@@ -422,29 +422,33 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	// paste-and-Enter equivalent here, and no "deliver after start" variant: the
 	// provider either accepts the turn or reports why.
 	if in.prompt != "" && !in.promptQueued {
+		var beforeSend func() error
 		if in.cfg.TrackerIntakeLimits != nil {
-			if err := m.markTrackerIntakeDeliveryPossible(ctx, id); err != nil {
-				controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
-				if !controllerStopped {
-					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, err)
+			beforeSend = func() error { return m.markTrackerIntakeDeliveryPossible(ctx, id) }
+		}
+		if _, err := m.chat.StartChatTurn(ctx, id, in.prompt, beforeSend); err != nil {
+			if in.cfg.TrackerIntakeLimits != nil {
+				reservation, pending, recoveryErr := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+				if recoveryErr != nil || (pending && reservation.DeliveryPossible) {
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt,
+						agentlaunch.RedactError(errors.Join(err, recoveryErr), in.project.Config.Env))
 				}
-				workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
-				if !workspaceDestroyed {
-					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, err)
+				controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
+				workspaceDestroyed := false
+				if controllerStopped {
+					workspaceDestroyed = m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
+				}
+				if !controllerStopped || !workspaceDestroyed {
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
 				}
 				if confirmErr := m.confirmTrackerIntakeCleanup(ctx, id); confirmErr != nil {
 					err = errors.Join(err, confirmErr)
-					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, err)
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
 				}
 				m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
 				if releaseErr := m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id); releaseErr != nil {
 					err = errors.Join(err, releaseErr)
 				}
-				return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, err)
-			}
-		}
-		if _, err := m.chat.StartChatTurn(ctx, id, in.prompt); err != nil {
-			if in.cfg.TrackerIntakeLimits != nil {
 				return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
 			}
 			m.stopChatAfterSpawnFailure(ctx, id)

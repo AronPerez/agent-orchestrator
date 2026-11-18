@@ -879,7 +879,7 @@ type fakeSpawner struct {
 	reconcileErr   error
 }
 
-func (f *fakeSpawner) ReconcileTrackerIntakeClaims(context.Context) error {
+func (f *fakeSpawner) ScheduleTrackerIntakeClaimReconciliation(context.Context) error {
 	f.reconcileCalls++
 	return f.reconcileErr
 }

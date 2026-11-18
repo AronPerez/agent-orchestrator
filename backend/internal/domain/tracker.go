@@ -195,12 +195,16 @@ type TrackerIntakeHandledRecord struct {
 // and every opaque runtime identity needed to settle an interrupted launch
 // without starting a second worker for the same tracker item.
 type TrackerIntakeRecoveryReservation struct {
-	Branch             string   `json:"branch,omitempty"`
-	WorkspacePath      string   `json:"workspacePath,omitempty"`
-	WorkspaceRepoPath  string   `json:"workspaceRepoPath,omitempty"`
-	RuntimeLaunchID    string   `json:"runtimeLaunchId,omitempty"`
-	RuntimeHandleIDs   []string `json:"runtimeHandleIds,omitempty"`
-	ControllerPossible bool     `json:"controllerPossible,omitempty"`
+	Branch            string `json:"branch,omitempty"`
+	WorkspacePath     string `json:"workspacePath,omitempty"`
+	WorkspaceRepoPath string `json:"workspaceRepoPath,omitempty"`
+	// WorkspaceCreationIntent records that WorkspacePath was checkpointed before
+	// materialization. Recovery may remove it only when the workspace adapter can
+	// prove the path is a registered worktree or is empty/absent.
+	WorkspaceCreationIntent bool     `json:"workspaceCreationIntent,omitempty"`
+	RuntimeLaunchID         string   `json:"runtimeLaunchId,omitempty"`
+	RuntimeHandleIDs        []string `json:"runtimeHandleIds,omitempty"`
+	ControllerPossible      bool     `json:"controllerPossible,omitempty"`
 	// DeliveryPossible means the initial task may already have crossed the
 	// runtime/provider boundary. Recovery must preserve the worker and claim;
 	// cleaning it up and retrying could duplicate arbitrary external effects.

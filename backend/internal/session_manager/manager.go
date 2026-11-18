@@ -516,10 +516,12 @@ type Manager struct {
 	startupProvisioningRetries []domain.SessionRecord
 	// runBackground runs an asynchronous spawn's remaining work. Nil means a
 	// plain goroutine; tests substitute a synchronous runner.
-	runBackground     func(func())
-	backgroundWorkers sync.WaitGroup
-	asyncChatSpawnsMu sync.Mutex
-	asyncChatSpawns   map[domain.SessionID]*asyncChatSpawnRun
+	runBackground           func(func())
+	backgroundWorkers       sync.WaitGroup
+	trackerIntakeRecoveryMu sync.Mutex
+	trackerIntakeRecovering map[domain.SessionID]struct{}
+	asyncChatSpawnsMu       sync.Mutex
+	asyncChatSpawns         map[domain.SessionID]*asyncChatSpawnRun
 	// provisionObserver hears provision-state writes (SetProvisionObserver).
 	provisionObserver ProvisionObserver
 	// killTeardown bounds Kill's detached teardown. Zero means
@@ -1044,6 +1046,7 @@ func New(d Deps) *Manager {
 		taskPreparations:               make(map[domain.TaskPreparationToken]*taskPreparation),
 		taskNamingSlots:                make(chan struct{}, 4),
 		asyncChatSpawns:                make(map[domain.SessionID]*asyncChatSpawnRun),
+		trackerIntakeRecovering:        make(map[domain.SessionID]struct{}),
 		taskPreparationTTL:             defaultTaskPreparationTTL,
 		openTranscriptFile:             os.Open,
 		lookPath:                       d.LookPath,
@@ -3313,6 +3316,10 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	if !ok {
 		return KillResult{}, nil // already gone: benign race
 	}
+	intakeRecovery, pendingIntake, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+	if err != nil {
+		return KillResult{}, fmt.Errorf("kill %s: tracker intake claim: %w", id, err)
+	}
 	m.stopPreviewBestEffort(ctx, id)
 	m.destroyBrowserBestEffort(ctx, id)
 	handle := runtimeHandle(rec.Metadata)
@@ -3343,6 +3350,10 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	externalOwnerStopped := true
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 		externalOwnerStopped = m.stopChatBestEffort(ctx, id)
+	} else if pendingIntake && !intakeRecovery.CapacityReleased && trackerIntakeHasRuntimeEvidence(rec, intakeRecovery) {
+		if err := m.stopTrackerIntakeRuntimeOwners(ctx, rec, intakeRecovery); err != nil {
+			return KillResult{}, fmt.Errorf("kill %s: tracker intake runtime: %w", id, err)
+		}
 	} else if handle.ID != "" {
 		// Any Destroy error stops the kill. Every runtime's Destroy already
 		// returns nil when it confirms the session is absent, so an error means
@@ -5086,8 +5097,8 @@ func (m *Manager) ReconcileBackground(ctx context.Context) (resultErr error) {
 		}
 	}
 	m.startupProvisioningRetries = nil
-	if err := m.ReconcileTrackerIntakeClaims(ctx); err != nil {
-		m.logger.Warn("reconcile: pending tracker intake cleanup deferred", "error", err)
+	if err := m.ScheduleTrackerIntakeClaimReconciliation(ctx); err != nil {
+		m.logger.Warn("reconcile: pending tracker intake cleanup scheduling deferred", "error", err)
 	}
 	recs, err := m.store.ListAllSessions(ctx)
 	if err != nil {
@@ -5503,34 +5514,50 @@ func (m *Manager) workspaceProjectRestoreRows(ctx context.Context, project domai
 }
 
 func (m *Manager) workspaceProjectRestoreRowsFromMarkers(ctx context.Context, project domain.ProjectRecord, rec domain.SessionRecord, rows []domain.SessionWorktreeRecord) ([]ports.WorkspaceRepoInfo, error) {
-	if len(rows) > 1 {
-		return m.sessionWorktreeRowsToRepoInfos(ctx, project, rec, rows)
-	}
 	childRepos, err := m.store.ListWorkspaceRepos(ctx, project.ID)
 	if err != nil {
 		return nil, err
 	}
+	markers := make(map[string]domain.SessionWorktreeRecord, len(rows))
+	valid := map[string]struct{}{domain.RootWorkspaceRepoName: {}}
+	for _, repo := range childRepos {
+		valid[repo.Name] = struct{}{}
+	}
+	for _, row := range rows {
+		name := row.RepoName
+		if name == "" {
+			name = domain.RootWorkspaceRepoName
+		}
+		if _, ok := valid[name]; !ok {
+			return nil, fmt.Errorf("session worktree row %q no longer matches workspace registry", name)
+		}
+		row.RepoName = name
+		markers[name] = row
+	}
 	rootPath := rec.Metadata.WorkspacePath
 	rootBranch := rec.Metadata.Branch
-	var rootBaseSHA, rootBaseRef string
-	if len(rows) == 1 && (rows[0].RepoName == "" || rows[0].RepoName == domain.RootWorkspaceRepoName) {
-		rootPath = firstNonEmptyString(rows[0].WorktreePath, rootPath)
-		rootBranch = firstNonEmptyString(rows[0].Branch, rootBranch)
-		rootBaseSHA = rows[0].BaseSHA
-		rootBaseRef = rows[0].BaseRef
+	var rootBaseSHA string
+	var rootBaseRef, rootCreationSHA string
+	if row, ok := markers[domain.RootWorkspaceRepoName]; ok {
+		rootPath = firstNonEmptyString(row.WorktreePath, rootPath)
+		rootBranch = firstNonEmptyString(row.Branch, rootBranch)
+		rootBaseSHA = firstNonEmptyString(row.BaseSHA, rootBaseSHA)
+		rootBaseRef = row.BaseRef
+		rootCreationSHA = row.CreationSHA
 	}
 	out := []ports.WorkspaceRepoInfo{{
-		RepoName:  domain.RootWorkspaceRepoName,
-		RepoPath:  project.Path,
-		Path:      rootPath,
-		Branch:    rootBranch,
-		BaseSHA:   rootBaseSHA,
-		BaseRef:   rootBaseRef,
-		SessionID: rec.ID,
-		ProjectID: rec.ProjectID,
+		RepoName:    domain.RootWorkspaceRepoName,
+		RepoPath:    project.Path,
+		Path:        rootPath,
+		Branch:      rootBranch,
+		BaseSHA:     rootBaseSHA,
+		BaseRef:     rootBaseRef,
+		CreationSHA: rootCreationSHA,
+		SessionID:   rec.ID,
+		ProjectID:   rec.ProjectID,
 	}}
 	for _, repo := range childRepos {
-		out = append(out, ports.WorkspaceRepoInfo{
+		info := ports.WorkspaceRepoInfo{
 			RepoName:     repo.Name,
 			RepoPath:     filepath.Join(project.Path, filepath.FromSlash(repo.RelativePath)),
 			Path:         filepath.Join(rootPath, filepath.FromSlash(repo.RelativePath)),
@@ -5538,7 +5565,15 @@ func (m *Manager) workspaceProjectRestoreRowsFromMarkers(ctx context.Context, pr
 			SessionID:    rec.ID,
 			ProjectID:    rec.ProjectID,
 			RelativePath: repo.RelativePath,
-		})
+		}
+		if row, ok := markers[repo.Name]; ok {
+			info.Path = firstNonEmptyString(row.WorktreePath, info.Path)
+			info.Branch = firstNonEmptyString(row.Branch, info.Branch)
+			info.BaseSHA = firstNonEmptyString(row.BaseSHA, info.BaseSHA)
+			info.BaseRef = row.BaseRef
+			info.CreationSHA = row.CreationSHA
+		}
+		out = append(out, info)
 	}
 	return out, nil
 }
@@ -8166,12 +8201,11 @@ func (m *Manager) deliverAfterStartPromptWithFence(ctx context.Context, agent po
 	if prompt == "" {
 		return nil
 	}
+	var preWrite func(context.Context, domain.SessionRecord) error
 	if beforePrompt != nil {
-		if err := beforePrompt(); err != nil {
-			return err
-		}
+		preWrite = func(context.Context, domain.SessionRecord) error { return beforePrompt() }
 	}
-	return m.deliverStartedInput(ctx, id, prompt)
+	return m.deliverStartedInputChecked(ctx, id, prompt, preWrite)
 }
 
 func (m *Manager) waitForAfterStartCommand(ctx context.Context, selector ports.AgentAfterStartCommand, cfg ports.LaunchConfig, handle ports.RuntimeHandle) error {
@@ -8202,6 +8236,15 @@ func (m *Manager) waitForAfterStartCommand(ctx context.Context, selector ports.A
 }
 
 func (m *Manager) deliverStartedInput(ctx context.Context, id domain.SessionID, prompt string) error {
+	return m.deliverStartedInputChecked(ctx, id, prompt, nil)
+}
+
+func (m *Manager) deliverStartedInputChecked(
+	ctx context.Context,
+	id domain.SessionID,
+	prompt string,
+	preWrite func(context.Context, domain.SessionRecord) error,
+) error {
 	// Call Deliver directly (not the Guard.Send wrapper, which folds a suppressed
 	// outcome into nil): a freshly-spawned session can terminate or hit a
 	// permission dialog between readiness and prompt injection, and folding that
@@ -8213,9 +8256,9 @@ func (m *Manager) deliverStartedInput(ctx context.Context, id domain.SessionID, 
 	outcome, err = deliverWithStaleExitRetry(ctx, id, m.staleExitClearerRef(),
 		func() (sessionguard.Outcome, error) {
 			if m.SessionMutationInProgress(id) {
-				return m.messenger.DeliverUnderMutation(ctx, id, prompt)
+				return m.messenger.DeliverUnderMutationChecked(ctx, id, prompt, preWrite)
 			}
-			return m.messenger.Deliver(ctx, id, prompt)
+			return m.messenger.DeliverChecked(ctx, id, prompt, preWrite)
 		})
 	if err != nil {
 		return fmt.Errorf("send %s: %w", id, err)

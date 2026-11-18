@@ -1264,6 +1264,18 @@ func (a readinessAgent) PromptReadinessHints(context.Context, ports.LaunchConfig
 	return a.hints, nil
 }
 
+type readinessHookAgent struct {
+	afterStartAgent
+	hook func()
+}
+
+func (a *readinessHookAgent) PromptReadinessHints(context.Context, ports.LaunchConfig) (ports.PromptReadinessHints, error) {
+	if a.hook != nil {
+		a.hook()
+	}
+	return ports.PromptReadinessHints{}, nil
+}
+
 type composedAfterStartAgent struct {
 	afterStartAgent
 	buildCalls int
@@ -1436,12 +1448,13 @@ type fakeWorkspace struct {
 	destroyCtxErr error
 	// destroyHook runs at the top of Destroy, so a test can make teardown burn
 	// real time against Kill's budget.
-	destroyHook func()
-	fetchErr    error
-	fetches     []fetchDefaultBranchCall
-	resolves    []resolveDefaultBranchCall
-	resolved    map[string]ports.WorkspaceDefaultBranch
-	fetchFunc   func(context.Context, string, ports.WorkspaceDefaultBranch) error
+	destroyHook     func()
+	destroyInfoHook func(ports.WorkspaceInfo)
+	fetchErr        error
+	fetches         []fetchDefaultBranchCall
+	resolves        []resolveDefaultBranchCall
+	resolved        map[string]ports.WorkspaceDefaultBranch
+	fetchFunc       func(context.Context, string, ports.WorkspaceDefaultBranch) error
 	// createRepoPath, when set, is returned as the RepoPath of a single-repo
 	// Create so tests can assert it survives the spawn->teardown metadata round
 	// trip (production Create resolves this path; the zero default keeps every
@@ -1603,6 +1616,9 @@ func (w *fakeWorkspace) CreateWorkspaceProject(_ context.Context, cfg ports.Work
 }
 func (w *fakeWorkspace) Destroy(ctx context.Context, info ports.WorkspaceInfo) error {
 	w.lastDestroyInfo = info
+	if w.destroyInfoHook != nil {
+		w.destroyInfoHook(info)
+	}
 	if w.destroyHook != nil {
 		w.destroyHook()
 	}
@@ -3101,13 +3117,14 @@ func TestSpawnTrackerIntakeSuccessfulRuntimeBeforeCommitWaitsForDeadProofAfterFa
 		t.Fatalf("pending intake claim = %q, want %q", got, rec.ID)
 	}
 
-	// Once an in-command launch may have delivered the task, restart recovery
-	// probes exact ownership. An inconclusive probe reports a retryable recovery
-	// error while preserving the claim, so intake cannot duplicate arbitrary
-	// external effects.
+	// Once the row is terminated, claim recovery probes exact ownership. An
+	// inconclusive probe reports a retryable recovery error while preserving the
+	// claim, so intake cannot duplicate arbitrary external effects.
+	rec.IsTerminated = true
+	st.sessions[rec.ID] = rec
 	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
-	if err := m.checkSessionHealth(ctx, rec); err == nil || !strings.Contains(err.Error(), "remains unresolved") {
-		t.Fatalf("checkSessionHealth() error = %v, want unresolved ownership", err)
+	if err := m.ReconcileTrackerIntakeClaims(ctx); err == nil || !strings.Contains(err.Error(), "remains unresolved") {
+		t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want unresolved ownership", err)
 	}
 	if got := st.trackerIntakePending[key]; got != rec.ID {
 		t.Fatalf("pending claim after unknown probe = %q, want %q", got, rec.ID)
@@ -3207,9 +3224,10 @@ func TestReconcileTrackerIntakeClaimsSettlesPossibleDeliveryAfterTermination(t *
 }
 
 func TestReconcileTrackerIntakeClaimsAdoptsReservedRuntime(t *testing.T) {
-	m, st, _, _ := newManager()
+	m, st, rt, ws := newManager()
 	lcm := &fakeLCM{store: st}
 	m.lcm = lcm
+	m.runBackground = func(work func()) { work() }
 	id := domain.SessionID("reserved-runtime")
 	key := "mer\x00github:acme/mer#101"
 	st.trackerIntakePending[key] = id
@@ -3219,8 +3237,8 @@ func TestReconcileTrackerIntakeClaimsAdoptsReservedRuntime(t *testing.T) {
 	}
 	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#101", Kind: domain.KindWorker}
 
-	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
-		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground(): %v", err)
 	}
 	got := st.sessions[id]
 	if lcm.completed != 1 || got.Metadata.RuntimeHandleID != "runtime-101" ||
@@ -3229,6 +3247,132 @@ func TestReconcileTrackerIntakeClaimsAdoptsReservedRuntime(t *testing.T) {
 	}
 	if st.trackerIntakePending[key] != id {
 		t.Fatal("adoption released no-replay claim")
+	}
+	if len(rt.fencedRefs) != 0 || rt.destroyed != 0 || ws.destroyed != 0 {
+		t.Fatalf("live possible delivery was torn down: probes=%v runtime=%d workspace=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestKillFencesEveryReservedTrackerIntakeRuntime(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("mer-1")
+	issueID := domain.IssueID("github:acme/mer#110")
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI}
+	st.trackerIntakePending["mer\x00"+string(issueID)] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-110", RuntimeHandleIDs: []string{"native-110", "tmux-110"}, DeliveryPossible: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+
+	if _, err := m.Kill(context.Background(), id); err == nil || !strings.Contains(err.Error(), "remains unresolved") {
+		t.Fatalf("Kill() error = %v, want unresolved reserved runtime", err)
+	}
+	if got := st.trackerIntakeRecovery[id]; got.CapacityReleased {
+		t.Fatalf("Kill() released capacity with unknown candidate: %+v", got)
+	}
+	if len(rt.fencedRefs) != 1 || rt.destroyed != 0 || ws.destroyed != 0 {
+		t.Fatalf("Kill() ownership effects: probes=%v runtime=%d workspace=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeCreationIntentPreservesOccupiedPath(t *testing.T) {
+	m, st, _, ws := newManager()
+	ws.path = "/ws/occupied"
+	ws.createErr = gitworktree.ErrPathOccupied
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	issueID := domain.IssueID("github:acme/mer#111")
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "fix it", TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, gitworktree.ErrPathOccupied) {
+		t.Fatalf("Spawn() error = %v, want occupied path refusal", err)
+	}
+	key := "mer\x00" + string(issueID)
+	id := st.trackerIntakePending[key]
+	if id == "" || st.sessions[id].ID != "" {
+		t.Fatalf("occupied spawn claim/session = %q/%+v, want preserved claim with deleted seed", id, st.sessions[id])
+	}
+	if got := st.trackerIntakeRecovery[id]; !got.WorkspaceCreationIntent || got.WorkspacePath != ws.path {
+		t.Fatalf("occupied spawn reservation = %+v, want durable creation intent", got)
+	}
+
+	ws.destroyErr = ports.ErrWorkspaceDirty
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err == nil {
+		t.Fatal("ReconcileTrackerIntakeClaims() error = nil, want occupied path preserved")
+	}
+	if ws.lastDestroyInfo.BaseSHA != trackerIntakeWorkspaceCreationFence {
+		t.Fatalf("workspace cleanup fence = %q, want creation intent", ws.lastDestroyInfo.BaseSHA)
+	}
+	if st.trackerIntakePending[key] != id {
+		t.Fatal("occupied creation intent released its pending claim")
+	}
+}
+
+func TestScheduleTrackerIntakeClaimReconciliationDoesNotBlockCaller(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("slow-cleanup")
+	key := "mer\x00github:acme/mer#112"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/slow", WorkspaceRepoPath: "/repo/mer", WorkspaceCreationIntent: true, CapacityReleased: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#112", IsTerminated: true}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ws.destroyInfoHook = func(ports.WorkspaceInfo) {
+		close(started)
+		<-release
+	}
+
+	returned := make(chan error, 1)
+	go func() { returned <- m.ScheduleTrackerIntakeClaimReconciliation(context.Background()) }()
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatalf("ScheduleTrackerIntakeClaimReconciliation(): %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("claim scheduling blocked on workspace cleanup")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled cleanup did not start")
+	}
+	close(release)
+	if err := m.WaitBackgroundWorkers(context.Background()); err != nil {
+		t.Fatalf("WaitBackgroundWorkers(): %v", err)
+	}
+}
+
+func TestWorkspaceProjectRestoreRowsMergePartialMarkersWithRegistry(t *testing.T) {
+	m, st, _, _ := newManager()
+	project := st.projects["mer"]
+	project.Kind = domain.ProjectKindWorkspace
+	project.Path = "/repo/root"
+	st.projects["mer"] = project
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{
+		{Name: "api", RelativePath: "services/api"},
+		{Name: "web", RelativePath: "apps/web"},
+	}
+	rec := domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Metadata: domain.SessionMetadata{WorkspacePath: "/ws/root", Branch: "ao/mer-1/root"}}
+	markers := []domain.SessionWorktreeRecord{
+		{SessionID: rec.ID, RepoName: domain.RootWorkspaceRepoName, WorktreePath: "/ws/root", Branch: rec.Metadata.Branch, BaseSHA: "root-base"},
+		{SessionID: rec.ID, RepoName: "api", WorktreePath: "/ws/root/services/api", Branch: rec.Metadata.Branch, BaseSHA: "api-base"},
+	}
+
+	st.worktrees[rec.ID] = markers
+	rows, isProject, err := m.trackerIntakeWorkspaceRows(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("trackerIntakeWorkspaceRows(): %v", err)
+	}
+	if !isProject || len(rows) != 3 || rows[2].RepoName != "web" || rows[2].Path != "/ws/root/apps/web" {
+		t.Fatalf("merged restore rows = %+v, want root plus both registry children", rows)
+	}
+	if rows[1].BaseSHA != "api-base" || rows[2].BaseSHA != trackerIntakeWorkspaceCreationFence {
+		t.Fatalf("merged marker/create fences = api %q web %q", rows[1].BaseSHA, rows[2].BaseSHA)
 	}
 }
 
@@ -3285,6 +3429,62 @@ func TestDeliverAfterStartPromptDoesNotFenceBeforeReadiness(t *testing.T) {
 	}
 	if marked {
 		t.Fatal("delivery was fenced before readiness completed")
+	}
+}
+
+func TestDeliverAfterStartPromptDoesNotFenceSuppressedWrite(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		Activity: domain.Activity{State: domain.ActivityBlocked}, FirstSignalAt: time.Now(),
+	}
+	msg := &fakeMessenger{}
+	m := New(Deps{Store: st, Runtime: &fakeRuntime{}, Messenger: msg})
+	marked := false
+
+	err := m.deliverAfterStartPromptWithFence(context.Background(), fakeAgent{}, ports.LaunchConfig{}, ports.RuntimeHandle{}, id, "task", func() error {
+		marked = true
+		return nil
+	})
+	if !errors.Is(err, ErrAwaitingDecision) {
+		t.Fatalf("deliverAfterStartPromptWithFence() error = %v, want blocked delivery", err)
+	}
+	if marked || len(msg.msgs) != 0 {
+		t.Fatalf("suppressed write fenced/sent = %t/%d, want false/0", marked, len(msg.msgs))
+	}
+}
+
+func TestSpawnTrackerIntakeSuppressedPromptReleasesClaimForRetry(t *testing.T) {
+	m, st, rt, _ := newManager()
+	agent := &readinessHookAgent{afterStartAgent: afterStartAgent{recordingAgent: &recordingAgent{}}}
+	m.agents = singleAgent{agent: agent}
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	issueID := domain.IssueID("github:acme/mer#113")
+	cfg := ports.SpawnConfig{
+		ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "fix it", TrackerIntakeLimits: &limits,
+	}
+	agent.hook = func() {
+		rec := st.sessions["mer-1"]
+		rec.Activity.State = domain.ActivityBlocked
+		st.sessions[rec.ID] = rec
+	}
+
+	if _, _, _, err := m.Spawn(context.Background(), cfg); !errors.Is(err, ErrAwaitingDecision) {
+		t.Fatalf("Spawn() error = %v, want guarded prompt refusal", err)
+	}
+	key := "mer\x00" + string(issueID)
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("suppressed prompt kept claim: pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if rt.destroyed != 1 {
+		t.Fatalf("suppressed prompt runtime cleanup = %d, want 1", rt.destroyed)
+	}
+
+	agent.hook = nil
+	if _, _, _, err := m.Spawn(context.Background(), cfg); err != nil {
+		t.Fatalf("Spawn(retry): %v", err)
 	}
 }
 

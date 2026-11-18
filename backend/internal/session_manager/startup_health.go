@@ -30,12 +30,16 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 		}
 		rec = current
 	}
-	intakeRecovery, pendingIntake, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+	_, pendingIntake, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
 	if err != nil {
 		return fmt.Errorf("check session %s: tracker intake claim: %w", rec.ID, err)
 	}
 	if pendingIntake {
-		return m.reconcileInterruptedTrackerIntake(ctx, rec, intakeRecovery)
+		// Pending claims are reconciled independently from the startup live pass.
+		// In particular, a possibly-delivered runtime adopted earlier in startup
+		// must not be immediately probed and stopped by this health check. The
+		// deduplicated claim scheduler owns both adoption and cleanup.
+		return nil
 	}
 	// Preserve cleanup of interrupted spawns that never committed a workspace.
 	// Their client request IDs must remain retryable after a daemon crash.
