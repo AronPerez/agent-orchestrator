@@ -131,6 +131,19 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		}
 		return fmt.Errorf("recover tracker intake %s: released generation was replaced by a live owner", rec.ID)
 	}
+	if found && !rec.IsTerminated && rec.RuntimeReleased() && claim.Recovery.CapacityReleased &&
+		claim.Recovery.ReleasesCapacityFor(rec) {
+		// Exit Agent deliberately keeps this exact session and worktree resumable.
+		// A delivered task becomes handled without consuming capacity; an
+		// undelivered native relaunch retains its pending no-duplicate fence until
+		// the user resumes or terminates the session.
+		if claim.Recovery.DeliveryPossible {
+			return m.store.CommitStoppedTrackerIntakeSession(ctx, rec.ID, m.clock())
+		}
+		if claim.Recovery.RelaunchPublished {
+			return nil
+		}
+	}
 	if found && !rec.IsTerminated && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat &&
 		claim.Recovery.DeliveryPossible && claim.Recovery.CapacityReleased && rec.Activity.State == domain.ActivityExited {
 		// A pre-atomic build may have persisted the released-capacity fact just
@@ -171,6 +184,9 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 
 func trackerIntakeClaimDefersToSessionHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
 	if reservation.CapacityReleased || rec.IsTerminated {
+		return false
+	}
+	if rec.RuntimeReleased() {
 		return false
 	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
@@ -232,7 +248,47 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim d
 		_, err := m.adoptTrackerIntakeRuntime(ctx, claim, alive[0])
 		return err
 	}
+	settled, err := m.settleStoppedTrackerIntakeRuntime(ctx, claim)
+	if err != nil || settled {
+		return err
+	}
 	return m.settleAbsentTrackerIntakeRuntime(ctx, claim)
+}
+
+// settleStoppedTrackerIntakeRuntime preserves a session that Exit Agent
+// intentionally left resumable. The caller has already proved every reserved
+// runtime for this generation absent. Delivered work becomes a handled,
+// capacity-released claim atomically; an undelivered published relaunch stays
+// pending as an issue-level fence but no longer occupies a project slot.
+func (m *Manager) settleStoppedTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim) (bool, error) {
+	rec, found, err := m.store.GetSession(ctx, claim.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("recover tracker intake %s: reload stopped session: %w", claim.SessionID, err)
+	}
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("recover tracker intake %s: reload stopped claim: %w", claim.SessionID, err)
+	}
+	if !found || !pending || rec.IsTerminated || !rec.RuntimeReleased() ||
+		rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID ||
+		!trackerIntakeRuntimeReservationMatchesSession(rec, reservation) {
+		return false, nil
+	}
+	if reservation.DeliveryPossible {
+		if err := m.store.CommitStoppedTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+			return true, fmt.Errorf("recover tracker intake %s: commit stopped delivery: %w", rec.ID, err)
+		}
+		return true, nil
+	}
+	if !reservation.RelaunchPublished {
+		return false, nil
+	}
+	if !reservation.CapacityReleased {
+		if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+			return true, fmt.Errorf("recover tracker intake %s: release stopped relaunch capacity: %w", rec.ID, err)
+		}
+	}
+	return true, nil
 }
 
 func (m *Manager) adoptTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim, handleID string) (bool, error) {

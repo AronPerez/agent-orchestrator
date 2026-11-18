@@ -8905,6 +8905,93 @@ func TestRestore_PendingUndeliveredNativeOwnerSurvivesClaimReconciliation(t *tes
 	}
 }
 
+func TestRestore_PendingUndeliveredNativeOwnerExitReleasesCapacityWithoutTeardown(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#1201")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task", AgentSessionID: "native-1",
+		},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"old-runtime"},
+		CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+	}
+	rt := &fakeRuntime{createIDs: []string{"new-runtime"}}
+	ws := &fakeWorkspace{}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: ws,
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ExitAgent(ctx, "mer-1"); err != nil {
+		t.Fatalf("ExitAgent(): %v", err)
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions["mer-1"]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited || !got.RuntimeReleased() {
+		t.Fatalf("exited native owner = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery["mer-1"]
+	if !reservation.RelaunchPublished || reservation.DeliveryPossible || !reservation.CapacityReleased ||
+		reservation.ReleasedRuntimeLaunchID != got.Metadata.RuntimeLaunchID {
+		t.Fatalf("settled native reservation = %+v, want released capacity for stopped generation", reservation)
+	}
+	if ws.destroyed != 0 || st.trackerIntakePending[key] != "mer-1" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("stopped native owner destroyed workspace=%d or changed claim pending=%q handled=%q",
+			ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeDeliveredOwnerExitCommitsStoppedClaimWithoutTeardown(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("delivered-owner")
+	issueID := domain.IssueID("github:acme/mer#1202")
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/delivered-owner", Branch: "b",
+			RuntimeHandleID: "delivered-runtime", RuntimeLaunchID: "delivered-launch",
+		},
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/delivered-owner", RuntimeLaunchID: "delivered-launch",
+		RuntimeHandleIDs: []string{"delivered-runtime"}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{"delivered-runtime": true}
+
+	if _, err := m.ExitAgent(ctx, id); err != nil {
+		t.Fatalf("ExitAgent(): %v", err)
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited || !got.RuntimeReleased() {
+		t.Fatalf("exited delivered owner = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.CapacityReleased || reservation.ReleasedRuntimeLaunchID != got.Metadata.RuntimeLaunchID {
+		t.Fatalf("handled stopped reservation = %+v, want released capacity for stopped generation", reservation)
+	}
+	if ws.destroyed != 0 || st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("stopped delivered owner destroyed workspace=%d or claim pending=%q handled=%q",
+			ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 func TestReconcileTrackerIntakeAdoptsInterruptedRelaunchGeneration(t *testing.T) {
 	for _, terminated := range []bool{false, true} {
 		t.Run(fmt.Sprintf("terminated=%t", terminated), func(t *testing.T) {
