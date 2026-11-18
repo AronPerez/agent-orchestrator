@@ -62,7 +62,7 @@ describe("decision inbox API", () => {
 		await expect(answerDecisionInboxCall({ sourceHostId: "remote-a", callId: "dec_1", option: 2 })).resolves.toEqual(answered);
 		expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
 			params: { path: { id: "dec_1" } },
-			body: { choice: "option", option: 2 },
+			body: { choice: "option", option: 2, ifState: "needs_you" },
 		});
 	});
 });

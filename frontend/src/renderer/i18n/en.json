@@ -1321,6 +1321,7 @@
 	"notify.title": "Notifications",
 	"notify.unreadCount": "{{count}} unread notifications",
 	"notify.workspaceLoadFailed": "Could not load sessions. Restore and open may be unavailable.",
+	"decisionInbox.answerFailed": "Answer not saved. {{message}}",
 	"decisionInbox.loadFailed": "Could not load decisions.",
 	"decisionInbox.loading": "Loading decisions…",
 	"decisionInbox.needed": "Decision needed",

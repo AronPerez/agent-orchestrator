@@ -1355,6 +1355,7 @@
 	"notify.retryUnseen": "未確認通知の読み込みを再試行",
 	"notify.retryUnresolved": "未解決通知の読み込みを再試行",
 	"notify.workspaceLoadFailed": "セッションを読み込めませんでした。復元とオープンが利用できない可能性があります。",
+	"decisionInbox.answerFailed": "回答は保存されませんでした。{{message}}",
 	"decisionInbox.loadFailed": "決定を読み込めませんでした。",
 	"decisionInbox.loading": "決定を読み込んでいます…",
 	"decisionInbox.needed": "判断が必要",

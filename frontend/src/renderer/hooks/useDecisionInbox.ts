@@ -43,14 +43,14 @@ export function useDecisionInbox(enabled: boolean) {
 
 	const answerMutation = useMutation({
 		mutationFn: answerDecisionInboxCall,
-		onSuccess: async (_call, input) => {
+		onSuccess: (_call, input) => {
 			queryClient.setQueryData<DecisionCall[]>(decisionInboxQueryKey(input.sourceHostId), (current) =>
 				current?.filter((call) => call.id !== input.callId),
 			);
-			await queryClient.invalidateQueries({ queryKey: ["decision-inbox"] });
+			void queryClient.invalidateQueries({ queryKey: decisionInboxQueryKey(input.sourceHostId), exact: true });
 		},
 		onError: (_error, input) => {
-			void queryClient.invalidateQueries({ queryKey: decisionInboxQueryKey(input.sourceHostId) });
+			void queryClient.invalidateQueries({ queryKey: decisionInboxQueryKey(input.sourceHostId), exact: true });
 		},
 	});
 
@@ -65,6 +65,10 @@ export function useDecisionInbox(enabled: boolean) {
 		void localQuery.refetch();
 		for (const query of remoteQueries) void query.refetch();
 	}, [localQuery, remoteQueries]);
+	const retryAnswer = useCallback(() => {
+		if (answerMutation.variables) answerMutation.mutate(answerMutation.variables);
+	}, [answerMutation.mutate, answerMutation.variables]);
+	const clearAnswerError = useCallback(() => answerMutation.reset(), [answerMutation.reset]);
 
 	return {
 		entries,
@@ -78,5 +82,7 @@ export function useDecisionInbox(enabled: boolean) {
 		} : undefined,
 		answer,
 		retry,
+		retryAnswer,
+		clearAnswerError,
 	};
 }

@@ -1355,6 +1355,7 @@
 	"notify.retryUnseen": "Ungesehene Benachrichtigungen erneut laden",
 	"notify.retryUnresolved": "Ungelöste Benachrichtigungen erneut laden",
 	"notify.workspaceLoadFailed": "Sitzungen konnten nicht geladen werden. Wiederherstellen und Öffnen sind möglicherweise nicht verfügbar.",
+	"decisionInbox.answerFailed": "Antwort nicht gespeichert. {{message}}",
 	"decisionInbox.loadFailed": "Entscheidungen konnten nicht geladen werden.",
 	"decisionInbox.loading": "Entscheidungen werden geladen…",
 	"decisionInbox.needed": "Entscheidung erforderlich",

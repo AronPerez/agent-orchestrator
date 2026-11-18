@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHmac } from "node:crypto";
 import { createServer, request as httpRequest, type ClientRequest, type IncomingMessage, type RequestOptions, type Server } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { connect as netConnect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
@@ -11,6 +12,8 @@ import { WebSocket, WebSocketServer } from "ws";
 import * as agentViewer from "./agent-viewer";
 import { previewCertificate } from "./preview-certificate";
 import { startRemoteProxy, webSocketTunnelStream } from "./remote-proxy";
+
+const desktopRelayMarker = (token: string) => createHmac("sha256", token).update("ao-desktop-relay-v1").digest("base64url");
 
 // App previews are HTTPS. Trust exactly the proxy's preview certificate; its
 // "*.localhost" name is a TLD wildcard Node won't match, which Electron's
@@ -38,6 +41,7 @@ type Seen = {
 	auth: string | undefined;
 	expectedHost: string | undefined;
 	origin: string | undefined;
+	clientSurface?: string;
 	appAuth: string | undefined;
 	appOrigin: string | undefined;
 	body: string;
@@ -84,6 +88,7 @@ async function startUpstream(
 				auth: req.headers.authorization,
 				expectedHost: req.headers["x-ao-expected-host-id"] as string | undefined,
 				origin: req.headers.origin,
+				clientSurface: req.headers["x-ao-client-surface"] as string | undefined,
 				appAuth: req.headers["x-ao-preview-app-authorization"] as string | undefined,
 				appOrigin: req.headers["x-ao-preview-app-origin"] as string | undefined,
 				body,
@@ -115,7 +120,13 @@ it.each([
 		method, headers: { "Content-Type": "application/json", Origin: "app://renderer" }, body: JSON.stringify(body),
 	});
 	expect(await response.json()).toEqual({ ok: true });
-	expect(seen).toEqual([expect.objectContaining({ url: route, auth: "Bearer pw", origin: undefined, body: body ? JSON.stringify(body) : "" })]);
+	expect(seen).toEqual([expect.objectContaining({
+		url: route,
+		auth: "Bearer pw",
+		origin: undefined,
+		clientSurface: desktopRelayMarker("pw"),
+		body: body ? JSON.stringify(body) : "",
+	})]);
 });
 
 
@@ -667,7 +678,7 @@ describe("startRemoteProxy", () => {
 
 		const res = await fetch(`${proxy.base}/api/v1/projects`, {
 			method: "POST",
-			headers: { "content-type": "application/json", origin: "app://renderer" },
+			headers: { "content-type": "application/json", origin: "app://renderer", "X-AO-Client-Surface": "mobile" },
 			body: '{"path":"/srv/repo"}',
 		});
 
@@ -677,6 +688,7 @@ describe("startRemoteProxy", () => {
 		expect(seen[0].url).toBe("/api/v1/projects"); // token gone
 		expect(seen[0].auth).toBe("Bearer pw");
 		expect(seen[0].origin).toBeUndefined(); // app://renderer never reaches the daemon
+		expect(seen[0].clientSurface).toBe(desktopRelayMarker("pw")); // forged values are replaced by a credential-bound marker
 		expect(seen[0].body).toBe('{"path":"/srv/repo"}');
 	});
 

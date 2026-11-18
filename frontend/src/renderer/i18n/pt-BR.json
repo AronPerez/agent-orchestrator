@@ -1371,6 +1371,7 @@
 	"notify.retryUnseen": "Tentar carregar notificações não vistas novamente",
 	"notify.retryUnresolved": "Tentar carregar notificações não resolvidas novamente",
 	"notify.workspaceLoadFailed": "Não foi possível carregar as sessões. Restaurar e abrir podem estar indisponíveis.",
+	"decisionInbox.answerFailed": "Resposta não salva. {{message}}",
 	"decisionInbox.loadFailed": "Não foi possível carregar as decisões.",
 	"decisionInbox.loading": "Carregando decisões…",
 	"decisionInbox.needed": "Decisão necessária",

@@ -1349,6 +1349,7 @@
 	"notify.title": "Уведомления",
 	"notify.unreadCount": "Непрочитанных уведомлений: {{count}}",
 	"notify.workspaceLoadFailed": "Не удалось загрузить сессии. Восстановление и открытие могут быть недоступны.",
+	"decisionInbox.answerFailed": "Ответ не сохранён. {{message}}",
 	"decisionInbox.loadFailed": "Не удалось загрузить решения.",
 	"decisionInbox.loading": "Загрузка решений…",
 	"decisionInbox.needed": "Требуется решение",

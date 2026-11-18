@@ -151,11 +151,14 @@ function previewAssetPath(entry: string, requested: string): string {
 }
 
 const RENDERER_ORIGIN = "app://renderer";
+const CLIENT_SURFACE_HEADER = "x-ao-client-surface";
+const DESKTOP_RELAY_MARKER_CONTEXT = "ao-desktop-relay-v1";
 // Hop-by-hop or wrong-machine headers that must not transit the proxy.
 const STRIP_REQUEST_HEADERS = [
 	"host",
 	"origin",
 	"proxy-authorization",
+	CLIENT_SURFACE_HEADER,
 	"x-ao-preview-app-authorization",
 	"x-ao-preview-app-origin",
 	"x-ao-expected-host-id",
@@ -280,6 +283,9 @@ export async function startRemoteProxy(entry: RemoteEntry, rendererOrigin = REND
 			delete out["sec-fetch-site"];
 			delete out["sec-fetch-mode"];
 			delete out["sec-fetch-dest"];
+			if (incoming.origin === rendererOrigin) {
+				out[CLIENT_SURFACE_HEADER] = createHmac("sha256", entry.password).update(DESKTOP_RELAY_MARKER_CONTEXT).digest("base64url");
+			}
 		}
 		out.host = upstream.host;
 		out.authorization = `Bearer ${entry.password}`;

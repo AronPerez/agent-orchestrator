@@ -104,9 +104,54 @@ describe("useDecisionInbox", () => {
 
 		await waitFor(() => expect(remote.POST).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
 			params: { path: { id: "dec_1" } },
-			body: { choice: "option", option: 2 },
+			body: { choice: "option", option: 2, ifState: "needs_you" },
 		}));
 		await waitFor(() => expect(result.current.entries).toEqual([]));
 		expect(remote.GET.mock.calls.length).toBeGreaterThan(1);
+	});
+
+	it("releases answer controls without waiting for an unrelated host refresh", async () => {
+		connectedHostsMock.mockReturnValue(["remote-a", "remote-b"]);
+		setupClient("local", []);
+		const remoteA = setupClient("remote-a", [
+			decisionCall("dec_1", "2026-11-18T09:00:00Z"),
+			decisionCall("dec_2", "2026-11-18T10:00:00Z"),
+		]);
+		const remoteB = setupClient("remote-b", []);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => useDecisionInbox(true), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.entries).toHaveLength(2));
+
+		remoteB.GET.mockImplementation(() => new Promise(() => undefined));
+		void queryClient.invalidateQueries({ queryKey: ["decision-inbox", "remote-b"], exact: true });
+		await waitFor(() => expect(remoteB.GET).toHaveBeenCalledTimes(2));
+
+		act(() => result.current.answer(result.current.entries[0], 1));
+		await waitFor(() => expect(remoteA.POST).toHaveBeenCalledTimes(1));
+		await waitFor(() => expect(result.current.pending).toBeUndefined());
+
+		const remaining = result.current.entries.find((entry) => entry.call.id === "dec_2");
+		expect(remaining).toBeDefined();
+		act(() => result.current.answer(remaining!, 2));
+		await waitFor(() => expect(remoteA.POST).toHaveBeenCalledTimes(2));
+		expect(remoteB.GET).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps a failed answer visible after reconciliation removes its call", async () => {
+		setupClient("local", []);
+		const remote = setupClient("remote-a", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => useDecisionInbox(true), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.entries).toHaveLength(1));
+
+		remote.POST.mockRejectedValueOnce(new Error("The call changed."));
+		remote.GET.mockResolvedValue({ data: { calls: [] } });
+		act(() => result.current.answer(result.current.entries[0], 1));
+
+		await waitFor(() => expect(result.current.entries).toEqual([]));
+		expect(result.current.answerError?.message).toBe("The call changed.");
+
+		act(() => result.current.clearAnswerError());
+		await waitFor(() => expect(result.current.answerError).toBeUndefined());
 	});
 });

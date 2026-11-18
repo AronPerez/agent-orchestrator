@@ -23,6 +23,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
+	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
 func TestLANControlBlockMarksRequestContext(t *testing.T) {
@@ -154,6 +155,53 @@ func TestLANManagerAuthGatesSharedHandler(t *testing.T) {
 	resp2, _ := http.DefaultClient.Do(req)
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("auth: got %d want 200", resp2.StatusCode)
+	}
+}
+
+func TestLANManagerCarriesDesktopRelaySurfaceThroughAuthentication(t *testing.T) {
+	inner := requestSurfaceMiddleware([]string{"app://renderer"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		surface, _ := telemetrymeta.SurfaceFromContext(r.Context())
+		_, _ = io.WriteString(w, string(surface))
+	}))
+	state := &authState{}
+	state.setHash(mobilebridge.HashPassword("secret12"))
+	manager := NewLANManager(inner, state, 0, slog.Default(), nil)
+	port, err := manager.Start(0)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer manager.Stop(context.Background())
+
+	request := func(marker string) string {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/v1/decisions/dec_1/answer", port), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer secret12")
+		if marker != "" {
+			req.Header.Set(desktopRelaySurfaceHeader, marker)
+		}
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+
+	if got := request(""); got != string(domain.RequestSurfaceMobile) {
+		t.Fatalf("ordinary authenticated LAN surface = %q, want mobile", got)
+	}
+	if got := request(testDesktopRelayMarker("secret12")); got != string(domain.RequestSurfaceDesktop) {
+		t.Fatalf("desktop relay surface = %q, want desktop", got)
+	}
+	if got := request(testDesktopRelayMarker("wrong-token")); got != string(domain.RequestSurfaceMobile) {
+		t.Fatalf("wrong-token relay surface = %q, want mobile", got)
 	}
 }
 

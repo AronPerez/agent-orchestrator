@@ -87,20 +87,43 @@ describe("DecisionInbox", () => {
 		for (const button of screen.getAllByRole("button")) expect(button).toBeDisabled();
 	});
 
-	it("keeps the ask actionable after an answer fails", () => {
+	it("keeps a failed answer visible after its call leaves the list", async () => {
+		const onRetryAnswer = vi.fn();
+		const onDismissAnswerError = vi.fn();
 		render(
 			<DecisionInbox
-				entries={[entry]}
+				entries={[]}
 				isLoading={false}
 				loadFailed={false}
 				onAnswer={vi.fn()}
 				onRetry={vi.fn()}
 				answerError={{ sourceHostId: "remote-a", callId: "dec_1", message: "The call changed." }}
+				onRetryAnswer={onRetryAnswer}
+				onDismissAnswerError={onDismissAnswerError}
 			/>,
 		);
 
-		expect(screen.getByRole("alert")).toHaveTextContent("The call changed.");
-		expect(screen.getByRole("button", { name: /Ship today/ })).toBeEnabled();
+		expect(screen.getByRole("alert")).toHaveTextContent("Answer not saved. The call changed.");
+		await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+		expect(onRetryAnswer).toHaveBeenCalledTimes(1);
+		await userEvent.click(screen.getByRole("button", { name: "Close" }));
+		expect(onDismissAnswerError).toHaveBeenCalledTimes(1);
+	});
+
+	it("shows a complete long option label before it can be selected", () => {
+		const longLabel = "Ship checkout totals to the primary region after focused checks";
+		const longEntry = {
+			...entry,
+			call: {
+				...entry.call,
+				options: [{ ...entry.call.options[0], label: longLabel }, entry.call.options[1]],
+			},
+		};
+		render(<DecisionInbox entries={[longEntry]} isLoading={false} loadFailed={false} onAnswer={vi.fn()} onRetry={vi.fn()} />);
+
+		const button = screen.getByRole("button", { name: new RegExp(longLabel) });
+		expect(button).toHaveClass("h-auto", "whitespace-normal");
+		expect(screen.getByText(longLabel)).toHaveClass("break-words");
 	});
 
 	it("offers a retry when decision calls could not load", async () => {

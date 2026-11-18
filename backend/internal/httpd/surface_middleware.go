@@ -1,10 +1,18 @@
 package httpd
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
+)
+
+const (
+	desktopRelaySurfaceHeader = "X-AO-Client-Surface"
+	desktopRelayMarkerContext = "ao-desktop-relay-v1"
 )
 
 // requestSurfaceMiddleware tags each request with the client it came from, so
@@ -22,14 +30,32 @@ func requestSurfaceMiddleware(allowedOrigins []string) func(http.Handler) http.H
 
 // requestSurface classifies from transport facts. A phone authenticates on the
 // LAN listener (directly or through a managed tunnel) and sets its install-id
-// header on every request; the desktop renderer presents an exact renderer
-// origin; everything else on loopback is a native client such as the CLI.
+// header on every request. The desktop's loopback remote proxy replaces the
+// client-surface header with a marker bound to the accepted bearer credential.
+// The local renderer presents an exact renderer origin; everything else on
+// loopback is a native client such as the CLI.
 func requestSurface(r *http.Request, allowedOrigins map[string]struct{}) domain.RequestSurface {
-	if authenticatedLANBearer(r) || r.Header.Get(InstallIDHeader) != "" {
+	if r.Header.Get(InstallIDHeader) != "" {
+		return domain.RequestSurfaceMobile
+	}
+	if authenticatedLANBearer(r) {
+		if validDesktopRelayMarker(r.Header.Get(desktopRelaySurfaceHeader), bearerToken(r)) {
+			return domain.RequestSurfaceDesktop
+		}
 		return domain.RequestSurfaceMobile
 	}
 	if _, ok := allowedOrigins[r.Header.Get("Origin")]; ok {
 		return domain.RequestSurfaceDesktop
 	}
 	return domain.RequestSurfaceCLI
+}
+
+func validDesktopRelayMarker(marker, token string) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(marker)
+	if err != nil || token == "" {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(token))
+	_, _ = mac.Write([]byte(desktopRelayMarkerContext))
+	return hmac.Equal(decoded, mac.Sum(nil))
 }

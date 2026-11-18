@@ -748,7 +748,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 		return merged.sort((a, b) => Date.parse(b.kind === "cloud" ? b.item.createdAt : b.notification.createdAt) - Date.parse(a.kind === "cloud" ? a.item.createdAt : a.notification.createdAt));
 	}, [entries, visibleCloudItems]);
 	const notificationRowsEmpty = rows.length === 0;
-	const decisionContent = decisionInbox.entries.length > 0 || decisionInbox.isLoading || decisionInbox.loadFailed;
+	const decisionContent = decisionInbox.entries.length > 0 || decisionInbox.isLoading || decisionInbox.loadFailed || Boolean(decisionInbox.answerError);
 	const isEmpty = notificationRowsEmpty && !decisionContent;
 	const rowCount = rows.length + decisionInbox.entries.length;
 
@@ -887,7 +887,9 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 							isLoading={decisionInbox.isLoading}
 							loadFailed={decisionInbox.loadFailed}
 							onAnswer={decisionInbox.answer}
+							onDismissAnswerError={decisionInbox.clearAnswerError}
 							onRetry={decisionInbox.retry}
+							onRetryAnswer={decisionInbox.retryAnswer}
 							pending={decisionInbox.pending}
 						/>
 						{rows.map((row) => {

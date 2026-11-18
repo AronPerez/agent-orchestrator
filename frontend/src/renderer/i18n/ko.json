@@ -1355,6 +1355,7 @@
 	"notify.retryUnseen": "미확인 알림 다시 불러오기",
 	"notify.retryUnresolved": "미해결 알림 다시 불러오기",
 	"notify.workspaceLoadFailed": "세션을 불러올 수 없습니다. 복원 및 열기가 불가능할 수 있습니다.",
+	"decisionInbox.answerFailed": "답변이 저장되지 않았습니다. {{message}}",
 	"decisionInbox.loadFailed": "결정을 불러올 수 없습니다.",
 	"decisionInbox.loading": "결정을 불러오는 중…",
 	"decisionInbox.needed": "결정 필요",

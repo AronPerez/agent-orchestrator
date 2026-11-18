@@ -262,7 +262,7 @@ beforeEach(() => {
 	cloudNotificationsMock.mockReset().mockReturnValue(emptyCloudResult);
 	decisionInboxMock.mockReset().mockReturnValue({
 		entries: [], isLoading: false, loadFailed: false, pending: undefined, answerError: undefined,
-		answer: vi.fn(), retry: vi.fn(),
+		answer: vi.fn(), retry: vi.fn(), retryAnswer: vi.fn(), clearAnswerError: vi.fn(),
 	});
 	connectMock.mockReset();
 	paramsMock.mockReset().mockReturnValue({});
@@ -351,7 +351,7 @@ describe("NotificationCenter", () => {
 		const answer = vi.fn();
 		decisionInboxMock.mockReturnValue({
 			entries: [pendingDecision], isLoading: false, loadFailed: false, pending: undefined, answerError: undefined,
-			answer, retry: vi.fn(),
+			answer, retry: vi.fn(), retryAnswer: vi.fn(), clearAnswerError: vi.fn(),
 		});
 		renderNotificationCenter();
 		await clickOpen();
@@ -693,6 +693,23 @@ describe("NotificationCenter", () => {
 
 		expect(await screen.findByText("No notifications yet.")).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Clear all" })).toBeDisabled();
+	});
+
+	it("keeps a failed decision answer above an otherwise empty panel", async () => {
+		notificationQueryMock.mockImplementation((status: NotificationListStatus) => ({
+			...notificationQueryResult(status),
+			data: { pageParams: [""], pages: [{ notifications: [], unreadCount: 0, unresolvedCount: 0 }] },
+		}));
+		decisionInboxMock.mockReturnValue({
+			entries: [], isLoading: false, loadFailed: false, pending: undefined,
+			answerError: { sourceHostId: "remote-a", callId: "dec_1", message: "The call changed." },
+			answer: vi.fn(), retry: vi.fn(), retryAnswer: vi.fn(), clearAnswerError: vi.fn(),
+		});
+		renderNotificationCenter();
+		await userEvent.click(screen.getByRole("button", { name: /notifications/i }));
+
+		expect(await screen.findByRole("alert")).toHaveTextContent("Answer not saved. The call changed.");
+		expect(screen.queryByText("No notifications yet.")).not.toBeInTheDocument();
 	});
 
 	it("surfaces a failed refresh over an unrelated cached empty page", async () => {

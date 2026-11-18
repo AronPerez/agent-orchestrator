@@ -1337,6 +1337,7 @@
 	"notify.title": "通知",
 	"notify.unreadCount": "{{count}} 条未读通知",
 	"notify.workspaceLoadFailed": "无法加载会话。恢复与打开可能暂不可用。",
+	"decisionInbox.answerFailed": "未保存回答。{{message}}",
 	"decisionInbox.loadFailed": "无法加载决策。",
 	"decisionInbox.loading": "正在加载决策…",
 	"decisionInbox.needed": "需要决策",

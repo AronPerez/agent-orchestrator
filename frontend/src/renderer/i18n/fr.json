@@ -1371,6 +1371,7 @@
 	"notify.retryUnseen": "Réessayer le chargement des notifications non vues",
 	"notify.retryUnresolved": "Réessayer le chargement des notifications non résolues",
 	"notify.workspaceLoadFailed": "Impossible de charger les sessions. La restauration et l'ouverture peuvent être indisponibles.",
+	"decisionInbox.answerFailed": "Réponse non enregistrée. {{message}}",
 	"decisionInbox.loadFailed": "Impossible de charger les décisions.",
 	"decisionInbox.loading": "Chargement des décisions…",
 	"decisionInbox.needed": "Décision requise",

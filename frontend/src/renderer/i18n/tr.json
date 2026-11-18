@@ -1321,6 +1321,7 @@
 	"notify.title": "Bildirimler",
 	"notify.unreadCount": "{{count}} okunmamış bildirim",
 	"notify.workspaceLoadFailed": "Oturumlar yüklenemedi. Geri yükleme ve açma kullanılamayabilir.",
+	"decisionInbox.answerFailed": "Yanıt kaydedilmedi. {{message}}",
 	"decisionInbox.loadFailed": "Kararlar yüklenemedi.",
 	"decisionInbox.loading": "Kararlar yükleniyor…",
 	"decisionInbox.needed": "Karar gerekiyor",

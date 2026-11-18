@@ -74,9 +74,10 @@ type RaiseDecisionRequest struct {
 
 // AnswerDecisionRequest records an offered option or a person-authored alternative.
 type AnswerDecisionRequest struct {
-	Choice string `json:"choice" enum:"option,other"`
-	Option int    `json:"option,omitempty"`
-	Note   string `json:"note,omitempty" maxLength:"1000"`
+	Choice  string `json:"choice" enum:"option,other"`
+	Option  int    `json:"option,omitempty"`
+	Note    string `json:"note,omitempty" maxLength:"1000"`
+	IfState string `json:"ifState,omitempty" enum:"needs_you" description:"Optional compare-and-set guard. The answer is rejected if the call no longer has this state."`
 }
 
 // DismissDecisionRequest records why the person declined to choose.

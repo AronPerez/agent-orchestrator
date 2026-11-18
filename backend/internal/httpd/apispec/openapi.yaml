@@ -17553,6 +17553,12 @@ components:
           - option
           - other
           type: string
+        ifState:
+          description: Optional compare-and-set guard. The answer is rejected if the
+            call no longer has this state.
+          enum:
+          - needs_you
+          type: string
         note:
           maxLength: 1000
           type: string

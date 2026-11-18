@@ -283,9 +283,9 @@ func TestDecisionsAPI_Actions(t *testing.T) {
 	svc := &fakeDecisionService{}
 	srv := newDecisionServer(t, svc)
 
-	body, status := decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/answer", `{"choice":"option","option":2,"note":"Rotate monthly"}`, "")
+	body, status := decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/answer", `{"choice":"option","option":2,"note":"Rotate monthly","ifState":"needs_you"}`, "")
 	if status != http.StatusOK || !strings.Contains(string(body), `"id":"dec_1"`) || svc.id != "dec_1" || svc.action != "answer" ||
-		svc.answer != (decisionsvc.AnswerInput{Choice: "option", Option: 2, Note: "Rotate monthly"}) || svc.actor.Session != "" {
+		svc.answer != (decisionsvc.AnswerInput{Choice: "option", Option: 2, Note: "Rotate monthly", IfState: domain.DecisionStateNeedsYou}) || svc.actor.Session != "" {
 		t.Fatalf("answer status=%d body=%s actor=%+v input=%+v", status, body, svc.actor, svc.answer)
 	}
 

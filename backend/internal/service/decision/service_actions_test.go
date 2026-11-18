@@ -105,6 +105,37 @@ func TestAnswerRules(t *testing.T) {
 	}
 }
 
+func TestAnswerIfStateRejectsACompetingAnswer(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	person := Actor{Surface: domain.RequestSurfaceDesktop}
+	call := raiseDecision(t, fixture, fixture.w1)
+
+	first, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{
+		Choice: domain.DecisionChoiceOption,
+		Option: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entryCount := len(*fixture.appended)
+
+	_, err = fixture.service.Answer(ctx, person, call.ID, AnswerInput{
+		Choice:  domain.DecisionChoiceOption,
+		Option:  1,
+		IfState: domain.DecisionStateNeedsYou,
+	})
+	assertDecisionAPIError(t, err, apierr.KindConflict, "DECISION_WRONG_STATE", "", `This call changed before the answer was saved. Its state is "In progress".`)
+
+	stored := getDecisionCall(t, fixture, call.ID)
+	if stored.Option != 2 || stored.StandingEntryID != first.StandingEntryID {
+		t.Fatalf("competing answer replaced the standing answer: %+v", stored)
+	}
+	if len(*fixture.appended) != entryCount {
+		t.Fatalf("stale answer appended an entry: got %d entries, want %d", len(*fixture.appended), entryCount)
+	}
+}
+
 func TestDismissAndReopen(t *testing.T) {
 	fixture := newDecisionService(t)
 	ctx := context.Background()

@@ -142,7 +142,7 @@ func (c *DecisionsController) answer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	call, err := c.Svc.Answer(r.Context(), decisionActor(r), chi.URLParam(r, "id"), decisionsvc.AnswerInput{
-		Choice: req.Choice, Option: req.Option, Note: req.Note,
+		Choice: req.Choice, Option: req.Option, Note: req.Note, IfState: domain.DecisionCallState(req.IfState),
 	})
 	if err != nil {
 		envelope.WriteErrorWithCode(w, r, err, "DECISION_ANSWER_FAILED", "Unable to answer decision")

@@ -102,9 +102,10 @@ type RaiseInput struct {
 
 // AnswerInput identifies an offered option or a person-authored alternative.
 type AnswerInput struct {
-	Choice string
-	Option int
-	Note   string
+	Choice  string
+	Option  int
+	Note    string
+	IfState domain.DecisionCallState
 }
 
 // OutcomeInput records the result of carrying out a decision.
@@ -223,6 +224,9 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	}
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
+	}
+	if input.IfState != "" && call.State != input.IfState {
+		return domain.DecisionCall{}, wrongState(call, `This call changed before the answer was saved. Its state is "%s".`)
 	}
 	if call.State != domain.DecisionStateNeedsYou && call.State != domain.DecisionStateInProgress && call.State != domain.DecisionStateDismissed {
 		return domain.DecisionCall{}, wrongState(call, `This call is closed. Its state is "%s".`)

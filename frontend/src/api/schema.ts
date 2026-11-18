@@ -5879,6 +5879,11 @@ export interface components {
         AnswerDecisionRequest: {
             /** @enum {string} */
             choice: "option" | "other";
+            /**
+             * @description Optional compare-and-set guard. The answer is rejected if the call no longer has this state.
+             * @enum {string}
+             */
+            ifState?: "needs_you";
             note?: string;
             option?: number;
         };
