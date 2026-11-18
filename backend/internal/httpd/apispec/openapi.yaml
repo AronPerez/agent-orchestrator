@@ -3546,6 +3546,19 @@ paths:
       summary: Search visible chat messages across conversations
       tags:
       - conversations
+  /api/v1/coordination/capabilities:
+    get:
+      operationId: getCoordinationCapabilities
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoordinationCapabilitiesResponse'
+          description: OK
+      summary: List authenticated cross-machine coordination capabilities
+      tags:
+      - identity
   /api/v1/cues/{cueId}:
     delete:
       operationId: deleteCue
@@ -20936,6 +20949,15 @@ components:
       - outputTokens
       - cachedTokens
       - totalTokens
+      type: object
+    CoordinationCapabilitiesResponse:
+      properties:
+        capabilities:
+          items:
+            type: string
+          type: array
+      required:
+      - capabilities
       type: object
     CoordinationEvent:
       properties:
