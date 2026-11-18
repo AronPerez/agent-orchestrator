@@ -29,8 +29,8 @@ type AccessDevice struct {
 	// revoking that credential also revoke the authority it delegated.
 	Issuer string `json:"issuer,omitempty"`
 	// ClientID is the stable originating AO installation for idempotent scoped
-	// issuance. Reissuing for the same issuer, scopes, and client replaces the
-	// prior row, including when its one-time response was lost.
+	// issuance. Reissuing for the same scopes and client replaces the prior row,
+	// including after a lost response followed by a parent credential change.
 	ClientID string `json:"clientId,omitempty"`
 	// InstallID links the device to its push registration.
 	InstallID  string    `json:"installId,omitempty"`
@@ -153,8 +153,9 @@ func (r *AccessDevices) IssueScopedBy(name, platform string, scopes []string, is
 }
 
 // IssueScopedByClient registers a scoped token for one stable originating
-// client. A retry atomically replaces the prior token for the same issuer,
-// exact scopes, and client ID, so a lost one-time response cannot leak rows.
+// client. A retry atomically replaces the prior token for the same exact scopes
+// and client ID, even if the full parent credential changed after a lost
+// response, so the old delegated authority cannot leak rows.
 // Empty client IDs preserve the legacy append-only behavior.
 func (r *AccessDevices) IssueScopedByClient(name, platform string, scopes []string, issuer, clientID string, now time.Time) (AccessDevice, string, []AccessDevice, error) {
 	normalizedScopes := normalizeDeviceScopes(scopes)
@@ -194,7 +195,7 @@ func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, 
 	replaced := make([]AccessDevice, 0, 1)
 	if clientID != "" {
 		for _, candidate := range r.devices {
-			if candidate.Issuer == issuer && candidate.ClientID == clientID && deviceScopesEqual(candidate.Scopes, normalizedScopes) {
+			if candidate.ClientID == clientID && deviceScopesEqual(candidate.Scopes, normalizedScopes) {
 				replaced = append(replaced, candidate)
 			}
 		}

@@ -158,6 +158,65 @@ func contractFixture(now time.Time) (*fakeStore, domain.SessionID) {
 	}, id
 }
 
+func TestIsCurrentlyStalled(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	deadline := now.Add(time.Hour)
+	escalatedAt := now.Add(-30 * time.Minute)
+	base := domain.SessionRecord{
+		ID:                       "worker-1",
+		ProjectID:                "ao",
+		Kind:                     domain.KindWorker,
+		Goal:                     "ship it",
+		TimeboxDeadlineAt:        &deadline,
+		ContractStallEscalatedAt: &escalatedAt,
+		Activity: domain.Activity{
+			State:          domain.ActivityIdle,
+			LastActivityAt: now.Add(-45 * time.Minute),
+		},
+	}
+	project := domain.ProjectRecord{
+		ID: "ao",
+		Config: domain.ProjectConfig{
+			WorkerContracts: domain.WorkerContractConfig{StallMinutes: 15},
+		},
+	}
+	passingPR := domain.PRFacts{
+		CI:           domain.CIPassing,
+		Review:       domain.ReviewApproved,
+		Mergeability: domain.MergeMergeable,
+	}
+
+	tests := []struct {
+		name string
+		edit func(*domain.SessionRecord)
+		prs  []domain.PRFacts
+		want bool
+	}{
+		{name: "escalated idle worker", want: true},
+		{name: "active worker", edit: func(rec *domain.SessionRecord) { rec.Activity.State = domain.ActivityActive }},
+		{name: "finished contract", edit: func(rec *domain.SessionRecord) { rec.ContractOutcome = domain.SessionContractOutcomeMet }},
+		{name: "direction after escalation", edit: func(rec *domain.SessionRecord) { rec.Metadata.LatestInteractionAt = now.Add(-5 * time.Minute) }},
+		{name: "later idle episode below threshold", edit: func(rec *domain.SessionRecord) { rec.Activity.LastActivityAt = now.Add(-10 * time.Minute) }},
+		{name: "later idle episode reaches threshold", edit: func(rec *domain.SessionRecord) { rec.Activity.LastActivityAt = now.Add(-15 * time.Minute) }, want: true},
+		{name: "failing PR still needs worker", prs: []domain.PRFacts{{CI: domain.CIFailing, Mergeability: domain.MergeMergeable}}, want: true},
+		{name: "pending PR waits externally", prs: []domain.PRFacts{{CI: domain.CIPending, Review: domain.ReviewApproved, Mergeability: domain.MergeMergeable}}},
+		{name: "merge-ready PR waits externally", prs: []domain.PRFacts{passingPR}},
+		{name: "requested changes still need worker", prs: []domain.PRFacts{{CI: domain.CIPassing, Review: domain.ReviewChangesRequest, Mergeability: domain.MergeMergeable}}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := base
+			if tt.edit != nil {
+				tt.edit(&rec)
+			}
+			if got := IsCurrentlyStalled(rec, project, tt.prs, now); got != tt.want {
+				t.Fatalf("IsCurrentlyStalled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEvaluateSessionNudgesOneStallEpisode(t *testing.T) {
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	store, id := contractFixture(now)

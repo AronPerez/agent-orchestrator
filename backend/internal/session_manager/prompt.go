@@ -130,7 +130,8 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 	default:
 		return ""
 	}
-	sections = append(sections, userOrientationPrompt(), publishingScopePrompt())
+	hasActiveOrchestrator := cfg.Role == sessionPromptRoleWorker && !cfg.Standalone && strings.TrimSpace(cfg.OrchestratorSessionID) != ""
+	sections = append(sections, decisionCallsPrompt(hasActiveOrchestrator), userOrientationPrompt(), publishingScopePrompt())
 	if zone := timeZonePrompt(cfg.TimeZone); zone != "" {
 		sections = append(sections, zone)
 	}
@@ -141,6 +142,37 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 		}
 	}
 	return strings.Join(sections, "\n\n")
+}
+
+func decisionCallsPrompt(hasActiveOrchestrator bool) string {
+	visibility := `- Before ending a turn blocked by a new or existing call, explicitly tell the human in the current response that a decision is waiting, include the call link and ` + "`ao decision show <call-link>`" + `. Do not end the turn silently.`
+	if hasActiveOrchestrator {
+		visibility = `- Before ending a turn blocked by a new or existing call, use the needs-input call-link handoff in Worker Reports; also explicitly tell the human in the current response that a decision is waiting, include the call link and ` + "`ao decision show <call-link>`" + `. Do not rely on the report alone because its recipient may no longer be active.`
+	}
+	return `## Decisions for the Human
+
+When you need the human to choose between options, raise a call in Orchestrator's decision ledger. Do not ask in passing, and do not pass the question to another session.
+
+- Search first: ` + "`ao decision search <words>`" + `. Try more than one phrasing. If a decision that still applies covers your question, follow it and say which one. If an unanswered match belongs to another project, do not reuse it. Instead, raise one call in your current project and mention the related call link in its context so the answer is delivered to your project. For an unanswered match in your current project, do not raise a second one. If it blocks you, use your role's existing handoff or status path with the call link so someone knows which session to resume after it is answered.
+- Otherwise raise one call for each decision: ` + "`ao decision raise --title <the question> --context <what they need to know> --option \"<label> :: <what it leads to>\" --option \"<label> :: <what it leads to>\" --recommend <n>`" + `. Give two to four options and recommend one, with the reason in the context.
+- Raise it yourself. If another session brings you a question, tell it to raise the call. If that session has ended, raise the call yourself with the full context. Never ask the human for a ruling by id.
+- Keep working on anything that does not depend on the answer.
+` + visibility + `
+- The answer arrives in this session as a message from the human that begins "Decision on your call" or "Changed decision on your call". A dismissal message begins "I dismissed your call" and means no answer is coming. When an answer or dismissal arrives and you have a project orchestrator, first run ` + "`ao report --checkpoint --note \"Decision call resolved: <call-link>; resume sessions blocked by it\"`" + ` so it can resume any other session in your project that reused your call. For an answer, act on it, then use the exact call and answer-entry ids from that message to record what happened in one line: ` + "`ao decision outcome <id> --for-answer <answer-entry-id> --text <what happened>`" + `.
+- If the session that raised a call has ended, its answer goes to the project's orchestrator and begins "Decision on a call raised by". Carry it out or hand it to a worker, then record the outcome.
+- When you mention a call anywhere, use the link ` + "`ao decision raise`" + ` printed. Never use a bare id.
+- After a restart or a compacted context, run ` + "`ao decision ls`" + ` to see what you asked, what was answered, and which outcomes you still owe.
+- Only the human answers, dismisses or retires a call. You cannot.
+
+Write every call for a reader who has not seen the code, the thread or the ticket:
+
+- The title is the question itself, in one line.
+- Give every internal code, id and abbreviation a plain label.
+- Say what each option leads to, including what it costs or risks.
+- Put the unit, the time window and the source next to every number. Mark a guess as a guess.
+- When you ask them to approve a text, show the text.
+- Check that the facts are still current just before you raise it.
+- Never put secrets, credentials or personal data in a call.`
 }
 
 // userOrientationPrompt asks for a sentence alongside tool calls. Left to
@@ -377,14 +409,14 @@ Your job is to complete the assigned task in this workspace. For implementation,
 - If you are continuing implementation, CI recovery, review-comment follow-up, or other explicitly authorized work that continues or changes an existing PR, claim or attach it through the Orchestrator app before changing it when the workflow supports that. From this worker, use `+"`ao session claim-pr <pr-ref>`"+`; `+"`AO_SESSION_ID`"+` selects this session automatically. For a review-only task, claim it with `+"`ao session claim-pr <pr-ref> --no-takeover --review`"+`; it is not the user's PR, so leave it unchanged unless the user explicitly asks.
 - For implementation work, if CI fails, fix the failures and push again.
 - For implementation work, if review comments arrive, address each one, push fixes, and report progress. A review-only task does not enter the fix-work lifecycle.
-- If you cannot proceed without a decision, ask for that decision instead of guessing.
+- If you cannot proceed without a decision, raise a call for it (see Decisions for the Human) instead of guessing.
 
 ## Worker Reports
 
 Use `+"`ao report`"+` to persist meaningful progress for the active project orchestrator. `+"`AO_SESSION_ID`"+` selects this worker automatically.
 
 - After a meaningful milestone, run `+"`ao report --checkpoint --note <text>`"+`.
-- When a decision or missing input blocks progress, run `+"`ao report --needs-input --note <text>`"+`.
+- When missing input that is not a choice between options blocks progress, such as missing access, run `+"`ao report --needs-input --note <text>`"+`. For a choice, raise or reuse one call (see Decisions for the Human). If that call blocks all remaining work, also run `+"`ao report --needs-input --note \"Blocked by <call-link>; resume this session when it is answered\"`"+`. This is a status handoff, not a second question.
 - When work cannot proceed for another reason, run `+"`ao report --stuck --note <text>`"+`.
 - When the assigned work is complete, run `+"`ao report --done --note <text>`"+`. Attach deliverables with `+"`--artifact`"+` and PRs with `+"`--pr-created`"+` or `+"`--pr-reviewed`"+`; summarize validation and mention anything else, such as issues you filed, in the note.
 - Attach each deliverable with `+"`--artifact <absolute-path>`"+` as soon as it exists, on the report for that milestone; do not wait for `+"`--done`"+`. `+"`--artifact`"+` takes only a path to a file in the session artifact directory, one flag per deliverable, not its supporting files. `+"`--artifact`"+` tells the orchestrator about a file but does not register it, so run `+"`ao artifact add <path>`"+` first.

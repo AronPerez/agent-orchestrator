@@ -214,6 +214,14 @@ const (
 	// session. AO_DATA_DIR is durable storage, not daemon discovery; custom and
 	// isolated daemons therefore need this coordinate explicitly.
 	EnvRunFile = "AO_RUN_FILE"
+	// EnvRemotesFile tells an agent CLI where the desktop saved its remote-host
+	// credentials. Packaged desktop daemons use ~/.ao/data for daemon state but
+	// keep remotes.json one level above it, so AO_DATA_DIR cannot derive this.
+	EnvRemotesFile = "AO_REMOTES_FILE"
+	// EnvCloudAccountFile tells an agent CLI which live desktop Cloud session may
+	// authorize account-owned rows in EnvRemotesFile. It is separate because dev
+	// and packaged desktops keep authentication in different state roots.
+	EnvCloudAccountFile = "AO_CLOUD_ACCOUNT_FILE"
 	// EnvDesktopApp is "1" when the Orchestrator desktop app started the
 	// daemon, so macOS charges the session's privacy checks to Orchestrator.
 	// A daemon started from a terminal (`ao start`) leaves it unset: macOS
@@ -482,6 +490,7 @@ type Manager struct {
 	attachments                 *attachmentstore.Store
 	attachmentSuffix            func() (string, error)
 	dataDir                     string
+	stateDir                    string
 	runFilePath                 string
 	clock                       func() time.Time
 	reconcileWorkers            int
@@ -948,6 +957,10 @@ type Deps struct {
 	// DataDir owns durable attachment storage and is exported to spawned agents
 	// as AO_DATA_DIR so their hook commands can open the same store.
 	DataDir string
+	// StateDir owns non-database AO state such as remotes.json. It is distinct
+	// from the default DataDir (~/.ao/data), but equal to an explicit isolated
+	// AO_DATA_DIR override.
+	StateDir string
 	// RunFilePath is exported to spawned agents as AO_RUN_FILE so their hook
 	// callbacks reach this daemon even when another AO daemon is also running.
 	RunFilePath string
@@ -1016,6 +1029,7 @@ func New(d Deps) *Manager {
 		attachments:                    attachmentstore.New(d.DataDir),
 		attachmentSuffix:               randomSuffix,
 		dataDir:                        d.DataDir,
+		stateDir:                       strings.TrimSpace(d.StateDir),
 		runFilePath:                    strings.TrimSpace(d.RunFilePath),
 		clock:                          d.Clock,
 		reconcileWorkers:               d.ReconcileWorkers,
@@ -5873,7 +5887,7 @@ func (m *Manager) sendWithConfirmationStop(
 	if options.SenderSessionID != "" && clientMessageID == "" {
 		if recorder, ok := m.store.(ports.SessionInteractionRecorder); ok {
 			if err := recorder.RecordSessionInteraction(context.WithoutCancel(ctx), id, options.SenderSessionID, options.InteractionAt); err != nil {
-				return fmt.Errorf("record interaction: %w", err)
+				return fmt.Errorf("send %s: %w: record interaction: %w", id, ErrDeliveryUnconfirmed, err)
 			}
 		}
 	}
@@ -5901,7 +5915,7 @@ func (m *Manager) sendWithConfirmationStop(
 		m.confirmCodexSessionDelivery(ctx, id, deliveryID, rec)
 	} else if m.harnessNudgeSafe(rec.Harness) {
 		if err := m.confirmActiveWithStop(ctx, m.messenger, id, evidence, inputBaseline, stop); err != nil {
-			return fmt.Errorf("send %s: %w", id, err)
+			return fmt.Errorf("send %s: %w: confirmation: %w", id, ErrDeliveryUnconfirmed, err)
 		}
 	}
 	return nil
@@ -7228,6 +7242,30 @@ func (m *Manager) runtimeEnvChecked(id domain.SessionID, project domain.ProjectI
 	deleteProtectedEnv(env, EnvRunFile, caseInsensitive)
 	if runFilePath != "" {
 		env[EnvRunFile] = runFilePath
+	}
+	remotesFilePath := strings.TrimSpace(os.Getenv(EnvRemotesFile))
+	deleteProtectedEnv(env, EnvRemotesFile, caseInsensitive)
+	if remotesFilePath == "" && m.stateDir != "" {
+		remotesFilePath = filepath.Join(m.stateDir, "remotes.json")
+	}
+	if remotesFilePath != "" {
+		if absolute, err := filepath.Abs(remotesFilePath); err == nil {
+			remotesFilePath = absolute
+		}
+	}
+	if remotesFilePath != "" {
+		env[EnvRemotesFile] = remotesFilePath
+	}
+	cloudAccountFilePath := strings.TrimSpace(os.Getenv(EnvCloudAccountFile))
+	deleteProtectedEnv(env, EnvCloudAccountFile, caseInsensitive)
+	if cloudAccountFilePath == "" && m.stateDir != "" {
+		cloudAccountFilePath = filepath.Join(m.stateDir, "cloud_active_user")
+	}
+	if cloudAccountFilePath != "" {
+		if absolute, err := filepath.Abs(cloudAccountFilePath); err == nil {
+			cloudAccountFilePath = absolute
+		}
+		env[EnvCloudAccountFile] = cloudAccountFilePath
 	}
 	deleteProtectedEnv(env, EnvDesktopApp, caseInsensitive)
 	if desktopOwnedDaemon() {
