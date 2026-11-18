@@ -67,6 +67,7 @@ function mappedSessionWithFailingPR(): WorkspaceSession {
 		autoInjectReview: true,
 		autoReviewEnabled: false,
 		chatProviderPreserved: false,
+		contractStalled: false,
 		createdAt: "2026-11-17T12:00:00Z",
 		displayStatus: "CI failing",
 		id: "mapped-worker",
