@@ -1210,13 +1210,18 @@ func Run(buildVersion string) (retErr error) {
 		log.Warn("could not establish host identity; /api/v1/identity will report unimplemented", "error", identityErr)
 	}
 	var decisionDeliverer *decisionsvc.Deliverer
+	// Stale decision notifications were already resolved by the startup
+	// Reconcile above; the projector's first pass creates any that a crash
+	// left missing. Appends only wake it, so a ledger write never waits on
+	// notification I/O.
+	decisionNotifications, decisionNotificationsDone := startDecisionNotifications(ctx, store, notificationWriter, log)
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
-		OnAppended: func(domain.DecisionEntry) {
+		OnAppended: decisionAppendHook(func() {
 			if decisionDeliverer != nil {
 				decisionDeliverer.Wake()
 			}
-		},
+		}, decisionNotifications.Wake),
 	})
 	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
 		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
@@ -1226,6 +1231,7 @@ func Run(buildVersion string) (retErr error) {
 	defer func() {
 		stop()
 		<-decisionDeliveryDone
+		<-decisionNotificationsDone
 	}()
 
 	// Managed remote-access connector. Reap first: a daemon that died without

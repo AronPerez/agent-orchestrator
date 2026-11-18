@@ -711,3 +711,32 @@ func TestDispatcherReceiptAmbiguitySurvivesCapacityEviction(t *testing.T) {
 		t.Errorf("pending = %d, want %d unresolved fresh tickets", len(d.pending), maxPendingReceipts-1)
 	}
 }
+
+// A decision announcement needs decision-specific copy, identity, and phone
+// routing. Until that ships, a decision row must not reach a phone with
+// session-shaped data that an older app would route to the PR list.
+func TestDispatcherHoldsDecisionNotificationsUntilPhoneSupportShips(t *testing.T) {
+	sub := &fakeSubscriber{ch: make(chan domain.NotificationEvent, 1)}
+	store := &fakeDeviceStore{devices: []mobilebridge.PushDevice{{Token: "ExponentPushToken[a]"}}}
+	sender := newFakeSender([]Ticket{{Status: "ok"}})
+	d := NewDispatcher(sub, store, sender, "h_machine_a", nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		d.Run(ctx)
+		close(done)
+	}()
+	sub.ch <- created(domain.NotificationRecord{
+		ID: "ntf_dec", Type: domain.NotificationDecisionNeeded, Title: "Decision needed · ao", Body: "Ship it?",
+		DecisionCallID: "dec_1", DecisionOriginHostID: "h_machine_a",
+	})
+	close(sub.ch)
+	<-done
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if sender.sent {
+		t.Fatal("pushed a decision notification before phone support exists")
+	}
+}

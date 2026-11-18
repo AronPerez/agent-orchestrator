@@ -122,6 +122,12 @@ func (d *Dispatcher) dispatch(ctx context.Context, rec domain.NotificationRecord
 	if d.hostID == "" {
 		return
 	}
+	// Decision announcements need their own copy, identity, and phone routing;
+	// session-shaped data would send an older app to the PR list. They stay
+	// bell-only until phone support ships.
+	if rec.Type.TargetsDecision() {
+		return
+	}
 	devices := d.devices.List()
 	if len(devices) == 0 {
 		return
