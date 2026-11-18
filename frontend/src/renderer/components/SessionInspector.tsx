@@ -34,14 +34,18 @@ import {
 	useMinuteClock,
 } from "@aoagents/product-ui";
 import {
+	AlertTriangle,
 	Archive,
 	ArrowUpRight,
+	CircleHelp,
 	PanelLeft,
 	GitPullRequest,
 	GitMerge,
 	Info,
 	Play,
 	Loader2,
+	ShieldCheck,
+	TriangleAlert,
 	X,
 } from "@/components/app-icons";
 import { InfoRow, InfoRowButton, InfoRowLink } from "./InspectorInfoRow";
@@ -55,7 +59,7 @@ import { clientForSessionHost } from "../lib/host-clients";
 import { sessionUiKey } from "../lib/hosts";
 import { projectNavigateTarget, sessionNavigateTarget } from "../lib/navigate-to-session";
 import { defaultReviewerHarness, WORKER_DEFAULT_REVIEWERS } from "../lib/reviewer-harnesses";
-import { cloudSessionsQueryKey, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
+import { cloudSessionsQueryKey, useWorkspaceProjectSessions, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { captureRendererEvent } from "../lib/telemetry";
 import { formatContractTimeLeft, formatTimeCompact } from "../lib/format-time";
 import { AgentAvatar } from "./AgentAvatar";
@@ -101,6 +105,11 @@ import {
 	STANDALONE_WORKSPACE_ID,
 } from "../types/workspace";
 import { getAgentActivityView, getSessionTimelinePillView } from "../lib/session-presentation";
+import {
+	sessionVerificationPresentation,
+	type SessionVerificationPresentation,
+	type SessionVerificationReason,
+} from "../lib/session-verification";
 import { BrowserPanelView, type BrowserAnnotationQueueModel } from "./BrowserPanel";
 import type { BrowserViewModel } from "../hooks/useBrowserView";
 import { FilesActionsHostContext, FilesTopbarHostContext } from "./files-topbar-host";
@@ -131,6 +140,13 @@ import {
 	type ReviewRunFacts,
 } from "../lib/session-reviews";
 import type { CloudCpAOReviewRun, CloudCpProjectRepo, CloudCpSessionReviewState, CloudCpPullRequestSummary } from "../lib/cloud-cp";
+import {
+	projectOverlapForSession,
+	projectOverlapScanState,
+	useProjectOverlaps,
+	type ProjectOverlapScanState,
+	type SessionProjectOverlap,
+} from "../hooks/useProjectOverlaps";
 
 type ProjectConfig = components["schemas"]["ProjectConfig"];
 type OpenReviewerTerminal = (target: { handleId: string; harness: string }) => void;
@@ -434,6 +450,19 @@ const SummaryView = memo(function SummaryView({
 	standaloneAgent?: boolean;
 }) {
 	const { t } = useTranslation();
+	const collisionProjectId = !session.cloud && session.workspaceId !== STANDALONE_WORKSPACE_ID && !standaloneAgent
+		? session.workspaceId
+		: undefined;
+	const collisionSessions = useWorkspaceProjectSessions(collisionProjectId, hostId).data ?? [];
+	const overlapLiveSessions = collisionProjectId
+		? collisionSessions
+			.filter((candidate) => candidate.isTerminated !== true && !candidate.needsResume)
+			.map(({ id, workspacePublished }) => ({ id, workspacePublished }))
+		: undefined;
+	const overlaps = useProjectOverlaps(collisionProjectId, { enabled: inspectorVisible, hostId, liveSessions: overlapLiveSessions });
+	const collision = projectOverlapForSession(overlaps.data, session.id);
+	const collisionScanState = projectOverlapScanState(overlaps);
+	const collisionNames = new Map(collisionSessions.map((candidate) => [candidate.id, candidate.title]));
 	const query = useSessionScmSummary(session.id, true, session.cloud?.orgId, session.cloud ? session.autoInjectCI === true : false, hostId);
 	const linkedPRs = query.data?.linkedPrs ?? [];
 	const projectQuery = useQuery({
@@ -506,10 +535,13 @@ const SummaryView = memo(function SummaryView({
 	// Reached through a share: this person sees the session's pull requests but
 	// leaves managing them, and the session's policies, to its owner.
 	const guest = session.cloud?.shared === true;
+	const verification = sessionVerificationPresentation(session);
+	const sessionControls = showSessionControls && !guest
+		? <SessionControls hostId={hostId} policies={hasPRs} scratchpad={scratchpadSession} session={session} stopTurn={stopTurn} />
+		: undefined;
 	const prView = usePRViewEnabled();
 	return (
 		<SessionInspectorSummaryView
-			context={<SessionContractSummary session={session} />}
 			activity={
 				<>
 					<ActivityTimeline hostId={hostId} prs={prSummaries} session={session} />
@@ -607,12 +639,140 @@ const SummaryView = memo(function SummaryView({
 					title={prSectionTitle}
 				/>
 			)}
-			completion={showSessionControls && !guest ? <SessionControls hostId={hostId} policies={hasPRs} scratchpad={scratchpadSession} session={session} stopTurn={stopTurn} /> : undefined}
+			completion={verification || sessionControls ? (
+				<>
+					{verification ? (
+						<SessionVerificationSection
+							onOpenEvidence={onOpenArtifact ? (path) => onOpenArtifact({ path }) : undefined}
+							presentation={verification}
+						/>
+					) : null}
+					{sessionControls}
+				</>
+			) : undefined}
+			context={session.goal?.trim() || collision || collisionScanState ? (
+				<>
+					<SessionContractSummary session={session} />
+					{collision || collisionScanState ? <CollisionRadarSection collision={collision} names={collisionNames} scanState={collisionScanState} /> : null}
+				</>
+			) : undefined}
 			scripts={session.cloud ? <CloudScriptRunSections cloud={session.cloud} sessionId={session.id} /> : undefined}
 			workers={showWorkers ? <OrchestratorChildrenSection session={session} /> : <SessionForksSection session={session} />}
 		/>
 	);
 });
+
+function verificationStateLabel(t: TFunction, state: SessionVerificationPresentation["state"]): string {
+	switch (state) {
+		case "verified":
+			return t("verification.verified");
+		case "tampering_suspected":
+			return t("verification.tamperingSuspected");
+		default:
+			return t("verification.unverified");
+	}
+}
+
+function verificationReasonLabel(t: TFunction, reason: SessionVerificationReason): string {
+	switch (reason.kind) {
+		case "test_files_deleted":
+			return t("verification.testFilesDeleted", { count: reason.count });
+		case "test_cases_removed":
+			return t("verification.testCasesRemoved", { added: reason.added, removed: reason.removed });
+		case "skip_markers_added":
+			return t("verification.skipMarkersAdded", { count: reason.count });
+		case "ci_workflow_edited":
+			return t("verification.ciWorkflowEdited");
+	}
+}
+
+function SessionVerificationSection({
+	presentation,
+	onOpenEvidence,
+}: {
+	presentation: SessionVerificationPresentation;
+	onOpenEvidence?: (path: string) => void;
+}) {
+	const { t } = useTranslation();
+	const Icon = presentation.state === "verified" ? ShieldCheck : presentation.state === "tampering_suspected" ? TriangleAlert : CircleHelp;
+	const tone = presentation.state === "verified" ? "text-success" : presentation.state === "tampering_suspected" ? "text-status-in-review" : "text-passive";
+	return (
+		<Section surface={false} title={t("verification.title")}>
+			<div className="flex flex-col gap-2" data-session-verification={presentation.state}>
+				<div className="flex items-center gap-2 text-sm font-medium">
+					<Icon aria-hidden="true" className={cn("size-icon-sm shrink-0", tone)} />
+					<span>{verificationStateLabel(t, presentation.state)}</span>
+				</div>
+				{presentation.reasons.length > 0 ? (
+					<ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+						{presentation.reasons.map((reason) => (
+							<li key={reason.kind}>{verificationReasonLabel(t, reason)}</li>
+						))}
+					</ul>
+				) : null}
+				{presentation.state === "tampering_suspected" ? (
+					<p className="text-xs text-muted-foreground">{t("verification.advisory")}</p>
+				) : null}
+				{presentation.evidence && onOpenEvidence ? (
+					<Button
+						className="self-start"
+						onClick={() => onOpenEvidence(presentation.evidence!)}
+						size="sm"
+						type="button"
+						variant="outline"
+					>
+						{t("verification.viewEvidence")}
+					</Button>
+				) : null}
+			</div>
+		</Section>
+	);
+}
+
+function CollisionRadarSection({
+	collision,
+	names,
+	scanState,
+}: {
+	collision?: SessionProjectOverlap;
+	names: Map<string, string>;
+	scanState?: ProjectOverlapScanState;
+}) {
+	const { t } = useTranslation();
+	const peers = collision?.peers ?? [];
+	const incomplete = collision?.truncated || collision?.unresolvedBase || collision?.unavailable;
+	const peerNames = peers.map((peer) => names.get(peer.sessionId) ?? peer.sessionId);
+	const title = peers.length
+		? t("collisionRadar.title")
+		: scanState === "unavailable"
+			? t("collisionRadar.unavailableTitle")
+			: scanState === "stale"
+				? t("collisionRadar.staleTitle")
+				: t("collisionRadar.incompleteTitle");
+	return (
+		<Section defaultOpen surface={false} title={title}>
+			<div className="flex flex-col gap-2" data-testid="collision-radar-section">
+				{peers.length ? (
+					<div className="flex items-start gap-2 text-xs text-warning">
+						<AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+						<p>{t("collisionRadar.summary", { sessions: peerNames.join(", ") })}</p>
+					</div>
+				) : null}
+				{peers.map((peer) => (
+					<div className="min-w-0" key={peer.sessionId}>
+						<p className="text-xs font-medium text-foreground">{names.get(peer.sessionId) ?? peer.sessionId}</p>
+						<ul className="mt-1 space-y-1">
+							{peer.paths.map((path) => <li className="break-all font-mono text-xs text-muted-foreground" key={path}>{path}</li>)}
+						</ul>
+					</div>
+				))}
+				{incomplete ? <p className="text-xs text-warning">{t("collisionRadar.incomplete")}</p> : null}
+				{scanState === "unavailable" ? <p className="text-xs text-warning">{t("collisionRadar.unavailable")}</p> : null}
+				{scanState === "stale" ? <p className="text-xs text-warning">{t("collisionRadar.stale")}</p> : null}
+			</div>
+		</Section>
+	);
+}
 
 export function SessionContractSummary({
 	session,

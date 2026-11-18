@@ -211,6 +211,56 @@ const (
 	ReportAcknowledged ReportDeliveryState = "acknowledged"
 )
 
+// ReportVerificationState is the observed outcome of project-owned verify
+// commands for one done report. An absent verification fact means the project
+// had no configured verify commands for that report.
+type ReportVerificationState string
+
+const (
+	// ReportVerificationPassed means every configured verify command completed successfully.
+	ReportVerificationPassed ReportVerificationState = "passed"
+	// ReportVerificationFailed means a configured verify command failed, timed out, or could not run.
+	ReportVerificationFailed ReportVerificationState = "failed"
+)
+
+// Valid reports whether s is a persisted verification outcome.
+func (s ReportVerificationState) Valid() bool {
+	return s == ReportVerificationPassed || s == ReportVerificationFailed
+}
+
+// ReportVerification is the durable evidence fact attached to one done
+// report. OutputTail is returned only to the worker that creates the report;
+// the durable full bounded tail lives at Evidence.
+type ReportVerification struct {
+	State             ReportVerificationState
+	Evidence          string
+	StartedAt         time.Time
+	CompletedAt       time.Time
+	WorkspaceRevision string
+	InteractionAt     time.Time
+	OutputTail        string
+}
+
+// SessionDoneReport is the latest done report fact used by session read
+// models. Its presence means the session reported done; Verification remains
+// nil when that report had no configured verify commands.
+type SessionDoneReport struct {
+	ID           string
+	Verification *ReportVerification
+	// Superseded means another report of any state was created after this done
+	// report, so its verification no longer describes the latest work claim.
+	Superseded bool
+}
+
+// Validate checks the persisted verification fields. OutputTail is ephemeral
+// response data and is intentionally not part of the durable invariant.
+func (v ReportVerification) Validate() error {
+	if !v.State.Valid() || strings.TrimSpace(v.Evidence) == "" || v.StartedAt.IsZero() || v.CompletedAt.IsZero() || v.CompletedAt.Before(v.StartedAt) {
+		return ErrInvalidReport
+	}
+	return nil
+}
+
 // ReportRecord is the durable report and outbox persistence shape. State and
 // outputs are independent, and neither changes authoritative session state.
 type ReportRecord struct {
@@ -235,6 +285,7 @@ type ReportRecord struct {
 	AcknowledgedAt     time.Time
 	LastError          string
 	DeliveryBatchID    string
+	Verification       *ReportVerification
 }
 
 // ErrInvalidReport reports an invalid report or delivery transition input.
@@ -273,6 +324,11 @@ func (r ReportRecord) Validate() error {
 	}
 	if r.DeliveryAttempts < 0 {
 		return ErrInvalidReport
+	}
+	if r.Verification != nil {
+		if r.State != ReportDone || r.Verification.Validate() != nil {
+			return ErrInvalidReport
+		}
 	}
 	return nil
 }

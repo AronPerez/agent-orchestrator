@@ -26,7 +26,9 @@ import (
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessioncontract"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workspacewatch"
 )
 
 const maxDisplayNameLen = 100
@@ -55,6 +57,7 @@ type Store interface {
 	GetDisplayPRFactsForSession(ctx context.Context, id domain.SessionID) (domain.PRFacts, bool, error)
 	ListPRFactsForSession(ctx context.Context, id domain.SessionID) ([]domain.PRFacts, error)
 	ListPRFactsForSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID][]domain.PRFacts, error)
+	ListLatestDoneReportsForSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID]domain.SessionDoneReport, error)
 	ListCurrentHeadReviewRunsForSession(ctx context.Context, id domain.SessionID) ([]domain.CurrentHeadReviewRun, error)
 	ListCurrentHeadReviewRunsForSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID][]domain.CurrentHeadReviewRun, error)
 	ListInterruptedSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID]bool, error)
@@ -209,6 +212,13 @@ type terminalTitleSource interface {
 	ListSessionTerminalTitles(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID]string, error)
 }
 
+// OverlapNudger delivers daemon-initiated collision coordination through the
+// shared lifecycle guard.
+type OverlapNudger interface {
+	NudgeCoordination(context.Context, domain.SessionID, string, string) (sessionguard.Outcome, error)
+	ConfirmCoordination(context.Context, domain.SessionID, string, string) (sessionguard.Outcome, error)
+}
+
 // Service is the controller-facing session service. It delegates command-side
 // session operations to the internal sessionmanager.Manager and owns read-model
 // assembly, including user-facing display status derivation.
@@ -238,8 +248,23 @@ type Service struct {
 	runBackground       func(func())
 	orchestratorLocksMu sync.Mutex
 	orchestratorLocks   map[domain.ProjectID]*sync.Mutex
-	workspaceCache      *workspaceCache
-	workspaceManifests  *workspaceManifestIndex
+
+	overlapNoticeLocksMu    sync.Mutex
+	overlapNoticeLocks      map[domain.ProjectID]*sync.Mutex
+	overlapNoticePendingMu  sync.Mutex
+	overlapNoticePending    map[projectOverlapNoticeKey]domain.SessionOverlapNotice
+	overlapNoticeAttempts   map[projectOverlapNoticeKey]projectOverlapNoticeAttempt
+	overlapNoticeAttemptSeq uint64
+	overlapNudger           OverlapNudger
+	overlapRadarSignalMu    sync.Mutex
+	overlapRadarPending     map[domain.ProjectID]bool
+	overlapRadarWake        chan struct{}
+	overlapWatch            func(context.Context, ...string) (workspacewatch.Subscription, error)
+	overlapNoticeRetryDelay time.Duration
+	overlapNoticeTimeout    time.Duration
+
+	workspaceCache     *workspaceCache
+	workspaceManifests *workspaceManifestIndex
 	// commitSelections caches resolved commit selections. Their keys are
 	// immutable SHAs, so entries never go stale.
 	commitSelections *commitSelectionCache
@@ -372,6 +397,9 @@ type Deps struct {
 	// same Capturer. Left nil, files are listed by path with no identity.
 	ArtifactTracker artifactTracker
 	ShareLinks      *sessionartifacts.ShareLinks
+	// OverlapNudger is the shared lifecycle manager. It owns the one delivery
+	// guard used by collision notices and PR reactions.
+	OverlapNudger OverlapNudger
 }
 
 // NewWithDeps wires a session service with optional PR-claim dependencies.
@@ -380,7 +408,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks, overlapNudger: d.OverlapNudger, overlapNoticeAttempts: map[projectOverlapNoticeKey]projectOverlapNoticeAttempt{}, overlapRadarPending: map[domain.ProjectID]bool{}, overlapRadarWake: make(chan struct{}, 1), overlapWatch: workspacewatch.WatchWithStatus, overlapNoticeRetryDelay: defaultProjectOverlapNoticeRetryDelay, overlapNoticeTimeout: defaultProjectOverlapNoticeTimeout}
 	s.terminalTitles, _ = d.Store.(terminalTitleSource)
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {
@@ -1725,6 +1753,10 @@ func (s *Service) sessionsFromRecords(ctx context.Context, filtered []domain.Ses
 	if err != nil {
 		return nil, fmt.Errorf("list session artifacts: %w", err)
 	}
+	doneReportsBySession, err := s.store.ListLatestDoneReportsForSessions(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list latest done reports: %w", err)
+	}
 	var cleanupBySession map[domain.SessionID]domain.SessionCleanupRecord
 	if len(archived) > 0 {
 		if cleanupBySession, err = s.store.ListSessionCleanupFactsForSessions(ctx, archived); err != nil {
@@ -1749,6 +1781,9 @@ func (s *Service) sessionsFromRecords(ctx context.Context, filtered []domain.Ses
 		}
 		sess.ActiveAgentSwitch = switches[rec.ID]
 		sess.TerminalTitle = presentedTerminalTitle(rec, titles[rec.ID])
+		if latest, ok := doneReportsBySession[rec.ID]; ok {
+			sess.LatestDoneReport = &latest
+		}
 		out = append(out, sess)
 	}
 	if s.statusRecoveryRevision() != recoveryRevision {
@@ -2305,9 +2340,16 @@ func (s *Service) toSession(ctx context.Context, rec domain.SessionRecord) (doma
 	if err != nil {
 		return domain.Session{}, fmt.Errorf("list session artifacts %s: %w", rec.ID, err)
 	}
+	doneReports, err := s.store.ListLatestDoneReportsForSessions(ctx, []domain.SessionID{rec.ID})
+	if err != nil {
+		return domain.Session{}, fmt.Errorf("list latest done report %s: %w", rec.ID, err)
+	}
 	sess, err := s.toSessionWithFacts(ctx, rec, prs, runs, interrupted[rec.ID], artifacts[rec.ID], cleanup)
 	if err != nil {
 		return domain.Session{}, err
+	}
+	if latest, ok := doneReports[rec.ID]; ok {
+		sess.LatestDoneReport = &latest
 	}
 	sess.TerminalTitle = presentedTerminalTitle(rec, s.storedTerminalTitles(ctx, []domain.SessionID{rec.ID})[rec.ID])
 	return sess, nil

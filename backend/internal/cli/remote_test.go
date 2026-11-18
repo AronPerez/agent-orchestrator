@@ -367,37 +367,6 @@ func TestSelectSavedHostUsesLocalActiveAccount(t *testing.T) {
 	}
 }
 
-func TestResolveAllSavedHostTargetsRespectsAccountOwnership(t *testing.T) {
-	home := aoHome(t)
-	writeRemotes(t, home, 0o600,
-		remoteEntry{Label: "local", URL: "https://local.example", HostID: "h_local", CoordinationToken: "aoc_local"},
-		remoteEntry{Label: "owned-a", URL: "https://a.example", HostID: "h_a", CoordinationToken: "aoc_a", AccountUserID: "user-a"},
-		remoteEntry{Label: "owned-b", URL: "https://b.example", HostID: "h_b", CoordinationToken: "aoc_b", AccountUserID: "user-b"},
-		remoteEntry{Label: "needs-reconnect", URL: "https://broken.example", HostID: "h_broken"},
-	)
-
-	got, err := resolveAllSavedHostTargetsForAccount("user-a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("candidates = %#v, want local, user-a, and invalid local pairing", got)
-	}
-	byID := make(map[string]savedHostTargetCandidate, len(got))
-	for _, candidate := range got {
-		byID[candidate.HostID] = candidate
-	}
-	if byID["h_a"].Target == nil || byID["h_local"].Target == nil {
-		t.Fatalf("visible targets = %#v", got)
-	}
-	if _, leaked := byID["h_b"]; leaked {
-		t.Fatalf("user-b host leaked into user-a candidates: %#v", got)
-	}
-	if candidate := byID["h_broken"]; candidate.Err == nil || candidate.Target != nil || !strings.Contains(candidate.Err.Error(), "coordination credential") {
-		t.Fatalf("invalid candidate = %#v, want reconnect error without a target", candidate)
-	}
-}
-
 func TestActiveCloudAccountUsesDesktopCarriedMarker(t *testing.T) {
 	home := aoHome(t)
 	writeActiveCloudAccount(t, home, "user-production")
@@ -483,6 +452,37 @@ func TestSavedHostResolverHidesCleanupRecords(t *testing.T) {
 	}
 	if _, err := resolveSavedHostTarget("retired"); err == nil {
 		t.Fatal("cleanup-only row remained selectable")
+	}
+}
+
+func TestResolveAllSavedHostTargetsRespectsAccountOwnership(t *testing.T) {
+	home := aoHome(t)
+	writeRemotes(t, home, 0o600,
+		remoteEntry{Label: "local", URL: "https://local.example", HostID: "h_local", CoordinationToken: "aoc_local"},
+		remoteEntry{Label: "owned-a", URL: "https://a.example", HostID: "h_a", CoordinationToken: "aoc_a", AccountUserID: "user-a"},
+		remoteEntry{Label: "owned-b", URL: "https://b.example", HostID: "h_b", CoordinationToken: "aoc_b", AccountUserID: "user-b"},
+		remoteEntry{Label: "needs-reconnect", URL: "https://broken.example", HostID: "h_broken"},
+	)
+
+	got, err := resolveAllSavedHostTargetsForAccount("user-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("candidates = %#v, want local, user-a, and invalid local pairing", got)
+	}
+	byID := make(map[string]savedHostTargetCandidate, len(got))
+	for _, candidate := range got {
+		byID[candidate.HostID] = candidate
+	}
+	if byID["h_a"].Target == nil || byID["h_local"].Target == nil {
+		t.Fatalf("visible targets = %#v", got)
+	}
+	if _, leaked := byID["h_b"]; leaked {
+		t.Fatalf("user-b host leaked into user-a candidates: %#v", got)
+	}
+	if candidate := byID["h_broken"]; candidate.Err == nil || candidate.Target != nil || !strings.Contains(candidate.Err.Error(), "coordination credential") {
+		t.Fatalf("invalid candidate = %#v, want reconnect error without a target", candidate)
 	}
 }
 

@@ -13,7 +13,7 @@ import {
 	type BoardUsagePresentation,
 	type ProductUITranslator,
 } from "@aoagents/product-ui";
-import { Archive, Check, Copy, File, GitBranch, LoaderCircle, RotateCcw, Share2, Trash2 } from "@/components/app-icons";
+import { AlertTriangle, Archive, Check, CircleHelp, Copy, File, GitBranch, LoaderCircle, RotateCcw, Share2, ShieldCheck, Trash2, TriangleAlert } from "@/components/app-icons";
 import type { MessageKey } from "../i18n";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { aoBridge } from "../lib/bridge";
@@ -56,8 +56,13 @@ import { Checkbox } from "./ui/checkbox";
 import { HoverCard, HoverCardTrigger } from "./ui/hover-card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { someoneElseWorking, type SessionPerson } from "../lib/session-people";
+import { sessionVerificationPresentation, type SessionVerificationPresentation } from "../lib/session-verification";
 import { SessionPeopleStack } from "./SessionPeople";
 import { SessionOwnerTag } from "./SessionOwnerTag";
+import { Badge } from "./ui/badge";
+import type { ProjectOverlapScanState } from "../hooks/useProjectOverlaps";
+
+export type BoardCollision = { pathCount: number; peerNames: string[] };
 
 export function toBoardSessionPresentation(
 	session: WorkspaceSession,
@@ -127,6 +132,8 @@ export function sessionsBoardLabels(t: TFunction): BoardColumnLabels {
 }
 
 export function BoardSessionCardAdapter({
+	collision,
+	collisionScanState,
 	me,
 	participants,
 	memory,
@@ -138,6 +145,8 @@ export function BoardSessionCardAdapter({
 	onTerminate,
 	session,
 }: {
+	collision?: BoardCollision;
+	collisionScanState?: ProjectOverlapScanState;
 	/** Live reading of the session's process tree, for the card's resource chip. */
 	memory?: SessionMemoryReading;
 	/** Colour for the chip; neutral unless this card is part of the fix. */
@@ -157,6 +166,8 @@ export function BoardSessionCardAdapter({
 }) {
 	return (
 		<DesktopSessionCard
+			collision={collision}
+			collisionScanState={collisionScanState}
 			me={me}
 			participants={participants}
 			memory={memory}
@@ -248,6 +259,8 @@ export function ArchivedSessionCardAdapter({
 }
 
 function DesktopSessionCard({
+	collision,
+	collisionScanState,
 	me,
 	participants,
 	action,
@@ -271,6 +284,8 @@ function DesktopSessionCard({
 }: {
 	action?: ReactNode;
 	branchAction?: ReactNode;
+	collision?: BoardCollision;
+	collisionScanState?: ProjectOverlapScanState;
 	compact?: boolean;
 	footer?: ReactNode;
 	hidePullRequestProgress?: boolean;
@@ -382,13 +397,54 @@ function DesktopSessionCard({
 		</Tooltip>
 	) : null;
 	const people = participants && participants.length > 0 ? participants : undefined;
+	const verification = sessionVerificationPresentation(session);
+	const deliverables = sessionDeliverables(session);
+	const artifactLinks = interactive && onOpenArtifact && deliverables.length > 0
+		? <BoardArtifactLinks artifacts={deliverables} onOpen={onOpenArtifact} onOpenInspector={onOpenArtifacts} session={session} />
+		: undefined;
+	const collisionBadge = collision ? (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Badge
+					aria-label={t("collisionRadar.cardAria", { count: collision.pathCount, sessions: collision.peerNames.join(", ") })}
+					variant="warning"
+				>
+					<AlertTriangle aria-hidden="true" />
+					{t("collisionRadar.badge")}
+				</Badge>
+			</TooltipTrigger>
+			<TooltipContent>{t("collisionRadar.cardAria", { count: collision.pathCount, sessions: collision.peerNames.join(", ") })}</TooltipContent>
+		</Tooltip>
+	) : null;
+	const collisionScanCopy = collisionScanState === "incomplete"
+		? { label: t("collisionRadar.incompleteTitle"), detail: t("collisionRadar.incomplete") }
+		: collisionScanState === "unavailable"
+			? { label: t("collisionRadar.unavailableBadge"), detail: t("collisionRadar.unavailable") }
+			: collisionScanState === "stale"
+				? { label: t("collisionRadar.staleBadge"), detail: t("collisionRadar.stale") }
+				: undefined;
+	const collisionScanBadge = collisionScanCopy ? (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Badge aria-label={collisionScanCopy.detail} variant="warning">
+					<AlertTriangle aria-hidden="true" />
+					{collisionScanCopy.label}
+				</Badge>
+			</TooltipTrigger>
+			<TooltipContent>{collisionScanCopy.detail}</TooltipContent>
+		</Tooltip>
+	) : null;
+	const ownerTag = session.cloud?.requestedBy ? <SessionOwnerTag session={session} /> : null;
 
 	const card = (
 		<SessionCardView
 			action={action}
 			artifacts={
-				interactive && onOpenArtifact ? (
-					<BoardArtifactLinks artifacts={sessionDeliverables(session)} onOpen={onOpenArtifact} onOpenInspector={onOpenArtifacts} session={session} />
+				verification || artifactLinks ? (
+					<div className="flex min-w-0 flex-col gap-1">
+						{verification ? <BoardVerificationMarker presentation={verification} onOpenEvidence={interactive ? onOpenArtifact : undefined} /> : null}
+						{artifactLinks}
+					</div>
 				) : undefined
 			}
 			branchAction={branchAction}
@@ -436,7 +492,7 @@ function DesktopSessionCard({
 				url: prBrowserUrl(pr),
 			}))}
 			renderAvatar={(provider) => <AgentAvatar provider={provider} />}
-			tag={session.cloud?.requestedBy ? <SessionOwnerTag session={session} /> : undefined}
+			tag={collisionBadge || collisionScanBadge || ownerTag ? <span className="inline-flex min-w-0 items-center gap-1">{collisionBadge}{collisionScanBadge}{ownerTag}</span> : undefined}
 			session={
 				hideTerminatedStatus
 					? hideTerminatedCardStatus(toBoardSessionPresentation(session))
@@ -554,6 +610,59 @@ function SessionRenameDialog({
 const BOARD_ARTIFACT_LIMIT = 2;
 const BOARD_ARTIFACT_EXPANDED_LIMIT = 10;
 const BOARD_ARTIFACT_HOVER_DELAY = 300;
+
+function verificationLabel(t: TFunction, state: SessionVerificationPresentation["state"]): string {
+	switch (state) {
+		case "verified":
+			return t("verification.verified");
+		case "tampering_suspected":
+			return t("verification.tamperingSuspected");
+		default:
+			return t("verification.unverified");
+	}
+}
+
+function BoardVerificationMarker({
+	presentation,
+	onOpenEvidence,
+}: {
+	presentation: SessionVerificationPresentation;
+	onOpenEvidence?: (path: string) => void;
+}) {
+	const { t } = useTranslation();
+	const label = verificationLabel(t, presentation.state);
+	const Icon = presentation.state === "verified" ? ShieldCheck : presentation.state === "tampering_suspected" ? TriangleAlert : CircleHelp;
+	const tone = presentation.state === "verified" ? "text-success" : presentation.state === "tampering_suspected" ? "text-status-in-review" : "text-passive";
+	const content = (
+		<>
+			<Icon aria-hidden="true" className={cn("size-icon-2xs shrink-0", tone)} />
+			<span className="truncate">{label}</span>
+		</>
+	);
+	if (presentation.evidence && onOpenEvidence) {
+		return (
+			<Button
+				aria-label={t("verification.viewEvidence")}
+				className="h-auto min-w-0 self-start gap-1.5 px-0 py-0 text-2xs font-normal hover:underline"
+				data-session-verification={presentation.state}
+				onClick={(event) => {
+					event.stopPropagation();
+					onOpenEvidence(presentation.evidence!);
+				}}
+				size="none"
+				type="button"
+				variant="quiet"
+			>
+				{content}
+			</Button>
+		);
+	}
+	return (
+		<div className="flex min-w-0 items-center gap-1.5 text-2xs" data-session-verification={presentation.state}>
+			{content}
+		</div>
+	);
+}
 
 /** The session's most recently updated artifacts, newest first. */
 export function latestSessionArtifacts(artifacts: SessionArtifact[], limit = BOARD_ARTIFACT_LIMIT): SessionArtifact[] {

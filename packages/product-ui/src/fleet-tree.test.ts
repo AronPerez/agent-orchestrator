@@ -3,6 +3,10 @@ import {
 	buildFleetTree,
 	emptyFleetRollup,
 	flattenFleetSessions,
+	limitFleetCollapsePreferences,
+	parseFleetCollapsePreferences,
+	rememberFleetCollapsePreference,
+	resolveFleetCollapsedKeys,
 	fleetSessionKey,
 	type FleetTreeScope,
 } from "./fleet-tree";
@@ -15,6 +19,7 @@ type Session = {
 	parentSessionId?: string;
 	kind?: "orchestrator" | "worker";
 	status: SessionStatus;
+	rollupStatus?: SessionStatus;
 	isTerminated?: boolean;
 };
 
@@ -86,6 +91,16 @@ describe("buildFleetTree", () => {
 		expect(machine.rollup).toEqual({ action: 1, done: 0, merge: 1, pending: 1, working: 2 });
 	});
 
+	it("can roll up a delivery status while retaining the session's live agent status", () => {
+		const tree = buildFleetTree([
+			scope("ao", "laptop", [session("worker", "working", { rollupStatus: "ci_failed" })]),
+		]);
+
+		expect(tree[0]!.machines[0]!.sessions[0]!.session.status).toBe("working");
+		expect(tree[0]!.machines[0]!.sessions[0]!.zone).toBe("action");
+		expect(tree[0]!.rollup).toEqual({ ...emptyFleetRollup(), action: 1 });
+	});
+
 	it("keeps a terminated ancestor needed by a live descendant but hides unrelated archives", () => {
 		const tree = buildFleetTree([
 			scope("ao", "laptop", [
@@ -151,19 +166,24 @@ describe("buildFleetTree", () => {
 		expect(rows.find(({ node }) => node.session.id === "self")?.node.parentUnavailable).toBe(true);
 	});
 
-	it("exposes a cross-machine parent address without attaching to a same-id local session", () => {
+	it("keeps same-host qualified parents local and exposes cross-machine parents without attaching them", () => {
 		const machine = buildFleetTree([
 			scope("ao", "laptop", [
 				session("parent", "working"),
-				session("child", "idle", { parentHostId: "server", parentSessionId: "parent" }),
+				session("local-child", "idle", { parentHostId: "laptop", parentSessionId: "parent" }),
+				session("remote-child", "idle", { parentHostId: "server", parentSessionId: "parent" }),
 			]),
 		])[0]!.machines[0]!;
 		const rows = flattenFleetSessions(machine.sessions, new Set());
-		const child = rows.find(({ node }) => node.session.id === "child")!;
+		const localChild = rows.find(({ node }) => node.session.id === "local-child")!;
+		const remoteChild = rows.find(({ node }) => node.session.id === "remote-child")!;
 
-		expect(child.depth).toBe(0);
-		expect(child.node.parentUnavailable).toBe(true);
-		expect(child.node.parentAddress).toEqual({ machineId: "server", sessionId: "parent" });
+		expect(localChild.depth).toBe(1);
+		expect(localChild.node.parentUnavailable).toBe(false);
+		expect(localChild.node.parentAddress).toEqual({ machineId: "laptop", sessionId: "parent" });
+		expect(remoteChild.depth).toBe(0);
+		expect(remoteChild.node.parentUnavailable).toBe(true);
+		expect(remoteChild.node.parentAddress).toEqual({ machineId: "server", sessionId: "parent" });
 	});
 
 	it("flattens collapse state by qualified node key", () => {
@@ -179,5 +199,60 @@ describe("buildFleetTree", () => {
 			.toEqual([["manager", 0]]);
 		expect(flattenFleetSessions(machine.sessions, new Set()).map(({ node, depth }) => [node.session.id, depth]))
 			.toEqual([["manager", 0], ["worker", 1]]);
+	});
+
+	it("starts large qualified branches collapsed and lets remembered choices override the default", () => {
+		const sessions = Array.from({ length: 8 }, (_, index) =>
+			session(`worker-${index}`, "working"));
+		const project = buildFleetTree([scope("ao", "laptop", sessions)])[0]!;
+		const machine = project.machines[0]!;
+
+		const defaults = resolveFleetCollapsedKeys([project], {});
+		expect(defaults).toEqual(new Set([project.key, machine.key]));
+
+		const remembered = resolveFleetCollapsedKeys([project], {
+			[project.key]: false,
+			[machine.key]: true,
+		});
+		expect(remembered.has(project.key)).toBe(false);
+		expect(remembered.has(machine.key)).toBe(true);
+	});
+
+	it("defaults a large manager branch without conflating equal session ids on another machine", () => {
+		const manager = session("manager", "working");
+		const children = Array.from({ length: 8 }, (_, index) =>
+			session(`child-${index}`, "working", { parentSessionId: manager.id }));
+		const tree = buildFleetTree([
+			scope("ao", "laptop", [manager, ...children]),
+			scope("ao", "server", [session("manager", "working")]),
+		]);
+		const laptopManager = tree[0]!.machines[0]!.sessions[0]!;
+		const serverManager = tree[1]!.machines[0]!.sessions[0]!;
+
+		const collapsed = resolveFleetCollapsedKeys(tree, {});
+		expect(collapsed.has(laptopManager.key)).toBe(true);
+		expect(collapsed.has(serverManager.key)).toBe(false);
+		expect(laptopManager.key).not.toBe(serverManager.key);
+	});
+
+	it("accepts only bounded boolean collapse preferences from storage", () => {
+		expect(parseFleetCollapsePreferences(JSON.stringify({ a: true, b: false, ignored: "yes" })))
+			.toEqual({ a: true, b: false });
+		expect(parseFleetCollapsePreferences("not json")).toEqual({});
+		const restored = parseFleetCollapsePreferences(JSON.stringify(Object.fromEntries(
+			Array.from({ length: 2_001 }, (_, index) => [String(index), true]),
+		)));
+		expect(Object.keys(restored)).toHaveLength(2_000);
+		expect(restored["0"]).toBeUndefined();
+		expect(restored["2000"]).toBe(true);
+	});
+
+	it("evicts the oldest stored branch when remembering a new choice", () => {
+		const full = Object.fromEntries(Array.from({ length: 2_000 }, (_, index) => [String(index), true]));
+		const remembered = rememberFleetCollapsePreference(full, "newest", false);
+		expect(Object.keys(remembered)).toHaveLength(2_000);
+		expect(remembered["0"]).toBeUndefined();
+		expect(remembered.newest).toBe(false);
+		expect(limitFleetCollapsePreferences({ ...full, newest: false })).toEqual(remembered);
 	});
 });

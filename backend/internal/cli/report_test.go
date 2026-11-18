@@ -10,6 +10,15 @@ import (
 	"testing"
 )
 
+func reportCLIServer(t *testing.T, handler http.Handler) Deps {
+	t.Helper()
+	cfg := setConfigEnv(t)
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+	return Deps{ProcessAlive: func(int) bool { return true }}
+}
+
 func TestReportValidation(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "worker-1")
 	long := strings.Repeat("x", 1001)
@@ -63,23 +72,58 @@ func TestReportModesAndBoundaries(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := setConfigEnv(t)
 			var got reportAPIRequest
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			deps := reportCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/v1/reports" {
 					_ = json.NewDecoder(r.Body).Decode(&got)
 				}
 				w.WriteHeader(http.StatusCreated)
 				_, _ = io.WriteString(w, `{"id":"rpt_1"}`)
 			}))
-			defer srv.Close()
-			writeRunFileFor(t, cfg, srv)
-			_, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, tc.args...)
+			_, _, err := executeCLI(t, deps, tc.args...)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("request=%+v want=%+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReportNeedsInputRemindsAboutCalls(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "worker-1")
+	reminder := "Reminder: for a choice, raise or reuse one call; if it blocks all remaining work, send one needs-input report with its link so the orchestrator can resume this session after it is answered. See: ao decision raise --help\n"
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		status     int
+		wantStderr string
+		wantError  bool
+	}{
+		{name: "needs input", args: []string{"report", "--needs-input", "--note", "x"}, status: http.StatusCreated, wantStderr: reminder},
+		{name: "checkpoint", args: []string{"report", "--checkpoint", "--note", "x"}, status: http.StatusCreated},
+		{name: "failed needs input", args: []string{"report", "--needs-input", "--note", "x"}, status: http.StatusInternalServerError, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := reportCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				if tc.status == http.StatusCreated {
+					_, _ = io.WriteString(w, `{"id":"rpt_1"}`)
+				}
+			}))
+			stdout, stderr, err := executeCLI(t, deps, tc.args...)
+			if tc.wantError != (err != nil) {
+				t.Fatalf("err = %v, wantError = %v", err, tc.wantError)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			if stderr != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", stderr, tc.wantStderr)
+			}
+			if tc.wantError && strings.Contains(stderr, "Reminder") {
+				t.Fatalf("failed request printed reminder: %q", stderr)
 			}
 		})
 	}
@@ -97,6 +141,52 @@ func TestReportPreservesAPIEnvelopeAsRuntimeError(t *testing.T) {
 	_, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "report", "hello")
 	if err == nil || ExitCode(err) != 1 || !strings.Contains(err.Error(), "bad report (INVALID_REPORT) [request req-7]") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReportDonePrintsFailedVerificationOnce(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "worker-1")
+	cfg := setConfigEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"rpt_1","verification":{"state":"failed","evidence":"verification/rpt_1.txt","outputTail":"FAIL expected green\n"}}`)
+	}))
+	defer srv.Close()
+	writeRunFileFor(t, cfg, srv)
+	out, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "report", "--done", "--note", "finished")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Verification failed.\nEvidence: verification/rpt_1.txt\n\nFAIL expected green\n"
+	if out != want {
+		t.Fatalf("stdout = %q, want %q", out, want)
+	}
+}
+
+func TestReportDoneUsesDaemonStepTimeoutsInsteadOfAClientDeadline(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "worker-1")
+	cfg := setConfigEnv(t)
+	writeRunFileFor(t, cfg, &httptest.Server{URL: "http://127.0.0.1:43210"})
+	deadline := true
+	deps := Deps{
+		ProcessAlive: func(int) bool { return true },
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			_, deadline = req.Context().Deadline()
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"rpt_1"}`)),
+				Request:    req,
+			}, nil
+		})},
+	}
+	_, _, err := executeCLI(t, deps, "report", "--done", "--note", "finished")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deadline {
+		t.Fatal("done report request had a client deadline; project Verify steps own the timeout")
 	}
 }
 

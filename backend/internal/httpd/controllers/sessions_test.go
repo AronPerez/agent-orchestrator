@@ -112,13 +112,18 @@ type fakeSessionService struct {
 	workspaceTree              sessionsvc.WorkspaceTree
 	workspaceTreePath          string
 	workspacePaths             []string
+	projectOverlapPaths        []string
+	projectOverlapPathsErr     error
 	workspaceReconciles        int
 	workspaceHistoryView       sessionsvc.WorkspaceView
 	workspaceViewHistory       *sessionsvc.WorkspaceHistory
 	workspaceBranches          sessionsvc.WorkspaceBranches
 	projectOverlaps            sessionsvc.ProjectOverlapResult
 	projectOverlapsErr         error
+	overlapMu                  sync.Mutex
 	overlapProjectID           domain.ProjectID
+	projectOverlapReads        int
+	overlapWatchProjectID      domain.ProjectID
 	spawnErr                   error
 	lastSpawn                  ports.SpawnConfig
 	orchestratorMode           domain.SessionMode
@@ -745,6 +750,16 @@ func (f *fakeSessionService) WorkspaceWatchPaths(_ context.Context, id domain.Se
 	return []string{session.Metadata.WorkspacePath}, nil
 }
 
+func (f *fakeSessionService) ProjectOverlapWatchPaths(_ context.Context, projectID domain.ProjectID) ([]string, error) {
+	f.overlapMu.Lock()
+	defer f.overlapMu.Unlock()
+	f.overlapWatchProjectID = projectID
+	if f.projectOverlapPathsErr != nil {
+		return nil, f.projectOverlapPathsErr
+	}
+	return append([]string(nil), f.projectOverlapPaths...), nil
+}
+
 func (f *fakeSessionService) GetWorkspaceFile(_ context.Context, id domain.SessionID, path string, section sessionsvc.WorkspaceFileSection) (sessionsvc.WorkspaceFileDetail, error) {
 	f.workspaceFileSection = section
 	if f.workspaceErr != nil {
@@ -954,11 +969,20 @@ func TestSessionsAPI_ListWorkspaceTree(t *testing.T) {
 func (f *fakeSessionService) InvalidateWorkspaceCache(_ domain.SessionID) {}
 
 func (f *fakeSessionService) ProjectOverlaps(_ context.Context, projectID domain.ProjectID) (sessionsvc.ProjectOverlapResult, error) {
+	f.overlapMu.Lock()
+	defer f.overlapMu.Unlock()
 	f.overlapProjectID = projectID
+	f.projectOverlapReads++
 	if f.projectOverlapsErr != nil {
 		return sessionsvc.ProjectOverlapResult{}, f.projectOverlapsErr
 	}
 	return f.projectOverlaps, nil
+}
+
+func (f *fakeSessionService) projectOverlapCallState() (domain.ProjectID, domain.ProjectID, int) {
+	f.overlapMu.Lock()
+	defer f.overlapMu.Unlock()
+	return f.overlapProjectID, f.overlapWatchProjectID, f.projectOverlapReads
 }
 
 func newSessionTestServer(t *testing.T, svc *fakeSessionService) *httptest.Server {
@@ -4131,8 +4155,9 @@ func TestSessionsAPI_ProjectOverlaps(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("GET project overlaps = %d, want 200; body=%s", status, body)
 	}
-	if svc.overlapProjectID != "demo" {
-		t.Fatalf("project id = %q, want demo", svc.overlapProjectID)
+	projectID, _, _ := svc.projectOverlapCallState()
+	if projectID != "demo" {
+		t.Fatalf("project id = %q, want demo", projectID)
 	}
 	var got controllers.ProjectOverlapsResponse
 	mustJSON(t, body, &got)
@@ -4762,6 +4787,66 @@ func TestSessionsAPI_StreamWorkspaceChanges(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for workspace change event")
+	}
+}
+
+func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
+	workspace := t.TempDir()
+	svc := newFakeSessionService()
+	svc.projectOverlapPaths = []string{workspace}
+	svc.projectOverlaps = sessionsvc.ProjectOverlapResult{ProjectID: "demo"}
+	srv := newSessionTestServer(t, svc)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/projects/demo/overlaps/events", nil)
+	if err != nil {
+		t.Fatalf("new overlap stream request: %v", err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET overlap stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET overlap stream = %d body=%s", resp.StatusCode, body)
+	}
+	if contentType := resp.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
+	}
+	_, watchProjectID, overlapReads := svc.projectOverlapCallState()
+	if watchProjectID != "demo" || overlapReads != 1 {
+		t.Fatalf("startup reads watch=%q overlaps=%d, want demo/1", watchProjectID, overlapReads)
+	}
+
+	event := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			if scanner.Text() == "event: overlaps_changed" {
+				event <- scanner.Text()
+				return
+			}
+		}
+	}()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatalf("write workspace file: %v", err)
+	}
+	select {
+	case got := <-event:
+		if got != "event: overlaps_changed" {
+			t.Fatalf("event = %q, want overlaps_changed", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for overlap change event")
+	}
+	_, _, overlapReads = svc.projectOverlapCallState()
+	// A single filesystem write can produce more than one watcher edge. Each
+	// edge is allowed to trigger another authoritative read; the contract here
+	// is that at least one read happens after the startup reconciliation.
+	if overlapReads < 2 {
+		t.Fatalf("overlap reads after change = %d, want at least 2", overlapReads)
 	}
 }
 
@@ -5562,6 +5647,58 @@ func TestSessionsAPI_InteractionRecencyKeepsHumanTimestampSeparate(t *testing.T)
 	}
 	if !response.Session.LastInteractionAt.Equal(rec.Metadata.LatestUserPromptAt) {
 		t.Fatalf("new human recency=%v", response.Session.LastInteractionAt)
+	}
+}
+
+func TestSessionsAPI_ExposesLatestDoneVerificationAndPRTamperFact(t *testing.T) {
+	svc := newFakeSessionService()
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	session := svc.sessions["ao-1"]
+	session.LatestDoneReport = &domain.SessionDoneReport{
+		ID: "done-1",
+		Verification: &domain.ReportVerification{
+			State: domain.ReportVerificationPassed, Evidence: "verification/done-1.txt",
+			StartedAt: at, CompletedAt: at.Add(time.Second), WorkspaceRevision: "head-1", InteractionAt: at.Add(-time.Minute),
+		},
+		Superseded: true,
+	}
+	session.PRs = []domain.PRFacts{{
+		URL: "https://github.com/o/r/pull/1", Number: 1, CI: domain.CIPassing,
+		Tamper: &domain.PRTamperAssessment{HeadSHA: "head-1", SkipMarkersAdded: 2, AssessedAt: at},
+	}}
+	svc.sessions["ao-1"] = session
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1", "")
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var response struct {
+		Session struct {
+			LatestDoneReport struct {
+				ID           string `json:"id"`
+				Superseded   bool   `json:"superseded"`
+				Verification struct {
+					State             string    `json:"state"`
+					Evidence          string    `json:"evidence"`
+					WorkspaceRevision string    `json:"workspaceRevision"`
+					InteractionAt     time.Time `json:"interactionAt"`
+				} `json:"verification"`
+			} `json:"latestDoneReport"`
+			PRs []struct {
+				Tamper struct {
+					HeadSHA          string `json:"headSha"`
+					SkipMarkersAdded int    `json:"skipMarkersAdded"`
+				} `json:"tamper"`
+			} `json:"prs"`
+		} `json:"session"`
+	}
+	mustJSON(t, body, &response)
+	if response.Session.LatestDoneReport.ID != "done-1" || !response.Session.LatestDoneReport.Superseded || response.Session.LatestDoneReport.Verification.State != "passed" || response.Session.LatestDoneReport.Verification.Evidence != "verification/done-1.txt" || response.Session.LatestDoneReport.Verification.WorkspaceRevision != "head-1" || !response.Session.LatestDoneReport.Verification.InteractionAt.Equal(at.Add(-time.Minute)) {
+		t.Fatalf("latest done report = %+v", response.Session.LatestDoneReport)
+	}
+	if len(response.Session.PRs) != 1 || response.Session.PRs[0].Tamper.HeadSHA != "head-1" || response.Session.PRs[0].Tamper.SkipMarkersAdded != 2 {
+		t.Fatalf("PR tamper fact = %+v", response.Session.PRs)
 	}
 }
 

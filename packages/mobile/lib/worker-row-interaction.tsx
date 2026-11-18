@@ -53,6 +53,7 @@ export function WorkerRowInteraction({
 	rowStyle,
 	accessibilityLabel,
 	accessibilityHint,
+	additionalAccessibilityAction,
 	onPress,
 	actions,
 	onAction,
@@ -166,6 +167,7 @@ export function WorkerRowInteraction({
 							onAction={runAction}
 							accessibilityLabel={accessibilityLabel}
 							accessibilityHint={accessibilityHint}
+							additionalAccessibilityAction={additionalAccessibilityAction}
 							style={[rowStyle, menuWidth.style]}
 						>
 							{children}

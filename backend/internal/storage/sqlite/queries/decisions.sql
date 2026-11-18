@@ -49,12 +49,16 @@ RETURNING *;
 -- name: GetDecisionCall :one
 SELECT * FROM decision_calls WHERE call_id = ?;
 
--- name: ListDecisionCallsByOwner :many
+-- name: ListDecisionCallsForSession :many
 SELECT *
 FROM decision_calls
-WHERE origin = ? AND owner_session_id = ?
+WHERE origin = sqlc.arg(origin)
+  AND (
+    owner_session_id = sqlc.arg(session_id)
+    OR json_extract(body, '$.deliveredTo') = sqlc.arg(session_id)
+  )
 ORDER BY raised_at DESC, call_id DESC
-LIMIT ?;
+LIMIT sqlc.arg(result_limit);
 
 -- name: ListDecisionCallsByState :many
 SELECT *

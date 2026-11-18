@@ -198,10 +198,25 @@ type ReportOutputRequest struct {
 	Label     string `json:"label,omitempty"`
 }
 
-// CreateReportResponse returns only the durable identifier needed to correlate
-// a successful submission without echoing report contents.
+// CreateReportResponse returns the durable identifier and, when project verify
+// commands ran, their result. OutputTail is returned here once so the worker
+// can act on a failure without bloating later report-list responses.
 type CreateReportResponse struct {
-	ID string `json:"id"`
+	ID           string                      `json:"id"`
+	Verification *ReportVerificationResponse `json:"verification,omitempty"`
+}
+
+// ReportVerificationResponse is the observed verification fact for one done
+// report. OutputTail is populated only by report creation; Evidence remains the
+// durable session-artifact reference on read projections.
+type ReportVerificationResponse struct {
+	State             string     `json:"state" enum:"passed,failed"`
+	Evidence          string     `json:"evidence"`
+	StartedAt         time.Time  `json:"startedAt"`
+	CompletedAt       time.Time  `json:"completedAt"`
+	WorkspaceRevision string     `json:"workspaceRevision,omitempty"`
+	InteractionAt     *time.Time `json:"interactionAt,omitempty"`
+	OutputTail        string     `json:"outputTail,omitempty"`
 }
 
 // ReportOutputResponse is one ordered output reference in the read projection.
@@ -213,15 +228,16 @@ type ReportOutputResponse struct {
 
 // ReportResponse is one persisted worker claim, independent of delivery state.
 type ReportResponse struct {
-	ID          string                 `json:"id"`
-	SessionID   string                 `json:"sessionId"`
-	ProjectID   string                 `json:"projectId"`
-	State       string                 `json:"state,omitempty"`
-	Note        string                 `json:"note,omitempty"`
-	Message     string                 `json:"message,omitempty"`
-	Outputs     []ReportOutputResponse `json:"outputs,omitempty"`
-	CreatedAt   time.Time              `json:"createdAt"`
-	RepeatCount int64                  `json:"repeatCount"`
+	ID           string                      `json:"id"`
+	SessionID    string                      `json:"sessionId"`
+	ProjectID    string                      `json:"projectId"`
+	State        string                      `json:"state,omitempty"`
+	Note         string                      `json:"note,omitempty"`
+	Message      string                      `json:"message,omitempty"`
+	Outputs      []ReportOutputResponse      `json:"outputs,omitempty"`
+	CreatedAt    time.Time                   `json:"createdAt"`
+	RepeatCount  int64                       `json:"repeatCount"`
+	Verification *ReportVerificationResponse `json:"verification,omitempty"`
 	// DeliveryBatchID names the orchestrator delivery that carried this report.
 	DeliveryBatchID string `json:"deliveryBatchId,omitempty"`
 }
@@ -780,6 +796,17 @@ type SessionView struct {
 	LastEventAt   time.Time             `json:"lastEventAt"`
 	PRs           []SessionPRFacts      `json:"prs"`
 	ArtifactFiles []SessionArtifactView `json:"artifactFiles,omitempty"`
+	// LatestDoneReport is present after the session reports done. Verification
+	// is absent when the project had no configured verify commands.
+	LatestDoneReport *SessionDoneReportResponse `json:"latestDoneReport,omitempty"`
+}
+
+// SessionDoneReportResponse is the latest done report fact needed to derive a
+// session's verification marker.
+type SessionDoneReportResponse struct {
+	ID           string                      `json:"id"`
+	Verification *ReportVerificationResponse `json:"verification,omitempty"`
+	Superseded   bool                        `json:"superseded,omitempty"`
 }
 
 // SessionArtifactView is one inferred file artifact for a session.
@@ -1762,7 +1789,20 @@ type SessionPRFacts struct {
 	// StackParent is the number of the open PR whose branch this PR targets.
 	// Absent when the PR's base branch has no open PR in a live session, e.g.
 	// the default branch.
-	StackParent int `json:"stackParent,omitempty"`
+	StackParent int                         `json:"stackParent,omitempty"`
+	Tamper      *PRTamperAssessmentResponse `json:"tamper,omitempty"`
+}
+
+// PRTamperAssessmentResponse is an advisory assessment bound to one PR head.
+// It never changes mergeability or blocks an action.
+type PRTamperAssessmentResponse struct {
+	HeadSHA          string    `json:"headSha"`
+	TestFilesDeleted int       `json:"testFilesDeleted,omitempty"`
+	TestCasesRemoved int       `json:"testCasesRemoved,omitempty"`
+	TestCasesAdded   int       `json:"testCasesAdded,omitempty"`
+	SkipMarkersAdded int       `json:"skipMarkersAdded,omitempty"`
+	CIWorkflowEdited bool      `json:"ciWorkflowEdited,omitempty"`
+	AssessedAt       time.Time `json:"assessedAt"`
 }
 
 // SessionPRSummary is the concise desktop SCM read model returned by GET

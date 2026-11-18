@@ -24,6 +24,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
+	"github.com/aoagents/agent-orchestrator/backend/internal/verification"
 )
 
 const (
@@ -51,6 +52,9 @@ const (
 	// next poll retries it. It only cuts work that honors cancellation; a wake
 	// or a teardown runs on its own budget. Merged and closed PRs are exempt.
 	DefaultLifecycleTimeout = 30 * time.Second
+	// DefaultTamperRetryInterval bounds retries for a local diff assessment
+	// that could not run yet, independently of provider ETag changes.
+	DefaultTamperRetryInterval = time.Minute
 )
 
 // identityKey builds the cache key for a per-provider, per-host identity.
@@ -94,6 +98,7 @@ type Store interface {
 	// details were read at; ok is false when they are due a read.
 	PRDetailsUpdatedAt(ctx context.Context, prURL string) (time.Time, bool, error)
 	WriteSCMObservation(ctx context.Context, pr domain.PullRequest, checks []domain.PullRequestCheck, reviews []domain.PullRequestReview, threads []domain.PullRequestReviewThread, comments []domain.PullRequestComment, reviewMode ports.ReviewWriteMode) error
+	UpdatePRTamperAssessment(ctx context.Context, prURL, baseSHA, headSHA string, assessment domain.PRTamperAssessment) (bool, error)
 	RecordRepositoryRename(ctx context.Context, r domain.RepositoryRename) error
 }
 
@@ -210,6 +215,8 @@ type ObserverCache struct {
 	// cursor - overlap; the cursor advances only after successful persistence
 	//
 	LastSyncCursor map[string]time.Time
+	// TamperRetryAt maps a head-bound local assessment key to its next attempt.
+	TamperRetryAt map[string]time.Time
 	// repoOrder tracks FIFO eviction order for RepoPRListETag.
 	repoOrder []string
 	// commitOrder tracks FIFO eviction order for CommitChecksETag.
@@ -218,6 +225,8 @@ type ObserverCache struct {
 	lastReviewPollOrder []string
 	// reviewFailedOrder tracks FIFO eviction order for ReviewRefreshFailed.
 	reviewFailedOrder []string
+	// tamperRetryOrder tracks FIFO eviction order for TamperRetryAt.
+	tamperRetryOrder []string
 	// max is the maximum number of entries each cache map retains.
 	max int
 }
@@ -233,6 +242,7 @@ func newCache(maxEntries int) ObserverCache {
 		ReviewRefreshFailed: map[string]bool{},
 		LastPRFetchAt:       map[string]time.Time{},
 		LastSyncCursor:      map[string]time.Time{},
+		TamperRetryAt:       map[string]time.Time{},
 		max:                 maxEntries,
 	}
 }
@@ -290,12 +300,14 @@ type Observer struct {
 	trigger chan struct{}
 	// lifecycleTimeout bounds each lifecycle notification.
 	lifecycleTimeout time.Duration
+	// assessTamper performs the local, exact-revision diff assessment.
+	assessTamper func(context.Context, string, string, string, time.Time) (domain.PRTamperAssessment, error)
 }
 
 // New constructs an Observer with default cadence/cache settings for zero
 // values in cfg.
 func New(provider Provider, store Store, lifecycle Lifecycle, cfg Config) *Observer {
-	o := &Observer{provider: provider, store: store, lifecycle: lifecycle, tick: cfg.Tick, reviewInterval: cfg.ReviewInterval, clock: cfg.Clock, logger: cfg.Logger, scopedIdentityResolver: cfg.ScopedIdentityResolver, Cache: newCache(cfg.CacheMax), rateLimitUntil: map[string]time.Time{}, branchStates: cfg.BranchStates, lifecycleTimeout: DefaultLifecycleTimeout, forcedReviews: map[string]bool{}, forcedSessions: map[domain.SessionID]bool{}, sessionRefreshDebounce: 500 * time.Millisecond, trigger: make(chan struct{}, 1)}
+	o := &Observer{provider: provider, store: store, lifecycle: lifecycle, tick: cfg.Tick, reviewInterval: cfg.ReviewInterval, clock: cfg.Clock, logger: cfg.Logger, scopedIdentityResolver: cfg.ScopedIdentityResolver, Cache: newCache(cfg.CacheMax), rateLimitUntil: map[string]time.Time{}, branchStates: cfg.BranchStates, lifecycleTimeout: DefaultLifecycleTimeout, forcedReviews: map[string]bool{}, forcedSessions: map[domain.SessionID]bool{}, sessionRefreshDebounce: 500 * time.Millisecond, trigger: make(chan struct{}, 1), assessTamper: verification.AssessPullRequestTampering}
 	if o.tick <= 0 {
 		o.tick = DefaultTickInterval
 	}
@@ -337,19 +349,23 @@ func (o *Observer) Start(ctx context.Context) <-chan struct{} {
 type subject struct {
 	session domain.SessionRecord
 	repo    ports.SCMRepo
-	branch  string
-	known   domain.PullRequest
-	hasPR   bool
+	// workspacePath is the local checkout for repo. Workspace projects must
+	// assess a child PR against its child worktree, not the root repository.
+	workspacePath string
+	branch        string
+	known         domain.PullRequest
+	hasPR         bool
 }
 
 // Head names are scoped to repo's provider and host. Each base has a separate
 // set because overlapping workspace checkouts can have different push targets.
 type sessionRepo struct {
-	session   domain.SessionRecord
-	repo      ports.SCMRepo
-	headNames map[string]struct{}
-	branch    string
-	workspace bool
+	session       domain.SessionRecord
+	repo          ports.SCMRepo
+	headNames     map[string]struct{}
+	branch        string
+	workspace     bool
+	workspacePath string
 }
 
 type repoGuardState struct {
@@ -487,6 +503,7 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 	if err != nil {
 		return err
 	}
+	o.retryTamperAssessments(ctx, subjects, now)
 	if len(sessionRepos) == 0 {
 		return nil
 	}
@@ -702,6 +719,11 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 			preserveLocalReviewDecision: reviewStale[key],
 		}
 		prepared := o.prepareForPersistence(obs, local, opts, now)
+		finalPR, finalChecks, finalReviews, finalThreads, finalComments := domainFromObservation(subj.session.ID, subj.session, prepared, local, opts, now)
+		tamperSession := subj.session
+		tamperSession.Metadata.WorkspaceRepoPath = subj.workspacePath
+		tamper, tamperBackfilled := o.tamperAssessment(ctx, tamperSession, finalPR, local, now)
+		finalPR.Tamper = tamper
 		if !prepared.Changed.Metadata && !prepared.Changed.CI && !prepared.Changed.Review {
 			// Details are left out of the hashes, and a provider reads them only
 			// when none are stored or the PR's updatedAt moved, so details here
@@ -711,17 +733,15 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 			// Details still owed (a failed read or write) keep the refresh
 			// incomplete, so the repository cursor waits and they are retried.
 			refreshed := !prepared.PR.DetailsPending
-			if prepared.PR.Details != nil {
-				pr, _, _, _, _ := domainFromObservation(subj.session.ID, subj.session, prepared, local, opts, now)
-				if err := o.store.WriteSCMObservation(ctx, pr, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
-					o.logger.Warn("scm observer: PR details write failed", "session", subj.session.ID, "pr", pr.URL, "err", err)
+			if finalPR.Details != nil || tamperBackfilled {
+				if err := o.store.WriteSCMObservation(ctx, finalPR, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+					o.logger.Warn("scm observer: PR details or tamper write failed", "session", subj.session.ID, "pr", finalPR.URL, "err", err)
 					refreshed = false
 				}
 			}
 			prRefreshOK[key] = refreshed
 			continue
 		}
-		finalPR, finalChecks, finalReviews, finalThreads, finalComments := domainFromObservation(subj.session.ID, subj.session, prepared, local, opts, now)
 		pr, checks, reviews, threads, comments := finalPR, finalChecks, finalReviews, finalThreads, finalComments
 		// Lifecycle is allowed to run only after the observed facts are durable,
 		// but semantic hashes are the observer's acknowledgement cursor. Keep
@@ -740,6 +760,7 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 				pendingOpts.preserveLocalReviewHash = true
 			}
 			pr, checks, reviews, threads, comments = domainFromObservation(subj.session.ID, subj.session, prepared, local, pendingOpts, now)
+			pr.Tamper = tamper
 		}
 		if err := o.store.WriteSCMObservation(ctx, pr, checks, reviews, threads, comments, reviewMode); err != nil {
 			o.logger.Error("scm observer: DB write failed", "session", subj.session.ID, "pr", pr.URL, "err", err)
@@ -917,13 +938,15 @@ func (o *Observer) discoverSubjects(ctx context.Context) (map[string]*subject, [
 			}
 		}
 		repos := append([]ports.SCMRepo(nil), scanRepos[sess.ProjectID]...)
-		sessionRepos = append(sessionRepos, checkoutSessionRepos(sess, branch, proj.Kind.WithDefault() == domain.ProjectKindWorkspace, repos)...)
+		ownedSessionRepos := checkoutSessionRepos(sess, branch, proj.Kind.WithDefault() == domain.ProjectKindWorkspace, repos)
+		sessionRepos = append(sessionRepos, ownedSessionRepos...)
 		childRepos, err := o.workspaceSCMSessionRepos(ctx, proj, sess, branch)
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, child := range childRepos {
 			sessionRepos = append(sessionRepos, child)
+			ownedSessionRepos = append(ownedSessionRepos, child)
 			repos = append(repos, child.repo)
 		}
 		if len(repos) == 0 {
@@ -948,7 +971,7 @@ func (o *Observer) discoverSubjects(ctx context.Context) (map[string]*subject, [
 				o.logger.Warn("scm observer: duplicate tracked PR subject skipped", "pr", key, "kept_session", existing.session.ID, "skipped_session", sess.ID)
 				continue
 			}
-			out[key] = &subject{session: sess, repo: prRepo, branch: branch, known: pr, hasPR: true}
+			out[key] = &subject{session: sess, repo: prRepo, workspacePath: localCheckoutPath(prRepo, ownedSessionRepos), branch: branch, known: pr, hasPR: true}
 		}
 	}
 	return out, sessionRepos, nil
@@ -988,7 +1011,8 @@ func checkoutSessionRepos(sess domain.SessionRecord, branch string, workspace bo
 				byBase[key] = position
 				result = append(result, sessionRepo{
 					session: sess, repo: base, branch: branch, workspace: workspace,
-					headNames: make(map[string]struct{}),
+					workspacePath: firstNonEmpty(sess.Metadata.WorkspaceRepoPath, sess.Metadata.WorkspacePath),
+					headNames:     make(map[string]struct{}),
 				})
 			}
 			for _, destination := range checkout {
@@ -1010,7 +1034,7 @@ func (o *Observer) workspaceSCMSessionRepos(ctx context.Context, proj domain.Pro
 	if err != nil {
 		return nil, err
 	}
-	var checkouts [][]ports.SCMRepo
+	var result []sessionRepo
 	for _, child := range childRepos {
 		if strings.TrimSpace(child.RepoOriginURL) == "" {
 			continue
@@ -1021,9 +1045,29 @@ func (o *Observer) workspaceSCMSessionRepos(ctx context.Context, proj domain.Pro
 			continue
 		}
 		childPath := filepath.Join(proj.Path, filepath.FromSlash(child.RelativePath))
-		checkouts = append(checkouts, o.resolveScanRepos(ctx, domain.ProjectRecord{Path: childPath}, repo))
+		childCheckouts := checkoutSessionRepos(sess, branch, true, o.resolveScanRepos(ctx, domain.ProjectRecord{Path: childPath}, repo))
+		for i := range childCheckouts {
+			childCheckouts[i].workspacePath = filepath.Join(sess.Metadata.WorkspacePath, filepath.FromSlash(child.RelativePath))
+		}
+		result = append(result, childCheckouts...)
 	}
-	return checkoutSessionRepos(sess, branch, true, checkouts...), nil
+	return result, nil
+}
+
+func localCheckoutPath(repo ports.SCMRepo, candidates []sessionRepo) string {
+	name := strings.ToLower(repoFullName(repo))
+	for _, candidate := range candidates {
+		if !strings.EqualFold(candidate.repo.Provider, repo.Provider) || !strings.EqualFold(candidate.repo.Host, repo.Host) {
+			continue
+		}
+		if strings.EqualFold(repoFullName(candidate.repo), name) {
+			return candidate.workspacePath
+		}
+		if _, ok := candidate.headNames[name]; ok {
+			return candidate.workspacePath
+		}
+	}
+	return ""
 }
 
 func repoForTrackedPR(pr domain.PullRequest, repos []ports.SCMRepo) (ports.SCMRepo, bool) {
@@ -1325,11 +1369,12 @@ func (o *Observer) discoverNewPRs(ctx context.Context, sessionRepos []sessionRep
 				continue
 			}
 			subjects[keyForTrackedPR(known, repo)] = &subject{
-				session: sr.session,
-				repo:    repo,
-				branch:  sr.branch,
-				known:   known,
-				hasPR:   true,
+				session:       sr.session,
+				repo:          repo,
+				workspacePath: sr.workspacePath,
+				branch:        sr.branch,
+				known:         known,
+				hasPR:         true,
 			}
 		}
 	}
@@ -1929,6 +1974,82 @@ func (o *Observer) prepareForPersistence(obs ports.SCMObservation, local domain.
 	obs.PR.State = firstNonEmpty(obs.PR.State, normalizePRState(obs.PR.Draft, obs.PR.Merged, obs.PR.Closed))
 	obs.ObservedAt = firstTime(obs.ObservedAt, now)
 	return obs
+}
+
+func (o *Observer) retryTamperAssessments(ctx context.Context, subjects map[string]*subject, now time.Time) {
+	keys := make([]string, 0, len(subjects))
+	for key := range subjects {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if ctx.Err() != nil {
+			return
+		}
+		subj := subjects[key]
+		tamperSession := subj.session
+		tamperSession.Metadata.WorkspaceRepoPath = subj.workspacePath
+		assessment, backfilled := o.tamperAssessment(ctx, tamperSession, subj.known, subj.known, now)
+		if !backfilled {
+			continue
+		}
+		updated, err := o.store.UpdatePRTamperAssessment(ctx, subj.known.URL, subj.known.BaseSHA, subj.known.HeadSHA, *assessment)
+		if err != nil || !updated {
+			o.scheduleTamperRetry(tamperSession, subj.known, subj.known, now)
+			o.logger.Warn("scm observer: PR tamper retry write failed", "session", subj.session.ID, "pr", subj.known.URL, "updated", updated, "err", err)
+			continue
+		}
+		subj.known.Tamper = assessment
+	}
+}
+
+func (o *Observer) tamperAssessment(ctx context.Context, session domain.SessionRecord, pr, local domain.PullRequest, now time.Time) (*domain.PRTamperAssessment, bool) {
+	if pr.HeadSHA != "" && pr.HeadSHA == local.HeadSHA && pr.BaseSHA != "" && pr.BaseSHA == local.BaseSHA && local.Tamper != nil && local.Tamper.HeadSHA == pr.HeadSHA {
+		return local.Tamper, false
+	}
+	workspacePath, baseSHA, headSHA, retryKey, ok := tamperAssessmentInputs(session, pr, local)
+	if !ok {
+		return nil, false
+	}
+	if retryAt := o.Cache.TamperRetryAt[retryKey]; !retryAt.IsZero() && now.Before(retryAt) {
+		return nil, false
+	}
+	assess := o.assessTamper
+	if assess == nil {
+		assess = verification.AssessPullRequestTampering
+	}
+	assessment, err := assess(ctx, workspacePath, baseSHA, headSHA, now)
+	if err != nil {
+		o.cacheSetTime(o.Cache.TamperRetryAt, &o.Cache.tamperRetryOrder, retryKey, now.Add(DefaultTamperRetryInterval))
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			o.logger.Debug("scm observer: PR tamper assessment unavailable", "session", session.ID, "pr", pr.URL, "head", headSHA, "err", err)
+		}
+		return nil, false
+	}
+	cacheDelete(o.Cache.TamperRetryAt, &o.Cache.tamperRetryOrder, retryKey)
+	return &assessment, true
+}
+
+func (o *Observer) scheduleTamperRetry(session domain.SessionRecord, pr, local domain.PullRequest, now time.Time) {
+	_, _, _, retryKey, ok := tamperAssessmentInputs(session, pr, local)
+	if ok {
+		o.cacheSetTime(o.Cache.TamperRetryAt, &o.Cache.tamperRetryOrder, retryKey, now.Add(DefaultTamperRetryInterval))
+	}
+}
+
+func tamperAssessmentInputs(session domain.SessionRecord, pr, local domain.PullRequest) (workspacePath, baseSHA, headSHA, retryKey string, ok bool) {
+	workspacePath = strings.TrimSpace(session.Metadata.WorkspaceRepoPath)
+	if workspacePath == "" {
+		workspacePath = strings.TrimSpace(session.Metadata.WorkspacePath)
+	}
+	baseSHA = firstNonEmpty(pr.BaseSHA, local.BaseSHA)
+	headSHA = firstNonEmpty(pr.HeadSHA, local.HeadSHA)
+	if workspacePath == "" || baseSHA == "" || headSHA == "" {
+		return "", "", "", "", false
+	}
+	identity := firstNonEmpty(pr.URL, pr.HTMLURL, local.URL, local.HTMLURL, strconv.Itoa(pr.Number), strconv.Itoa(local.Number))
+	retryKey = string(session.ID) + "\x00" + identity + "\x00" + baseSHA + "\x00" + headSHA
+	return workspacePath, baseSHA, headSHA, retryKey, true
 }
 
 func domainFromObservation(sessionID domain.SessionID, sessionRecord domain.SessionRecord, obs ports.SCMObservation, local domain.PullRequest, opts persistenceOptions, now time.Time) (domain.PullRequest, []domain.PullRequestCheck, []domain.PullRequestReview, []domain.PullRequestReviewThread, []domain.PullRequestComment) {

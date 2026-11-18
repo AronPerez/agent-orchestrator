@@ -49,6 +49,33 @@ jobs:
           xcrun swiftc -module-cache-path "$HOME/.ao/build-cache/update-helper/tests" native/update-helper/UpdateProgressState.swift native/update-helper/StateTests.swift -o "$HOME/.ao/build-cache/update-helper/state-tests"
           "$HOME/.ao/build-cache/update-helper/state-tests"
 
+  mac-verification-es-extension:
+    runs-on: macos-26-intel
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test development build guard
+        run: node --test scripts/build-verification-es-extension.node-test.mjs
+      - name: Compile unsigned extension bundle for both macOS architectures
+        env:
+          AO_DATA_DIR: ${{ runner.temp }}/ao-verification-es
+          AO_MACOS_ES_EXTENSION_DEV: "1"
+        run: |
+          node scripts/build-verification-es-extension.mjs --arch x64
+          lipo "$AO_DATA_DIR/build-cache/verification-es-extension/x64/dev.agent-orchestrator.verification.endpoint-security.systemextension/Contents/MacOS/ao-verification-endpoint-security" -verify_arch x86_64
+          node scripts/build-verification-es-extension.mjs --arch arm64
+          lipo "$AO_DATA_DIR/build-cache/verification-es-extension/arm64/dev.agent-orchestrator.verification.endpoint-security.systemextension/Contents/MacOS/ao-verification-endpoint-security" -verify_arch arm64
+      - name: Run fake Endpoint Security source tests
+        env:
+          AO_DATA_DIR: ${{ runner.temp }}/ao-verification-es
+        run: npm run test:verification-es-extension
+
   test:
     runs-on: ubuntu-latest
     defaults:

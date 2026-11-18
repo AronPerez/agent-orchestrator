@@ -3,11 +3,13 @@ import { attentionZone, type AttentionZone } from "./session-presentation";
 
 export type FleetTreeSession = {
 	id: string;
-	/** Present only when parentSessionId belongs to another machine. */
+	/** Stable machine ID owning parentSessionId when lineage is host-qualified. */
 	parentHostId?: string;
 	parentSessionId?: string;
 	kind?: "orchestrator" | "worker";
 	status: SessionStatus;
+	/** Delivery/SCM state to aggregate while `status` keeps the live agent state. */
+	rollupStatus?: SessionStatus;
 	isTerminated?: boolean;
 };
 
@@ -63,6 +65,36 @@ export type FlatFleetSession<Session extends FleetTreeSession> = {
 	node: FleetSessionNode<Session>;
 	depth: number;
 };
+
+/** A person's explicit choice for a qualified branch. Absent keys use the size default. */
+export type FleetCollapsePreferences = Readonly<Record<string, boolean>>;
+
+/** Eight visible sessions already fill most of a compact laptop or phone list. */
+export const DEFAULT_FLEET_COLLAPSE_SIZE = 8;
+
+const MAX_FLEET_COLLAPSE_PREFERENCES = 2_000;
+const MAX_FLEET_COLLAPSE_KEY_LENGTH = 1_024;
+
+/** Keep the newest valid preferences within the storage contract's hard limit. */
+export function limitFleetCollapsePreferences(
+	preferences: Readonly<Record<string, unknown>>,
+): Record<string, boolean> {
+	const valid = Object.entries(preferences).filter(([key, value]) =>
+		key.length <= MAX_FLEET_COLLAPSE_KEY_LENGTH && typeof value === "boolean");
+	return Object.fromEntries(valid.slice(-MAX_FLEET_COLLAPSE_PREFERENCES)) as Record<string, boolean>;
+}
+
+/** Remember one choice as the newest entry, evicting the oldest choice when full. */
+export function rememberFleetCollapsePreference(
+	preferences: FleetCollapsePreferences,
+	key: string,
+	collapsed: boolean,
+): Record<string, boolean> {
+	const next = { ...preferences };
+	delete next[key];
+	next[key] = collapsed;
+	return limitFleetCollapsePreferences(next);
+}
 
 export function emptyFleetRollup(): FleetRollup {
 	return { merge: 0, action: 0, pending: 0, working: 0, done: 0 };
@@ -152,7 +184,8 @@ function buildMachine<Session extends FleetTreeSession>(
 	showArchived: boolean,
 ): FleetMachineNode<Session> {
 	const byId = new Map(sessions.map((item) => [item.id, item]));
-	const localParentId = (item: Session): string | undefined => item.parentHostId ? undefined : item.parentSessionId;
+	const localParentId = (item: Session): string | undefined =>
+		!item.parentHostId || item.parentHostId === machine.id ? item.parentSessionId : undefined;
 	const children = new Map<string, Session[]>();
 	for (const item of sessions) {
 		const parentId = localParentId(item);
@@ -177,6 +210,7 @@ function buildMachine<Session extends FleetTreeSession>(
 		if (visited.has(item.id) || !included.has(item.id)) return undefined;
 		visited.add(item.id);
 		const parentId = localParentId(item);
+		const externalParent = Boolean(item.parentSessionId && item.parentHostId && item.parentHostId !== machine.id);
 		const recordedChildren = children.get(item.id) ?? [];
 		const directChildren = recordedChildren.filter((child) => included.has(child.id));
 		const childNodes = directChildren.flatMap((child) => {
@@ -197,8 +231,8 @@ function buildMachine<Session extends FleetTreeSession>(
 			} : undefined,
 			role: item.kind === "orchestrator" ? "orchestrator" : recordedChildren.length ? "manager" : "worker",
 			parentUnavailable: item.parentSessionId !== undefined &&
-				(Boolean(item.parentHostId) || fallbackRoot || parentId === item.id || !parentId || !byId.has(parentId)),
-			zone: item.isTerminated || item.status === "terminated" ? "done" : attentionZone(item.status),
+				(externalParent || fallbackRoot || parentId === item.id || !parentId || !byId.has(parentId)),
+			zone: item.isTerminated || item.status === "terminated" ? "done" : attentionZone(item.rollupStatus ?? item.status),
 			rollup,
 			children: childNodes,
 		};
@@ -247,4 +281,51 @@ export function flattenFleetSessions<Session extends FleetTreeSession>(
 		for (const child of [...row.node.children].reverse()) stack.push({ node: child, depth: row.depth + 1 });
 	}
 	return rows;
+}
+
+/**
+ * Resolve the branches that should be folded now.
+ *
+ * Large branches start folded so their roll-up remains the useful first view.
+ * A stored boolean is an override rather than merely a list of collapsed keys:
+ * `false` remembers that someone deliberately opened a branch which defaults
+ * to folded.
+ */
+export function resolveFleetCollapsedKeys<Session extends FleetTreeSession>(
+	projects: readonly FleetProjectNode<Session>[],
+	preferences: FleetCollapsePreferences,
+	defaultSize = DEFAULT_FLEET_COLLAPSE_SIZE,
+): Set<string> {
+	const collapsed = new Set<string>();
+	const resolve = (key: string, sessionCount: number) => {
+		const remembered = preferences[key];
+		if (remembered ?? sessionCount >= defaultSize) collapsed.add(key);
+	};
+	const visitSession = (node: FleetSessionNode<Session>): number => {
+		const count = 1 + node.children.reduce((total, child) => total + visitSession(child), 0);
+		if (node.children.length) resolve(node.key, count);
+		return count;
+	};
+	for (const project of projects) {
+		let projectCount = 0;
+		for (const machine of project.machines) {
+			const machineCount = machine.sessions.reduce((total, session) => total + visitSession(session), 0);
+			projectCount += machineCount;
+			if (machine.sessions.length) resolve(machine.key, machineCount);
+		}
+		if (project.machines.length) resolve(project.key, projectCount);
+	}
+	return collapsed;
+}
+
+/** Parse untrusted client storage without allowing it to grow the view model unboundedly. */
+export function parseFleetCollapsePreferences(raw: string | null | undefined): Record<string, boolean> {
+	if (!raw) return {};
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+		return limitFleetCollapsePreferences(parsed as Record<string, unknown>);
+	} catch {
+		return {};
+	}
 }

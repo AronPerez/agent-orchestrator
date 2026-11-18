@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
+	"runtime"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -72,19 +75,25 @@ func newSendCommand(ctx *commandContext) *cobra.Command {
 }
 
 func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) error {
+	opts.clientMessageID = strings.TrimSpace(opts.clientMessageID)
 	if opts.recoverOnly && !opts.steer {
 		return usageError{errors.New("usage: --recover-only requires --steer")}
 	}
-	if strings.TrimSpace(opts.clientMessageID) != "" && !opts.steer {
+	if opts.clientMessageID != "" && !opts.steer {
 		return usageError{errors.New("usage: --client-message-id requires --steer")}
 	}
-	if opts.recoverOnly && strings.TrimSpace(opts.clientMessageID) == "" {
+	if opts.recoverOnly && opts.clientMessageID == "" {
 		return usageError{errors.New("usage: --recover-only requires --client-message-id")}
 	}
 	if !opts.recoverOnly && strings.TrimSpace(opts.message) == "" {
 		return usageError{errors.New("usage: --message is required")}
 	}
-	senderSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+	senderSessionID := callerSession()
+	if opts.recoverOnly {
+		// Receipt recovery does not send a message and therefore needs neither
+		// source provenance nor a live source daemon.
+		senderSessionID = ""
+	}
 	sourceSessionID := senderSessionID
 	userAuthored := senderSessionID == ""
 	automationAuthored := false
@@ -93,9 +102,12 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	if session == "" {
 		return usageError{errors.New("usage: --session is required")}
 	}
+	if c.remote != nil {
+		c.remote.identityPinRequired = true
+	}
 	sourceHostID := ""
 	sameHost := c.remote == nil
-	if c.remote != nil && senderSessionID != "" {
+	if !opts.recoverOnly && c.remote != nil && senderSessionID != "" {
 		var err error
 		sourceHostID, sameHost, err = c.remoteRelationToSource(ctx, senderSessionID)
 		if err != nil {
@@ -134,7 +146,7 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 		}
 		return nil
 	}
-	return c.steerMessage(ctx, path, message, senderSessionID, strings.TrimSpace(opts.clientMessageID), automationAuthored, opts.recoverOnly)
+	return c.steerMessage(ctx, path, message, senderSessionID, opts.clientMessageID, automationAuthored, opts.recoverOnly)
 }
 
 func (c *commandContext) steerMessage(
@@ -151,20 +163,27 @@ func (c *commandContext) steerMessage(
 		AutomationAuthored: automationAuthored, RecoverOnly: recoverOnly,
 	}, &result)
 	if err != nil {
+		var preflightErr remotePreflightError
+		if errors.As(err, &preflightErr) {
+			if recoverOnly {
+				return fmt.Errorf("%w; recovery request was not sent; retry the same recovery command with delivery handle %s", err, clientMessageID)
+			}
+			return fmt.Errorf("%w; steering request was not sent; retry the original command with the same --client-message-id %s", err, clientMessageID)
+		}
 		var responseErr apiResponseError
 		hasResponseErr := errors.As(err, &responseErr)
 		if hasResponseErr && responseErr.ErrorBody.Code == "CHAT_STEER_UNCERTAIN" {
 			if recoverOnly {
 				return fmt.Errorf("%w; delivery handle %s remains unresolved and was not resent", err, clientMessageID)
 			}
-			return fmt.Errorf(
-				"%w; recover this delivery without resending it: ao send%s --session %s --steer --recover-only --client-message-id %s",
-				err, c.savedHostRetryArgs(), strings.TrimPrefix(sessionPath, "sessions/"), clientMessageID)
+			return fmt.Errorf("%w; recover this delivery without resending it: %s", err,
+				c.steeringRecoveryCommand(strings.TrimPrefix(sessionPath, "sessions/"), clientMessageID))
 		}
 		if errors.Is(err, errDaemonUnavailable) || !hasResponseErr || responseErr.StatusCode >= 500 {
 			return fmt.Errorf(
-				"%w; outcome is unknown for delivery handle %s; retry safely with --client-message-id %s",
-				err, clientMessageID, clientMessageID)
+				"%w; outcome is unknown for delivery handle %s; recover without resending it: %s",
+				err, clientMessageID,
+				c.steeringRecoveryCommand(strings.TrimPrefix(sessionPath, "sessions/"), clientMessageID))
 		}
 		return err
 	}
@@ -189,4 +208,41 @@ func (c *commandContext) steerMessage(
 		"No active turn to steer. Message accepted%s as a normal Chat turn in %s state with delivery handle %s; provider delivery is not confirmed.\n",
 		c.resolvedBySuffix(), result.State, clientMessageID)
 	return nil
+}
+
+func (c *commandContext) steeringRecoveryCommand(sessionID, clientMessageID string) string {
+	return c.steeringRecoveryCommandForOS(runtime.GOOS, sessionID, clientMessageID)
+}
+
+func (c *commandContext) steeringRecoveryCommandForOS(goos, sessionID, clientMessageID string) string {
+	remoteArgs := c.remoteRetryArguments()
+	args := make([]string, 0, 1+len(remoteArgs)+6)
+	args = append(args, "send")
+	args = append(args, remoteArgs...)
+	args = append(args, "--session", sessionID, "--steer", "--recover-only", "--client-message-id", clientMessageID)
+	if goos == "windows" {
+		return powershellEncodedAOCommand(args)
+	}
+	rendered := []string{"ao"}
+	for _, arg := range args {
+		rendered = append(rendered, quoteCommandArgument(arg))
+	}
+	return strings.Join(rendered, " ")
+}
+
+// powershellEncodedAOCommand is safe to paste into PowerShell or Command
+// Prompt: the outer command contains only Base64, and PowerShell receives each
+// original value as a single-quoted literal after decoding it.
+func powershellEncodedAOCommand(args []string) string {
+	parts := make([]string, 0, 1+len(args))
+	parts = append(parts, "& ao")
+	for _, arg := range args {
+		parts = append(parts, "'"+strings.ReplaceAll(arg, "'", "''")+"'")
+	}
+	units := utf16.Encode([]rune(strings.Join(parts, " ")))
+	raw := make([]byte, len(units)*2)
+	for i, unit := range units {
+		binary.LittleEndian.PutUint16(raw[2*i:], unit)
+	}
+	return "powershell.exe -NoProfile -EncodedCommand " + base64.StdEncoding.EncodeToString(raw)
 }

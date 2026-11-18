@@ -116,6 +116,8 @@ func TestBuildSystemPrompt_OrchestratorRequiresConfirmationAndAOOnlyDelegation(t
 		"ao://sessions/{project-id}/{session-id}/artifacts/{path}",
 		"Use stable project and session IDs",
 		"operating-system deep links",
+		"ao session overlaps --project mer",
+		"before assigning implementation work",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("orchestrator prompt missing %q:\n%s", want, got)
@@ -323,6 +325,154 @@ func TestBuildSystemPromptAsksEveryRoleToNarrateToolCalls(t *testing.T) {
 		}
 		if !strings.Contains(got, "describe what it does in plain technical terms, not the command") {
 			t.Errorf("%s (standalone=%v) prompt does not translate Orchestrator commands:\n%s", cfg.Role, cfg.Standalone, got)
+		}
+	}
+}
+
+func TestBuildSystemPromptTellsEveryRoleHowToAskTheHumanToDecide(t *testing.T) {
+	for name, cfg := range map[string]systemPromptConfig{
+		"worker": {
+			Role:                  sessionPromptRoleWorker,
+			OrchestratorSessionID: "shop-1",
+		},
+		"standalone worker": {
+			Role:       sessionPromptRoleWorker,
+			Standalone: true,
+		},
+		"orchestrator": {
+			Role: sessionPromptRoleOrchestrator,
+		},
+		"orchestrator override": {
+			Role:                 sessionPromptRoleOrchestrator,
+			OrchestratorOverride: "You coordinate.",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := buildSystemPromptText(cfg)
+			for _, want := range []string{
+				"ao decision search <words>",
+				"If it blocks you, use your role's existing handoff or status path with the call link",
+				"ao decision raise --title <the question>",
+				`--option "<label> :: <what it leads to>"`,
+				"Never ask the human for a ruling by id.",
+				`begins "Decision on your call" or "Changed decision on your call"`,
+				`begins "I dismissed your call"`,
+				`begins "Decision on a call raised by"`,
+				"ao decision outcome <id> --for-answer <answer-entry-id> --text <what happened>",
+				"run `ao decision ls`",
+				"Only the human answers, dismisses or retires a call.",
+				"Never put secrets, credentials or personal data in a call.",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("prompt missing decision instruction %q", want)
+				}
+			}
+			if count := strings.Count(got, "## Decisions for the Human"); count != 1 {
+				t.Errorf("decision section heading appears %d times, want 1", count)
+			}
+		})
+	}
+}
+
+func TestBuildSystemPrompt_WorkerPairsBlockingCallsWithStatusReport(t *testing.T) {
+	got := buildSystemPromptText(systemPromptConfig{Role: sessionPromptRoleWorker})
+	for _, want := range []string{
+		"raise a call for it (see Decisions for the Human) instead of guessing",
+		"For a choice, raise or reuse one call (see Decisions for the Human).",
+		`ao report --needs-input --note "Blocked by <call-link>; resume this session when it is answered"`,
+		"This is a status handoff, not a second question.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("worker prompt missing decision instruction %q", want)
+		}
+	}
+	if strings.Contains(got, "When a decision or missing input blocks progress") {
+		t.Error("worker prompt still routes decisions to needs-input reports")
+	}
+	if strings.Contains(got, "check it again later") {
+		t.Error("worker prompt leaves a dependent session waiting without a resume path")
+	}
+}
+
+func TestBuildSystemPrompt_UnparentedRolesExposeBlockingCallsToHuman(t *testing.T) {
+	directNotice := "explicitly tell the human in the current response that a decision is waiting"
+	reportHandoff := "use the needs-input call-link handoff in Worker Reports"
+	for name, cfg := range map[string]systemPromptConfig{
+		"standalone worker":                   {Role: sessionPromptRoleWorker, Standalone: true},
+		"project worker without orchestrator": {Role: sessionPromptRoleWorker, Project: promptProject{ID: "shop"}},
+		"orchestrator":                        {Role: sessionPromptRoleOrchestrator},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := buildSystemPromptText(cfg)
+			for _, want := range []string{
+				directNotice,
+				"include the call link and `ao decision show <call-link>`",
+				"Do not end the turn silently.",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("prompt missing unparented decision notice %q", want)
+				}
+			}
+			if strings.Contains(got, reportHandoff) {
+				t.Error("unparented prompt incorrectly relies on an orchestrator report handoff")
+			}
+		})
+	}
+
+	parented := buildSystemPromptText(systemPromptConfig{
+		Role: sessionPromptRoleWorker, Project: promptProject{ID: "shop"}, OrchestratorSessionID: "shop-1",
+	})
+	if !strings.Contains(parented, reportHandoff) {
+		t.Fatal("parented worker prompt is missing its report handoff")
+	}
+}
+
+func TestBuildSystemPrompt_ParentedWorkerKeepsHumanNoticeIfOrchestratorEnds(t *testing.T) {
+	got := buildSystemPromptText(systemPromptConfig{
+		Role: sessionPromptRoleWorker, Project: promptProject{ID: "shop"}, OrchestratorSessionID: "shop-1",
+	})
+	for _, want := range []string{
+		"use the needs-input call-link handoff in Worker Reports",
+		"also explicitly tell the human in the current response that a decision is waiting",
+		"include the call link and `ao decision show <call-link>`",
+		"Do not rely on the report alone",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("parented worker prompt missing stale-orchestrator fallback %q", want)
+		}
+	}
+}
+
+func TestBuildSystemPrompt_SharedCallOwnerAlertsOrchestratorForDependentWorker(t *testing.T) {
+	cfg := systemPromptConfig{Role: sessionPromptRoleWorker, OrchestratorSessionID: "shop-1"}
+	ownerPrompt := buildSystemPromptText(cfg)
+	dependentPrompt := buildSystemPromptText(cfg)
+
+	if !strings.Contains(dependentPrompt, `ao report --needs-input --note "Blocked by <call-link>; resume this session when it is answered"`) {
+		t.Fatal("dependent worker prompt is missing its shared-call handoff")
+	}
+	for _, want := range []string{
+		"When an answer or dismissal arrives and you have a project orchestrator",
+		`ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessions blocked by it"`,
+		"so it can resume any other session in your project that reused your call",
+	} {
+		if !strings.Contains(ownerPrompt, want) {
+			t.Errorf("call owner prompt missing dependent-session alert %q", want)
+		}
+	}
+}
+
+func TestBuildSystemPrompt_DoesNotReuseUnansweredCallsAcrossProjects(t *testing.T) {
+	workerB := buildSystemPromptText(systemPromptConfig{
+		Role: sessionPromptRoleWorker, Project: promptProject{ID: "project-b"}, OrchestratorSessionID: "project-b-1",
+	})
+	for _, want := range []string{
+		"If an unanswered match belongs to another project, do not reuse it.",
+		"raise one call in your current project",
+		"mention the related call link in its context",
+	} {
+		if !strings.Contains(workerB, want) {
+			t.Errorf("project B prompt missing cross-project boundary %q", want)
 		}
 	}
 }

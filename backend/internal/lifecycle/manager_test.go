@@ -29,6 +29,7 @@ type fakeStore struct {
 	comments   map[string][]domain.PullRequestComment
 	prPolicies map[string]bool
 	signatures map[string]string
+	accepted   map[string]bool
 
 	listPRsErr        error
 	listReviewsErr    error
@@ -47,12 +48,17 @@ func newFakeStore() *fakeStore {
 		comments:   map[string][]domain.PullRequestComment{},
 		prPolicies: map[string]bool{},
 		signatures: map[string]string{},
+		accepted:   map[string]bool{},
 	}
 }
 
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
 	r, ok := f.sessions[id]
 	return r, ok, nil
+}
+
+func (f *fakeStore) SemanticDeliveryAccepted(_ context.Context, id domain.SessionID, runtimeLaunchID, deliveryID string) (bool, error) {
+	return f.accepted[string(id)+"\x00"+runtimeLaunchID+"\x00"+deliveryID], nil
 }
 
 func (f *fakeStore) ListPRsBySession(_ context.Context, id domain.SessionID) ([]domain.PullRequest, error) {

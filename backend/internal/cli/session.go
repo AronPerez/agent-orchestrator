@@ -266,14 +266,18 @@ type sessionListSnapshot struct {
 }
 
 type allHostSessionListResult struct {
-	HostID    string
-	HostLabel string
-	Local     bool
-	Snapshot  sessionListSnapshot
-	Err       error
+	HostID        string
+	HostLabel     string
+	Local         bool
+	AccountUserID string
+	Snapshot      sessionListSnapshot
+	Err           error
 }
 
-var allHostsSnapshotTimeout = 10 * time.Second
+var (
+	allHostsSnapshotTimeout     = 10 * time.Second
+	allHostsPREnrichmentTimeout = 2 * time.Second
+)
 
 func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd := &cobra.Command{
@@ -802,9 +806,18 @@ func (c *commandContext) fetchSessionListSnapshot(ctx context.Context, opts sess
 		hiddenTerminatedCount = terminatedCount
 		hiddenOrchestratorCount += terminatedOrchestratorCount
 	}
-	prSummaries, err := c.listSessionPRSummaries(ctx, sessions)
+	prContext := ctx
+	cancelPRContext := func() {}
+	if opts.allHosts {
+		prContext, cancelPRContext = context.WithTimeout(ctx, allHostsPREnrichmentTimeout)
+	}
+	defer cancelPRContext()
+	prSummaries, err := c.listSessionPRSummaries(prContext, sessions)
 	if err != nil {
-		return sessionListSnapshot{}, err
+		if !opts.allHosts || !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			return sessionListSnapshot{}, err
+		}
+		prSummaries = make(map[string][]sessionPRSummaryDTO)
 	}
 	return sessionListSnapshot{
 		Sessions: sessions, PRSummaries: prSummaries,
@@ -862,6 +875,9 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 		go func() {
 			defer wg.Done()
 			result := allHostSessionListResult{HostID: task.hostID, HostLabel: task.hostLabel, Local: task.local}
+			if task.target != nil {
+				result.AccountUserID = task.target.accountUserID
+			}
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
@@ -917,9 +933,7 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 			}
 			result.Snapshot, result.Err = hostContext.fetchSessionListSnapshot(hostCtx, opts)
 			if result.Err == nil {
-				if err := guard(hostCtx); err != nil {
-					result.Err = err
-				}
+				result.Err = c.verifySavedHostTargetAgainst(hostCtx, target, localHostID())
 			}
 			resultCh <- result
 		}()
@@ -928,6 +942,15 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 	close(resultCh)
 	for result := range resultCh {
 		results = append(results, result)
+	}
+	publicationAccount := c.activeCloudAccount(ctx)
+	for i := range results {
+		if results[i].AccountUserID != "" && publicationAccount != results[i].AccountUserID {
+			results[i].Err = errors.New("active Cloud account changed before publishing the saved-host snapshot; retry with the intended account signed in")
+		}
+		if results[i].Err != nil {
+			results[i].Snapshot = sessionListSnapshot{}
+		}
 	}
 	localIDs := make(map[string]struct{}, 1)
 	for _, result := range results {
@@ -991,13 +1014,13 @@ func writeAllHostSessionListJSON(cmd *cobra.Command, results []allHostSessionLis
 	for _, result := range results {
 		status := sessionListHostStatus{
 			HostID: result.HostID, HostLabel: result.HostLabel, Local: result.Local,
-			SessionCount: len(result.Snapshot.Sessions),
 		}
 		if result.Err != nil {
 			status.Error = result.Err.Error()
 			out.Meta.Hosts = append(out.Meta.Hosts, status)
 			continue
 		}
+		status.SessionCount = len(result.Snapshot.Sessions)
 		status.HiddenTerminatedCount = result.Snapshot.HiddenTerminatedCount
 		status.HiddenOrchestratorCount = result.Snapshot.HiddenOrchestratorCount
 		out.Meta.Hosts = append(out.Meta.Hosts, status)

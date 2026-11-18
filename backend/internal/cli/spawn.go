@@ -183,6 +183,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				return usageError{fmt.Errorf(`--tracker-provider must be "github" or "gitlab"`)}
 			}
 			opts.trackerProvider = tp
+			if ctx.remote != nil {
+				ctx.remote.identityPinRequired = true
+			}
 			var project projectDetails
 			var err error
 			if !opts.standalone {
@@ -223,7 +226,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 					return err
 				}
 			}
-			parentSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+			parentSessionID := callerSession()
 			parentHostID := ""
 			if ctx.remote != nil && parentSessionID != "" {
 				sourceHostID, sameHost, relationErr := ctx.remoteRelationToSource(cmd.Context(), parentSessionID)

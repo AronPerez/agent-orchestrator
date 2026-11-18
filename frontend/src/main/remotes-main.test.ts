@@ -1070,6 +1070,7 @@ describe("registerRemotesIpc", () => {
 				pendingCoordinationDeviceIds: [coordinationDeviceId],
 			})]);
 		});
+
 		it("keeps desktop connections working when the remote release has no issuer", async () => {
 			const file = await tempFile();
 			const ipc = fakeIpc();

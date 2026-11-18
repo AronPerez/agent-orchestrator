@@ -468,6 +468,201 @@ func TestSessionListAllHostsRevalidatesAccountDuringSnapshot(t *testing.T) {
 	if len(got.Meta.Hosts) != 2 || got.Meta.Hosts[1].HostID != "h_account" || !strings.Contains(got.Meta.Hosts[1].Error, "Cloud account changed") {
 		t.Fatalf("hosts = %#v, want structured account-switch failure", got.Meta.Hosts)
 	}
+	if got.Meta.Hosts[1].SessionCount != 0 {
+		t.Fatalf("rejected host session count = %d, want 0", got.Meta.Hosts[1].SessionCount)
+	}
+}
+
+func TestSessionListAllHostsKeepsSessionsWhenPREnrichmentTimesOut(t *testing.T) {
+	home, _ := prepareAllHostsTest(t, "")
+	oldEnrichmentTimeout := allHostsPREnrichmentTimeout
+	allHostsPREnrichmentTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { allHostsPREnrichmentTimeout = oldEnrichmentTimeout })
+
+	var prRequests atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"h_pr","apiVersion":1}`)
+		case "/api/v1/sessions":
+			session := strings.TrimSuffix(sessionJSON("pr-1", "demo", "worker", "idle", false), "}") + `,"prs":[{"number":7}]}`
+			_, _ = io.WriteString(w, `{"sessions":[`+session+`]}`)
+		case "/api/v1/sessions/pr-1/pr":
+			prRequests.Add(1)
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(remote.Close)
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "review", URL: remote.URL, HostID: "h_pr", CoordinationToken: "aoc_pr",
+	})
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "ls", "--all-hosts", "--all", "--include-terminated", "--json")
+	if err != nil {
+		t.Fatalf("session ls --all-hosts: %v\nstderr=%s", err, errOut)
+	}
+	if got := prRequests.Load(); got != 1 {
+		t.Fatalf("PR summary requests = %d, want 1", got)
+	}
+	var got sessionListOutput
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 1 || got.Data[0].HostID != "h_pr" || got.Data[0].ID != "pr-1" {
+		t.Fatalf("data = %#v, want the fetched session despite stalled optional enrichment", got.Data)
+	}
+	if len(got.Meta.Hosts) != 2 || got.Meta.Hosts[1].Error != "" || got.Meta.Hosts[1].SessionCount != 1 {
+		t.Fatalf("hosts = %#v, want a healthy remote snapshot", got.Meta.Hosts)
+	}
+}
+
+func TestSessionListAllHostsRejectsIdentityChangeAfterSnapshot(t *testing.T) {
+	home, _ := prepareAllHostsTest(t, "")
+	var identityRequests atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			hostID := "h_remote"
+			if identityRequests.Add(1) >= 3 {
+				hostID = "h_replacement"
+			}
+			_, _ = io.WriteString(w, `{"hostId":`+jsonQuote(hostID)+`,"apiVersion":1}`)
+		case "/api/v1/sessions":
+			_, _ = io.WriteString(w, `{"sessions":[`+sessionJSON("remote-1", "demo", "worker", "idle", false)+`]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(remote.Close)
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "remote", URL: remote.URL, HostID: "h_remote", CoordinationToken: "aoc_remote",
+	})
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "ls", "--all-hosts", "--all", "--include-terminated", "--json")
+	if err != nil {
+		t.Fatalf("session ls --all-hosts: %v\nstderr=%s", err, errOut)
+	}
+	var got sessionListOutput
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 0 {
+		t.Fatalf("data = %#v, want changed-host snapshot rejected", got.Data)
+	}
+	if len(got.Meta.Hosts) != 2 || got.Meta.Hosts[1].HostID != "h_remote" || !strings.Contains(got.Meta.Hosts[1].Error, "identity changed") || got.Meta.Hosts[1].SessionCount != 0 {
+		t.Fatalf("hosts = %#v, want changed-host failure with no published count", got.Meta.Hosts)
+	}
+}
+
+func TestSessionListAllHostsRevalidatesAccountAtPublication(t *testing.T) {
+	home, _ := prepareAllHostsTest(t, "")
+	writeActiveCloudAccount(t, home, "user-a")
+	startedAt, ok := processStartedAt(context.Background(), os.Getpid())
+	if !ok {
+		t.Fatal("could not read test process start time")
+	}
+	markerB, err := json.Marshal(activeCloudAccountMarker{
+		UserID: "user-b", DesktopPID: os.Getpid(), DesktopStartedAtMS: startedAt.UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(home, ".ao", activeCloudAccountFile)
+
+	accountFinished := make(chan struct{})
+	var accountFinishedOnce sync.Once
+	var accountIdentityRequests atomic.Int32
+	account := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"h_account","apiVersion":1}`)
+			if accountIdentityRequests.Add(1) >= 3 {
+				accountFinishedOnce.Do(func() { close(accountFinished) })
+			}
+		case "/api/v1/sessions":
+			_, _ = io.WriteString(w, `{"sessions":[`+sessionJSON("account-1", "demo", "worker", "idle", false)+`]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(account.Close)
+
+	slowStarted := make(chan struct{})
+	releaseSlow := make(chan struct{})
+	var slowStartedOnce, releaseSlowOnce sync.Once
+	t.Cleanup(func() { releaseSlowOnce.Do(func() { close(releaseSlow) }) })
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"h_slow","apiVersion":1}`)
+		case "/api/v1/sessions":
+			slowStartedOnce.Do(func() { close(slowStarted) })
+			<-releaseSlow
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(slow.Close)
+	writeRemotes(t, home, 0o600,
+		remoteEntry{Label: "account", URL: account.URL, HostID: "h_account", CoordinationToken: "aoc_account", AccountUserID: "user-a"},
+		remoteEntry{Label: "slow", URL: slow.URL, HostID: "h_slow", CoordinationToken: "aoc_slow"},
+	)
+
+	type cliResult struct {
+		out, errOut string
+		err         error
+	}
+	done := make(chan cliResult, 1)
+	go func() {
+		out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+			"session", "ls", "--all-hosts", "--all", "--include-terminated", "--json")
+		done <- cliResult{out: out, errOut: errOut, err: err}
+	}()
+	select {
+	case <-accountFinished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("account-owned snapshot did not finish")
+	}
+	select {
+	case <-slowStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow host did not start")
+	}
+	if err := os.WriteFile(markerPath, append(markerB, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releaseSlowOnce.Do(func() { close(releaseSlow) })
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("session ls --all-hosts: %v\nstderr=%s", result.err, result.errOut)
+	}
+	var got sessionListOutput
+	if err := json.Unmarshal([]byte(result.out), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range got.Data {
+		if entry.HostID == "h_account" {
+			t.Fatalf("account-owned snapshot published after account switch: %#v", got.Data)
+		}
+	}
+	for _, host := range got.Meta.Hosts {
+		if host.HostID == "h_account" {
+			if !strings.Contains(host.Error, "before publishing") || host.SessionCount != 0 {
+				t.Fatalf("account host status = %#v, want publication failure with no count", host)
+			}
+			return
+		}
+	}
+	t.Fatalf("hosts = %#v, want account-owned host status", got.Meta.Hosts)
 }
 
 func TestSessionListAllHostsKeepsLocalResultWhenRemoteDiscoveryFails(t *testing.T) {
@@ -544,18 +739,21 @@ func TestSessionListAllHostsBoundsRemoteFanout(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		hostID := "h_" + string(rune('a'+i))
 		token := "aoc_" + string(rune('a'+i))
+		firstIdentity := &atomic.Bool{}
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/v1/identity" {
-				current := inFlight.Add(1)
-				for {
-					observed := maxInFlight.Load()
-					if current <= observed || maxInFlight.CompareAndSwap(observed, current) {
-						break
+				if firstIdentity.CompareAndSwap(false, true) {
+					current := inFlight.Add(1)
+					for {
+						observed := maxInFlight.Load()
+						if current <= observed || maxInFlight.CompareAndSwap(observed, current) {
+							break
+						}
 					}
+					started <- struct{}{}
+					<-release
+					inFlight.Add(-1)
 				}
-				started <- struct{}{}
-				<-release
-				inFlight.Add(-1)
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, `{"hostId":"`+hostID+`","apiVersion":1}`)
 				return
@@ -582,12 +780,24 @@ func TestSessionListAllHostsBoundsRemoteFanout(t *testing.T) {
 	}
 }
 
-func TestSessionListAllHostsRejectsSingleRemoteTarget(t *testing.T) {
-	aoHome(t)
-	t.Setenv("AO_TOKEN", "explicit-token")
-	_, _, err := executeCLI(t, Deps{}, "session", "ls", "--all-hosts", "--url", "https://remote.example")
-	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--all-hosts cannot be combined") {
-		t.Fatalf("err=%v exit=%d, want target-conflict usage error", err, ExitCode(err))
+func TestSessionListAllHostsRejectsSingleRemoteTargetBeforeResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		envURL string
+		args   []string
+	}{
+		{name: "missing saved host", args: []string{"session", "ls", "--all-hosts", "--host", "missing"}},
+		{name: "raw URL without credential", args: []string{"session", "ls", "--all-hosts", "--url", "http://127.0.0.1:1"}},
+		{name: "AO_URL without credential", envURL: "http://127.0.0.1:1", args: []string{"session", "ls", "--all-hosts"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			aoHome(t)
+			t.Setenv("AO_URL", tc.envURL)
+			_, _, err := executeCLI(t, Deps{}, tc.args...)
+			if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--all-hosts cannot be combined") {
+				t.Fatalf("err=%v exit=%d, want target-conflict usage error", err, ExitCode(err))
+			}
+		})
 	}
 }
 

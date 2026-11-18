@@ -61,7 +61,7 @@ func (c *ReportsController) list(w http.ResponseWriter, r *http.Request) {
 			ID: record.ID, SessionID: string(record.SessionID), ProjectID: string(record.ProjectID),
 			State: string(record.State), Note: record.Note, Message: record.Message,
 			Outputs: outputs, CreatedAt: record.CreatedAt, RepeatCount: record.RepeatCount,
-			DeliveryBatchID: record.DeliveryBatchID,
+			DeliveryBatchID: record.DeliveryBatchID, Verification: reportVerificationResponse(record.Verification),
 		}
 	}
 	envelope.WriteJSON(w, http.StatusOK, response)
@@ -91,5 +91,21 @@ func (c *ReportsController) create(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteErrorWithCode(w, r, err, "REPORT_CREATE_FAILED", "Unable to create report")
 		return
 	}
-	envelope.WriteJSON(w, http.StatusCreated, CreateReportResponse{ID: rec.ID})
+	envelope.WriteJSON(w, http.StatusCreated, CreateReportResponse{ID: rec.ID, Verification: reportVerificationResponse(rec.Verification)})
+}
+
+func reportVerificationResponse(verification *domain.ReportVerification) *ReportVerificationResponse {
+	if verification == nil {
+		return nil
+	}
+	response := &ReportVerificationResponse{
+		State: string(verification.State), Evidence: verification.Evidence,
+		StartedAt: verification.StartedAt, CompletedAt: verification.CompletedAt,
+		WorkspaceRevision: verification.WorkspaceRevision, OutputTail: verification.OutputTail,
+	}
+	if !verification.InteractionAt.IsZero() {
+		interactionAt := verification.InteractionAt
+		response.InteractionAt = &interactionAt
+	}
+	return response
 }
