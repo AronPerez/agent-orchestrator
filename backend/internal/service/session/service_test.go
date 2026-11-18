@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,8 +89,7 @@ type fakeStore struct {
 	interrupted         map[domain.SessionID]bool
 	listPRFactsCalls    int
 	listReviewRunsCalls int
-	getProjectMu        sync.Mutex
-	getProjectCalls     int
+	getProjectCalls     atomic.Int64
 	num                 int
 	conversations       map[domain.SessionID]domain.ConversationRecord
 	activities          []domain.ConversationActivity
@@ -655,17 +655,9 @@ func (f *fakeStore) ListPRComments(_ context.Context, prURL string) ([]domain.Pu
 }
 
 func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
-	f.getProjectMu.Lock()
-	defer f.getProjectMu.Unlock()
-	f.getProjectCalls++
+	f.getProjectCalls.Add(1)
 	p, ok := f.projects[id]
 	return p, ok, nil
-}
-
-func (f *fakeStore) getProjectCallCount() int {
-	f.getProjectMu.Lock()
-	defer f.getProjectMu.Unlock()
-	return f.getProjectCalls
 }
 
 func (f *fakeStore) ListSessionWorktrees(_ context.Context, id domain.SessionID) ([]domain.SessionWorktreeRecord, error) {
@@ -6118,8 +6110,8 @@ func TestSessionsFromRecordsReusesContractProjectAndSkipsFinishedRows(t *testing
 	if len(sessions) != 4 {
 		t.Fatalf("sessions = %d, want 4", len(sessions))
 	}
-	if calls := st.getProjectCallCount(); calls != 1 {
-		t.Fatalf("GetProject calls = %d, want one shared lookup for active escalations", calls)
+	if got := st.getProjectCalls.Load(); got != 1 {
+		t.Fatalf("GetProject calls = %d, want one shared lookup for active escalations", got)
 	}
 	if !sessions[0].ContractStalled || !sessions[1].ContractStalled || sessions[2].ContractStalled || sessions[3].ContractStalled {
 		t.Fatalf("contract stalled values = [%v %v %v %v], want [true true false false]",
