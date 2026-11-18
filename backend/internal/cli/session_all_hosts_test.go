@@ -15,8 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	"github.com/spf13/cobra"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 func prepareAllHostsTest(t *testing.T, localSessionID string) (string, testConfig) {

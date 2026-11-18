@@ -231,6 +231,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 					return relationErr
 				}
 				if !sameHost {
+					if err := ctx.requireRemoteCoordinationCapability(cmd.Context(), coordinationCapabilityHostQualifiedParent); err != nil {
+						return fmt.Errorf("remote host-qualified parent lineage is unavailable: %w", err)
+					}
 					parentHostID = sourceHostID
 				}
 			}

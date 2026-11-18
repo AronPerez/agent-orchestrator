@@ -14,7 +14,7 @@ func DeriveDecisionStream(raiser SessionID, sessions []SessionRecord) (SessionRe
 	hasChild := make(map[SessionID]bool)
 	for _, session := range sessions {
 		byID[session.ID] = session
-		if session.ParentSessionID != "" && session.ParentSessionID != session.ID {
+		if session.ParentHostID == "" && session.ParentSessionID != "" && session.ParentSessionID != session.ID {
 			hasChild[session.ParentSessionID] = true
 		}
 	}
@@ -30,7 +30,7 @@ func DeriveDecisionStream(raiser SessionID, sessions []SessionRecord) (SessionRe
 		if hasChild[current.ID] {
 			stream, found = current, true
 		}
-		if current.ParentSessionID == "" {
+		if current.ParentHostID != "" || current.ParentSessionID == "" {
 			break
 		}
 		parent, exists := byID[current.ParentSessionID]

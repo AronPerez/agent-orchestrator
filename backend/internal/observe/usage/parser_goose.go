@@ -38,7 +38,7 @@ func readGooseLedgerRows(ctx context.Context, db *sql.DB, nativeSessionID string
 WITH RECURSIVE tree(id) AS (
     SELECT id FROM sessions WHERE id = ?
     UNION
-    SELECT s.id FROM sessions s JOIN tree ON s.parent_session_id = tree.id AND s.parent_host_id = ''
+    SELECT s.id FROM sessions s JOIN tree ON s.parent_session_id = tree.id
 )
 SELECT u.id, u.session_id, u.created_timestamp, COALESCE(u.model, ''),
        COALESCE(s.provider_name, ''), u.input_tokens, u.output_tokens,

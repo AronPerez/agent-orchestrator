@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
@@ -68,7 +69,7 @@ func TestGetIdentityExposesNothingBeyondIDAndVersion(t *testing.T) {
 	}
 }
 
-func TestGetCoordinationCapabilitiesAdvertisesAutomationProvenance(t *testing.T) {
+func TestGetCoordinationCapabilitiesAdvertisesCrossMachineContracts(t *testing.T) {
 	srv := identityServer(t, "h_abc")
 
 	res, err := http.Get(srv.URL + "/api/v1/coordination/capabilities")
@@ -86,7 +87,8 @@ func TestGetCoordinationCapabilitiesAdvertisesAutomationProvenance(t *testing.T)
 	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got.Capabilities) != 1 || got.Capabilities[0] != "automation-authored" {
-		t.Fatalf("capabilities = %v, want [automation-authored]", got.Capabilities)
+	want := []string{"automation-authored", "host-qualified-parent"}
+	if !reflect.DeepEqual(got.Capabilities, want) {
+		t.Fatalf("capabilities = %v, want %v", got.Capabilities, want)
 	}
 }

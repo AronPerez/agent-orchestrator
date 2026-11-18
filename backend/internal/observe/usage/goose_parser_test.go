@@ -26,8 +26,7 @@ CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
     working_dir TEXT NOT NULL DEFAULT '',
     provider_name TEXT,
-    parent_session_id TEXT,
-    parent_host_id TEXT NOT NULL DEFAULT ''
+    parent_session_id TEXT
 );
 CREATE TABLE usage_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,11 +42,10 @@ CREATE TABLE usage_ledger (
     cost_source TEXT,
     is_compaction INTEGER DEFAULT 0
 );
-INSERT INTO sessions (id, provider_name, parent_session_id, parent_host_id) VALUES
-    ('20261103_1', 'anthropic', NULL, ''),
-    ('20261103_2', 'openai', '20261103_1', ''),
-    ('20261103_3', 'anthropic', NULL, ''),
-    ('20261103_4', 'openai', '20261103_1', 'h_other');`)
+INSERT INTO sessions (id, provider_name, parent_session_id) VALUES
+    ('20261103_1', 'anthropic', NULL),
+    ('20261103_2', 'openai', '20261103_1'),
+    ('20261103_3', 'anthropic', NULL);`)
 	mustNoError(t, err)
 	return path, writer
 }
@@ -70,7 +68,6 @@ func TestReadGooseLedgerRowsForSessionTree(t *testing.T) {
 	_, err := writer.Exec(`INSERT INTO usage_ledger (session_id, created_timestamp, input_tokens, output_tokens, cost_source)
 VALUES ('20261103_1', 1793750400, 7, 7, 'carried_forward')`)
 	mustNoError(t, err)
-	insertGooseLedgerRow(t, writer, "20261103_4", "gpt-5", 500, 50, 0, 0, 5, "provider_reported")
 	before, err := os.ReadFile(path)
 	mustNoError(t, err)
 
