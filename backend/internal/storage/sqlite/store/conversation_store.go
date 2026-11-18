@@ -1691,11 +1691,14 @@ func (s *Store) MarkTurnProviderDeliveryAccepted(ctx context.Context, turnID str
 func (s *Store) MarkTurnProviderDeliveryAcceptedByProviderID(ctx context.Context, conversationID, providerTurnID string) error {
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
-	rows, err := q.MarkConversationTurnProviderDeliveryAcceptedByProviderID(ctx,
+	_, err := q.MarkConversationTurnProviderDeliveryAcceptedByProviderID(ctx,
 		gen.MarkConversationTurnProviderDeliveryAcceptedByProviderIDParams{
 			ConversationID: conversationID, ProviderTurnID: providerTurnID,
 		})
-	return expectBatchRow("mark provider delivery accepted", providerTurnID, rows, err)
+	if err != nil {
+		return fmt.Errorf("mark provider delivery accepted %s: %w", providerTurnID, err)
+	}
+	return nil
 }
 
 func expectBatchRow(action, id string, rows int64, err error) error {
@@ -5411,6 +5414,9 @@ func editDeliveryToDomain(row gen.ConversationEditDelivery) domain.ConversationE
 		},
 		RejectionKind:    domain.ConversationEditRejectionKind(row.RejectionKind),
 		RejectionMessage: row.RejectionMessage, CreatedAt: row.CreatedAt,
+	}
+	if delivery.State == domain.ConversationEditAccepted {
+		delivery.Turn.ProviderDeliveryState = domain.ProviderDeliveryAccepted
 	}
 	if row.SettledAt.Valid {
 		settled := row.SettledAt.Time
