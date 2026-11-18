@@ -28,6 +28,11 @@ type fakeDecisionService struct {
 	query    string
 	searches int
 	id       string
+	action   string
+	answer   decisionsvc.AnswerInput
+	note     string
+	outcome  decisionsvc.OutcomeInput
+	retired  bool
 	err      error
 }
 
@@ -66,6 +71,40 @@ func (f *fakeDecisionService) Search(_ context.Context, actor decisionsvc.Actor,
 		return nil, f.err
 	}
 	return []domain.DecisionCall{sampleDecisionCall()}, nil
+}
+
+func (f *fakeDecisionService) Answer(_ context.Context, actor decisionsvc.Actor, id string, input decisionsvc.AnswerInput) (domain.DecisionCall, error) {
+	f.actor, f.id, f.action, f.answer = actor, id, "answer", input
+	return f.actionResult()
+}
+
+func (f *fakeDecisionService) Dismiss(_ context.Context, actor decisionsvc.Actor, id, note string) (domain.DecisionCall, error) {
+	f.actor, f.id, f.action, f.note = actor, id, "dismiss", note
+	return f.actionResult()
+}
+
+func (f *fakeDecisionService) RecordOutcome(_ context.Context, actor decisionsvc.Actor, id string, input decisionsvc.OutcomeInput) (domain.DecisionCall, error) {
+	f.actor, f.id, f.action, f.outcome = actor, id, "outcome", input
+	return f.actionResult()
+}
+
+func (f *fakeDecisionService) Withdraw(_ context.Context, actor decisionsvc.Actor, id string) (domain.DecisionCall, error) {
+	f.actor, f.id, f.action = actor, id, "withdraw"
+	return f.actionResult()
+}
+
+func (f *fakeDecisionService) Retire(_ context.Context, actor decisionsvc.Actor, id string, retired bool) (domain.DecisionCall, error) {
+	f.actor, f.id, f.action, f.retired = actor, id, "retire", retired
+	return f.actionResult()
+}
+
+func (f *fakeDecisionService) actionResult() (domain.DecisionCall, error) {
+	if f.err != nil {
+		return domain.DecisionCall{}, f.err
+	}
+	call := sampleDecisionCall()
+	call.ID = f.id
+	return call, nil
 }
 
 func sampleDecisionCall() domain.DecisionCall {
@@ -210,5 +249,99 @@ func TestDecisionsAPI_RejectsOversizedWhitespaceBeforeDecoding(t *testing.T) {
 	}
 	if svc.raise.Title != "" {
 		t.Fatalf("service received oversized title of %d bytes", len(svc.raise.Title))
+	}
+}
+
+func TestDecisionsAPI_RejectsOversizedActionBodiesBeforeDecoding(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "answer", path: "/api/v1/decisions/dec_1/answer", body: `{"choice":"option","option":1,"note":"` + strings.Repeat(" ", 70<<10) + `x"}`},
+		{name: "dismiss", path: "/api/v1/decisions/dec_1/dismiss", body: `{"note":"` + strings.Repeat(" ", 70<<10) + `x"}`},
+		{name: "outcome", path: "/api/v1/decisions/dec_1/outcome", body: `{"text":"done","link":"https://example.com/` + strings.Repeat("x", 70<<10) + `"}`},
+		{name: "retire", path: "/api/v1/decisions/dec_1/retire", body: `{` + strings.Repeat(" ", 70<<10) + `"retired":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeDecisionService{}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			newDecisionHandler(svc).ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusBadRequest || !reportContainsAll(recorder.Body.String(), "INVALID_JSON") {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if svc.action != "" {
+				t.Fatalf("service action = %q", svc.action)
+			}
+		})
+	}
+}
+
+func TestDecisionsAPI_Actions(t *testing.T) {
+	svc := &fakeDecisionService{}
+	srv := newDecisionServer(t, svc)
+
+	body, status := decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/answer", `{"choice":"option","option":2,"note":"Rotate monthly"}`, "")
+	if status != http.StatusOK || !strings.Contains(string(body), `"id":"dec_1"`) || svc.id != "dec_1" || svc.action != "answer" ||
+		svc.answer != (decisionsvc.AnswerInput{Choice: "option", Option: 2, Note: "Rotate monthly"}) || svc.actor.Session != "" {
+		t.Fatalf("answer status=%d body=%s actor=%+v input=%+v", status, body, svc.actor, svc.answer)
+	}
+
+	body, status = decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/dismiss", `{"note":"Not enough to go on"}`, "")
+	if status != http.StatusOK || svc.action != "dismiss" || svc.note != "Not enough to go on" {
+		t.Fatalf("dismiss status=%d body=%s action=%q note=%q", status, body, svc.action, svc.note)
+	}
+	body, status = decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/dismiss", "", "")
+	if status != http.StatusOK || svc.action != "dismiss" || svc.note != "" {
+		t.Fatalf("empty dismiss status=%d body=%s action=%q note=%q", status, body, svc.action, svc.note)
+	}
+
+	body, status = decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/outcome", `{"forEntry":"dent_answer","text":"Shipped in PR 412","link":"https://example.com/pr/412"}`, "w-1")
+	if status != http.StatusOK || svc.action != "outcome" || svc.actor.Session != "w-1" ||
+		svc.outcome != (decisionsvc.OutcomeInput{ForEntry: "dent_answer", Text: "Shipped in PR 412", Link: "https://example.com/pr/412"}) {
+		t.Fatalf("outcome status=%d body=%s actor=%+v input=%+v", status, body, svc.actor, svc.outcome)
+	}
+
+	body, status = decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/withdraw", "", "w-1")
+	if status != http.StatusOK || svc.action != "withdraw" || svc.actor.Session != "w-1" {
+		t.Fatalf("withdraw status=%d body=%s actor=%+v action=%q", status, body, svc.actor, svc.action)
+	}
+
+	body, status = decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/retire", `{"retired":true}`, "")
+	if status != http.StatusOK || svc.action != "retire" || !svc.retired {
+		t.Fatalf("retire status=%d body=%s action=%q retired=%v", status, body, svc.action, svc.retired)
+	}
+}
+
+func TestDecisionsAPI_ActionRefusals(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{
+			name: "person only", status: http.StatusForbidden, code: "DECISION_PERSON_ONLY",
+			err: apierr.Forbidden("DECISION_PERSON_ONLY", "Only the person can answer, dismiss or retire a call. A session cannot."),
+		},
+		{
+			name: "wrong state", status: http.StatusConflict, code: "DECISION_WRONG_STATE",
+			err: apierr.Conflict("DECISION_WRONG_STATE", `This call is closed. Its state is "Done".`, map[string]any{"state": "done"}),
+		},
+		{
+			name: "not found", status: http.StatusNotFound, code: "DECISION_NOT_FOUND",
+			err: apierr.NotFound("DECISION_NOT_FOUND", "Unknown call"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &fakeDecisionService{err: tt.err}
+			body, status := decisionRequest(t, newDecisionServer(t, svc), http.MethodPost, "/api/v1/decisions/dec_1/answer", `{"choice":"option","option":1}`, "")
+			if status != tt.status || !strings.Contains(string(body), tt.code) {
+				t.Fatalf("status=%d body=%s", status, body)
+			}
+		})
 	}
 }

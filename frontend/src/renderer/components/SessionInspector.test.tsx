@@ -11,7 +11,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PRSummaryCard, resetPRFocus, SessionInspector } from "./SessionInspector";
+import { PRSummaryCard, resetPRFocus, SessionContractSummary, SessionInspector } from "./SessionInspector";
 import { subscribeChatComposerText } from "../lib/chat-context-bus";
 import { sessionUiKey } from "../lib/hosts";
 import { resetPRMergeMethods } from "./PRActions";
@@ -413,6 +413,38 @@ afterEach(() => {
 });
 
 describe("SessionInspector tabs", () => {
+	it("shows a worker contract goal, advances time left, and hides time after an outcome", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-11-17T18:00:00Z"));
+		const deadline = "2026-11-17T18:45:00Z";
+		const view = render(
+			<SessionContractSummary
+				session={{
+					goal: "Ship the worker contract UI",
+					timeboxDeadlineAt: deadline,
+				}}
+			/>,
+		);
+
+		expect(screen.getByRole("button", { name: "Goal" })).toHaveAttribute("aria-expanded", "true");
+		expect(screen.getByText("Ship the worker contract UI")).toBeInTheDocument();
+		expect(screen.getByText("45m left")).toBeInTheDocument();
+		act(() => vi.advanceTimersByTime(60_000));
+		expect(screen.getByText("44m left")).toBeInTheDocument();
+
+		view.rerender(
+			<SessionContractSummary
+				session={{
+					contractOutcome: "met",
+					goal: "Completed worker contract",
+					timeboxDeadlineAt: deadline,
+				}}
+			/>,
+		);
+		expect(screen.getByText("Completed worker contract")).toBeInTheDocument();
+		expect(screen.queryByText(/m left$/)).not.toBeInTheDocument();
+	});
+
   it("gives an orchestrator Summary and Browser, with its account but no branch", () => {
     renderWithQuery(<SessionInspector orchestrator session={session([], { kind: "orchestrator" })} />);
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Summary", "Browser"]);

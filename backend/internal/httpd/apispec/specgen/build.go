@@ -612,6 +612,10 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersDecisionOptionPayload":            "DecisionOptionPayload",
 	"ControllersDecisionLinkPayload":              "DecisionLinkPayload",
 	"ControllersRaiseDecisionRequest":             "RaiseDecisionRequest",
+	"ControllersAnswerDecisionRequest":            "AnswerDecisionRequest",
+	"ControllersDismissDecisionRequest":           "DismissDecisionRequest",
+	"ControllersDecisionOutcomeRequest":           "DecisionOutcomeRequest",
+	"ControllersRetireDecisionRequest":            "RetireDecisionRequest",
 	"ControllersDecisionCallResponse":             "DecisionCallResponse",
 	"ControllersListDecisionsQuery":               "ListDecisionsQuery",
 	"ControllersListDecisionsResponse":            "ListDecisionsResponse",
@@ -726,6 +730,7 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"MobilebridgeEndpoint":                        "MobileEndpoint",
 	"MobilebridgeTunnelStatus":                    "MobileTunnelStatus",
 	"ControllersIdentityResponse":                 "IdentityResponse",
+	"ControllersCoordinationCapabilitiesResponse": "CoordinationCapabilitiesResponse",
 	"ControllersEndpointsResponse":                "EndpointsResponse",
 	"ControllersLinkPreviewQuery":                 "LinkPreviewQuery",
 	"ControllersLinkPreviewResponse":              "LinkPreviewResponse",
@@ -1033,6 +1038,13 @@ func identityOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		{
+			method: http.MethodGet, path: "/api/v1/coordination/capabilities", id: "getCoordinationCapabilities", tag: "identity",
+			summary: "List authenticated cross-machine coordination capabilities",
+			resps: []respUnit{
+				{http.StatusOK, controllers.CoordinationCapabilitiesResponse{}},
+			},
+		},
 	}
 }
 
@@ -1068,6 +1080,14 @@ func decisionOperations() []operation {
 		{http.StatusInternalServerError, envelope.APIError{}},
 		{http.StatusNotImplemented, envelope.APIError{}},
 	}
+	actionErrors := []respUnit{
+		{http.StatusBadRequest, envelope.APIError{}},
+		{http.StatusForbidden, envelope.APIError{}},
+		{http.StatusNotFound, envelope.APIError{}},
+		{http.StatusConflict, envelope.APIError{}},
+		{http.StatusInternalServerError, envelope.APIError{}},
+		{http.StatusNotImplemented, envelope.APIError{}},
+	}
 	return []operation{
 		{
 			method: http.MethodPost, path: "/api/v1/decisions", id: "raiseDecision", tag: "decisions",
@@ -1083,6 +1103,35 @@ func decisionOperations() []operation {
 			method: http.MethodGet, path: "/api/v1/decisions/{id}", id: "getDecision", tag: "decisions",
 			summary: "Get one decision call and its history", pathParams: []any{controllers.DecisionIDParam{}},
 			resps: append([]respUnit{{http.StatusOK, controllers.DecisionDetailResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/answer", id: "answerDecision", tag: "decisions",
+			summary: "Answer a decision call", pathParams: []any{controllers.DecisionIDParam{}},
+			reqBody: controllers.AnswerDecisionRequest{},
+			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/dismiss", id: "dismissDecision", tag: "decisions",
+			summary: "Dismiss a decision call", pathParams: []any{controllers.DecisionIDParam{}},
+			reqBody: controllers.DismissDecisionRequest{}, optionalReqBody: true,
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/outcome", id: "recordDecisionOutcome", tag: "decisions",
+			summary: "Record the outcome of a decision call", pathParams: []any{controllers.DecisionIDParam{}},
+			reqBody: controllers.DecisionOutcomeRequest{},
+			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/withdraw", id: "withdrawDecision", tag: "decisions",
+			summary: "Withdraw a decision call", pathParams: []any{controllers.DecisionIDParam{}},
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/retire", id: "retireDecision", tag: "decisions",
+			summary: "Change whether a completed decision call still applies", pathParams: []any{controllers.DecisionIDParam{}},
+			reqBody: controllers.RetireDecisionRequest{},
+			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
 		},
 	}
 }

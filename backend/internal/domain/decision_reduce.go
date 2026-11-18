@@ -56,6 +56,7 @@ type DecisionCall struct {
 	RaisedAt          time.Time             `json:"raisedAt"`
 	State             DecisionCallState     `json:"state"`
 	StandingEntryID   string                `json:"standingEntryId,omitempty"`
+	StandingKind      DecisionEntryKind     `json:"standingKind,omitempty"`
 	Choice            string                `json:"choice,omitempty"`
 	Option            int                   `json:"option,omitempty"`
 	Note              string                `json:"note,omitempty"`
@@ -123,6 +124,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			standingKind = entry.Kind
 			answered[entry.ID] = entry
 			call.StandingEntryID = entry.ID
+			call.StandingKind = entry.Kind
 			call.Choice = payload.Choice
 			call.Option = payload.Option
 			call.Note = payload.Note
@@ -136,6 +138,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			standing = entry
 			standingKind = entry.Kind
 			call.StandingEntryID = entry.ID
+			call.StandingKind = entry.Kind
 			call.Choice = ""
 			call.Option = 0
 			call.Note = payload.Note
@@ -150,6 +153,12 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 		case DecisionKindOutcome:
 			var payload DecisionOutcomePayload
 			if json.Unmarshal(entry.Payload, &payload) != nil {
+				continue
+			}
+			// New outcomes name the immutable answer they carried out. If a
+			// newer answer already stands, keep the stale outcome in history but
+			// do not let it close that newer work. Empty preserves legacy entries.
+			if payload.ForEntry != "" && payload.ForEntry != standing.ID {
 				continue
 			}
 			if !hasClosing {

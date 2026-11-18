@@ -149,6 +149,7 @@ const memoryStores = new Map<string, AuthStore>();
 const refreshes = new Map<string, Promise<CloudAccount | null>>();
 const authGenerations = new Map<string, number>();
 const authMutations = new Map<string, Promise<void>>();
+const desktopStartedAtMs = Math.round(Date.now() - process.uptime() * 1000);
 
 function authGeneration(dataDir: string): number {
   return authGenerations.get(dataDir) ?? 0;
@@ -216,7 +217,7 @@ async function replaceActiveCloudAccountMarker(
   if (!userID) return;
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  const raw = `${JSON.stringify({ userId: userID, desktopPid: process.pid })}\n`;
+  const raw = `${JSON.stringify({ userId: userID, desktopPid: process.pid, desktopStartedAtMs })}\n`;
   try {
     await writeFile(temporary, raw, { mode: 0o600 });
     await chmod(temporary, 0o600);
@@ -230,8 +231,8 @@ async function publishActiveCloudAccountMarker(dataDir: string, userID: string |
   const target = activeCloudAccountPath(dataDir);
   if (userID) {
     try {
-      const current = JSON.parse(await readFile(target, "utf8")) as { userId?: unknown; desktopPid?: unknown };
-      if (current.userId === userID && current.desktopPid === process.pid) return;
+      const current = JSON.parse(await readFile(target, "utf8")) as { userId?: unknown; desktopPid?: unknown; desktopStartedAtMs?: unknown };
+      if (current.userId === userID && current.desktopPid === process.pid && current.desktopStartedAtMs === desktopStartedAtMs) return;
     } catch {
       // Missing, stale, or unreadable markers are replaced below.
     }
@@ -261,7 +262,7 @@ function decodeStore(value: Buffer): AuthStore {
   return JSON.parse(safeStorage.decryptString(value)) as AuthStore;
 }
 
-export async function readAuthStore(dataDir: string): Promise<AuthStore> {
+async function readAuthStoreUnlocked(dataDir: string): Promise<AuthStore> {
   const memoryStore = memoryStores.get(dataDir);
   if (memoryStore) {
     await publishActiveCloudAccountMarker(dataDir, memoryStore.session?.user.id);
@@ -284,7 +285,11 @@ export async function readAuthStore(dataDir: string): Promise<AuthStore> {
   return store;
 }
 
-export async function writeAuthStore(
+export function readAuthStore(dataDir: string): Promise<AuthStore> {
+  return withAuthMutation(dataDir, () => readAuthStoreUnlocked(dataDir));
+}
+
+async function writeAuthStoreUnlocked(
   dataDir: string,
   store: AuthStore,
 ): Promise<void> {
@@ -306,13 +311,21 @@ export async function writeAuthStore(
   await replaceActiveCloudAccountMarker(dataDir, store.session?.user.id);
 }
 
-export async function removeAuthStore(dataDir: string): Promise<void> {
+export function writeAuthStore(dataDir: string, store: AuthStore): Promise<void> {
+  return withAuthMutation(dataDir, () => writeAuthStoreUnlocked(dataDir, store));
+}
+
+async function removeAuthStoreUnlocked(dataDir: string): Promise<void> {
   memoryStores.delete(dataDir);
   await Promise.all([
     rm(storePath(dataDir), { force: true }),
     rm(path.join(dataDir, LEGACY_SESSION_FILE), { force: true }),
     rm(activeCloudAccountPath(dataDir), { force: true }),
   ]);
+}
+
+export function removeAuthStore(dataDir: string): Promise<void> {
+  return withAuthMutation(dataDir, () => removeAuthStoreUnlocked(dataDir));
 }
 
 function displayName(user: User): string {
@@ -499,13 +512,13 @@ async function refreshCloudSession(
     );
     return withAuthMutation(dataDir, async () => {
       if (authGeneration(dataDir) !== generation) return null;
-      const currentStore = await readAuthStore(dataDir);
+      const currentStore = await readAuthStoreUnlocked(dataDir);
       if (
         currentStore.session?.refreshToken !== storedSession.refreshToken
       ) {
         return null;
       }
-      await writeAuthStore(dataDir, { ...currentStore, session });
+      await writeAuthStoreUnlocked(dataDir, { ...currentStore, session });
       return publicAccount(session);
     });
   } catch (error) {
@@ -514,11 +527,11 @@ async function refreshCloudSession(
     }
     const sessionCleared = await withAuthMutation(dataDir, async () => {
       if (authGeneration(dataDir) !== generation) return false;
-      const currentStore = await readAuthStore(dataDir);
+      const currentStore = await readAuthStoreUnlocked(dataDir);
       if (
         currentStore.session?.refreshToken === storedSession.refreshToken
       ) {
-        await removeAuthStore(dataDir);
+        await removeAuthStoreUnlocked(dataDir);
         return true;
       }
       return false;
@@ -582,7 +595,7 @@ async function completeCloudSignIn(
     .update(JSON.stringify([code, callbackState]))
     .digest("hex");
   return withAuthMutation(dataDir, async () => {
-    const store = await readAuthStore(dataDir);
+    const store = await readAuthStoreUnlocked(dataDir);
     if (
       store.session &&
       !isLocalSession(store.session) &&
@@ -594,7 +607,7 @@ async function completeCloudSignIn(
     }
     if (!store.pkce) throw new Error("No WorkOS sign-in is pending.");
     if (store.pkce.expiresAt < Date.now()) {
-      await writeAuthStore(dataDir, { ...store, pkce: null });
+      await writeAuthStoreUnlocked(dataDir, { ...store, pkce: null });
       throw new Error("The WorkOS sign-in request expired.");
     }
     if (callbackState !== store.pkce.state) {
@@ -611,7 +624,7 @@ async function completeCloudSignIn(
       result.refreshToken,
       result.user,
     );
-    await writeAuthStore(dataDir, {
+    await writeAuthStoreUnlocked(dataDir, {
       session,
       pkce: null,
       completedCallback: callbackDigest,
@@ -731,7 +744,7 @@ function startLoopbackCallbackServer(dataDir: string): void {
 
 export async function signOutCloud(dataDir: string): Promise<void> {
   invalidateAuthOperations(dataDir);
-  await withAuthMutation(dataDir, () => removeAuthStore(dataDir));
+  await withAuthMutation(dataDir, () => removeAuthStoreUnlocked(dataDir));
 }
 
 function signInFailureDetail(error: unknown): string {

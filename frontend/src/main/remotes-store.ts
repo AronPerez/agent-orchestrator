@@ -297,13 +297,21 @@ export async function updateRemote(path: string, url: string, changes: RemoteCha
 		const current = existing.find((candidate) => candidate.url === url && !candidate.cleanupOnly);
 		if (!current) throw new Error(`no saved host for ${url}`);
 		const updated = applyRemoteChanges(current, changes);
-		// Re-pointing a host MOVES its entry: the row keeps its place, and any other
-		// row already sitting on the new url is absorbed rather than left as a twin.
-		const remotes = existing
-			.map((candidate) => (candidate === current ? updated : candidate))
-			.filter((candidate) => candidate === updated
-				|| candidate.cleanupOnly
-				|| (candidate.url !== updated.url && (!updated.hostId || candidate.hostId !== updated.hostId)));
+		// Re-pointing a host MOVES its entry. A different identified host already
+		// sitting on the new address may still own live child credentials, so keep
+		// those under that original host as a cleanup tombstone. Legacy duplicates
+		// and duplicate rows for the same host retain the existing absorb behavior.
+		const remotes = existing.flatMap((candidate): RemoteEntry[] => {
+			if (candidate === current) return [updated];
+			if (candidate.cleanupOnly) return [candidate];
+			if (candidate.url === updated.url) {
+				const differentHost = !!candidate.hostId && !!updated.hostId && candidate.hostId !== updated.hostId;
+				const cleanup = differentHost ? toCleanupRemote(candidate) : undefined;
+				return cleanup ? [cleanup] : [];
+			}
+			if (updated.hostId && candidate.hostId === updated.hostId) return [];
+			return [candidate];
+		});
 		await writeRemotes(path, remotes);
 		return updated;
 	});

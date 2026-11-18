@@ -5887,7 +5887,7 @@ func (m *Manager) sendWithConfirmationStop(
 	if options.SenderSessionID != "" && clientMessageID == "" {
 		if recorder, ok := m.store.(ports.SessionInteractionRecorder); ok {
 			if err := recorder.RecordSessionInteraction(context.WithoutCancel(ctx), id, options.SenderSessionID, options.InteractionAt); err != nil {
-				return fmt.Errorf("record interaction: %w", err)
+				return fmt.Errorf("send %s: %w: record interaction: %w", id, ErrDeliveryUnconfirmed, err)
 			}
 		}
 	}
@@ -5915,7 +5915,7 @@ func (m *Manager) sendWithConfirmationStop(
 		m.confirmCodexSessionDelivery(ctx, id, deliveryID, rec)
 	} else if m.harnessNudgeSafe(rec.Harness) {
 		if err := m.confirmActiveWithStop(ctx, m.messenger, id, evidence, inputBaseline, stop); err != nil {
-			return fmt.Errorf("send %s: %w", id, err)
+			return fmt.Errorf("send %s: %w: confirmation: %w", id, ErrDeliveryUnconfirmed, err)
 		}
 	}
 	return nil

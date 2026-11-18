@@ -63,11 +63,24 @@ WHERE state = ?
 ORDER BY raised_at, call_id
 LIMIT ?;
 
--- name: ListDecisionCallsAwaitingDelivery :many
-SELECT *
-FROM decision_calls
-WHERE origin = ? AND delivery = 'pending'
-ORDER BY raised_at, call_id;
+-- name: ListDecisionEntriesAwaitingDelivery :many
+SELECT pending.*
+FROM decision_entries AS pending
+JOIN decision_calls AS calls ON calls.call_id = pending.call_id
+WHERE calls.origin = ?
+  AND pending.kind IN ('answered', 'dismissed')
+  AND NOT EXISTS (
+      SELECT 1
+      FROM decision_entries AS delivered
+      WHERE delivered.call_id = pending.call_id
+        AND delivered.kind = 'delivered'
+        AND CASE
+            WHEN json_valid(delivered.payload)
+            THEN json_extract(delivered.payload, '$.forEntry') = pending.id
+            ELSE 0
+        END
+  )
+ORDER BY pending.stamp_wall, pending.stamp_counter, pending.origin, pending.id;
 
 -- name: ListDecisionStreams :many
 SELECT current.origin, current.stream_session_id, current.stream_name

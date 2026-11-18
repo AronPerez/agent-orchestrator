@@ -67,7 +67,11 @@ func writeActiveCloudAccount(t *testing.T, home, userID string) {
 		}
 		return
 	}
-	raw, err := json.Marshal(activeCloudAccountMarker{UserID: userID, DesktopPID: os.Getpid()})
+	startedAt, ok := processStartedAt(context.Background(), os.Getpid())
+	if !ok {
+		t.Fatal("could not read test process start time")
+	}
+	raw, err := json.Marshal(activeCloudAccountMarker{UserID: userID, DesktopPID: os.Getpid(), DesktopStartedAtMS: startedAt.UnixMilli()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +405,11 @@ func TestActiveCloudAccountUsesDesktopCarriedMarker(t *testing.T) {
 	if err := os.MkdirAll(devDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := json.Marshal(activeCloudAccountMarker{UserID: "user-development", DesktopPID: os.Getpid()})
+	startedAt, ok := processStartedAt(context.Background(), os.Getpid())
+	if !ok {
+		t.Fatal("could not read test process start time")
+	}
+	raw, err := json.Marshal(activeCloudAccountMarker{UserID: "user-development", DesktopPID: os.Getpid(), DesktopStartedAtMS: startedAt.UnixMilli()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,6 +421,53 @@ func TestActiveCloudAccountUsesDesktopCarriedMarker(t *testing.T) {
 	c := &commandContext{deps: Deps{ProcessAlive: func(int) bool { return true }}.withDefaults()}
 	if got := c.activeCloudAccount(context.Background()); got != "user-development" {
 		t.Fatalf("active account = %q, want development desktop account", got)
+	}
+}
+
+func TestActiveCloudAccountRejectsRecycledDesktopPID(t *testing.T) {
+	home := aoHome(t)
+	path := filepath.Join(home, ".ao", activeCloudAccountFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"userId":"user-a","desktopPid":4242,"desktopStartedAtMs":1000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &commandContext{deps: Deps{ProcessAlive: func(int) bool { return true }}.withDefaults()}
+	if got := c.activeCloudAccount(context.Background()); got != "" {
+		t.Fatalf("active account = %q, want fail-closed for a recycled PID", got)
+	}
+}
+
+func TestSelectSavedHostUsesRunFileDaemonIdentityForSelfCheck(t *testing.T) {
+	home := aoHome(t)
+	dataDir := filepath.Join(home, "unrelated-data")
+	t.Setenv("AO_DATA_DIR", dataDir)
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "desk", URL: "https://desk.example", HostID: "h_data_dir", CoordinationToken: "aoc_coordination",
+	})
+	t.Setenv(remotesFileEnv, filepath.Join(home, ".ao", remotesFileName))
+	if err := os.MkdirAll(filepath.Join(dataDir, "mobile"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "mobile", "identity.json"), []byte(`{"hostId":"h_data_dir"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPath := filepath.Join(home, "selected-running.json")
+	t.Setenv("AO_RUN_FILE", runPath)
+	if err := runfile.Write(runPath, runfile.Info{PID: os.Getpid(), Port: 3999, StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		hostID := "h_data_dir"
+		if req.URL.Host == "127.0.0.1:3999" {
+			hostID = "h_run_file"
+		}
+		return jsonResponse(http.StatusOK, fmt.Sprintf(`{"hostId":%q,"apiVersion":1}`, hostID)), nil
+	})}
+	c := &commandContext{deps: Deps{HTTPClient: client, ProcessAlive: func(int) bool { return true }}.withDefaults()}
+	if err := c.selectSavedHost(context.Background(), "desk"); err != nil {
+		t.Fatalf("saved host matching unrelated AO_DATA_DIR was rejected: %v", err)
 	}
 }
 

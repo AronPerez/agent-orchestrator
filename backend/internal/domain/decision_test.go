@@ -150,6 +150,9 @@ func TestValidateDecisionAnswerNoteAndOutcome(t *testing.T) {
 		{name: "outcome link invalid", rule: "outcome_link_invalid", err: func() error {
 			return ValidateDecisionOutcome(DecisionOutcomePayload{Text: "Shipped", Link: "ftp://x"})
 		}},
+		{name: "outcome link too long", rule: "outcome_link_too_long", err: func() error {
+			return ValidateDecisionOutcome(DecisionOutcomePayload{Text: "Shipped", Link: "https://example.com/" + strings.Repeat("x", 2030)})
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) { assertDecisionRule(t, tc.err(), tc.rule) })

@@ -197,6 +197,26 @@ describe("updateRemote", () => {
 		expect(await savedRemotes(path)).toEqual([{ label: "workbox", url: "http://192.0.2.9:9", password: "old" }]);
 	});
 
+	it("keeps displaced child cleanup bound to the original host when an update reuses its address", async () => {
+		const path = await tempFile(JSON.stringify({ remotes: [
+			{
+				hostId: "h_old", label: "old", url: "https://shared.example", password: "old-secret",
+				coordinationToken: "aoc_old", coordinationDeviceId: "dev_old",
+			},
+			{ hostId: "h_new", label: "new", url: "https://new.example", password: "new-secret" },
+		] }));
+
+		await updateRemote(path, "https://new.example", { url: "https://shared.example" });
+
+		expect(await savedRemotes(path)).toEqual([
+			{
+				hostId: "h_old", label: "old", url: "https://shared.example", password: "old-secret",
+				cleanupOnly: true, pendingCoordinationDeviceIds: ["dev_old"],
+			},
+			{ hostId: "h_new", label: "new", url: "https://shared.example", password: "new-secret" },
+		]);
+	});
+
 	it("refuses a url it has never saved", async () => {
 		const path = await tempFile(TWO_HOSTS);
 		await expect(updateRemote(path, "http://192.0.2.7:7", { label: "ghost" })).rejects.toThrow(/no saved host/);

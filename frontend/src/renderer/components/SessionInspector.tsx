@@ -4,7 +4,7 @@ import { GitHubIcon } from "./GitHubIcon";
 import { artifactFileIcon } from "./artifact-file-icon";
 import { ArtifactShareMark } from "./ArtifactShareMark";
 import { useReconciledShareLinks, type ShareAccessByUrl } from "./ShareArtifactPopover";
-import { Chat, CheckWaves, Folder, List, Package } from "@/components/app-icons";
+import { Chat, CheckWaves, Clock3, Folder, List, Package } from "@/components/app-icons";
 import { AppLink } from "./AppLink";
 import { GitHubMarkdown, githubHtmlClass } from "./PRMarkdown";
 import { botThreadReviewers, mergeReviewers, prConversationComments, prHasReviewActivity } from "../lib/pr-review-comments";
@@ -31,6 +31,7 @@ import {
 	type InspectorReviewSummaryAction,
 	type InspectorTimelineEvent,
 	type InspectorView,
+	useMinuteClock,
 } from "@aoagents/product-ui";
 import {
 	Archive,
@@ -56,7 +57,7 @@ import { projectNavigateTarget, sessionNavigateTarget } from "../lib/navigate-to
 import { defaultReviewerHarness, WORKER_DEFAULT_REVIEWERS } from "../lib/reviewer-harnesses";
 import { cloudSessionsQueryKey, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { captureRendererEvent } from "../lib/telemetry";
-import { formatTimeCompact } from "../lib/format-time";
+import { formatContractTimeLeft, formatTimeCompact } from "../lib/format-time";
 import { AgentAvatar } from "./AgentAvatar";
 import { SessionArtifactsView, type ArtifactOpenRequest } from "./SessionArtifactsView";
 import { OrchestratorChildrenSection } from "./OrchestratorChildrenSection";
@@ -508,6 +509,7 @@ const SummaryView = memo(function SummaryView({
 	const prView = usePRViewEnabled();
 	return (
 		<SessionInspectorSummaryView
+			context={<SessionContractSummary session={session} />}
 			activity={
 				<>
 					<ActivityTimeline hostId={hostId} prs={prSummaries} session={session} />
@@ -611,6 +613,27 @@ const SummaryView = memo(function SummaryView({
 		/>
 	);
 });
+
+export function SessionContractSummary({
+	session,
+}: {
+	session: Pick<WorkspaceSession, "contractOutcome" | "goal" | "timeboxDeadlineAt">;
+}) {
+	const { t } = useTranslation();
+	const goal = session.goal?.trim();
+	const now = useMinuteClock(Boolean(goal && session.timeboxDeadlineAt && !session.contractOutcome));
+	if (!goal) return null;
+	return (
+		<Section surface={false} title={t("inspector.goal")}>
+			<div className="flex flex-col gap-1.5">
+				<InfoRow icon={CheckWaves} label={goal} title={goal} />
+				{session.timeboxDeadlineAt && !session.contractOutcome ? (
+					<InfoRow icon={Clock3} label={formatContractTimeLeft(session.timeboxDeadlineAt, now)} />
+				) : null}
+			</div>
+		</Section>
+	);
+}
 
 /**
  * The latest Setup and Cleanup runs, collapsed: a terminal session's agent
