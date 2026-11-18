@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -385,6 +386,67 @@ func TestRunnerCanCancelWhileWaitingForProject(t *testing.T) {
 	}
 	close(release)
 	first.Wait()
+}
+
+type testCleanupUncertainError struct{}
+
+func (testCleanupUncertainError) Error() string     { return "cleanup was not confirmed" }
+func (testCleanupUncertainError) cleanupUncertain() {}
+
+func TestRunnerPoisonsOnlyTheProjectWithUncertainCleanup(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	runner := newTestRunner(func(_ context.Context, _ string, _ string, env stepEnvironment, _ io.Writer) error {
+		calls.Add(1)
+		if env.Value("AO_PROJECT_ID") == "unsafe" {
+			close(entered)
+			<-release
+			return testCleanupUncertainError{}
+		}
+		return nil
+	})
+
+	request := Request{ProjectID: "unsafe", WorkspacePath: "/work", Commands: []string{"verify"}}
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	go func() {
+		_, err := runner.Run(context.Background(), request)
+		first <- err
+	}()
+	<-entered
+	go func() {
+		_, err := runner.Run(context.Background(), request)
+		second <- err
+	}()
+	for {
+		runner.mu.Lock()
+		refs := runner.projects[request.ProjectID].refs
+		runner.mu.Unlock()
+		if refs == 2 {
+			break
+		}
+		runtime.Gosched()
+	}
+	close(release)
+	if err := <-first; err == nil {
+		t.Fatal("first unsafe run succeeded")
+	}
+	if err := <-second; !errors.Is(err, errVerificationProjectUnsafe) {
+		t.Fatalf("queued unsafe run error = %v, want poisoned project gate", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("unsafe executor calls = %d, want 1", calls.Load())
+	}
+
+	other := Request{ProjectID: "other", WorkspacePath: "/work", Commands: []string{"verify"}}
+	result, err := runner.Run(context.Background(), other)
+	if err != nil || !result.Passed {
+		t.Fatalf("other project run = %+v, %v", result, err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("total executor calls = %d, want 2", calls.Load())
+	}
 }
 
 func TestRunnerValidatesRequestBeforeExecution(t *testing.T) {

@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestMain(m *testing.M) {
@@ -147,10 +149,14 @@ func TestVerificationExitedOrphanHelper(t *testing.T) {
 		if err = child.Start(); err != nil {
 			os.Exit(3)
 		}
+		pid := child.Process.Pid
 		if err = child.Process.Release(); err != nil {
 			os.Exit(4)
 		}
-		time.Sleep(250 * time.Millisecond)
+		var info unix.Siginfo
+		if err = unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil); err != nil {
+			os.Exit(6)
+		}
 		os.Exit(0)
 	default:
 		os.Exit(5)
