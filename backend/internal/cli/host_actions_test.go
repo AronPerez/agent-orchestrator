@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 const (
@@ -431,6 +433,31 @@ func TestRawURLHumanAndRecoveryRequestsPinIdentityAndRefuseRedirects(t *testing.
 	}
 }
 
+func TestExistingRawURLCommandDoesNotRequireIdentity(t *testing.T) {
+	t.Setenv("AO_TOKEN", "legacy-secret")
+	var identityRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			identityRequests++
+			http.NotFound(w, r)
+		case "/api/v1/projects":
+			_, _ = io.WriteString(w, `{"projects":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, stderr, err := executeCLI(t, Deps{}, "project", "ls", "--url", srv.URL); err != nil {
+		t.Fatalf("legacy raw-url project list: %v stderr=%s", err, stderr)
+	}
+	if identityRequests != 0 {
+		t.Fatalf("identity requests = %d, want none for a preexisting raw-url command", identityRequests)
+	}
+}
+
 func TestSteerPreflightFailureRecommendsOriginalRetry(t *testing.T) {
 	var identityCalls, authenticatedRequests int
 	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -462,18 +489,6 @@ func TestSteerPreflightFailureRecommendsOriginalRetry(t *testing.T) {
 	}
 }
 
-func TestSendRejectsNonPortableRecoveryHandle(t *testing.T) {
-	for _, handle := range []string{"job-$(Get-Date)", "job-%PATH%", "job with space", `job"quote`} {
-		t.Run(handle, func(t *testing.T) {
-			_, _, err := executeCLI(t, Deps{}, "send", "--session", "remote-1", "--steer",
-				"--client-message-id", handle, "--message", "continue")
-			if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--client-message-id may contain only") {
-				t.Fatalf("err=%v exit=%d, want portable-handle usage error", err, ExitCode(err))
-			}
-		})
-	}
-}
-
 func TestSendSavedHostRecoverOnlyDoesNotNeedSourceDaemon(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "local-source")
 	var request conversationMessageAPIRequest
@@ -494,10 +509,10 @@ func TestSendSavedHostRecoverOnlyDoesNotNeedSourceDaemon(t *testing.T) {
 	}
 
 	if _, stderr, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel, "--session", "remote-1",
-		"--steer", "--recover-only", "--client-message-id", "delivery-1"); err != nil {
+		"--steer", "--recover-only", "--client-message-id", "job 42"); err != nil {
 		t.Fatalf("recover-only: %v stderr=%s", err, stderr)
 	}
-	if !request.RecoverOnly || request.SenderSessionID != "" || request.AutomationAuthored {
+	if !request.RecoverOnly || request.ClientMessageID != "job 42" || request.SenderSessionID != "" || request.AutomationAuthored {
 		t.Fatalf("request = %+v, want provenance-free receipt recovery", request)
 	}
 }
@@ -727,17 +742,58 @@ func TestExplicitURLToSelectedDaemonPreservesLocalLineageAndAttribution(t *testi
 func TestRemoteRetryArgsPreservesTargetWithoutCredentials(t *testing.T) {
 	t.Run("saved host", func(t *testing.T) {
 		c := &commandContext{remote: &remoteTarget{source: "--host", hostID: testSavedHostID}}
-		if got, want := c.remoteRetryArgs(), ` --host h_desk`; got != want {
-			t.Fatalf("remoteRetryArgs() = %q, want %q", got, want)
+		got := c.remoteRetryArguments()
+		if len(got) != 2 || got[0] != "--host" || got[1] != testSavedHostID {
+			t.Fatalf("remoteRetryArguments() = %q", got)
 		}
 	})
 	t.Run("raw url", func(t *testing.T) {
 		c := &commandContext{remote: &remoteTarget{source: "--url", baseURL: "https://desk.example/a path", token: "must-not-leak"}}
-		got := c.remoteRetryArgs()
-		if !strings.Contains(got, "--url") || !strings.Contains(got, "desk.example") || strings.Contains(got, "must-not-leak") {
-			t.Fatalf("remoteRetryArgs() = %q, want quoted URL without credential", got)
+		got := c.remoteRetryArguments()
+		if len(got) != 2 || got[0] != "--url" || got[1] != "https://desk.example/a path" || strings.Contains(strings.Join(got, " "), "must-not-leak") {
+			t.Fatalf("remoteRetryArguments() = %q, want URL without credential", got)
 		}
 	})
+}
+
+func TestWindowsRecoveryCommandEncodesArbitraryArguments(t *testing.T) {
+	c := &commandContext{remote: &remoteTarget{
+		source: "--url", baseURL: "https://desk.example/$env:USERNAME/$(Get-Date)/owner's", token: "must-not-leak",
+	}}
+	command := c.steeringRecoveryCommandForOS("windows", "remote session", "job 42 %PATH% $(Get-Date)")
+	if strings.Contains(command, "desk.example") || strings.Contains(command, "$env") || strings.Contains(command, "%PATH%") || strings.Contains(command, "must-not-leak") {
+		t.Fatalf("encoded command exposed an interpolated argument or credential: %q", command)
+	}
+	script := decodePowerShellCommand(t, command)
+	for _, want := range []string{
+		"'--url' 'https://desk.example/$env:USERNAME/$(Get-Date)/owner''s'",
+		"'--session' 'remote session'",
+		"'--client-message-id' 'job 42 %PATH% $(Get-Date)'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("decoded script = %q, want %q", script, want)
+		}
+	}
+	if strings.Contains(script, "must-not-leak") {
+		t.Fatalf("decoded script leaked the bearer: %q", script)
+	}
+}
+
+func decodePowerShellCommand(t *testing.T, command string) string {
+	t.Helper()
+	const prefix = "powershell.exe -NoProfile -EncodedCommand "
+	if !strings.HasPrefix(command, prefix) {
+		t.Fatalf("Windows recovery command = %q, want encoded PowerShell", command)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(command, prefix))
+	if err != nil || len(raw)%2 != 0 {
+		t.Fatalf("decode Windows recovery command: bytes=%d err=%v", len(raw), err)
+	}
+	units := make([]uint16, len(raw)/2)
+	for i := range units {
+		units[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
+	}
+	return string(utf16.Decode(units))
 }
 
 func TestSavedHostRejectsUnsafeHostIDBeforeRenderingCommands(t *testing.T) {

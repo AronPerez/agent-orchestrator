@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
+	"runtime"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -20,8 +23,6 @@ type sendOptions struct {
 	clientMessageID string
 	recoverOnly     bool
 }
-
-var clientMessageIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:@/+=,-]{1,256}$`)
 
 // sendAPIRequest mirrors the daemon's SendSessionMessageRequest body for
 // POST /api/v1/sessions/{id}/send. The CLI keeps its own copy so it need not
@@ -86,9 +87,6 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	if opts.recoverOnly && opts.clientMessageID == "" {
 		return usageError{errors.New("usage: --recover-only requires --client-message-id")}
 	}
-	if opts.clientMessageID != "" && !clientMessageIDPattern.MatchString(opts.clientMessageID) {
-		return usageError{errors.New("usage: --client-message-id may contain only letters, digits, '.', '_', ':', '@', '/', '+', '=', ',' and '-'")}
-	}
 	if !opts.recoverOnly && strings.TrimSpace(opts.message) == "" {
 		return usageError{errors.New("usage: --message is required")}
 	}
@@ -106,8 +104,8 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	if session == "" {
 		return usageError{errors.New("usage: --session is required")}
 	}
-	if err := c.selectSavedHostIfSet(ctx, opts.host); err != nil {
-		return err
+	if c.remote != nil {
+		c.remote.identityPinRequired = true
 	}
 	sourceHostID := ""
 	sameHost := c.remote == nil
@@ -215,6 +213,38 @@ func (c *commandContext) steerMessage(
 }
 
 func (c *commandContext) steeringRecoveryCommand(sessionID, clientMessageID string) string {
-	return fmt.Sprintf("ao send%s --session %s --steer --recover-only --client-message-id %s",
-		c.remoteRetryArgs(), quoteCommandArgument(sessionID), quoteCommandArgument(clientMessageID))
+	return c.steeringRecoveryCommandForOS(runtime.GOOS, sessionID, clientMessageID)
+}
+
+func (c *commandContext) steeringRecoveryCommandForOS(goos, sessionID, clientMessageID string) string {
+	remoteArgs := c.remoteRetryArguments()
+	args := make([]string, 0, 1+len(remoteArgs)+6)
+	args = append(args, "send")
+	args = append(args, remoteArgs...)
+	args = append(args, "--session", sessionID, "--steer", "--recover-only", "--client-message-id", clientMessageID)
+	if goos == "windows" {
+		return powershellEncodedAOCommand(args)
+	}
+	rendered := []string{"ao"}
+	for _, arg := range args {
+		rendered = append(rendered, quoteCommandArgument(arg))
+	}
+	return strings.Join(rendered, " ")
+}
+
+// powershellEncodedAOCommand is safe to paste into PowerShell or Command
+// Prompt: the outer command contains only Base64, and PowerShell receives each
+// original value as a single-quoted literal after decoding it.
+func powershellEncodedAOCommand(args []string) string {
+	parts := make([]string, 0, 1+len(args))
+	parts = append(parts, "& ao")
+	for _, arg := range args {
+		parts = append(parts, "'"+strings.ReplaceAll(arg, "'", "''")+"'")
+	}
+	units := utf16.Encode([]rune(strings.Join(parts, " ")))
+	raw := make([]byte, len(units)*2)
+	for i, unit := range units {
+		binary.LittleEndian.PutUint16(raw[2*i:], unit)
+	}
+	return "powershell.exe -NoProfile -EncodedCommand " + base64.StdEncoding.EncodeToString(raw)
 }

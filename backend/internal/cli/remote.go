@@ -36,6 +36,9 @@ type remoteTarget struct {
 	// --url/AO_URL. It is rechecked immediately before bearer use and sent as
 	// defense in depth for listeners that enforce it.
 	expectedHostID string
+	// identityPinRequired opts coordination actions into the identity contract.
+	// Older raw-URL commands predate that route and retain their compatibility.
+	identityPinRequired bool
 	// Host-local caller IDs may cross this target only after its relationship to
 	// the source daemon has been proved.
 	sourceRelationKnown bool
@@ -53,7 +56,7 @@ type remoteTarget struct {
 const remotesFileName = "remotes.json"
 
 var savedHostIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
-var commandArgumentPattern = regexp.MustCompile(`^[A-Za-z0-9._:@/+=,-]+$`)
+var commandArgumentPattern = regexp.MustCompile(`^[A-Za-z0-9._:@%/+=,-]+$`)
 
 // remotePreflightError means the destination credential was not sent. Callers
 // that normally treat transport failures as ambiguous may safely recommend a
@@ -254,28 +257,24 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	return nil
 }
 
-// remoteRetryArgs preserves the destination in a copyable retry command.
-// Saved host IDs are generated from a portable alphabet. Raw URLs are quoted
-// without ever including the bearer credential.
-func (c *commandContext) remoteRetryArgs() string {
+// remoteRetryArguments preserves the destination without its bearer. Rendering
+// is shell-specific and happens only after these values are structured.
+func (c *commandContext) remoteRetryArguments() []string {
 	if c.remote == nil {
-		return ""
+		return nil
 	}
 	if c.remote.source == "--host" && savedHostIDPattern.MatchString(c.remote.hostID) {
-		return " --host " + c.remote.hostID
+		return []string{"--host", c.remote.hostID}
 	}
 	if c.remote.source == "--url" || c.remote.source == "AO_URL" {
-		return " --url " + quoteCommandArgument(c.remote.baseURL)
+		return []string{"--url", c.remote.baseURL}
 	}
-	return ""
+	return nil
 }
 
 func quoteCommandArgument(value string) string {
 	if commandArgumentPattern.MatchString(value) {
 		return value
-	}
-	if runtime.GOOS == "windows" {
-		return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
@@ -451,6 +450,9 @@ func (c *commandContext) remoteRelationToSource(ctx context.Context, sessionID s
 
 func (c *commandContext) revalidateRemoteTarget(ctx context.Context) error {
 	if c.remote == nil {
+		return nil
+	}
+	if c.remote.expectedHostID == "" && !c.remote.identityPinRequired {
 		return nil
 	}
 	identity, err := c.probeSavedHostIdentity(ctx, c.remote.baseURL)

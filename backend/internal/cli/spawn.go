@@ -183,10 +183,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				return usageError{fmt.Errorf(`--tracker-provider must be "github" or "gitlab"`)}
 			}
 			opts.trackerProvider = tp
-			if err := ctx.selectSavedHostIfSet(cmd.Context(), opts.host); err != nil {
-				return err
+			if ctx.remote != nil {
+				ctx.remote.identityPinRequired = true
 			}
-
 			var project projectDetails
 			var err error
 			if !opts.standalone {
