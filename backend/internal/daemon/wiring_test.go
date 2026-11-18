@@ -1103,6 +1103,10 @@ func (r *selectableRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (
 	return ports.RuntimeHandle{ID: "runtime-1"}, nil
 }
 
+func (r *selectableRuntime) LaunchCandidates(ports.RuntimeConfig) ([]ports.RuntimeHandle, error) {
+	return []ports.RuntimeHandle{{ID: "runtime-1"}}, nil
+}
+
 func (r *selectableRuntime) Destroy(context.Context, ports.RuntimeHandle) error { return nil }
 
 func (r *selectableRuntime) ProcessRootPIDs(context.Context, ports.RuntimeHandle) ([]int, error) {
