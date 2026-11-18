@@ -532,6 +532,45 @@ func TestDelivererSkipsAnOlderPlanCallWhenAReplacementIsAlreadyAnswered(t *testi
 	t.Fatalf("older approval %s was not recorded as superseded: %+v", approval.StandingEntryID, entries)
 }
 
+func TestDelivererUsesLedgerOrderWhenAReplacementClockMovesBackward(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	approval := answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	*fixture.now = approval.RaisedAt.Add(-time.Hour)
+	decline := answeredPlanFirstCall(t, fixture, fixture.loose, 3, "")
+	if !decline.RaisedAt.Before(approval.RaisedAt) {
+		t.Fatalf("replacement raised at %s, want before %s", decline.RaisedAt, approval.RaisedAt)
+	}
+	messenger := newFakeDecisionMessenger()
+
+	pending, err := newTestDeliverer(fixture.store, messenger, "h_a").RunDue(context.Background())
+	if err != nil || pending != 0 {
+		t.Fatalf("delivery pending=%d err=%v", pending, err)
+	}
+	if len(messenger.messages) != 1 || messenger.messages[0].entryID != decline.StandingEntryID ||
+		!strings.Contains(messenger.messages[0].text, "Do not proceed") {
+		t.Fatalf("delivered messages = %+v, want only ledger-newest decline %s", messenger.messages, decline.StandingEntryID)
+	}
+}
+
+func TestRaisingAReplacementPlanCallClosesAnApprovedGate(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	if pending, err := newTestDeliverer(fixture.store, newFakeDecisionMessenger(), "h_a").RunDue(context.Background()); err != nil || pending != 0 {
+		t.Fatalf("deliver approval: pending=%d err=%v", pending, err)
+	}
+	raisePlanFirstCall(t, fixture, fixture.loose)
+	record, ok, err := fixture.store.GetSession(context.Background(), fixture.loose)
+	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstPending {
+		t.Fatalf("replacement gate state=%q ok=%v err=%v", record.PlanFirstState, ok, err)
+	}
+}
+
 func TestDelivererSerializesPlanApprovalWithChangedAnswer(t *testing.T) {
 	fixture := newDecisionService(t)
 	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
@@ -626,11 +665,11 @@ func TestDelivererSerializesPlanCallsForTheSameOwner(t *testing.T) {
 	if answerBlocked {
 		answerErr = <-answered
 	}
-	if deliveryErr := <-delivered; deliveryErr != nil || answerErr != nil {
+	if deliveryErr := <-delivered; deliveryErr != nil || apiCode(answerErr) != "DECISION_SUPERSEDED" {
 		t.Fatalf("deliveryErr=%v answerErr=%v", deliveryErr, answerErr)
 	}
 	record, ok, err := fixture.store.GetSession(context.Background(), fixture.loose)
-	if !answerBlocked || err != nil || !ok || record.PlanFirstState != domain.PlanFirstDeclined {
+	if !answerBlocked || err != nil || !ok || record.PlanFirstState != domain.PlanFirstApproved {
 		t.Fatalf("answerBlocked=%v state=%q ok=%v err=%v", answerBlocked, record.PlanFirstState, ok, err)
 	}
 }

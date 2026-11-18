@@ -237,6 +237,16 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 	if err := domain.ValidateDecisionRaise(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
+	if isPlanFirstCall(domain.DecisionCall{Raised: payload}) {
+		unlock, err := s.mutationGate.acquire(ctx, planFirstMutationKey(session.ID))
+		if err != nil {
+			return domain.DecisionCall{}, err
+		}
+		defer unlock()
+		if err := s.holdPlanFirstOwnerGate(ctx, session.ID, domain.PlanFirstPending); err != nil {
+			return domain.DecisionCall{}, err
+		}
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -288,6 +298,9 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
 	}
+	if err := s.rejectSupersededPlanCall(ctx, call); err != nil {
+		return domain.DecisionCall{}, err
+	}
 	if call.State != domain.DecisionStateNeedsYou && call.State != domain.DecisionStateInProgress && call.State != domain.DecisionStateDismissed {
 		return domain.DecisionCall{}, wrongState(call, `This call is closed. Its state is "%s".`)
 	}
@@ -311,6 +324,9 @@ func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string)
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
 	}
+	if err := s.rejectSupersededPlanCall(ctx, call); err != nil {
+		return domain.DecisionCall{}, err
+	}
 	if call.State != domain.DecisionStateNeedsYou {
 		return domain.DecisionCall{}, wrongState(call, `Only a call in "Needs you" can be dismissed. This one is "%s".`)
 	}
@@ -331,7 +347,11 @@ func (s *Service) holdPlanFirstGate(ctx context.Context, call domain.DecisionCal
 	if !isPlanFirstCall(call) {
 		return nil
 	}
-	owner, ok, err := s.store.GetSession(ctx, call.Raised.OwnerSessionID)
+	return s.holdPlanFirstOwnerGate(ctx, call.Raised.OwnerSessionID, next)
+}
+
+func (s *Service) holdPlanFirstOwnerGate(ctx context.Context, ownerID domain.SessionID, next domain.PlanFirstState) error {
+	owner, ok, err := s.store.GetSession(ctx, ownerID)
 	if err != nil {
 		return err
 	}
@@ -353,6 +373,27 @@ func planFirstStateBeforeDelivery(answer domain.DecisionAnsweredPayload) domain.
 		return domain.PlanFirstDeclined
 	}
 	return domain.PlanFirstPending
+}
+
+func (s *Service) rejectSupersededPlanCall(ctx context.Context, call domain.DecisionCall) error {
+	if !isPlanFirstCall(call) {
+		return nil
+	}
+	current, found, err := newestPlanFirstCall(ctx, s.store, call.Origin, call.Raised.OwnerSessionID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("plan-first owner has no current call")
+	}
+	if current.ID != call.ID {
+		return apierr.Conflict(
+			"DECISION_SUPERSEDED",
+			"A newer plan decision replaced this call. Answer the latest plan decision instead.",
+			map[string]any{"currentCallId": current.ID},
+		)
+	}
+	return nil
 }
 
 // RecordOutcome closes an in-progress call with the result of carrying it out.
@@ -537,9 +578,32 @@ func (s *Service) lockedCall(ctx context.Context, callID string) (domain.Decisio
 
 func decisionMutationKey(call domain.DecisionCall) string {
 	if isPlanFirstCall(call) {
-		return "plan:" + string(call.Raised.OwnerSessionID)
+		return planFirstMutationKey(call.Raised.OwnerSessionID)
 	}
 	return "call:" + call.ID
+}
+
+func planFirstMutationKey(owner domain.SessionID) string {
+	return "plan:" + string(owner)
+}
+
+type planFirstCallStore interface {
+	ListDecisionCallsForSession(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
+}
+
+// newestPlanFirstCall returns the owner's plan protocol call with the newest
+// raised-entry ledger stamp. The store supplies calls in that order.
+func newestPlanFirstCall(ctx context.Context, store planFirstCallStore, origin string, owner domain.SessionID) (domain.DecisionCall, bool, error) {
+	calls, err := store.ListDecisionCallsForSession(ctx, origin, owner, -1)
+	if err != nil {
+		return domain.DecisionCall{}, false, err
+	}
+	for _, call := range calls {
+		if call.Raised.OwnerSessionID == owner && isPlanFirstCall(call) {
+			return call, true, nil
+		}
+	}
+	return domain.DecisionCall{}, false, nil
 }
 
 func (s *Service) append(ctx context.Context, actor Actor, callID string, kind domain.DecisionEntryKind, payload any) (domain.DecisionCall, error) {

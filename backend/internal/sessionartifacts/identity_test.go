@@ -250,7 +250,7 @@ func TestPinPlanApprovalRotatesAfterExplicitReplacementRegistration(t *testing.T
 	}
 }
 
-func TestPinPlanApprovalDoesNotFailWhenHardLinksAreUnavailable(t *testing.T) {
+func TestPlanApprovalSurvivesRenameAndEditWhenHardLinksAreUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plan.md")
 	if err := os.WriteFile(path, []byte("# Plan"), 0o600); err != nil {
@@ -260,8 +260,10 @@ func TestPinPlanApprovalDoesNotFailWhenHardLinksAreUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registeredAt := time.Now()
 	row := domain.SessionArtifactRecord{
 		ID: "approval", Path: "plan.md", File: fullIdentity(path, info), Role: domain.SessionArtifactRolePlanApproval,
+		RegisteredAt: &registeredAt,
 	}
 	original := linkPlanApproval
 	linkPlanApproval = func(*os.Root, string, string) error { return errors.New("hard links unavailable") }
@@ -272,6 +274,29 @@ func TestPinPlanApprovalDoesNotFailWhenHardLinksAreUnavailable(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, VersionsDir, planApprovalPinsDir, row.ID)); !os.IsNotExist(err) {
 		t.Fatalf("unexpected plan approval pin: %v", err)
+	}
+	renamed := filepath.Join(dir, "project-plan.md")
+	if err := os.Rename(path, renamed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(renamed, []byte("# Edited plan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	observation, err := Observe(context.Background(), dir, []string{row.Path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := observation.Changes([]domain.SessionArtifactRecord{row}, time.Now(), func() string { return "new" })
+	if len(changes.Move) != 1 || changes.Move[0].ID != row.ID || changes.Move[0].To != "project-plan.md" {
+		t.Fatalf("renamed edited plan changes = %+v", changes)
+	}
+	row.Path = changes.Move[0].To
+	row.File = changes.Move[0].File
+	row.PreviousPaths = changes.Move[0].PreviousPaths
+	files := observation.Apply([]domain.SessionArtifactRecord{row})
+	if len(files) != 1 || files[0].Path != "project-plan.md" || files[0].ID != row.ID ||
+		files[0].Role != domain.SessionArtifactRolePlanApproval || !files[0].Registered {
+		t.Fatalf("renamed edited plan approval = %+v", files)
 	}
 }
 

@@ -215,6 +215,10 @@ func TestDecisionStreamsUseLedgerOrderWhenTheClockMovesBackward(t *testing.T) {
 	if domain.CompareDecisionEntries(first, second) >= 0 {
 		t.Fatalf("ledger order first=%+v second=%+v, want second later", first.Stamp, second.Stamp)
 	}
+	calls, err := store.ListDecisionCallsForSession(ctx, "h_a", "w-1", 50)
+	if err != nil || decisionIDs(calls) != "dec_2,dec_1" {
+		t.Fatalf("owner calls=%q err=%v, want ledger-newest first", decisionIDs(calls), err)
+	}
 
 	streams, err := store.ListDecisionStreams(ctx)
 	want := []domain.DecisionStream{{Origin: "h_a", SessionID: "epic", Name: "Checkout epic"}}

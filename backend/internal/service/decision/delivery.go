@@ -206,19 +206,12 @@ func (d *Deliverer) deliverCurrent(ctx context.Context, call domain.DecisionCall
 		d.logFailure(call.ID, "load current plan answer", err)
 		return true, false
 	}
-	ownerCalls, err := d.store.ListDecisionCallsForSession(ctx, d.hostID, current.Raised.OwnerSessionID, -1)
+	authoritative, found, err := newestPlanFirstCall(ctx, d.store, current.Origin, current.Raised.OwnerSessionID)
 	if err != nil {
 		d.logFailure(call.ID, "load current plan call", err)
 		return true, false
 	}
-	var authoritative domain.DecisionCall
-	for _, candidate := range ownerCalls {
-		if candidate.Raised.OwnerSessionID == current.Raised.OwnerSessionID && isPlanFirstCall(candidate) {
-			authoritative = candidate
-			break
-		}
-	}
-	if authoritative.ID == "" {
+	if !found {
 		d.logFailure(call.ID, "load current plan call", errors.New("owner has no plan-first call"))
 		return true, false
 	}

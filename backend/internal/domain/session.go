@@ -224,14 +224,14 @@ type SessionArtifactRegistration struct {
 }
 
 // SameFile reports whether f and other name the same file, and both are
-// complete enough to tell. Birth time is preferred; on Linux filesystems that
-// do not expose it, the stable device/inode plus nanosecond modification time
-// is the conservative rename fallback.
+// complete enough to tell. Birth time or an inode generation protects against
+// inode reuse; where neither is available, device/inode plus nanosecond
+// modification time is the conservative rename fallback.
 func (f FileIdentity) SameFile(other FileIdentity) bool {
 	if f.Ino == 0 || f != other {
 		return false
 	}
-	return f.Birth != 0 || (f.Dev != 0 && f.ModTime != 0)
+	return f.Birth != 0 || f.Generation != 0 || (f.Dev != 0 && f.ModTime != 0)
 }
 
 // SessionArtifactRecord is the stored identity of one tracked file or bundle
