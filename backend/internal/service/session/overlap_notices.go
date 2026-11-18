@@ -661,7 +661,11 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 				}
 			} else {
 				state.retry = true
-				if !attempt.ambiguous {
+				if attempt.ambiguous {
+					if errors.Is(nudgeErr, sessionmanager.ErrSemanticDeliveryRejected) {
+						s.deleteProjectOverlapNoticeAttempt(key)
+					}
+				} else {
 					if outcome != sessionguard.Sent || projectOverlapNoticeDefinitelyUnsent(nudgeErr) {
 						s.deleteProjectOverlapNoticeAttempt(key)
 					} else {

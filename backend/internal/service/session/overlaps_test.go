@@ -1255,6 +1255,43 @@ func TestReconcileProjectOverlapNoticesKeepsAmbiguousAttemptAcrossInconclusiveCo
 	}
 }
 
+func TestReconcileProjectOverlapNoticesRetriesAfterAmbiguousChatAttemptIsRejected(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = domain.SessionRecord{ID: "demo-a", ProjectID: "demo"}
+	store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo"}
+	nudger := &recordingOverlapNudger{
+		errors: map[domain.SessionID][]error{"demo-a": {
+			errors.New("delivery unconfirmed"), sessionmanager.ErrSemanticDeliveryRejected, nil,
+		}},
+	}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	first := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}}}
+	changed := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"renamed.go"}}}}
+
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), first); err == nil {
+		t.Fatal("first reconcile unexpectedly ignored the ambiguous delivery")
+	}
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), changed); !errors.Is(err, sessionmanager.ErrSemanticDeliveryRejected) {
+		t.Fatalf("confirmation error = %v, want semantic rejection", err)
+	}
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), changed); err != nil {
+		t.Fatalf("fresh retry after rejection: %v", err)
+	}
+	if len(nudger.calls) != 4 {
+		t.Fatalf("calls = %+v, want initial sends, confirmation, and fresh retry", nudger.calls)
+	}
+	if !nudger.calls[2].confirmOnly || nudger.calls[2].deliveryID != nudger.calls[0].deliveryID || nudger.calls[2].message != nudger.calls[0].message {
+		t.Fatalf("rejection did not confirm the original attempt: first=%+v confirm=%+v", nudger.calls[0], nudger.calls[2])
+	}
+	if nudger.calls[3].confirmOnly || nudger.calls[3].deliveryID == nudger.calls[0].deliveryID || !strings.Contains(nudger.calls[3].message, "renamed.go") {
+		t.Fatalf("rejection did not start a fresh current delivery: first=%+v retry=%+v", nudger.calls[0], nudger.calls[3])
+	}
+	if !store.hasNotice("demo-a", "demo-b") {
+		t.Fatal("fresh retry after rejection was not recorded")
+	}
+}
+
 func TestReconcileProjectOverlapNoticesRetiresUnconfirmedAttemptAfterCleanScan(t *testing.T) {
 	store := newMemoryOverlapNoticeStore()
 	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
