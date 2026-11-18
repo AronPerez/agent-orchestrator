@@ -2,6 +2,7 @@ package sessionmanager
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,8 @@ type taskPromptConfig struct {
 	IssueContext string
 	// BaseBranch is set for a task stacked on another pull request.
 	BaseBranch string
+	ProjectID  string
+	SessionID  string
 	PlanFirst  bool
 }
 
@@ -78,13 +81,16 @@ func buildTaskPrompt(cfg taskPromptConfig) string {
 	if cfg.Role != sessionPromptRoleWorker || !cfg.PlanFirst {
 		return prompt
 	}
+	gate := planFirstGatePrompt(cfg.ProjectID, cfg.SessionID)
 	if prompt == "" {
-		return planFirstGatePrompt
+		return gate
 	}
-	return strings.TrimRight(prompt, "\n") + "\n\n" + planFirstGatePrompt
+	return strings.TrimRight(prompt, "\n") + "\n\n" + gate
 }
 
-const planFirstGatePrompt = `## Plan-first gate
+func planFirstGatePrompt(projectID, sessionID string) string {
+	planLink := fmt.Sprintf("ao://sessions/%s/%s/artifacts/plan.md", url.PathEscape(projectID), url.PathEscape(sessionID))
+	return `## Plan-first gate
 
 This worker requires a human-approved plan before implementation.
 
@@ -92,10 +98,11 @@ This worker requires a human-approved plan before implementation.
 2. Write a concise Markdown plan to ` + "`plan.md`" + ` in the session artifact directory named in the standing instructions, then run ` + "`ao artifact add plan.md`" + `.
 3. Raise exactly one Decision Ledger call with the registered plan link:
 
-   ` + "`ao decision raise --title \"Approve this plan?\" --context \"Review ao://sessions/$AO_PROJECT_ID/$AO_SESSION_ID/artifacts/plan.md. Choose Approve with changes only with an approval note.\" --option \"Approve :: Start implementation exactly as planned.\" --option \"Approve with changes :: Apply the approval note to the plan, then start implementation.\" --option \"Do not proceed :: Stop without making implementation changes.\" --recommend 1 --ref \"" + domain.PlanFirstDecisionReference + "\"`" + `
+   ` + "`ao decision raise --title \"Approve this plan?\" --context \"Review " + planLink + ". Choose Approve with changes only with an approval note.\" --option \"Approve :: Start implementation exactly as planned.\" --option \"Approve with changes :: Apply the approval note to the plan, then start implementation.\" --option \"Do not proceed :: Stop without making implementation changes.\" --recommend 1 --ref \"" + domain.PlanFirstDecisionReference + "\"`" + `
 
 4. End the turn while the call is unanswered; do not poll. The ledger will deliver the human's answer to this session.
-5. Only Approve or Approve with changes authorizes implementation. For Approve with changes, apply the approval note and update ` + "`plan.md`" + ` before starting. If that answer has no note, do not guess; raise a replacement call that asks for the missing changes. If the call is dismissed or the answer is Do not proceed, stop without implementation and record the outcome.`
+5. Only Approve or Approve with changes authorizes implementation. For Approve with changes, apply the approval note and update ` + "`plan.md`" + ` before starting. If that answer has no note, do not guess; raise a replacement call using the same title, reference, and three options shown above, with context asking the human to supply the missing changes in the approval note. If the call is dismissed or the answer is Do not proceed, stop without implementation and record the outcome.`
+}
 
 func issueTaskPrompt(cfg taskPromptConfig) string {
 	issueContext := strings.TrimSpace(cfg.IssueContext)

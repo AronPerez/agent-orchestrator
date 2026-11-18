@@ -490,6 +490,8 @@ func TestBuildTaskPrompt_PlanFirstGate(t *testing.T) {
 	got := buildTaskPrompt(taskPromptConfig{
 		Role:      sessionPromptRoleWorker,
 		Prompt:    "Add search",
+		ProjectID: "mercury",
+		SessionID: "mercury-8",
 		PlanFirst: true,
 	})
 	if !strings.HasPrefix(got, "Add search\n\n") {
@@ -501,7 +503,7 @@ func TestBuildTaskPrompt_PlanFirstGate(t *testing.T) {
 		"Do not edit repository files",
 		"plan.md",
 		"ao artifact add plan.md",
-		"ao://sessions/$AO_PROJECT_ID/$AO_SESSION_ID/artifacts/plan.md",
+		"ao://sessions/mercury/mercury-8/artifacts/plan.md",
 		"ao decision raise",
 		`--title "Approve this plan?"`,
 		`--ref "plan-first"`,
@@ -510,10 +512,14 @@ func TestBuildTaskPrompt_PlanFirstGate(t *testing.T) {
 		"End the turn while the call is unanswered",
 		"do not poll",
 		"approval note",
+		"same title, reference, and three options",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plan-first prompt missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "$AO_PROJECT_ID") || strings.Contains(got, "$AO_SESSION_ID") {
+		t.Fatalf("plan-first prompt contains POSIX-only variables:\n%s", got)
 	}
 }
 

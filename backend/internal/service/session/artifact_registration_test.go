@@ -48,6 +48,20 @@ func TestRegisterArtifactsReportsWhatStaysUnlisted(t *testing.T) {
 	}
 }
 
+func TestRegisterArtifactsMarksThePendingPlanApprovalByRole(t *testing.T) {
+	svc, st, _ := registrationFixture(t, "plan.md")
+	rec := st.sessions["mer-1"]
+	rec.PlanFirstState = domain.PlanFirstPending
+	st.sessions["mer-1"] = rec
+
+	if _, err := svc.RegisterArtifacts(context.Background(), "mer-1", []string{"plan.md"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.artifactRoles["mer-1"]["plan.md"]; got != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("plan role = %q, want %q", got, domain.SessionArtifactRolePlanApproval)
+	}
+}
+
 func TestRegisterArtifactsReportsOnlyNewFilesBySourceCategoryAndSize(t *testing.T) {
 	_, st, dir := registrationFixture(t, "brand.html", "notes.html", "shot.png", "app.icon/icon.json", "app.icon/a.png")
 	big := filepath.Join(dir, "deck.pdf")

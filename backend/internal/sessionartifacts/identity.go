@@ -250,17 +250,25 @@ func previousPaths(previous []string, from, to string) []string {
 // bundle directory is registered with it.
 func (o Observation) Apply(rows []domain.SessionArtifactRecord) []domain.SessionArtifactFile {
 	byPath := make(map[string]domain.SessionArtifactRecord, len(rows))
+	byFile := make(map[domain.FileIdentity]domain.SessionArtifactRecord, len(rows))
 	registered := make(map[string]bool)
 	for _, row := range rows {
 		byPath[row.Path] = row
+		if row.File.SameFile(row.File) {
+			byFile[row.File] = row
+		}
 		if row.RegisteredAt != nil {
 			registered[row.Path] = true
 		}
 	}
 	files := slices.Clone(o.Files)
 	for i := range files {
-		row := byPath[files[i].Path]
+		row, found := byPath[files[i].Path]
+		if !found {
+			row = byFile[o.fullIdentity(files[i].Path)]
+		}
 		files[i].ID = row.ID
+		files[i].Role = row.Role
 		files[i].PreviousPaths = row.PreviousPaths
 		files[i].Registered = namedBy(files[i].Path, registered)
 	}

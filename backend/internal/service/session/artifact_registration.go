@@ -45,6 +45,9 @@ func (s *Service) RegisterArtifacts(ctx context.Context, id domain.SessionID, re
 			return ArtifactRegistration{}, registrationError(reference, err)
 		}
 		paths = append(paths, registration.Path)
+		if rec.PlanFirstState == domain.PlanFirstPending && registration.Path == "plan.md" {
+			registration.Role = domain.SessionArtifactRolePlanApproval
+		}
 		registrations = append(registrations, registration)
 	}
 	known, knownOK := s.registeredArtifactPaths(ctx, id)

@@ -443,12 +443,16 @@ func DeriveOutputType(prCount, artifactFileCount int) domain.SessionOutputType {
 }
 
 // DeliverableCount counts files that advance a session's delivery lifecycle.
-// A plan-first worker's registered root plan is approval evidence, not task
-// output; it remains listed and readable while being excluded from this count.
-func DeliverableCount(files []domain.SessionArtifactFile, planFirst bool) int {
+// Plan approval evidence remains listed and readable but is excluded unless
+// the caller knows it is also the requested final artifact output. Before the
+// initial registration persists its role, a pending gate's root plan.md is the
+// provisional approval artifact; that filename fallback ends with the gate.
+func DeliverableCount(files []domain.SessionArtifactFile, planFirstPending, includePlanApproval bool) int {
 	count := 0
 	for _, file := range files {
-		if planFirst && file.Path == "plan.md" {
+		approvalEvidence := file.Role == domain.SessionArtifactRolePlanApproval ||
+			(planFirstPending && file.Role == "" && file.Path == "plan.md")
+		if approvalEvidence && !includePlanApproval {
 			continue
 		}
 		count++

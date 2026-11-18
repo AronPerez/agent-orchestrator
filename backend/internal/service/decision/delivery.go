@@ -22,7 +22,7 @@ var ErrSessionEnded = errors.New("decision: session can no longer take a message
 type Messenger interface {
 	// DeliverAsPerson returns an error wrapping ErrSessionEnded when the session
 	// can no longer take a message.
-	DeliverAsPerson(context.Context, domain.SessionID, string, time.Time) error
+	DeliverAsPerson(context.Context, domain.SessionID, string, string, time.Time) error
 }
 
 // FallbackOutcomeAuthorizer lets a selected fallback session record an outcome
@@ -185,7 +185,7 @@ func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) (bool
 	}
 	ended := !found || owner.IsTerminated
 	if !ended {
-		err = d.messenger.DeliverAsPerson(ctx, owner.ID, DeliveryMessage(call, false), d.now().UTC())
+		err = d.messenger.DeliverAsPerson(ctx, owner.ID, DeliveryMessage(call, false), call.StandingEntryID, d.now().UTC())
 		switch {
 		case err == nil:
 			if !d.applyPlanFirstAnswer(ctx, owner, call) {
@@ -199,7 +199,7 @@ func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) (bool
 			// A stopped plan-first worker is resumable. Keep the answer pending
 			// instead of delivering it elsewhere (or recording no_session), so
 			// the worker receives the approval after it resumes.
-			if owner.PlanFirstState.BlocksAutomation() && isPlanFirstCall(call) {
+			if owner.PlanFirstState.Enabled() && isPlanFirstCall(call) {
 				return true, false
 			}
 			ended = true
@@ -279,7 +279,7 @@ func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCal
 			revoke()
 		}
 	}
-	err := d.messenger.DeliverAsPerson(ctx, orchestrator.ID, DeliveryMessage(call, true), d.now().UTC())
+	err := d.messenger.DeliverAsPerson(ctx, orchestrator.ID, DeliveryMessage(call, true), call.StandingEntryID, d.now().UTC())
 	switch {
 	case err == nil:
 		recorded := d.record(ctx, call, domain.DecisionDeliveredPayload{

@@ -2606,6 +2606,37 @@ func TestSessionArtifactsAreReadPerSessionAndGoWithTheSession(t *testing.T) {
 	}
 }
 
+func TestSessionArtifactPlanApprovalRoleSurvivesRenameAndReregistration(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, st, "p1")
+	sess, err := st.CreateSession(ctx, sampleRecord("p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	registration := domain.SessionArtifactRegistration{Path: "plan.md", Role: domain.SessionArtifactRolePlanApproval}
+	if _, _, err := st.AddSessionArtifacts(ctx, sess.ID, []domain.SessionArtifactRegistration{registration}, now); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.ListSessionArtifacts(ctx, sess.ID)
+	if err != nil || len(rows) != 1 || rows[0].Role != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("registered rows=%+v err=%v", rows, err)
+	}
+	if _, err := st.ApplySessionArtifactChanges(ctx, sess.ID, domain.SessionArtifactChanges{Move: []domain.SessionArtifactMove{{
+		ID: rows[0].ID, From: "plan.md", To: "project-plan.md", PreviousPaths: []string{"plan.md"},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.AddSessionArtifacts(ctx, sess.ID, []domain.SessionArtifactRegistration{{Path: "project-plan.md"}}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = st.ListSessionArtifacts(ctx, sess.ID)
+	if err != nil || len(rows) != 1 || rows[0].Path != "project-plan.md" || rows[0].Role != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("renamed rows=%+v err=%v", rows, err)
+	}
+}
+
 func registeredPaths(rows []domain.SessionArtifactRecord) []string {
 	var paths []string
 	for _, row := range rows {

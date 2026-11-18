@@ -160,6 +160,16 @@ const (
 	SessionArtifactGeneric  SessionArtifactKind = "file"
 )
 
+// SessionArtifactRole distinguishes internal workflow evidence from task
+// deliverables without coupling that identity to a filename.
+type SessionArtifactRole string
+
+const (
+	// SessionArtifactRolePlanApproval is the plan submitted to the human by a
+	// plan-first worker. The role stays with the artifact when it is renamed.
+	SessionArtifactRolePlanApproval SessionArtifactRole = "plan_approval"
+)
+
 // MaxArtifactRegistrationPaths bounds how many paths one ao artifact add sends.
 const MaxArtifactRegistrationPaths = 100
 
@@ -171,6 +181,7 @@ type SessionArtifactFile struct {
 	Path      string              `json:"path"`
 	Name      string              `json:"name"`
 	Kind      SessionArtifactKind `json:"kind" enum:"html,markdown,file"`
+	Role      SessionArtifactRole `json:"-"`
 	Size      int64               `json:"size"`
 	UpdatedAt time.Time           `json:"updatedAt"`
 	ShareURL  string              `json:"shareUrl,omitempty"`
@@ -209,6 +220,7 @@ type FileIdentity struct {
 type SessionArtifactRegistration struct {
 	Path string
 	File FileIdentity
+	Role SessionArtifactRole
 }
 
 // SameFile reports whether f and other name the same file, and both are
@@ -224,6 +236,7 @@ type SessionArtifactRecord struct {
 	ID            string
 	SessionID     SessionID
 	Path          string
+	Role          SessionArtifactRole
 	RegisteredAt  *time.Time
 	File          FileIdentity
 	PreviousPaths []string

@@ -30,6 +30,8 @@ type fakeStore struct {
 	prPolicies map[string]bool
 	signatures map[string]string
 	accepted   map[string]bool
+	artifacts  map[domain.SessionID][]domain.SessionArtifactRecord
+	done       map[domain.SessionID]domain.SessionDoneReport
 
 	listPRsErr        error
 	listReviewsErr    error
@@ -49,7 +51,23 @@ func newFakeStore() *fakeStore {
 		prPolicies: map[string]bool{},
 		signatures: map[string]string{},
 		accepted:   map[string]bool{},
+		artifacts:  map[domain.SessionID][]domain.SessionArtifactRecord{},
+		done:       map[domain.SessionID]domain.SessionDoneReport{},
 	}
+}
+
+func (f *fakeStore) ListSessionArtifacts(_ context.Context, id domain.SessionID) ([]domain.SessionArtifactRecord, error) {
+	return f.artifacts[id], nil
+}
+
+func (f *fakeStore) ListLatestDoneReportsForSessions(_ context.Context, ids []domain.SessionID) (map[domain.SessionID]domain.SessionDoneReport, error) {
+	out := make(map[domain.SessionID]domain.SessionDoneReport, len(ids))
+	for _, id := range ids {
+		if report, ok := f.done[id]; ok {
+			out[id] = report
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {

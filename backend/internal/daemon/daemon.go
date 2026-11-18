@@ -1779,18 +1779,15 @@ func (a reportEvidenceArtifacts) Unregister(ctx context.Context, id domain.Sessi
 }
 
 type decisionMessageSession interface {
-	SendWithOptions(context.Context, domain.SessionID, string, *ports.SpawnAttachment, ports.MessageDeliveryOptions) error
+	DeliverDecisionAnswer(context.Context, domain.SessionID, string, string, time.Time) error
 }
 
 type decisionMessenger struct {
 	sessions decisionMessageSession
 }
 
-func (m decisionMessenger) DeliverAsPerson(ctx context.Context, id domain.SessionID, message string, at time.Time) error {
-	err := m.sessions.SendWithOptions(ctx, id, message, nil, ports.MessageDeliveryOptions{
-		InteractionAt:  at,
-		AuthoredByUser: true,
-	})
+func (m decisionMessenger) DeliverAsPerson(ctx context.Context, id domain.SessionID, message, deliveryID string, at time.Time) error {
+	err := m.sessions.DeliverDecisionAnswer(ctx, id, message, deliveryID, at)
 	if errors.Is(err, sessionmanager.ErrNotFound) || errors.Is(err, sessionmanager.ErrTerminated) || errors.Is(err, sessionmanager.ErrAgentExited) {
 		return fmt.Errorf("%w: %w", decisionsvc.ErrSessionEnded, err)
 	}

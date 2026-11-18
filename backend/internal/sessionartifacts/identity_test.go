@@ -124,6 +124,23 @@ func (d *identityDir) register(path string) {
 	d.t.Fatalf("no row at %s", path)
 }
 
+func TestObservationApplyKeepsPlanApprovalRoleAcrossRenameBeforePersistence(t *testing.T) {
+	d := newIdentityDir(t)
+	d.write("plan.md", "# Plan")
+	_, _ = d.scan()
+	d.rows[0].Role = domain.SessionArtifactRolePlanApproval
+	d.rename("plan.md", "project-plan.md")
+
+	observation, err := Observe(context.Background(), d.dir, RegisteredPaths(d.rows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := observation.Apply(d.rows)
+	if len(files) != 1 || files[0].Path != "project-plan.md" || files[0].ID != d.rows[0].ID || files[0].Role != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("renamed approval artifact = %+v, rows=%+v", files, d.rows)
+	}
+}
+
 // setHistory marks whether the row at path has kept versions.
 func (d *identityDir) setHistory(path string, has bool) {
 	for i := range d.rows {
