@@ -661,7 +661,7 @@ describe("SessionsBoard", () => {
 
 		renderBoard();
 
-		expect(screen.getByText("Board")).toBeInTheDocument();
+		expect(within(screen.getByTestId("board-topbar-label")).getByText("Board")).toBeInTheDocument();
 	});
 
 	it("labels an idle session as Idle, not Working", () => {
