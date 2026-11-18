@@ -45,15 +45,41 @@ func runWorkspaceStep(ctx context.Context, workspacePath, command string, env st
 		return err
 	}
 	survived, waitErr := tree.Wait()
-	if platformCleanupUncertain(waitErr) {
-		waitErr = markCleanupUncertain(waitErr)
-	}
-	if waitErr != nil && cmd.ProcessState != nil && cmd.ProcessState.Success() && ctx.Err() != nil && errors.Is(waitErr, ctx.Err()) {
-		waitErr = nil
-	}
+	waitErr = normalizeWorkspaceWaitError(
+		waitErr,
+		cmd.ProcessState != nil && cmd.ProcessState.Success(),
+		ctx.Err(),
+	)
 	closeErr := tree.Close()
 	if survived {
 		waitErr = errors.Join(waitErr, errLingeringProcessTree)
 	}
 	return errors.Join(waitErr, closeErr)
+}
+
+func normalizeWorkspaceWaitError(waitErr error, processSucceeded bool, contextErr error) error {
+	if waitErr == nil || !processSucceeded || contextErr == nil || !errors.Is(waitErr, contextErr) {
+		return waitErr
+	}
+	return errors.Join(cleanupUncertaintyComponents(waitErr)...)
+}
+
+func cleanupUncertaintyComponents(err error) []error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := err.(interface{ cleanupUncertain() }); ok {
+		return []error{err}
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var components []error
+		for _, child := range joined.Unwrap() {
+			components = append(components, cleanupUncertaintyComponents(child)...)
+		}
+		return components
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return cleanupUncertaintyComponents(wrapped.Unwrap())
+	}
+	return nil
 }

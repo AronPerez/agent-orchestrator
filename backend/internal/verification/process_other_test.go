@@ -500,6 +500,19 @@ func TestRunnerPreservesParentCancellationFromARealCommand(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkspaceWaitErrorPreservesCleanupUncertainty(t *testing.T) {
+	cleanupErr := markCleanupUncertain(errors.New("cleanup was not confirmed"))
+	waitErr := errors.Join(context.Canceled, cleanupErr)
+
+	got := normalizeWorkspaceWaitError(waitErr, true, context.Canceled)
+	if !isCleanupUncertain(got) {
+		t.Fatalf("normalized error = %v, want cleanup uncertainty", got)
+	}
+	if errors.Is(got, context.Canceled) {
+		t.Fatalf("normalized error = %v, cancellation component was not suppressed", got)
+	}
+}
+
 func readProcessID(t *testing.T, path string) int {
 	t.Helper()
 	waitForFile(t, path)

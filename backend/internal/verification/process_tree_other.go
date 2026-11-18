@@ -58,6 +58,7 @@ type unixWorkspaceProcessTree struct {
 	cmd            *exec.Cmd
 	descendants    *unixDescendantWatch
 	hooks          unixProcessHooks
+	cleanupStatus  *os.File
 	closeOwnership func() error
 	closeOnce      sync.Once
 	closeErr       error
@@ -68,19 +69,33 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 	if err != nil {
 		return nil, err
 	}
-	gateReader, gateWriter, err := prepareUnixProcessStartGate(cmd)
+	gateReader, gateWriter, cleanupReader, cleanupWriter, err := prepareUnixProcessStartGate(cmd)
 	if err != nil {
 		return nil, errors.Join(err, closeOwnership())
 	}
-	closeGate := func() error { return errors.Join(gateReader.Close(), gateWriter.Close()) }
+	closeControlFiles := func() error {
+		var result error
+		for _, file := range []*os.File{gateReader, gateWriter, cleanupReader, cleanupWriter} {
+			if file != nil {
+				result = errors.Join(result, file.Close())
+			}
+		}
+		return result
+	}
 	configureUnixWorkspaceProcess(cmd)
 	if err = cmd.Start(); err != nil {
-		return nil, errors.Join(err, closeGate(), closeOwnership())
+		return nil, errors.Join(err, closeControlFiles(), closeOwnership())
 	}
 	_ = gateReader.Close()
+	if cleanupWriter != nil {
+		_ = cleanupWriter.Close()
+	}
 	start, err := verificationProcessStartForWatchFn(cmd.Process.Pid)
 	if err != nil {
 		_ = gateWriter.Close()
+		if cleanupReader != nil {
+			_ = cleanupReader.Close()
+		}
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return nil, errors.Join(
@@ -95,6 +110,9 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 	_ = gateWriter.Close()
 	if err != nil {
 		sharedUnixDescendantObserver.unwatch(descendants)
+		if cleanupReader != nil {
+			_ = cleanupReader.Close()
+		}
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return nil, errors.Join(
@@ -104,25 +122,37 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 	}
 	return &unixWorkspaceProcessTree{
 		cmd: cmd, descendants: descendants,
-		hooks: defaultUnixProcessHooks(ownership, descendants), closeOwnership: closeOwnership,
+		hooks: defaultUnixProcessHooks(ownership, descendants), cleanupStatus: cleanupReader,
+		closeOwnership: closeOwnership,
 	}, nil
 }
 
-func prepareUnixProcessStartGate(cmd *exec.Cmd) (*os.File, *os.File, error) {
+func prepareUnixProcessStartGate(cmd *exec.Cmd) (*os.File, *os.File, *os.File, *os.File, error) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
-		return nil, nil, fmt.Errorf("create verification start gate: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("create verification start gate: %w", err)
 	}
 	fd := 3 + len(cmd.ExtraFiles)
 	cmd.ExtraFiles = append(cmd.ExtraFiles, reader)
-	if err = configureUnixProcessStartGate(cmd, fd); err != nil {
-		return nil, nil, errors.Join(err, reader.Close(), writer.Close())
+	cleanupReader, cleanupWriter, cleanupFD, err := preparePlatformCleanupConfirmation(cmd)
+	if err != nil {
+		return nil, nil, nil, nil, errors.Join(err, reader.Close(), writer.Close())
 	}
-	return reader, writer, nil
+	if err = configureUnixProcessStartGate(cmd, fd, cleanupFD); err != nil {
+		if cleanupReader != nil {
+			err = errors.Join(err, cleanupReader.Close())
+		}
+		if cleanupWriter != nil {
+			err = errors.Join(err, cleanupWriter.Close())
+		}
+		return nil, nil, nil, nil, errors.Join(err, reader.Close(), writer.Close())
+	}
+	return reader, writer, cleanupReader, cleanupWriter, nil
 }
 
 func (t *unixWorkspaceProcessTree) Wait() (bool, error) {
 	waitErr := t.cmd.Wait()
+	waitErr = finalizePlatformCleanupConfirmation(t.cleanupStatus, waitErr)
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), t.hooks.wait+time.Second)
 	survived, stopErr := stopOwnedUnixProcesses(cleanupCtx, t.hooks)
 	cancel()
@@ -136,6 +166,9 @@ func (t *unixWorkspaceProcessTree) Close() error {
 		}
 		if t.closeOwnership != nil {
 			t.closeErr = t.closeOwnership()
+		}
+		if t.cleanupStatus != nil {
+			t.closeErr = errors.Join(t.closeErr, t.cleanupStatus.Close())
 		}
 	})
 	return t.closeErr
