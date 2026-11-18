@@ -120,6 +120,17 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 	if found && (rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID) {
 		return nil
 	}
+	if found && !rec.IsTerminated && claim.Recovery.CapacityReleased && !claim.Recovery.ReleasesCapacityFor(rec) {
+		// Resume rotated the owner after an earlier generation was proved
+		// stopped, so that proof cannot authorize cleanup of this workspace.
+		// A possibly-delivered claim is already a no-replay fence and can become
+		// handled immediately; an undelivered restored owner stays pending and
+		// charged until the user stops it or lifecycle can fence it explicitly.
+		if claim.Recovery.DeliveryPossible {
+			return m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock())
+		}
+		return fmt.Errorf("recover tracker intake %s: released generation was replaced by a live owner", rec.ID)
+	}
 	if found && !rec.IsTerminated && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat &&
 		claim.Recovery.DeliveryPossible && claim.Recovery.CapacityReleased && rec.Activity.State == domain.ActivityExited {
 		// A pre-atomic build may have persisted the released-capacity fact just

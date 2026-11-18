@@ -3688,6 +3688,58 @@ func TestScheduleTrackerIntakeClaimReconciliationDoesNotBlockCaller(t *testing.T
 	}
 }
 
+func TestReconcileTrackerIntakeReleasedChatPreservesRestoredGeneration(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("restored-released-chat")
+	issueID := domain.IssueID("github:acme/mer#113")
+	key := "mer\x00" + string(issueID)
+	oldGeneration := "controller-stopped"
+	newGeneration := "controller-restored"
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/restored-released-chat/root", WorkspacePath: "/ws/restored-released-chat",
+			ProviderConversationID: "thread-113", ControllerGeneration: oldGeneration,
+		},
+	}
+	st.sessions[id] = rec
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		ControllerPossible: true, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedControllerGeneration: oldGeneration,
+	}
+	ws.destroyErr = ports.ErrWorkspaceDirty
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err == nil {
+		t.Fatal("first recovery error = nil, want dirty workspace to retain pending claim")
+	}
+	if ws.destroyed != 1 || st.trackerIntakePending[key] != id {
+		t.Fatalf("first recovery destroyed=%d pending=%q", ws.destroyed, st.trackerIntakePending[key])
+	}
+
+	ws.destroyErr = nil
+	restored := st.sessions[id]
+	restored.Metadata.ControllerGeneration = newGeneration
+	restored.Activity.State = domain.ActivityActive
+	st.sessions[id] = restored
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("recovery after Resume: %v", err)
+	}
+	if ws.destroyed != 1 {
+		t.Fatalf("restored workspace destroyed %d time(s), want only pre-Resume attempt", ws.destroyed)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Metadata.ControllerGeneration != newGeneration {
+		t.Fatalf("restored session changed by stale cleanup: %+v", got)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("restored delivered claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 func TestWorkspaceProjectRestoreRowsMergePartialMarkersWithRegistry(t *testing.T) {
 	m, st, _, _ := newManager()
 	project := st.projects["mer"]
