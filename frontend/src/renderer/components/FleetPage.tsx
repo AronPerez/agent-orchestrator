@@ -1,6 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { useLocalHostId } from "../hooks/useLocalHostId";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
 import { sessionNavigateTarget } from "../lib/navigate-to-session";
 import { recordManualWorkerOpen } from "../lib/session-management-telemetry";
@@ -15,6 +16,7 @@ export function FleetPage() {
 	const navigate = useNavigate();
 	const localWorkspaces = useWorkspaceQuery();
 	const shell = useShellMaybe();
+	const localHostId = useLocalHostId();
 	const openSession = useCallback((session: WorkspaceSession, hostId?: string) => {
 		if (session.kind === "worker") recordManualWorkerOpen(session.id, hostId);
 		void navigate(sessionNavigateTarget(session.workspaceId, session.id, hostId));
@@ -25,6 +27,7 @@ export function FleetPage() {
 			<PageTopbar lead={<PageTopbarTitle>{t("fleet.tab")}</PageTopbarTitle>} />
 			{localWorkspaces.isError ? <p className="px-4 py-2 text-xs text-destructive" role="alert">{t("fleet.stale")}</p> : null}
 			<FleetOverview
+				localHostId={localHostId}
 				localWorkspaces={localWorkspaces.data ?? []}
 				onOpen={openSession}
 				remoteHosts={shell?.remoteHosts}

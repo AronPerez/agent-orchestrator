@@ -47,6 +47,8 @@ type SessionRow = {
 	parentKey: string;
 	depth: number;
 	node: FleetSessionNode<WorkspaceSession>;
+	/** The session runs on a different machine from the branch it is drawn under. */
+	otherMachine: boolean;
 };
 
 type UnscopedMachineRow = {
@@ -127,10 +129,11 @@ function flattenRows(
 		nodes: readonly FleetSessionNode<WorkspaceSession>[],
 		depth: number,
 		parentKey: string,
+		machineId: string,
 	) => {
 		for (const node of nodes) {
-			rows.push({ kind: "session", key: node.key, parentKey, depth, node });
-			if (!collapsed.has(node.key)) addSessions(node.children, depth + 1, node.key);
+			rows.push({ kind: "session", key: node.key, parentKey, depth, node, otherMachine: node.machineId !== machineId });
+			if (!collapsed.has(node.key)) addSessions(node.children, depth + 1, node.key, machineId);
 		}
 	};
 	for (const node of projects) {
@@ -138,7 +141,7 @@ function flattenRows(
 		if (collapsed.has(node.key)) continue;
 		for (const machine of node.machines) {
 			rows.push({ kind: "machine", key: machine.key, parentKey: node.key, depth: 2, node: machine });
-			if (!collapsed.has(machine.key)) addSessions(machine.sessions, 3, machine.key);
+			if (!collapsed.has(machine.key)) addSessions(machine.sessions, 3, machine.key, machine.machine.id);
 		}
 	}
 	for (const item of unscopedHosts) {
@@ -239,7 +242,17 @@ function hasChildren(row: FleetOverviewRow): boolean {
 	}
 }
 
+/** Lineage names this computer by its daemon host ID; the tree names it LOCAL_HOST. */
+function fleetSessions(workspace: WorkspaceSummary, localHostId: string | undefined): WorkspaceSession[] {
+	return workspace.sessions.map((session) => ({
+		...session,
+		...(localHostId && session.parentHostId === localHostId ? { parentHostId: LOCAL_HOST } : {}),
+		rollupStatus: fleetRollupStatus(session),
+	}));
+}
+
 export function FleetOverview({
+	localHostId,
 	localWorkspaces,
 	remoteWorkspaces = [],
 	remoteHosts = [],
@@ -248,6 +261,8 @@ export function FleetOverview({
 	remoteLoadedSessionHostIds,
 	onOpen,
 }: {
+	/** This computer's stable daemon host ID, used by remote rows to address local parents. */
+	localHostId?: string;
 	localWorkspaces: readonly WorkspaceSummary[];
 	remoteWorkspaces?: readonly WorkspaceSummary[];
 	remoteHosts?: readonly RemoteHost[];
@@ -282,7 +297,7 @@ export function FleetOverview({
 				.map((workspace) => ({
 					project: { id: workspace.id, name: workspace.name },
 					machine: { id: LOCAL_HOST, name: t("remote.thisComputer"), reachable: true },
-					sessions: workspace.sessions.map((session) => ({ ...session, rollupStatus: fleetRollupStatus(session) })),
+					sessions: fleetSessions(workspace, localHostId),
 				})),
 			...visibleRemoteWorkspaces
 				.filter((workspace) => workspace.kind !== CLOUD_PROJECT_KIND && Boolean(workspace.hostId))
@@ -296,12 +311,19 @@ export function FleetOverview({
 							name: host?.label ?? hostId,
 							reachable: host ? host.status === "connected" : true,
 						},
-						sessions: workspace.sessions.map((session) => ({ ...session, rollupStatus: fleetRollupStatus(session) })),
+						sessions: fleetSessions(workspace, localHostId),
 					};
 				}),
 		];
-		return orderProjects(buildFleetTree(scopes, { showArchived }));
-	}, [hostsById, localWorkspaces, showArchived, t, visibleRemoteWorkspaces]);
+		const knownMachines = [
+			{ id: LOCAL_HOST, reachable: true },
+			...[...hostsById.values()].map((host) => ({
+				id: host.hostId,
+				reachable: host.status === "connected" && host.failureReason !== "unauthorized",
+			})),
+		];
+		return orderProjects(buildFleetTree(scopes, { showArchived, knownMachines }));
+	}, [hostsById, localHostId, localWorkspaces, showArchived, t, visibleRemoteWorkspaces]);
 	const scopedHostIds = useMemo(() => new Set(visibleRemoteWorkspaces.map((workspace) => workspace.hostId).filter(Boolean)), [visibleRemoteWorkspaces]);
 	const unscopedHosts = useMemo(
 		() => remoteHosts.filter((host) => !scopedHostIds.has(host.hostId)),
@@ -390,6 +412,19 @@ export function FleetOverview({
 		.filter((zone) => rollup[zone] > 0)
 		.map((zone) => `${rollup[zone]} ${getAttentionZoneViewForZone(zone, t).label}`)
 		.join(", ") || t("fleet.empty");
+	const machineLabel = (machineId: string) => machineId === LOCAL_HOST
+		? t("remote.thisComputer")
+		: hostsById.get(machineId)?.label ?? machineId;
+	const otherMachineText = (row: SessionRow) =>
+		row.otherMachine ? t("fleet.onMachine", { machine: machineLabel(row.node.machineId) }) : undefined;
+	const parentUnavailableText = (row: SessionRow) => {
+		switch (row.node.parentUnavailableReason) {
+			case undefined: return undefined;
+			case "machine-offline": return t("fleet.parentMachineOffline");
+			case "machine-unknown": return t("fleet.parentMachineUnknown");
+			case "missing": return t("fleet.parentUnavailable");
+		}
+	};
 	const sessionStatus = (row: SessionRow) => row.node.session.displayStatus
 		? getDisplayStatusLabel(row.node.session.displayStatus, (key, values) => t(key as MessageKey, values))
 		: getSessionStatusView(row.node.session.status, t).label;
@@ -431,8 +466,9 @@ export function FleetOverview({
 				row.node.session.title,
 				roleLabel(row),
 				sessionStatus(row),
+				otherMachineText(row),
 				row.node.session.isTerminated ? t("fleet.archived") : undefined,
-				row.node.parentUnavailable ? t("fleet.parentUnavailable") : undefined,
+				parentUnavailableText(row),
 				rollupOrder.some((zone) => row.node.rollup[zone] > 0) ? rollupText(row.node.rollup) : undefined,
 				scmRollupText(row.key),
 			].filter(Boolean).join(", ");
@@ -526,8 +562,9 @@ export function FleetOverview({
 										) : (
 											<span className="flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
 												<span>{roleLabel(row)} · {sessionStatus(row)}</span>
+												{otherMachineText(row) ? <span>{otherMachineText(row)}</span> : null}
 												{row.node.session.isTerminated ? <span>{t("fleet.archived")}</span> : null}
-												{row.node.parentUnavailable ? <span>{t("fleet.parentUnavailable")}</span> : null}
+												{parentUnavailableText(row) ? <span>{parentUnavailableText(row)}</span> : null}
 												{rollupOrder.some((zone) => row.node.rollup[zone] > 0) ? <Rollup rollup={row.node.rollup} /> : null}
 												<ScmRollupView rollup={scmRollups.get(row.key) ?? emptyScmRollup()} />
 											</span>

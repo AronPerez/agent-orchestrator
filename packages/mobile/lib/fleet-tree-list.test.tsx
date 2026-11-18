@@ -270,6 +270,43 @@ describe("FleetTreeList", () => {
 		expect(fixtures.archiveOptions).toMatchObject({ active: false, exhaustive: false });
 	});
 
+	it("draws a cross-host worker under its parent and names the worker's machine", () => {
+		const view = render([
+			{ ...worker("Parent"), hostId: "mac", hostName: "Mac" },
+			worker("Parent"),
+			worker("Child", { parentHostId: "mac", parentSessionId: "Parent", status: "needs_input" }),
+		], [], "open", [{ hostId: "mac", name: "Mac", connection: "open" }]);
+
+		const rows = view.root.findAllByType("WorkerListRow" as never);
+		const child = rows.find((row) => row.props.session.id === "Child")!;
+		const parents = rows.filter((row) => row.props.session.id === "Parent");
+		expect(child.props.hostId).toBe("box");
+		expect(child.props.treeDepth).toBe(3);
+		expect(child.props.projectName).toBe("Worker · On Build box");
+		expect(parents.map((row) => [row.props.hostId, row.props.projectName])).toEqual([
+			["mac", "Manager · 1 needs you"],
+			["box", "Worker"],
+		]);
+	});
+
+	it("keeps a cross-host child as a marked root when its parent machine is offline or unknown", () => {
+		const view = render([
+			{ ...worker("Parent"), hostId: "mac", hostName: "Mac" },
+			worker("Waiting", { parentHostId: "mac", parentSessionId: "Parent" }),
+			worker("Stranger", { parentHostId: "unpaired", parentSessionId: "Parent" }),
+		], [], "open", [{ hostId: "mac", name: "Mac", connection: "closed" }]);
+
+		const rows = view.root.findAllByType("WorkerListRow" as never);
+		expect(rows.find((row) => row.props.session.id === "Waiting")?.props).toMatchObject({
+			treeDepth: 2,
+			projectName: "Worker · Parent's machine not connected",
+		});
+		expect(rows.find((row) => row.props.session.id === "Stranger")?.props).toMatchObject({
+			treeDepth: 2,
+			projectName: "Worker · Parent on an unknown machine",
+		});
+	});
+
 	it("looks up a cross-host parent on its qualified host despite a local ID collision", async () => {
 		fixtures.app.configForHost.mockImplementation((hostId: string) => ({
 			host: `${hostId}.test`, httpPort: "3011", muxPort: "3011", password: "secret", hostId,
