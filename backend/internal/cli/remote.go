@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 )
@@ -206,7 +207,7 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	if err != nil {
 		return err
 	}
-	if local := readLocalHostID(); local != "" && local == target.hostID {
+	if local := c.localDaemonHostID(ctx); local != "" && local == target.hostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
 	}
 	actual, err := c.probeSavedHostIdentity(ctx, target.baseURL)
@@ -216,7 +217,7 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	if actual.HostID != target.hostID {
 		return fmt.Errorf("saved host identity changed for %s: expected %s, got %s; connection refused", target.baseURL, target.hostID, actual.HostID)
 	}
-	if local := readLocalHostID(); local != "" && local == actual.HostID {
+	if local := c.localDaemonHostID(ctx); local != "" && local == actual.HostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
 	}
 	if target.accountUserID != "" && c.activeCloudAccount(ctx) != target.accountUserID {
@@ -229,8 +230,9 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 var activeCloudUserIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type activeCloudAccountMarker struct {
-	UserID     string `json:"userId"`
-	DesktopPID int    `json:"desktopPid"`
+	UserID             string `json:"userId"`
+	DesktopPID         int    `json:"desktopPid"`
+	DesktopStartedAtMS int64  `json:"desktopStartedAtMs"`
 }
 
 // activeCloudAccount reads the desktop auth authority beside the exact remote
@@ -238,7 +240,7 @@ type activeCloudAccountMarker struct {
 // alive, so a stale file after a crash cannot authorize account-owned hosts.
 // Any read, parse, validation, or liveness failure hides those hosts; local
 // pairings (which have no accountUserId) remain usable.
-func (c *commandContext) activeCloudAccount(context.Context) string {
+func (c *commandContext) activeCloudAccount(ctx context.Context) string {
 	markerPath := strings.TrimSpace(os.Getenv(cloudAccountFileEnv))
 	if markerPath == "" {
 		remotesPath, err := remotesFilePath()
@@ -252,13 +254,24 @@ func (c *commandContext) activeCloudAccount(context.Context) string {
 		return ""
 	}
 	var marker activeCloudAccountMarker
-	if json.Unmarshal(raw, &marker) != nil || marker.DesktopPID <= 0 || !activeCloudUserIDPattern.MatchString(marker.UserID) {
+	if json.Unmarshal(raw, &marker) != nil || marker.DesktopPID <= 0 || marker.DesktopStartedAtMS <= 0 || !activeCloudUserIDPattern.MatchString(marker.UserID) {
 		return ""
 	}
 	if c.deps.ProcessAlive == nil || !c.deps.ProcessAlive(marker.DesktopPID) {
 		return ""
 	}
+	startedAt, ok := c.deps.ProcessStartedAt(ctx, marker.DesktopPID)
+	if !ok || absDuration(startedAt.Sub(time.UnixMilli(marker.DesktopStartedAtMS))) > 5*time.Second {
+		return ""
+	}
 	return marker.UserID
+}
+
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func (c *commandContext) probeSavedHostIdentity(ctx context.Context, base string) (savedHostIdentity, error) {
@@ -287,6 +300,16 @@ func (c *commandContext) probeSavedHostIdentity(ctx context.Context, base string
 		return savedHostIdentity{}, fmt.Errorf("remote coordination API version %d is incompatible with version 1", identity.APIVersion)
 	}
 	return identity, nil
+}
+
+func (c *commandContext) localDaemonHostID(ctx context.Context) string {
+	base, err := c.localDaemonBase()
+	if err == nil {
+		if identity, probeErr := c.probeSavedHostIdentity(ctx, base); probeErr == nil {
+			return identity.HostID
+		}
+	}
+	return readLocalHostID()
 }
 
 // readLocalHostID is best-effort and read-only. A missing local daemon identity
