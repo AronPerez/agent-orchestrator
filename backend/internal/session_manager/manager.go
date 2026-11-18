@@ -2632,9 +2632,11 @@ func (m *Manager) destroySpawnWorkspace(ctx context.Context, ws ports.WorkspaceI
 		m.logger.Warn("spawn rollback: workspace ownership changed; preserving workspace", "sessionID", ws.SessionID, "error", err)
 		return false
 	}
-	if err := m.runPreRemove(ws.ProjectID, ws.Path); err != nil {
-		m.logger.Warn("spawn rollback: workspace cleanup failed; preserving workspace", "sessionID", ws.SessionID, "error", err)
-		return false
+	if trackerIntakeCleanupHooksSafe(ws, workspaceProject) {
+		if err := m.runPreRemove(ws.ProjectID, ws.Path); err != nil {
+			m.logger.Warn("spawn rollback: workspace cleanup failed; preserving workspace", "sessionID", ws.SessionID, "error", err)
+			return false
+		}
 	}
 	ctx, cancel := spawnRollbackContext(ctx)
 	defer cancel()
@@ -3327,16 +3329,30 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	if err != nil {
 		return KillResult{}, fmt.Errorf("kill %s: tracker intake claim: %w", id, err)
 	}
+	if pendingIntake {
+		rec = applyTrackerIntakeRecovery(rec, intakeRecovery)
+	}
 	m.stopPreviewBestEffort(ctx, id)
 	m.destroyBrowserBestEffort(ctx, id)
 	handle := runtimeHandle(rec.Metadata)
 	ws := workspaceInfo(rec)
+	if pendingIntake {
+		ws = trackerIntakeWorkspaceInfo(rec, intakeRecovery)
+	}
 
 	var workspaceProjectRows []ports.WorkspaceRepoInfo
 	workspaceProject := false
-	if rows, ok, rowErr := m.workspaceProjectRows(ctx, rec); rowErr != nil {
+	var rows []ports.WorkspaceRepoInfo
+	var isWorkspaceProject bool
+	var rowErr error
+	if pendingIntake {
+		rows, isWorkspaceProject, rowErr = m.trackerIntakeWorkspaceRows(ctx, rec)
+	} else {
+		rows, isWorkspaceProject, rowErr = m.workspaceProjectRows(ctx, rec)
+	}
+	if rowErr != nil {
 		return KillResult{}, fmt.Errorf("kill %s: workspace rows: %w", id, rowErr)
-	} else if ok {
+	} else if isWorkspaceProject {
 		workspaceProjectRows = rows
 		workspaceProject = true
 	}
@@ -3450,8 +3466,14 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 				return KillResult{CleanupPending: true}, nil
 			}
 		}
-		if err := m.runPreRemove(rec.ProjectID, ws.Path); err != nil {
-			return KillResult{}, err
+		var cleanupProject *ports.WorkspaceProjectInfo
+		if workspaceProject {
+			cleanupProject = &ports.WorkspaceProjectInfo{Root: ws, Worktrees: workspaceProjectRows}
+		}
+		if trackerIntakeCleanupHooksSafe(ws, cleanupProject) {
+			if err := m.runPreRemove(rec.ProjectID, ws.Path); err != nil {
+				return KillResult{}, err
+			}
 		}
 		// Give workspace removal its own budget after untimed user commands.
 		cancelTeardown()
@@ -5528,6 +5550,9 @@ func (m *Manager) workspaceProjectRestoreRowsFromMarkers(ctx context.Context, pr
 	markers := make(map[string]domain.SessionWorktreeRecord, len(rows))
 	valid := map[string]struct{}{domain.RootWorkspaceRepoName: {}}
 	for _, repo := range childRepos {
+		if repo.GitStatus.WithDefault() != domain.GitStatusReady {
+			continue
+		}
 		valid[repo.Name] = struct{}{}
 	}
 	for _, row := range rows {
@@ -5564,6 +5589,9 @@ func (m *Manager) workspaceProjectRestoreRowsFromMarkers(ctx context.Context, pr
 		ProjectID:   rec.ProjectID,
 	}}
 	for _, repo := range childRepos {
+		if repo.GitStatus.WithDefault() != domain.GitStatusReady {
+			continue
+		}
 		info := ports.WorkspaceRepoInfo{
 			RepoName:     repo.Name,
 			RepoPath:     filepath.Join(project.Path, filepath.FromSlash(repo.RelativePath)),

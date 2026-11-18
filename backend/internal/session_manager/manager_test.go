@@ -847,7 +847,9 @@ type fakeRuntime struct {
 	exitedLaunches   map[string]bool
 	destroyedIDs     []string
 	fencedResult     ports.FencedProbeResult
+	fencedResults    map[string]ports.FencedProbeResult
 	fencedRefs       []ports.FencedRuntimeRef
+	onFencedProbe    func(ports.FencedRuntimeRef, ports.FencedProbeResult)
 	launchCandidates []ports.RuntimeHandle
 }
 
@@ -1053,7 +1055,16 @@ func (r *fakeRuntime) IsExactSupervisedProcessAlive(ctx context.Context, handle 
 }
 func (r *fakeRuntime) ProbeFencedRuntime(ctx context.Context, ref ports.FencedRuntimeRef) ports.FencedProbeResult {
 	r.fencedRefs = append(r.fencedRefs, ref)
+	if result, ok := r.fencedResults[ref.Handle.ID]; ok {
+		if r.onFencedProbe != nil {
+			r.onFencedProbe(ref, result)
+		}
+		return result
+	}
 	if r.fencedResult.Liveness != "" {
+		if r.onFencedProbe != nil {
+			r.onFencedProbe(ref, r.fencedResult)
+		}
 		return r.fencedResult
 	}
 	if r.aliveErr != nil || r.supervisedErr != nil {
@@ -1067,9 +1078,17 @@ func (r *fakeRuntime) ProbeFencedRuntime(ctx context.Context, ref ports.FencedRu
 		return ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
 	}
 	if alive {
-		return ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
+		result := ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
+		if r.onFencedProbe != nil {
+			r.onFencedProbe(ref, result)
+		}
+		return result
 	}
-	return ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	result := ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	if r.onFencedProbe != nil {
+		r.onFencedProbe(ref, result)
+	}
+	return result
 }
 func (r *fakeRuntime) GetOutput(_ context.Context, _ ports.RuntimeHandle, _ int) (string, error) {
 	r.outputCalls++
@@ -3237,6 +3256,7 @@ func TestReconcileTrackerIntakeClaimsAdoptsReservedRuntime(t *testing.T) {
 		RuntimeLaunchID: "launch-101", RuntimeHandleIDs: []string{"runtime-101"}, DeliveryPossible: true,
 	}
 	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#101", Kind: domain.KindWorker}
+	rt.aliveByHandle = map[string]bool{"runtime-101": true}
 
 	if err := m.ReconcileBackground(context.Background()); err != nil {
 		t.Fatalf("ReconcileBackground(): %v", err)
@@ -3251,6 +3271,106 @@ func TestReconcileTrackerIntakeClaimsAdoptsReservedRuntime(t *testing.T) {
 	}
 	if len(rt.fencedRefs) != 0 || rt.destroyed != 0 || ws.destroyed != 0 {
 		t.Fatalf("live possible delivery was torn down: probes=%v runtime=%d workspace=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsAdoptsOnlyLiveReservedCandidate(t *testing.T) {
+	m, st, rt, _ := newManager()
+	lcm := &fakeLCM{store: st}
+	m.lcm = lcm
+	id := domain.SessionID("reserved-runtime-candidates")
+	key := "mer\x00github:acme/mer#109"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-109", RuntimeHandleIDs: []string{"native-109", "tmux-109"}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#109", Kind: domain.KindWorker}
+	rt.fencedResults = map[string]ports.FencedProbeResult{
+		"native-109": {Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+		"tmux-109":   {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent},
+	}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if lcm.completed != 1 || got.Metadata.RuntimeHandleID != "native-109" || got.Metadata.RuntimeLaunchID != "launch-109" {
+		t.Fatalf("adopted runtime = %+v, completed=%d", got.Metadata, lcm.completed)
+	}
+	if len(rt.fencedRefs) != 2 || st.trackerIntakePending[key] != id {
+		t.Fatalf("candidate probes/pending = %+v/%q", rt.fencedRefs, st.trackerIntakePending[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsSettlesAbsentReservedCandidates(t *testing.T) {
+	m, st, rt, _ := newManager()
+	id := domain.SessionID("absent-runtime-candidates")
+	key := "mer\x00github:acme/mer#1090"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-1090", RuntimeHandleIDs: []string{"native-1090", "tmux-1090"}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#1090", Kind: domain.KindWorker}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("absent candidate claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if len(rt.fencedRefs) < 2 {
+		t.Fatalf("candidate probes = %+v, want both handles", rt.fencedRefs)
+	}
+}
+
+func TestReconcileTrackerIntakeAdoptionRevalidatesAfterKill(t *testing.T) {
+	m, st, rt, _ := newManager()
+	lcm := &fakeLCM{store: st}
+	m.lcm = lcm
+	id := domain.SessionID("adoption-kill-race")
+	key := "mer\x00github:acme/mer#1091"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-1091", RuntimeHandleIDs: []string{"runtime-1091"}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#1091", Kind: domain.KindWorker}
+	rt.aliveByHandle = map[string]bool{"runtime-1091": true}
+	probeEntered := make(chan struct{})
+	probeRelease := make(chan struct{})
+	var probeMu sync.Mutex
+	blocked := false
+	rt.onFencedProbe = func(_ ports.FencedRuntimeRef, _ ports.FencedProbeResult) {
+		probeMu.Lock()
+		if blocked {
+			probeMu.Unlock()
+			return
+		}
+		blocked = true
+		close(probeEntered)
+		probeMu.Unlock()
+		<-probeRelease
+	}
+
+	reconciled := make(chan error, 1)
+	go func() { reconciled <- m.ReconcileTrackerIntakeClaims(context.Background()) }()
+	select {
+	case <-probeEntered:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not probe the reserved runtime before adoption")
+	}
+	if _, err := m.Kill(context.Background(), id); err != nil {
+		t.Fatalf("Kill(): %v", err)
+	}
+	close(probeRelease)
+	if err := <-reconciled; err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if lcm.completed != 0 || !st.sessions[id].IsTerminated {
+		t.Fatalf("stale adoption resurrected killed row: completed=%d session=%+v", lcm.completed, st.sessions[id])
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("killed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
 	}
 }
 
@@ -3276,9 +3396,41 @@ func TestKillFencesEveryReservedTrackerIntakeRuntime(t *testing.T) {
 	}
 }
 
+func TestKillTrackerIntakeUsesReservedWorkspaceBeforePublication(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("reserved-workspace-kill")
+	issueID := domain.IssueID("github:acme/mer#1100")
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI}
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: "ao/reserved-workspace-kill/root", WorkspacePath: "/ws/reserved-workspace-kill", WorkspaceRepoPath: "/repo/mer",
+		WorkspaceCreationIntent: true, RuntimeLaunchID: "launch-1100", RuntimeHandleIDs: []string{"runtime-1100"}, DeliveryPossible: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
+
+	freed, err := m.Kill(context.Background(), id)
+	if err != nil || !freed {
+		t.Fatalf("Kill() = %t, %v, want reserved workspace removed", freed, err)
+	}
+	if ws.destroyed != 1 || ws.lastDestroyInfo.Path != "/ws/reserved-workspace-kill" {
+		t.Fatalf("reserved workspace cleanup = calls %d info %+v", ws.destroyed, ws.lastDestroyInfo)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("reserved workspace claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 func TestReconcileTrackerIntakeCreationIntentPreservesOccupiedPath(t *testing.T) {
 	m, st, _, ws := newManager()
-	ws.path = "/ws/occupied"
+	m.dataDir = t.TempDir()
+	ws.path = filepath.Join(m.dataDir, "worktrees", "occupied")
+	if err := os.MkdirAll(ws.path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	project := st.projects["mer"]
+	project.Config.PreRemove = []string{"echo ran > cleanup-marker"}
+	st.projects["mer"] = project
 	ws.createErr = gitworktree.ErrPathOccupied
 	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
 	issueID := domain.IssueID("github:acme/mer#111")
@@ -3308,6 +3460,9 @@ func TestReconcileTrackerIntakeCreationIntentPreservesOccupiedPath(t *testing.T)
 	}
 	if st.trackerIntakePending[key] != id {
 		t.Fatal("occupied creation intent released its pending claim")
+	}
+	if _, err := os.Stat(filepath.Join(ws.path, "cleanup-marker")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup hook ran in unowned occupied path: %v", err)
 	}
 }
 
@@ -3357,6 +3512,7 @@ func TestWorkspaceProjectRestoreRowsMergePartialMarkersWithRegistry(t *testing.T
 	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{
 		{Name: "api", RelativePath: "services/api"},
 		{Name: "web", RelativePath: "apps/web"},
+		{Name: "assets", RelativePath: "assets", GitStatus: domain.GitStatusNeedsInit},
 	}
 	rec := domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Metadata: domain.SessionMetadata{WorkspacePath: "/ws/root", Branch: "ao/mer-1/root"}}
 	markers := []domain.SessionWorktreeRecord{
@@ -3374,6 +3530,11 @@ func TestWorkspaceProjectRestoreRowsMergePartialMarkersWithRegistry(t *testing.T
 	}
 	if rows[1].BaseSHA != "api-base" || rows[2].BaseSHA != trackerIntakeWorkspaceCreationFence {
 		t.Fatalf("merged marker/create fences = api %q web %q", rows[1].BaseSHA, rows[2].BaseSHA)
+	}
+	for _, row := range rows {
+		if row.RepoName == "assets" {
+			t.Fatalf("asset directory reconstructed as worktree: %+v", rows)
+		}
 	}
 }
 

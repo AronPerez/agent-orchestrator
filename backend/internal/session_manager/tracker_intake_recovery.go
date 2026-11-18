@@ -92,34 +92,104 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		}
 	}
 	if claim.Recovery.DeliveryPossible && found && !rec.IsTerminated && !claim.Recovery.CapacityReleased {
-		if _, err := m.adoptTrackerIntakeRuntime(ctx, rec, claim.Recovery); err != nil {
-			return err
+		if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || strings.TrimSpace(rec.Metadata.RuntimeHandleID) != "" {
+			// Chat ownership is reattached by startup health without replaying the
+			// initial turn. A terminal row with a published handle is already
+			// controllable and keeps its no-replay claim until delivery settles.
+			return nil
 		}
-		// A live row still owns a possibly delivered task. Adoption makes a
-		// concrete terminal runtime controllable; all other ownership remains
-		// fenced without replay or teardown.
-		return nil
+		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec)
 	}
 	return m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
 }
 
-func (m *Manager) adoptTrackerIntakeRuntime(ctx context.Context, rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) (bool, error) {
+func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim, rec domain.SessionRecord) error {
+	reservation := claim.Recovery
+	handles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
+	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+	if len(handles) == 0 || launchID == "" {
+		return fmt.Errorf("recover tracker intake %s: possible delivery has no complete runtime fence", rec.ID)
+	}
+	alive := make([]string, 0, 1)
+	for _, handleID := range handles {
+		probe := m.runtime.ProbeFencedRuntime(ctx, ports.FencedRuntimeRef{
+			Handle: ports.RuntimeHandle{ID: handleID}, SessionID: rec.ID,
+			Generation: launchID, NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
+		})
+		switch probe.Liveness {
+		case ports.FencedAlive:
+			alive = append(alive, handleID)
+		case ports.FencedDead:
+		case ports.FencedUnknown:
+			return fmt.Errorf("recover tracker intake %s: runtime %s remains unresolved: %s", rec.ID, handleID, probe.Reason)
+		default:
+			return fmt.Errorf("recover tracker intake %s: runtime %s returned invalid liveness %q", rec.ID, handleID, probe.Liveness)
+		}
+	}
+	if len(alive) > 1 {
+		return fmt.Errorf("recover tracker intake %s: multiple reserved runtimes remain alive", rec.ID)
+	}
+	if len(alive) == 1 {
+		_, err := m.adoptTrackerIntakeRuntime(ctx, claim, alive[0])
+		return err
+	}
+	return m.settleAbsentTrackerIntakeRuntime(ctx, claim)
+}
+
+func (m *Manager) adoptTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim, handleID string) (bool, error) {
+	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
+		return false, fmt.Errorf("recover tracker intake %s: reserve adoption: %w", claim.SessionID, err)
+	}
+	defer m.endAgentOperation(claim.SessionID, agentOperationReconcile)
+	rec, found, err := m.store.GetSession(ctx, claim.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("recover tracker intake %s: reload session: %w", claim.SessionID, err)
+	}
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("recover tracker intake %s: reload claim: %w", claim.SessionID, err)
+	}
+	if !found || !pending || rec.IsTerminated || reservation.CapacityReleased || !reservation.DeliveryPossible ||
+		rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID {
+		return false, nil
+	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || strings.TrimSpace(rec.Metadata.RuntimeHandleID) != "" {
 		return false, nil
 	}
-	handles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
 	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
-	if len(handles) != 1 || launchID == "" {
+	if launchID == "" || !trackerIntakeHandleReserved(reservation.RuntimeHandleIDs, handleID) {
 		return false, nil
 	}
 	rec = applyTrackerIntakeRecovery(rec, reservation)
 	metadata := rec.Metadata
-	metadata.RuntimeHandleID = handles[0]
+	metadata.RuntimeHandleID = handleID
 	metadata.RuntimeLaunchID = launchID
 	if err := m.lcm.MarkSpawned(ctx, rec.ID, metadata); err != nil {
 		return false, fmt.Errorf("recover tracker intake %s: adopt reserved runtime: %w", rec.ID, err)
 	}
 	return true, nil
+}
+
+func (m *Manager) settleAbsentTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim) error {
+	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
+		return fmt.Errorf("recover tracker intake %s: reserve absent-runtime cleanup: %w", claim.SessionID, err)
+	}
+	defer m.endAgentOperation(claim.SessionID, agentOperationReconcile)
+	rec, found, err := m.store.GetSession(ctx, claim.SessionID)
+	if err != nil {
+		return fmt.Errorf("recover tracker intake %s: reload session: %w", claim.SessionID, err)
+	}
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
+	if err != nil {
+		return fmt.Errorf("recover tracker intake %s: reload claim: %w", claim.SessionID, err)
+	}
+	if !pending {
+		return nil
+	}
+	if !found {
+		rec = domain.SessionRecord{ID: claim.SessionID, ProjectID: claim.ProjectID, IssueID: claim.IssueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI}
+	}
+	return m.reconcileInterruptedTrackerIntake(ctx, rec, reservation)
 }
 
 func trackerIntakeHasRuntimeEvidence(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
@@ -334,6 +404,21 @@ func trackerIntakeWorkspaceInfo(rec domain.SessionRecord, reservation domain.Tra
 	return info
 }
 
+func trackerIntakeCleanupHooksSafe(ws ports.WorkspaceInfo, project *ports.WorkspaceProjectInfo) bool {
+	if ws.BaseSHA == trackerIntakeWorkspaceCreationFence {
+		return false
+	}
+	if project == nil {
+		return true
+	}
+	for _, repo := range project.Worktrees {
+		if repo.BaseSHA == trackerIntakeWorkspaceCreationFence || repo.CreationSHA == trackerIntakeWorkspaceCreationFence {
+			return false
+		}
+	}
+	return true
+}
+
 func applyTrackerIntakeRecovery(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) domain.SessionRecord {
 	if rec.Metadata.Branch == "" {
 		rec.Metadata.Branch = reservation.Branch
@@ -365,6 +450,16 @@ func uniqueTrackerIntakeHandles(handles []string) []string {
 		unique = append(unique, handle)
 	}
 	return unique
+}
+
+func trackerIntakeHandleReserved(handles []string, candidate string) bool {
+	candidate = strings.TrimSpace(candidate)
+	for _, handle := range handles {
+		if strings.TrimSpace(handle) == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func trackerIntakeHasTerminalEffect(rec domain.SessionRecord) bool {

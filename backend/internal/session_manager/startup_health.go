@@ -30,15 +30,23 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 		}
 		rec = current
 	}
-	_, pendingIntake, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+	intakeRecovery, pendingIntake, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
 	if err != nil {
 		return fmt.Errorf("check session %s: tracker intake claim: %w", rec.ID, err)
 	}
 	if pendingIntake {
-		// Pending claims are reconciled independently from the startup live pass.
-		// In particular, a possibly-delivered runtime adopted earlier in startup
-		// must not be immediately probed and stopped by this health check. The
-		// deduplicated claim scheduler owns both adoption and cleanup.
+		if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+			if intakeRecovery.DeliveryPossible && !intakeRecovery.CapacityReleased {
+				return m.reconnectPendingTrackerIntakeChat(ctx, rec, project)
+			}
+			if !intakeRecovery.DeliveryPossible {
+				return m.reconcileInterruptedTrackerIntake(ctx, rec, intakeRecovery)
+			}
+		}
+		// Pending terminal claims are reconciled independently from this live
+		// pass so a possibly-delivered runtime is never stopped as ordinary
+		// startup cleanup. A delivered Chat is handled above by reconnecting to
+		// its existing conversation without replaying the initial turn.
 		return nil
 	}
 	// Preserve cleanup of interrupted spawns that never committed a workspace.
@@ -79,6 +87,29 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 		return nil
 	}
 	return m.recordTerminalStoppedAtStartup(ctx, rec)
+}
+
+func (m *Manager) reconnectPendingTrackerIntakeChat(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord) error {
+	if m.chat == nil {
+		return ports.ErrChatUnsupported
+	}
+	if rec.Metadata.ProviderConversationID == "" {
+		return fmt.Errorf("check session %s: pending tracker intake chat has no provider conversation: %w", rec.ID, ErrIncompleteHandle)
+	}
+	if !m.chat.HasLiveChatController(rec.ID) {
+		_, err := m.resumeChatController(ctx, "check pending tracker intake", rec, project,
+			workspaceInfo(rec), false, true, "", domain.SessionInterfaceTransitionHistoryStrict)
+		if errors.Is(err, ports.ErrChatHostNotRunning) {
+			return m.recordAgentExited(ctx, rec)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+		return fmt.Errorf("check session %s: commit reattached tracker intake chat: %w", rec.ID, err)
+	}
+	return nil
 }
 
 // recordTerminalStoppedAtStartup keeps a terminal whose runtime ended while AO

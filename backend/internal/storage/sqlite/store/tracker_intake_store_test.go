@@ -243,12 +243,6 @@ func TestTrackerIntakeConfirmedStoppedDeliveryFenceDoesNotConsumeConcurrentCapac
 	}); err != nil {
 		t.Fatal(err)
 	}
-	created.IsTerminated = true
-	created.Activity = domain.Activity{State: domain.ActivityExited}
-	if err := store.UpdateSession(ctx, created); err != nil {
-		t.Fatalf("UpdateSession(terminated owner): %v", err)
-	}
-
 	second := sampleRecord("demo")
 	second.ID = "demo-2"
 	second.IssueID = "github:acme/demo#2"

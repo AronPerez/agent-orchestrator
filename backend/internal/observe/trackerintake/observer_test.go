@@ -402,13 +402,39 @@ func TestPollTreatsCapacityAsProjectScoped(t *testing.T) {
 	}
 }
 
+func TestPollDoesNotChargeReleasedPendingOwnerAgainstCapacity(t *testing.T) {
+	config := domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{
+		Enabled: true, Assignee: "alice", Limits: domain.AutomatedSessionLimits{MaxConcurrent: 1, MaxStartsPerPass: 1},
+	}}
+	store := &fakeStore{
+		projects: []domain.ProjectRecord{{ID: "demo", RepoOriginURL: "https://github.com/acme/demo.git", Config: config}},
+		sessions: []domain.SessionRecord{{ID: "demo-1", ProjectID: "demo", IssueID: "github:acme/demo#1"}},
+		pending: []domain.TrackerIntakePendingClaim{{
+			ProjectID: "demo", IssueID: "github:acme/demo#1", SessionID: "demo-1",
+			Recovery: domain.TrackerIntakeRecoveryReservation{DeliveryPossible: true, CapacityReleased: true},
+		}},
+	}
+	tracker := &fakeTracker{issues: []domain.Issue{
+		{ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#1"}, State: domain.IssueOpen, Assignees: []string{"alice"}},
+		{ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#2"}, State: domain.IssueOpen, Assignees: []string{"alice"}},
+	}}
+	spawner := &fakeSpawner{}
+
+	if err := New(singleResolver(tracker), store, spawner, Config{Logger: discardLogger()}).Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(spawner.calls) != 1 || spawner.calls[0].IssueID != "github:acme/demo#2" {
+		t.Fatalf("spawn calls = %+v, want unrelated issue after released pending owner", spawner.calls)
+	}
+}
+
 func TestIntakeSessionStateExcludesTerminatedAndOtherProjectSessions(t *testing.T) {
 	sessions := []domain.SessionRecord{
 		{ID: "demo-1", ProjectID: "demo", IssueID: "github:acme/demo#12", IsTerminated: true},
 		{ID: "demo-2", ProjectID: "demo", IssueID: "github:acme/demo#12"},
 		{ID: "other-1", ProjectID: "other", IssueID: "github:acme/demo#13"},
 	}
-	seen, active := intakeSessionState(sessions, "demo")
+	seen, active := intakeSessionState(sessions, nil, "demo")
 	if !seen["github:acme/demo#12"] {
 		t.Fatal("issue with a live session alongside a terminated one should still be seen")
 	}
@@ -421,7 +447,7 @@ func TestIntakeSessionStateIgnoresOnlyTerminatedSession(t *testing.T) {
 	sessions := []domain.SessionRecord{
 		{ID: "demo-1", ProjectID: "demo", IssueID: "github:acme/demo#12", IsTerminated: true},
 	}
-	seen, active := intakeSessionState(sessions, "demo")
+	seen, active := intakeSessionState(sessions, nil, "demo")
 	if seen["github:acme/demo#12"] || active != 0 {
 		t.Fatalf("state = (%+v, %d), want no live intake sessions", seen, active)
 	}
@@ -820,6 +846,8 @@ type fakeStore struct {
 	reconcileErr error
 	handled      map[domain.ProjectID][]domain.TrackerIntakeHandledRecord
 	handledErr   error
+	pending      []domain.TrackerIntakePendingClaim
+	pendingErr   error
 }
 
 func (f *fakeStore) ListProjects(context.Context) ([]domain.ProjectRecord, error) {
@@ -843,6 +871,10 @@ func (f *fakeStore) ReconcileTrackerIntakeClaims(_ context.Context, projectID do
 
 func (f *fakeStore) ListTrackerIntakeHandled(_ context.Context, projectID domain.ProjectID) ([]domain.TrackerIntakeHandledRecord, error) {
 	return append([]domain.TrackerIntakeHandledRecord(nil), f.handled[projectID]...), f.handledErr
+}
+
+func (f *fakeStore) ListPendingTrackerIntakeClaims(context.Context) ([]domain.TrackerIntakePendingClaim, error) {
+	return append([]domain.TrackerIntakePendingClaim(nil), f.pending...), f.pendingErr
 }
 
 type fakeTracker struct {

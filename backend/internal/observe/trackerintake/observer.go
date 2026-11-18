@@ -44,6 +44,7 @@ type Store interface {
 	ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error)
 	ReconcileTrackerIntakeClaims(ctx context.Context, projectID domain.ProjectID, handledAt time.Time) error
 	ListTrackerIntakeHandled(ctx context.Context, projectID domain.ProjectID) ([]domain.TrackerIntakeHandledRecord, error)
+	ListPendingTrackerIntakeClaims(ctx context.Context) ([]domain.TrackerIntakePendingClaim, error)
 }
 
 // Spawner is the session creation surface used by intake.
@@ -209,11 +210,16 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 		return true
 	}
 	projectID := domain.ProjectID(project.ID)
-	seen, active := intakeSessionState(sessions, projectID)
 	if err := o.store.ReconcileTrackerIntakeClaims(ctx, projectID, now); err != nil {
 		o.logger.Error("tracker intake: reconcile pending claims failed", "project", project.ID, "err", err)
 		return true
 	}
+	pending, err := o.store.ListPendingTrackerIntakeClaims(ctx)
+	if err != nil {
+		o.logger.Error("tracker intake: list pending claims failed", "project", project.ID, "err", err)
+		return true
+	}
+	seen, active := intakeSessionState(sessions, pending, projectID)
 	handled, err := o.store.ListTrackerIntakeHandled(ctx, projectID)
 	if err != nil {
 		o.logger.Error("tracker intake: list handled items failed", "project", project.ID, "err", err)
@@ -336,21 +342,35 @@ func containsFold(values []string, needle string) bool {
 	return false
 }
 
-// intakeSessionState treats every live issue-linked session in the project as
-// consuming capacity. Creation provenance is optional telemetry rather than a
-// durable session fact, so admission stays conservative when provenance is
-// missing or predates tracker intake.
-func intakeSessionState(sessions []domain.SessionRecord, projectID domain.ProjectID) (map[domain.IssueID]bool, int) {
+// intakeSessionState combines live issue-linked rows with the durable pending
+// ledger. A released claim remains seen so its issue cannot replay, but no
+// longer consumes concurrency while workspace cleanup finishes. Creation
+// provenance is optional telemetry, so rows without a claim stay conservative.
+func intakeSessionState(sessions []domain.SessionRecord, pending []domain.TrackerIntakePendingClaim, projectID domain.ProjectID) (map[domain.IssueID]bool, int) {
 	seen := make(map[domain.IssueID]bool)
-	active := 0
+	active := make(map[domain.SessionID]struct{})
+	released := make(map[domain.SessionID]struct{})
+	for _, claim := range pending {
+		if claim.ProjectID != projectID {
+			continue
+		}
+		seen[claim.IssueID] = true
+		if claim.Recovery.CapacityReleased {
+			released[claim.SessionID] = struct{}{}
+			continue
+		}
+		active[claim.SessionID] = struct{}{}
+	}
 	for _, sess := range sessions {
 		if sess.ProjectID != projectID || sess.IssueID == "" || sess.IsTerminated {
 			continue
 		}
 		seen[sess.IssueID] = true
-		active++
+		if _, ok := released[sess.ID]; !ok {
+			active[sess.ID] = struct{}{}
+		}
 	}
-	return seen, active
+	return seen, len(active)
 }
 
 // CanonicalIssueID stores tracker issue ids in sessions.issue_id with the

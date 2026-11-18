@@ -175,6 +175,34 @@ func TestStartupHealthPendingTrackerChatPreservesClaimWhenControllerStopIsUnconf
 	}
 }
 
+func TestStartupHealthPendingDeliveredTrackerChatReattachesWithoutReplay(t *testing.T) {
+	m, st, _, _ := newManager()
+	launcher := &healthCheckLauncher{}
+	m.chat = launcher
+	m.runBackground = func(work func()) { work() }
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-delivered"
+	rec.IssueID = "github:acme/mer#46"
+	rec.Metadata.ControllerGeneration = "controller-46"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true, DeliveryPossible: true,
+	}
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground(): %v", err)
+	}
+	if len(launcher.checks) != 1 || !launcher.checks[0].ReconnectOnly {
+		t.Fatalf("pending delivered chat reconnects = %+v, want one reconnect-only start", launcher.checks)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID {
+		t.Fatalf("reattached chat claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 // flakyStartupLauncher fails reattach attempts until failures runs out, then
 // reports a live controller the way a successful reconnect does.
 type flakyStartupLauncher struct {
