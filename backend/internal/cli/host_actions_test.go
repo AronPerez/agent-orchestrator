@@ -847,9 +847,15 @@ func TestSavedHostActionsRejectConflictingOrUnsupportedTargets(t *testing.T) {
 		}
 	})
 
-	t.Run("spawn claim is rejected before host lookup", func(t *testing.T) {
-		aoHome(t)
-		_, _, err := executeCLI(t, Deps{}, "spawn", "--host", "missing", "--project", "demo", "--agent", "codex",
+	t.Run("spawn claim is rejected for a saved host", func(t *testing.T) {
+		configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/identity" {
+				writeSavedHostIdentity(t, w, r)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		_, _, err := executeCLI(t, Deps{}, "spawn", "--host", testSavedHostLabel, "--project", "demo", "--agent", "codex",
 			"--name", "worker", "--claim-pr", "42")
 		if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--claim-pr is not supported with --host") {
 			t.Fatalf("err=%v exit=%d, want remote-claim usage error", err, ExitCode(err))

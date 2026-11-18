@@ -16,7 +16,6 @@ import (
 )
 
 type sendOptions struct {
-	host            string
 	session         string
 	message         string
 	steer           bool
@@ -67,7 +66,6 @@ func newSendCommand(ctx *commandContext) *cobra.Command {
 			return ctx.sendMessage(cmd.Context(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.host, "host", "", "Saved remote host label or host ID (cannot be combined with --url or AO_URL)")
 	cmd.Flags().StringVar(&opts.session, "session", "", "Session id (required)")
 	cmd.Flags().StringVar(&opts.message, "message", "", "Message body (required unless --recover-only)")
 	cmd.Flags().BoolVar(&opts.steer, "steer", false, "Steer an active Chat turn, or start the next turn when idle")
