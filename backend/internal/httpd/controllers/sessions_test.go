@@ -4826,8 +4826,11 @@ func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
 		t.Fatal("timed out waiting for overlap change event")
 	}
 	_, _, overlapReads = svc.projectOverlapCallState()
-	if overlapReads != 2 {
-		t.Fatalf("overlap reads after change = %d, want 2", overlapReads)
+	// A single filesystem write can produce more than one watcher edge. Each
+	// edge is allowed to trigger another authoritative read; the contract here
+	// is that at least one read happens after the startup reconciliation.
+	if overlapReads < 2 {
+		t.Fatalf("overlap reads after change = %d, want at least 2", overlapReads)
 	}
 }
 
