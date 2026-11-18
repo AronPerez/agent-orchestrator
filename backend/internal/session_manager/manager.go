@@ -4413,29 +4413,9 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		} else if strings.TrimSpace(rec.Metadata.ProviderConversationID) == "" {
 			return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, ErrIncompleteHandle)
 		}
-		controllerGeneration, trackerReservation, trackerPending, err := m.reserveTrackerIntakeChatRelaunch(
-			ctx, rec.ID, ws, reservedGeneration,
+		return m.resumeChatController(
+			ctx, operation, rec, project, ws, requireNativeHistory, false, reservedGeneration, historyPolicy,
 		)
-		if err != nil {
-			return RestoreResult{}, relaunchFailed("tracker intake controller fence", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
-		}
-		result, err := m.resumeChatController(
-			ctx, operation, rec, project, ws, requireNativeHistory, false, controllerGeneration, historyPolicy,
-		)
-		if err != nil {
-			return RestoreResult{}, err
-		}
-		if !trackerPending {
-			return result, nil
-		}
-		if trackerReservation.DeliveryPossible {
-			if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
-				return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: commit resumed tracker intake claim: %w", operation, rec.ID, err))
-			}
-		} else if err := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); err != nil {
-			return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: publish resumed tracker intake owner: %w", operation, rec.ID, err))
-		}
-		return result, nil
 	}
 
 	var env map[string]string

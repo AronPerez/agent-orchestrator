@@ -544,6 +544,130 @@ func TestChatTrackerIntakePreSendCleanupFailureResumePublishesControllerFence(t 
 	}
 }
 
+func TestCheckSessionHealth_PublishedUndeliveredTrackerChatReconnectsWithoutHandling(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, st, _ := newChatManager(launcher)
+	id := domain.SessionID("mer-published-chat")
+	issueID := domain.IssueID("github:acme/mer#822")
+	key := "mer\x00" + string(issueID)
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: chatTestProject, IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/mer-published-chat/root", WorkspacePath: "/ws/mer-published-chat",
+			ProviderConversationID: "thread-1", ControllerGeneration: "resumed-generation",
+		},
+	}
+	st.sessions[id] = rec
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-published-chat", Branch: "ao/mer-published-chat/root",
+		ControllerPossible: true, ControllerGeneration: "resumed-generation", RelaunchPublished: true,
+	}
+
+	if err := m.checkSessionHealth(context.Background(), rec); err != nil {
+		t.Fatalf("checkSessionHealth(): %v", err)
+	}
+	if len(launcher.started) != 1 {
+		t.Fatalf("Chat starts = %d, want one reconnect", len(launcher.started))
+	}
+	start := launcher.started[0]
+	if !start.ReconnectOnly || start.ControllerGeneration != "resumed-generation" {
+		t.Fatalf("reconnect = %+v, want reconnect-only reserved generation", start)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.RelaunchPublished || reservation.DeliveryPossible || reservation.CapacityReleased ||
+		reservation.ControllerGeneration != "resumed-generation" {
+		t.Fatalf("reconnected reservation = %+v, want unchanged undelivered published fence", reservation)
+	}
+	if st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("reconnect changed claim: pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntake_PublishedUndeliveredChatExitReleasesCapacityWithoutTeardown(t *testing.T) {
+	launcher := &recordingLauncher{live: true}
+	m, st, _ := newChatManager(launcher)
+	ws := m.workspace.(*fakeWorkspace)
+	id := domain.SessionID("mer-exited-chat")
+	issueID := domain.IssueID("github:acme/mer#823")
+	key := "mer\x00" + string(issueID)
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: chatTestProject, IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/mer-exited-chat/root", WorkspacePath: "/ws/mer-exited-chat",
+			ProviderConversationID: "thread-1", ControllerGeneration: "resumed-generation",
+		},
+	}
+	st.sessions[id] = rec
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-exited-chat", Branch: "ao/mer-exited-chat/root",
+		ControllerPossible: true, ControllerGeneration: "resumed-generation", RelaunchPublished: true,
+	}
+
+	if _, err := m.ExitAgent(context.Background(), id); err != nil {
+		t.Fatalf("ExitAgent(): %v", err)
+	}
+	launcher.live = false
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited {
+		t.Fatalf("exited Chat owner = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.RelaunchPublished || reservation.DeliveryPossible || !reservation.CapacityReleased ||
+		reservation.ReleasedControllerGeneration != "resumed-generation" {
+		t.Fatalf("settled Chat reservation = %+v, want released capacity for stopped generation", reservation)
+	}
+	if len(launcher.stopped) != 1 || ws.destroyed != 0 || st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("reconciliation stopped=%v destroyed=%d pending=%q handled=%q",
+			launcher.stopped, ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestRelaunchSession_PublishedUndeliveredChatPreStartFailurePreservesFence(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, st, _ := newChatManager(launcher)
+	id := domain.SessionID("mer-second-resume")
+	issueID := domain.IssueID("github:acme/mer#824")
+	key := "mer\x00" + string(issueID)
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: chatTestProject, IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityExited},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/mer-second-resume/root", WorkspacePath: "/ws/mer-second-resume",
+			ProviderConversationID: "thread-1", ControllerGeneration: "prior-generation",
+		},
+	}
+	prior := domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-second-resume", Branch: "ao/mer-second-resume/root",
+		ControllerPossible: true, ControllerGeneration: "prior-generation", RelaunchPublished: true,
+		CapacityReleased: true, ReleasedControllerGeneration: "prior-generation",
+	}
+	st.sessions[id] = rec
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = prior
+	m.chat = nil
+
+	_, err := m.relaunchSessionWithPolicyAndGeneration(
+		context.Background(), "resume agent", rec, st.projects[string(chatTestProject)], workspaceInfo(rec),
+		nil, false, false, "", domain.SessionInterfaceTransitionHistoryStrict, nil,
+	)
+	if !errors.Is(err, ports.ErrChatUnsupported) {
+		t.Fatalf("relaunch error = %v, want Chat unsupported", err)
+	}
+	if got := st.trackerIntakeRecovery[id]; !reflect.DeepEqual(got, prior) {
+		t.Fatalf("pre-start failure changed published fence:\n got: %+v\nwant: %+v", got, prior)
+	}
+}
+
 func (l *generationClaimFailureLauncher) StartChat(ctx context.Context, cfg ChatStart) (ChatStarted, error) {
 	var prepareErr error
 	cfg, prepareErr = prepareTestChatStart(ctx, cfg)

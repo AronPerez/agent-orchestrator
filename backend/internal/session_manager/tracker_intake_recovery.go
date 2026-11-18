@@ -131,6 +131,13 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		}
 		return fmt.Errorf("recover tracker intake %s: released generation was replaced by a live owner", rec.ID)
 	}
+	if found && !rec.IsTerminated && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat &&
+		rec.Activity.State == domain.ActivityExited && trackerIntakeChatReservationMatchesSession(rec, claim.Recovery) {
+		settled, settleErr := m.settleExitedTrackerIntakeChat(ctx, claim)
+		if settleErr != nil || settled {
+			return settleErr
+		}
+	}
 	if found && !rec.IsTerminated && rec.Activity.State == domain.ActivityExited &&
 		trackerIntakeRuntimeReservationMatchesSession(rec, claim.Recovery) &&
 		claim.Recovery.CapacityReleased && claim.Recovery.ReleasesCapacityFor(rec) {
@@ -181,6 +188,42 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec)
 	}
 	return m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
+}
+
+// settleExitedTrackerIntakeChat preserves a published Chat session after an
+// exact-generation stop. A delivered task becomes handled; an undelivered user
+// resume retains its issue-level fence while returning only its concurrency
+// slot. Neither case retires the resumable session or its workspace.
+func (m *Manager) settleExitedTrackerIntakeChat(ctx context.Context, claim domain.TrackerIntakePendingClaim) (bool, error) {
+	rec, found, err := m.store.GetSession(ctx, claim.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("recover tracker intake %s: reload stopped Chat session: %w", claim.SessionID, err)
+	}
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("recover tracker intake %s: reload stopped Chat claim: %w", claim.SessionID, err)
+	}
+	if !found || !pending || rec.IsTerminated || rec.Activity.State != domain.ActivityExited ||
+		domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat ||
+		rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID ||
+		!trackerIntakeChatReservationMatchesSession(rec, reservation) {
+		return false, nil
+	}
+	if reservation.DeliveryPossible {
+		if err := m.store.CommitStoppedTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+			return true, fmt.Errorf("recover tracker intake %s: commit stopped Chat delivery: %w", rec.ID, err)
+		}
+		return true, nil
+	}
+	if !reservation.RelaunchPublished {
+		return false, nil
+	}
+	if !reservation.CapacityReleased {
+		if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+			return true, fmt.Errorf("recover tracker intake %s: release stopped Chat relaunch capacity: %w", rec.ID, err)
+		}
+	}
+	return true, nil
 }
 
 func trackerIntakeClaimDefersToSessionHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {

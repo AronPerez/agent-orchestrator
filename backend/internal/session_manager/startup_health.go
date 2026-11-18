@@ -47,6 +47,11 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 			if intakeRecovery.DeliveryPossible && !intakeRecovery.CapacityReleased {
 				return m.reconnectPendingTrackerIntakeChat(ctx, rec, project)
 			}
+			if !intakeRecovery.DeliveryPossible && !intakeRecovery.CapacityReleased &&
+				intakeRecovery.RelaunchPublished && rec.Activity.State != domain.ActivityExited &&
+				trackerIntakeChatReservationMatchesSession(rec, intakeRecovery) {
+				return m.reconnectPublishedTrackerIntakeChat(ctx, rec, project, intakeRecovery)
+			}
 			if !intakeRecovery.DeliveryPossible {
 				// The per-claim background job owns interrupted launch teardown.
 				// Cleanup hooks intentionally have no default timeout, so running
@@ -98,6 +103,35 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 		return nil
 	}
 	return m.recordTerminalStoppedAtStartup(ctx, rec)
+}
+
+func (m *Manager) reconnectPublishedTrackerIntakeChat(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	project domain.ProjectRecord,
+	reservation domain.TrackerIntakeRecoveryReservation,
+) error {
+	if m.chat == nil {
+		return ports.ErrChatUnsupported
+	}
+	if rec.Metadata.ProviderConversationID == "" {
+		return fmt.Errorf("check session %s: published tracker intake chat has no provider conversation: %w", rec.ID, ErrIncompleteHandle)
+	}
+	if m.chat.HasLiveChatController(rec.ID) {
+		return nil
+	}
+	_, err := m.resumeChatController(ctx, "check published tracker intake", rec, project,
+		workspaceInfo(rec), false, true, reservation.ControllerGeneration, domain.SessionInterfaceTransitionHistoryStrict)
+	if errors.Is(err, ports.ErrChatHostNotRunning) {
+		if recordErr := m.recordAgentExited(ctx, rec); recordErr != nil {
+			return recordErr
+		}
+		if releaseErr := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); releaseErr != nil {
+			return fmt.Errorf("check session %s: release stopped published tracker intake chat: %w", rec.ID, releaseErr)
+		}
+		return nil
+	}
+	return err
 }
 
 func (m *Manager) reconnectPendingTrackerIntakeChat(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord) error {

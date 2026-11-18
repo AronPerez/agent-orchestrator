@@ -688,6 +688,16 @@ func (m *Manager) resumeChatController(
 		target := awakeTargets[0]
 		awakeTarget = &target
 	}
+	var trackerReservation domain.TrackerIntakeRecoveryReservation
+	var trackerPending bool
+	if !reconnectOnly {
+		controllerGeneration, trackerReservation, trackerPending, err = m.reserveTrackerIntakeChatRelaunch(
+			ctx, rec.ID, ws, controllerGeneration,
+		)
+		if err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake controller fence", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
+		}
+	}
 	var completionErr error
 	_, err = m.chat.StartChat(ctx, ChatStart{
 		AwakeReconnectTarget:    awakeTarget,
@@ -812,6 +822,15 @@ func (m *Manager) resumeChatController(
 		}
 		m.requireChatLogin(ctx, rec.ID, err)
 		return RestoreResult{}, relaunchFailed("chat start", fmt.Errorf("%s %s: resume chat: %w", operation, rec.ID, agentlaunch.RedactError(err, project.Config.Env)))
+	}
+	if trackerPending {
+		if trackerReservation.DeliveryPossible {
+			if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+				return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: commit resumed tracker intake claim: %w", operation, rec.ID, err))
+			}
+		} else if err := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: publish resumed tracker intake owner: %w", operation, rec.ID, err))
+		}
 	}
 
 	restored, err := m.getRecord(ctx, rec.ID)
