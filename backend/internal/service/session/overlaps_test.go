@@ -1208,6 +1208,53 @@ func TestReconcileProjectOverlapNoticesConfirmsOriginalAmbiguousPayload(t *testi
 	}
 }
 
+func TestReconcileProjectOverlapNoticesKeepsAmbiguousAttemptAcrossInconclusiveConfirmation(t *testing.T) {
+	tests := []struct {
+		name           string
+		confirmOutcome sessionguard.Outcome
+		confirmErr     error
+	}{
+		{name: "suppressed", confirmOutcome: sessionguard.SuppressedAwaitingUser},
+		{name: "failed", confirmOutcome: sessionguard.SuppressedUnknown, confirmErr: errors.New("read receipt")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMemoryOverlapNoticeStore()
+			store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+			store.sessions["demo-a"] = domain.SessionRecord{ID: "demo-a", ProjectID: "demo"}
+			store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo"}
+			nudger := &recordingOverlapNudger{
+				outcomes: map[domain.SessionID][]sessionguard.Outcome{"demo-a": {sessionguard.Sent, tc.confirmOutcome, sessionguard.Sent}},
+				errors:   map[domain.SessionID][]error{"demo-a": {errors.New("delivery unconfirmed"), tc.confirmErr, nil}},
+			}
+			svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+			first := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}}}
+			changed := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"renamed.go"}}}}
+
+			if err := svc.reconcileProjectOverlapNotices(context.Background(), first); err == nil {
+				t.Fatal("first reconcile unexpectedly ignored the ambiguous delivery")
+			}
+			if err := svc.reconcileProjectOverlapNotices(context.Background(), changed); (err != nil) != (tc.confirmErr != nil) {
+				t.Fatalf("inconclusive confirmation error = %v, want error=%t", err, tc.confirmErr != nil)
+			}
+			if err := svc.reconcileProjectOverlapNotices(context.Background(), changed); err != nil {
+				t.Fatalf("recovered confirmation: %v", err)
+			}
+			if len(nudger.calls) != 4 {
+				t.Fatalf("calls = %+v, want initial sends and two confirmations", nudger.calls)
+			}
+			for _, call := range nudger.calls[2:] {
+				if !call.confirmOnly || call.deliveryID != nudger.calls[0].deliveryID || call.message != nudger.calls[0].message {
+					t.Fatalf("confirmation lost the original attempt: first=%+v confirm=%+v", nudger.calls[0], call)
+				}
+			}
+			if !store.hasNotice("demo-a", "demo-b") {
+				t.Fatal("recovered confirmation was not recorded")
+			}
+		})
+	}
+}
+
 func TestReconcileProjectOverlapNoticesRetiresUnconfirmedAttemptAfterCleanScan(t *testing.T) {
 	store := newMemoryOverlapNoticeStore()
 	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
