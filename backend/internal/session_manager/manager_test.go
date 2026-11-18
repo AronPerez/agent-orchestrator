@@ -8992,6 +8992,103 @@ func TestReconcileTrackerIntakeDeliveredOwnerExitCommitsStoppedClaimWithoutTeard
 	}
 }
 
+func TestRestore_PendingUndeliveredNativeOwnerNaturalExitReleasesCapacityWithoutTeardown(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#1203")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task", AgentSessionID: "native-1",
+		},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"old-runtime"},
+		CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+	}
+	rt := &fakeRuntime{createIDs: []string{"new-runtime"}}
+	ws := &fakeWorkspace{}
+	lcm := &fakeLCM{store: st}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: ws,
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm,
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	rec := st.sessions["mer-1"]
+	rt.exitedLaunches = map[string]bool{rec.Metadata.RuntimeLaunchID: true}
+	if err := m.recordAgentExited(ctx, rec); err != nil {
+		t.Fatalf("recordAgentExited(): %v", err)
+	}
+	if st.sessions["mer-1"].RuntimeReleased() {
+		t.Fatal("natural exit unexpectedly recorded an explicit runtime release")
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions["mer-1"]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited {
+		t.Fatalf("naturally exited native owner = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery["mer-1"]
+	if !reservation.RelaunchPublished || reservation.DeliveryPossible || !reservation.CapacityReleased ||
+		reservation.ReleasedRuntimeLaunchID != got.Metadata.RuntimeLaunchID {
+		t.Fatalf("settled natural-exit reservation = %+v, want released capacity", reservation)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != "mer-1" {
+		t.Fatalf("natural exit destroyed runtime=%d workspace=%d or changed pending=%q",
+			rt.destroyed, ws.destroyed, st.trackerIntakePending[key])
+	}
+}
+
+func TestReconcileTrackerIntakeDeliveredOwnerNaturalExitCommitsStoppedClaimWithoutTeardown(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("naturally-exited-delivery")
+	issueID := domain.IssueID("github:acme/mer#1204")
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/naturally-exited-delivery", Branch: "b",
+			RuntimeHandleID: "delivery-runtime", RuntimeLaunchID: "delivery-launch",
+		},
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/naturally-exited-delivery", RuntimeLaunchID: "delivery-launch",
+		RuntimeHandleIDs: []string{"delivery-runtime"}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{"delivery-runtime": true}
+	rt.exitedLaunches = map[string]bool{"delivery-launch": true}
+
+	if err := m.recordAgentExited(ctx, st.sessions[id]); err != nil {
+		t.Fatalf("recordAgentExited(): %v", err)
+	}
+	if st.sessions[id].RuntimeReleased() {
+		t.Fatal("natural exit unexpectedly recorded an explicit runtime release")
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited {
+		t.Fatalf("naturally exited delivery = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.CapacityReleased || reservation.ReleasedRuntimeLaunchID != got.Metadata.RuntimeLaunchID {
+		t.Fatalf("handled natural-exit reservation = %+v, want released capacity", reservation)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("natural delivery exit destroyed runtime=%d workspace=%d or claim pending=%q handled=%q",
+			rt.destroyed, ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 func TestReconcileTrackerIntakeAdoptsInterruptedRelaunchGeneration(t *testing.T) {
 	for _, terminated := range []bool{false, true} {
 		t.Run(fmt.Sprintf("terminated=%t", terminated), func(t *testing.T) {
