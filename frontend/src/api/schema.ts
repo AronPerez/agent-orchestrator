@@ -1390,6 +1390,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/coordination/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List authenticated cross-machine coordination capabilities */
+        get: operations["getCoordinationCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/cues/{cueId}": {
         parameters: {
             query?: never;
@@ -7311,6 +7328,9 @@ export interface components {
             /** Format: int64 */
             totalTokens: number;
         };
+        CoordinationCapabilitiesResponse: {
+            capabilities: string[];
+        };
         CoordinationEvent: {
             /** Format: date-time */
             createdAt: string;
@@ -8736,6 +8756,7 @@ export interface components {
         };
         SendSessionMessageRequest: {
             attachment?: components["schemas"]["AttachmentInput"];
+            automationAuthored?: boolean;
             message: string;
             senderSessionId?: string;
             userAuthored?: boolean;
@@ -9655,6 +9676,7 @@ export interface components {
         };
         SteerConversationRequest: {
             attachments?: components["schemas"]["ConversationImageContentRequest"][];
+            automationAuthored?: boolean;
             clientMessageId?: string;
             recoverOnly?: boolean;
             senderSessionId?: string;
@@ -14907,6 +14929,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getCoordinationCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoordinationCapabilitiesResponse"];
                 };
             };
         };

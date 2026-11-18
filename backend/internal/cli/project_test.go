@@ -866,6 +866,11 @@ func TestProjectRemoveNamesTheDaemon(t *testing.T) {
 		var requests []string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests = append(requests, r.Method+" "+r.URL.Path)
+			if r.Method == http.MethodGet && r.URL.Path == "/api/v1/identity" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"hostId":"h_remote","apiVersion":1}`)
+				return
+			}
 			if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/projects/demo" {
 				http.NotFound(w, r)
 				return
