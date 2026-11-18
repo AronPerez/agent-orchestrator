@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { artifactLinkForPath, artifactLinkForTarget, findPlainReferences, findSessionLinks, hasArtifactDirectorySegment, isAoLink, parseArtifactLink, parseSessionLink, resolveSessionLink, sessionArtifactPath } from "./session-links";
+import { artifactLinkForPath, artifactLinkForTarget, findPlainReferences, findSessionLinks, hasArtifactDirectorySegment, isAoLink, isSessionLink, parseArtifactLink, parseSessionLink, resolveSessionLink, sessionArtifactPath } from "./session-links";
 
 describe("session links", () => {
 	it.each([
@@ -161,5 +161,22 @@ describe("session links", () => {
 		]);
 		expect(found("and/or CI/CD /review /tmp 1/2")).toEqual([]);
 		expect(findPlainReferences("proj-297", sessions)[0]!.node.url).toBe("ao://sessions/proj/proj-297");
+	});
+});
+
+describe("decision links", () => {
+	it("are in-app links but not session links", () => {
+		expect(isAoLink("ao://decisions/dec_1")).toBe(true);
+		expect(isSessionLink("ao://decisions/dec_1")).toBe(false);
+		expect(isAoLink("ao://decisions/dec_1/extra")).toBe(false);
+	});
+
+	it("are found in prose without swallowing adjacent punctuation", () => {
+		expect(findSessionLinks("See ao://decisions/dec_1.").map((link) => link.text)).toEqual(["ao://decisions/dec_1"]);
+		expect(findSessionLinks("(ao://decisions/dec_2), then ao://sessions/p/s!").map((link) => link.text)).toEqual([
+			"ao://decisions/dec_2",
+			"ao://sessions/p/s",
+		]);
+		expect(findSessionLinks("ao://decisions/dec_3/oops ao://decisions/")).toEqual([]);
 	});
 });

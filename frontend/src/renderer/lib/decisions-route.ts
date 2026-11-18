@@ -8,6 +8,11 @@ export const DECISIONS_QUERY_MAX = 500;
 // change the detail request's path or carry its own query.
 const CALL_ID = /^[A-Za-z0-9_-]+$/;
 
+/** True for a value that can name a decision call in a route or link. */
+export function isDecisionCallId(value: string): boolean {
+	return value.length > 0 && value.length <= DECISIONS_CALL_MAX && CALL_ID.test(value);
+}
+
 function boundedText(value: unknown, max: number): string | undefined {
 	if (typeof value === "number" && Number.isFinite(value)) value = String(value);
 	if (typeof value !== "string") return undefined;
@@ -23,7 +28,7 @@ function boundedText(value: unknown, max: number): string | undefined {
 export function validateDecisionsSearch(search: Record<string, unknown>): DecisionsSearch {
 	const result: DecisionsSearch = {};
 	const call = typeof search.call === "string" ? boundedText(search.call, DECISIONS_CALL_MAX) : undefined;
-	if (call && CALL_ID.test(call)) result.call = call;
+	if (call && isDecisionCallId(call)) result.call = call;
 	const q = boundedText(search.q, DECISIONS_QUERY_MAX);
 	if (q) result.q = q;
 	return result;
