@@ -26,6 +26,10 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 vi.mock("../hooks/useCloudCp", () => ({ useCloudCp: () => ({ ready: false, baseUrl: "", client: {} }) }));
 vi.mock("../hooks/useCloudOrg", () => ({ useCloudOrg: () => ({ org: undefined, ready: false }) }));
+vi.mock("../hooks/useProjectOverlaps", async (importOriginal) => ({
+	...await importOriginal<typeof import("../hooks/useProjectOverlaps")>(),
+	useProjectOverlaps: () => ({ data: undefined, isError: false }),
+}));
 vi.mock("../lib/shell-context", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/shell-context")>(), useShell: () => ({ daemonStatus: { state: "ready" } }) }));
 vi.mock("./SessionTopbarActions", () => ({ SessionTopbarActions: () => <div data-testid="shared-shell-topbar" /> }));
 vi.mock("./NotificationCenter", () => ({ NotificationCenter: () => <button aria-label="Notifications" type="button" /> }));
