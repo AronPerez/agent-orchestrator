@@ -4537,6 +4537,32 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 			return RestoreResult{}, relaunchFailed("after-start prompt", fmt.Errorf("%s %s: after-start prompt: %w", operation, rec.ID, err))
 		}
 	}
+	// A tracker intake worker whose first launch stopped before its prompt was
+	// delivered can be resumed from the saved prompt. That relaunch is itself a
+	// delivery attempt: persist the no-replay fence at the same boundary used by
+	// a fresh intake launch, then promote the pending claim only after delivery
+	// succeeds. Native restore and handoff/switch prompts do not replay the issue.
+	trackerIntakeSavedPrompt := mode == RestoreModeSavedPrompt && !switching && !savedNote && strings.TrimSpace(savedPrompt) != ""
+	var trackerIntakePriorReservation domain.TrackerIntakeRecoveryReservation
+	trackerIntakePending := false
+	trackerIntakeDeliveryMarked := false
+	if trackerIntakeSavedPrompt {
+		trackerIntakePriorReservation, trackerIntakePending, err = m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+		if err != nil {
+			m.cleanupSystemPromptDir(rec.ID)
+			return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: load pending tracker intake claim: %w", operation, rec.ID, err))
+		}
+	}
+	markTrackerIntakeDelivery := func() error {
+		if !trackerIntakePending || trackerIntakePriorReservation.DeliveryPossible || trackerIntakeDeliveryMarked {
+			return nil
+		}
+		if err := m.markTrackerIntakeDeliveryPossible(ctx, rec.ID); err != nil {
+			return err
+		}
+		trackerIntakeDeliveryMarked = true
+		return nil
+	}
 	if err := m.validateAgentBinary(argv); err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, relaunchFailed("agent binary", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
@@ -4580,12 +4606,29 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 			return RestoreResult{}, fmt.Errorf("%s %s: reserve switch launch: %w", operation, rec.ID, err)
 		}
 	}
+	if trackerIntakePending && delivery == ports.PromptDeliveryInCommand {
+		if err := markTrackerIntakeDelivery(); err != nil {
+			m.cleanupSystemPromptDir(rec.ID)
+			return RestoreResult{}, relaunchFailed("tracker intake delivery fence", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
+		}
+	}
 	if restartHandle == nil {
 		handle, err = m.runtime.Create(ctx, runtimeCfg)
 	} else {
 		handle, err = m.restartRuntime(ctx, *restartHandle, runtimeCfg)
 	}
 	if err != nil {
+		// A definite no-effect failure occurred before the in-command task could
+		// run, so restore the exact stopped-generation reservation and keep this
+		// issue retryable. Possible runtime effects retain DeliveryPossible even
+		// when adapter cleanup succeeded: the task may already have executed.
+		if trackerIntakeDeliveryMarked {
+			if _, possible := runtimeCreateEffect(err); !possible {
+				if restoreErr := m.store.ReserveTrackerIntakeRecovery(ctx, rec.ID, trackerIntakePriorReservation); restoreErr != nil {
+					err = errors.Join(err, restoreErr)
+				}
+			}
+		}
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, relaunchFailed("runtime", fmt.Errorf("%s %s: runtime: %w", operation, rec.ID, agentlaunch.RedactError(err, project.Config.Env)))
 	}
@@ -4663,7 +4706,11 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		if mode == RestoreModeNative {
 			afterStartPrompt = "" // restore native state without replaying a user turn
 		}
-		if err := m.deliverAfterStartPrompt(ctx, agent, launchCfg, handle, rec.ID, afterStartPrompt); err != nil {
+		var beforePrompt func() error
+		if trackerIntakePending && mode == RestoreModeSavedPrompt {
+			beforePrompt = markTrackerIntakeDelivery
+		}
+		if err := m.deliverAfterStartPromptWithFence(ctx, agent, launchCfg, handle, rec.ID, afterStartPrompt, beforePrompt); err != nil {
 			m.destroySpawnRuntimeAfterFailure(ctx, handle)
 			// A provider switch brings the source back itself, so its session
 			// must not be ended here.
@@ -4678,6 +4725,11 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 	}
 	if savedNote {
 		m.clearHandoffNote(ctx, rec.ID)
+	}
+	if trackerIntakePending {
+		if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: commit restored tracker intake claim: %w", operation, rec.ID, err))
+		}
 	}
 	updated, err := m.getRecord(ctx, rec.ID)
 	if err != nil {

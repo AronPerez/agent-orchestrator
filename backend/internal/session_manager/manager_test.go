@@ -8493,13 +8493,24 @@ func TestRestore_FallbackLaunchCarriesSystemPrompt(t *testing.T) {
 
 func TestRestore_FallbackLaunchDeliversPromptAfterStartWhenAgentRequestsIt(t *testing.T) {
 	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#115")
+	key := "mer\x00" + string(issueID)
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
 	st.sessions["mer-1"] = domain.SessionRecord{
-		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true,
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, IsTerminated: true,
 		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath:    "/ws/mer-1",
+		CapacityReleased: true,
 	}
 	rt := &fakeRuntime{}
 	msg := &fakeMessenger{}
+	deliveryFencedAtSend := false
+	msg.onSend = func(domain.SessionID, string) {
+		deliveryFencedAtSend = st.trackerIntakeRecovery["mer-1"].DeliveryPossible
+	}
 	recording := &recordingAgent{}
 	agent := &composedAfterStartAgent{afterStartAgent: afterStartAgent{recordingAgent: recording}}
 	m := New(Deps{
@@ -8528,6 +8539,12 @@ func TestRestore_FallbackLaunchDeliversPromptAfterStartWhenAgentRequestsIt(t *te
 	}
 	if rt.created != 1 {
 		t.Fatalf("runtime.Create = %d, want 1", rt.created)
+	}
+	if !deliveryFencedAtSend {
+		t.Fatal("saved tracker prompt reached the messenger before delivery was fenced")
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != "mer-1" {
+		t.Fatalf("restored claim pending=%q handled=%q, want durable handled fence", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
 	}
 }
 
@@ -8570,11 +8587,22 @@ func TestRestore_NativeAfterStartAgentResumesPassively(t *testing.T) {
 
 func TestRestore_CodexWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) {
 	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#114")
+	key := "mer\x00" + string(issueID)
 	st.sessions["mer-1"] = domain.SessionRecord{
-		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
 		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
 	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath:    "/ws/mer-1",
+		CapacityReleased: true,
+	}
 	rt := &fakeRuntime{}
+	deliveryFencedAtCreate := false
+	rt.onCreate = func() {
+		deliveryFencedAtCreate = st.trackerIntakeRecovery["mer-1"].DeliveryPossible
+	}
 	agent := &recordingAgent{}
 	m := New(Deps{
 		Runtime:   rt,
@@ -8605,8 +8633,96 @@ func TestRestore_CodexWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) 
 	if rt.created != 1 {
 		t.Fatalf("runtime.Create = %d, want 1", rt.created)
 	}
+	if !deliveryFencedAtCreate {
+		t.Fatal("saved tracker prompt entered runtime creation before delivery was fenced")
+	}
 	if st.sessions["mer-1"].IsTerminated {
 		t.Fatal("session must be live after fallback launch")
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != "mer-1" {
+		t.Fatalf("restored claim pending=%q handled=%q, want durable handled fence", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+
+	// Cleanup of the resumed session must not make its still-open issue eligible
+	// for another unattended intake launch.
+	delete(st.sessions, "mer-1")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 1}
+	_, _, _, err = m.Spawn(ctx, ports.SpawnConfig{
+		ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Prompt: "continue the task", RequestedMode: domain.SessionModeTUI, TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, ports.ErrTrackerIntakeHandled) {
+		t.Fatalf("Spawn(after restored session cleanup) error = %v, want ErrTrackerIntakeHandled", err)
+	}
+}
+
+func TestRestore_SavedPromptDefiniteRuntimeFailureRestoresUndeliveredTrackerClaim(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#116")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
+	}
+	prior := domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath:           "/ws/mer-1",
+		CapacityReleased:        true,
+		ReleasedRuntimeLaunchID: "stopped-launch",
+		CleanupConfirmed:        true,
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = prior
+	rt := &fakeRuntime{createErr: errors.New("runtime unavailable before process start")}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+		t.Fatal("Restore error = nil, want definite runtime failure")
+	}
+	got := st.trackerIntakeRecovery["mer-1"]
+	if got.DeliveryPossible || got.WorkspacePath != prior.WorkspacePath ||
+		got.CapacityReleased != prior.CapacityReleased || got.ReleasedRuntimeLaunchID != prior.ReleasedRuntimeLaunchID ||
+		got.CleanupConfirmed != prior.CleanupConfirmed {
+		t.Fatalf("recovery after definite no-effect failure = %+v, want prior undelivered reservation %+v", got, prior)
+	}
+	if st.trackerIntakePending[key] != "mer-1" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("failed restore claim pending=%q handled=%q, want retryable pending claim", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestRestore_SavedPromptPossibleRuntimeEffectKeepsDeliveryFenced(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#117")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1",
+	}
+	rt := &fakeRuntime{createErr: fakeRuntimeEffectError{
+		err: errors.New("runtime registry write failed after process start"), handle: ports.RuntimeHandle{ID: "partial-runtime"},
+		effect: ports.RuntimeEffectPossible, cleanup: ports.RuntimeCleanupSucceeded,
+	}}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+		t.Fatal("Restore error = nil, want possible runtime effect failure")
+	}
+	if got := st.trackerIntakeRecovery["mer-1"]; !got.DeliveryPossible {
+		t.Fatalf("recovery after possible runtime effect = %+v, want delivery fenced", got)
+	}
+	if st.trackerIntakePending[key] != "mer-1" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("uncertain restore claim pending=%q handled=%q, want fenced pending claim", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
 	}
 }
 
