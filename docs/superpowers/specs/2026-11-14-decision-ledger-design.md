@@ -60,7 +60,7 @@ The team call added four more:
 
 ## Non-goals
 
-- Other kinds of items from the old page: human-only steps, calls an agent made on the person's behalf ("Watching"), and the initiatives status table.
+- Other kinds of items from the old page: human-only steps and the initiatives status table. (Calls an agent made on the person's behalf, "Watching", were a non-goal until 2026-11-18, when the [autonomy-levels design delta](2026-11-18-autonomy-levels-design.md) added them as `decided` entries.)
 - More than one person. No teammates, no sharing, no permissions.
 - Sessions that run in Orchestrator's cloud sandboxes. The ledger covers sessions run by a machine's own Orchestrator.
 - Agreement between machines that distrust each other. All machines belong to one person, so there is no consensus protocol, signing or tamper-proofing.
@@ -181,6 +181,7 @@ Written by the session:
 | Links | Optional, up to five labelled URLs (a PR, a ticket, a document). |
 | Reference | Optional short external id such as a ticket number. Searchable. |
 | Story page | Optional. One self-contained page that tells the full story behind the call, for a decision that rests on a lot of evidence. See section 2a. |
+| Urgency, kind, prediction | Optional. Blocking or can wait; the kind of decision; and, in a project in observe mode, what the session would have decided on its own. Added by the [autonomy-levels design delta](2026-11-18-autonomy-levels-design.md). |
 
 Filled in by Orchestrator, never by the session: the project (id and name), the work stream (section 2c), the machine (host id and label), the owning session (id and display name at the time), and the time. The machine's label is its own hostname when the entry is written, so every device shows the same name for it. A session with no project may still raise a call; it is grouped under "No project".
 
@@ -275,7 +276,7 @@ The ledger is an append-only log. Each entry records one fact:
 | Origin sequence | 1, 2, 3 and so on per origin, with no gaps. Lets a machine ask a peer for "everything from origin X after number N" and notice a gap. |
 | Order stamp | A logical or hybrid clock value used to order entries the same way on every machine. |
 | Call id | The call the entry belongs to. |
-| Kind | `raised`, `answered`, `dismissed`, `delivered`, `outcome`, `withdrawn`, `retired` (with a true or false value), and later `reassigned`, and `asked` and `replied` if section 13 is built. |
+| Kind | `raised`, `answered`, `dismissed`, `delivered`, `outcome`, `withdrawn`, `retired` (with a true or false value), and later `reassigned`, `asked` and `replied` if section 13 is built, and `decided` and `overruled` from the [autonomy-levels design delta](2026-11-18-autonomy-levels-design.md). |
 | Payload | The kind's data, as JSON. |
 | Written at | Wall-clock time, for display only. |
 | Author | The person (with the surface: desktop, phone or their own shell) or a session (machine and session id). |
@@ -465,6 +466,7 @@ The reason for it is the flow described in the team call: the person gets a shor
 | 10 | A call's states are named Needs you, In progress and Done. The board's columns use those same names; there is no separate column wording. |
 | 11 | A call can carry an attached story page when the decision rests on a lot of evidence; small calls stay short text. The plain-language rules of the `readable-story` skill apply to every call. Orchestrator stays agent-neutral, and the person's project rules tell their sessions to use the skill. |
 | 12 | The board groups calls by project first, then by work stream inside each project. |
+| 13 | Autonomy levels (2026-11-18): per project, the person reserves kinds of decision; sessions record what they decide for the rest, with how to undo it, and the person can overrule. It ships observe-only first, adds urgency to calls, and makes an answer recorded in the ledger binding on every session. See the [autonomy-levels design delta](2026-11-18-autonomy-levels-design.md). |
 
 **Still open for the person:** whether to add asking for more from the call itself (section 13). Until it is chosen, it is a proposal and not part of the agreed design.
 

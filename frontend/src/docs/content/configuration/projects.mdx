@@ -58,6 +58,7 @@ ao project rm <project-id>
 | `reviewers` | Harnesses used for Orchestrator review runs. |
 | `trackerIntake` | Opt-in, read-only issue intake that can start workers. Also requires `AO_TRACKER_INTAKE=on` in the daemon environment. |
 | `containerReap` | Project-wide opt-out from Orchestrator's session-container cleanup. |
+| `autonomy` | Which kinds of decision belong to you. `mode` is `off` (the default) or `observe`. `reserved` lists decision kind ids; leave it out for the defaults. Run `ao decision kinds --project <id>` to see every kind. In `observe`, sessions name the kind of every call, ask before any action of a reserved kind, and record what they would have decided for the rest while still waiting for your answer. |
 
 `symlinks`, `agentRulesFile`, and `orchestratorRulesFile` must stay inside the repository. Orchestrator rejects absolute paths and paths that traverse outside it. Scratch projects do not support Git-only fields such as `defaultBranch` or `symlinks`.
 
