@@ -39,6 +39,7 @@ type DeliveryStore interface {
 	SetSessionPlanFirstState(context.Context, domain.SessionID, domain.PlanFirstState) (bool, error)
 	AppendDecisionEntry(context.Context, domain.DecisionEntry, time.Time) (domain.DecisionEntry, domain.DecisionCall, error)
 	GetDecisionCall(context.Context, string) (domain.DecisionCall, bool, error)
+	ListDecisionCallsForSession(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
 	ListDecisionCallsAwaitingDelivery(context.Context, string) ([]domain.DecisionCall, error)
 }
 
@@ -204,6 +205,27 @@ func (d *Deliverer) deliverCurrent(ctx context.Context, call domain.DecisionCall
 		}
 		d.logFailure(call.ID, "load current plan answer", err)
 		return true, false
+	}
+	ownerCalls, err := d.store.ListDecisionCallsForSession(ctx, d.hostID, current.Raised.OwnerSessionID, -1)
+	if err != nil {
+		d.logFailure(call.ID, "load current plan call", err)
+		return true, false
+	}
+	var authoritative domain.DecisionCall
+	for _, candidate := range ownerCalls {
+		if candidate.Raised.OwnerSessionID == current.Raised.OwnerSessionID && isPlanFirstCall(candidate) {
+			authoritative = candidate
+			break
+		}
+	}
+	if authoritative.ID == "" {
+		d.logFailure(call.ID, "load current plan call", errors.New("owner has no plan-first call"))
+		return true, false
+	}
+	if authoritative.ID != current.ID || authoritative.StandingEntryID != current.StandingEntryID {
+		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
+			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSuperseded,
+		}), false
 	}
 	if current.Delivery == domain.DecisionDeliveryPending && !d.holdPlanFirstBeforeDelivery(ctx, current) {
 		return true, false

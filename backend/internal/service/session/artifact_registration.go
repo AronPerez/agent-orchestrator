@@ -200,6 +200,24 @@ func (s *Service) emitArtifactRegisterFailed(source, reason string) {
 
 // UnregisterArtifact forgets one registered path, after the user deleted it.
 func (s *Service) UnregisterArtifact(ctx context.Context, id domain.SessionID, path string) error {
+	rows, err := s.store.ListSessionArtifactsForSessions(ctx, []domain.SessionID{id})
+	if err != nil {
+		return err
+	}
+	for _, row := range rows[id] {
+		if row.Path != path || row.Role != domain.SessionArtifactRolePlanApproval {
+			continue
+		}
+		rec, err := s.GetRecord(ctx, id)
+		if err != nil {
+			return err
+		}
+		dir := cmp.Or(rec.Metadata.ArtifactDir, sessionartifacts.Dir(s.dataDir, id))
+		if err := sessionartifacts.RemovePlanApprovalPin(dir, row.ID); err != nil {
+			return fmt.Errorf("remove plan approval pin of %s: %w", id, err)
+		}
+		break
+	}
 	return s.store.RemoveSessionArtifact(ctx, id, path)
 }
 

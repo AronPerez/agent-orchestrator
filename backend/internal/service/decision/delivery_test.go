@@ -499,6 +499,39 @@ func TestDelivererSkipsSupersededPlanApprovalWhenWorkerResumes(t *testing.T) {
 	}
 }
 
+func TestDelivererSkipsAnOlderPlanCallWhenAReplacementIsAlreadyAnswered(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	approval := answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	decline := answeredPlanFirstCall(t, fixture, fixture.loose, 3, "")
+	messenger := newFakeDecisionMessenger()
+
+	pending, err := newTestDeliverer(fixture.store, messenger, "h_a").RunDue(context.Background())
+	if err != nil || pending != 0 {
+		t.Fatalf("delivery pending=%d err=%v", pending, err)
+	}
+	if len(messenger.messages) != 1 || messenger.messages[0].entryID != decline.StandingEntryID ||
+		!strings.Contains(messenger.messages[0].text, "Do not proceed") {
+		t.Fatalf("delivered messages = %+v, want only replacement decline %s", messenger.messages, decline.StandingEntryID)
+	}
+	entries, err := fixture.store.ListDecisionEntries(context.Background(), approval.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Kind != domain.DecisionKindDelivered {
+			continue
+		}
+		var payload domain.DecisionDeliveredPayload
+		if json.Unmarshal(entry.Payload, &payload) == nil && payload.ForEntry == approval.StandingEntryID && payload.Status == domain.DecisionDeliveredSuperseded {
+			return
+		}
+	}
+	t.Fatalf("older approval %s was not recorded as superseded: %+v", approval.StandingEntryID, entries)
+}
+
 func TestDelivererSerializesPlanApprovalWithChangedAnswer(t *testing.T) {
 	fixture := newDecisionService(t)
 	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
@@ -560,8 +593,8 @@ func TestDelivererSerializesPlanCallsForTheSameOwner(t *testing.T) {
 	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
 		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
 	}
+	older := answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
 	answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
-	replacement := raisePlanFirstCall(t, fixture, fixture.loose)
 	messenger := &blockingDecisionMessenger{
 		fakeDecisionMessenger: newFakeDecisionMessenger(), block: fixture.loose,
 		started: make(chan struct{}, 1), release: make(chan struct{}),
@@ -577,7 +610,7 @@ func TestDelivererSerializesPlanCallsForTheSameOwner(t *testing.T) {
 
 	answered := make(chan error, 1)
 	go func() {
-		_, err := fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, replacement.ID, AnswerInput{
+		_, err := fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, older.ID, AnswerInput{
 			Choice: domain.DecisionChoiceOption, Option: 3,
 		})
 		answered <- err

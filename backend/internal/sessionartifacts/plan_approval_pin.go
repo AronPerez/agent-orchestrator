@@ -12,6 +12,10 @@ import (
 
 const planApprovalPinsDir = "plan-approval-pins"
 
+var linkPlanApproval = func(root *os.Root, oldname, newname string) error {
+	return root.Link(oldname, newname)
+}
+
 func planApprovalPinPath(id string) (string, bool) {
 	if id == "" || filepath.Base(id) != id || !filepath.IsLocal(id) {
 		return "", false
@@ -59,9 +63,9 @@ func PinPlanApproval(dir string, row domain.SessionArtifactRecord) error {
 	}
 
 	created := false
-	if err := root.Link(filepath.FromSlash(rel), pin); err != nil {
+	if err := linkPlanApproval(root, filepath.FromSlash(rel), pin); err != nil {
 		if !errors.Is(err, fs.ErrExist) {
-			return err
+			return nil
 		}
 		pinInfo, pinErr := root.Lstat(pin)
 		currentInfo, sourceErr := root.Lstat(filepath.FromSlash(rel))
@@ -75,8 +79,8 @@ func PinPlanApproval(dir string, row domain.SessionArtifactRecord) error {
 			if err := root.Remove(pin); err != nil {
 				return err
 			}
-			if err := root.Link(filepath.FromSlash(rel), pin); err != nil {
-				return err
+			if err := linkPlanApproval(root, filepath.FromSlash(rel), pin); err != nil {
+				return nil
 			}
 			created = true
 		}
@@ -92,6 +96,48 @@ func PinPlanApproval(dir string, row domain.SessionArtifactRecord) error {
 			_ = root.Remove(pin)
 		}
 		return domain.ErrSessionArtifactsChanged
+	}
+	return nil
+}
+
+// RefreshPlanApprovalPins makes each plan approval's private witness name its
+// currently stored file. File systems without hard-link support simply keep no
+// witness; stable identity metadata remains the primary rename signal.
+func RefreshPlanApprovalPins(dir string, rows []domain.SessionArtifactRecord) error {
+	for _, row := range rows {
+		if row.Role != domain.SessionArtifactRolePlanApproval {
+			continue
+		}
+		if row.File.Ino == 0 {
+			if err := RemovePlanApprovalPin(dir, row.ID); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := PinPlanApproval(dir, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RemovePlanApprovalPin removes the private witness for a deleted plan
+// approval. A missing artifact directory or witness is already clean.
+func RemovePlanApprovalPin(dir, id string) error {
+	pin, ok := planApprovalPinPath(id)
+	if !ok {
+		return ErrNotRegistrable
+	}
+	root, err := os.OpenRoot(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.Remove(pin); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	return nil
 }

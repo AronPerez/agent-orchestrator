@@ -2,6 +2,7 @@ package sessionartifacts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -246,6 +247,31 @@ func TestPinPlanApprovalRotatesAfterExplicitReplacementRegistration(t *testing.T
 	}
 	if !os.SameFile(planInfo, pinInfo) {
 		t.Fatal("rotated approval pin does not name the replacement plan")
+	}
+}
+
+func TestPinPlanApprovalDoesNotFailWhenHardLinksAreUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.md")
+	if err := os.WriteFile(path, []byte("# Plan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := domain.SessionArtifactRecord{
+		ID: "approval", Path: "plan.md", File: fullIdentity(path, info), Role: domain.SessionArtifactRolePlanApproval,
+	}
+	original := linkPlanApproval
+	linkPlanApproval = func(*os.Root, string, string) error { return errors.New("hard links unavailable") }
+	t.Cleanup(func() { linkPlanApproval = original })
+
+	if err := PinPlanApproval(dir, row); err != nil {
+		t.Fatalf("pin without hard-link support: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, VersionsDir, planApprovalPinsDir, row.ID)); !os.IsNotExist(err) {
+		t.Fatalf("unexpected plan approval pin: %v", err)
 	}
 }
 

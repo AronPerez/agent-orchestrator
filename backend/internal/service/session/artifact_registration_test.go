@@ -78,6 +78,35 @@ func TestRegisterArtifactsMarksThePendingPlanApprovalByRole(t *testing.T) {
 	}
 }
 
+func TestUnregisterArtifactRemovesThePlanApprovalPin(t *testing.T) {
+	svc, st, dir := registrationFixture(t, "plan.md")
+	rec := st.sessions["mer-1"]
+	rec.PlanFirstState = domain.PlanFirstPending
+	st.sessions["mer-1"] = rec
+	ctx := context.Background()
+
+	if _, err := svc.RegisterArtifacts(ctx, "mer-1", []string{"plan.md"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.ListSessionArtifactsForSessions(ctx, []domain.SessionID{"mer-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := filepath.Join(dir, ".versions", "plan-approval-pins", rows["mer-1"][0].ID)
+	if err := os.Remove(filepath.Join(dir, "plan.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UnregisterArtifact(ctx, "mer-1", "plan.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(pin); !os.IsNotExist(err) {
+		t.Fatalf("plan approval pin still exists after deletion: %v", err)
+	}
+	if paths := st.artifacts["mer-1"]; len(paths) != 0 {
+		t.Fatalf("stored paths = %v, want none", paths)
+	}
+}
+
 func TestRegisterArtifactsReportsOnlyNewFilesBySourceCategoryAndSize(t *testing.T) {
 	_, st, dir := registrationFixture(t, "brand.html", "notes.html", "shot.png", "app.icon/icon.json", "app.icon/a.png")
 	big := filepath.Join(dir, "deck.pdf")
