@@ -113,7 +113,6 @@ func stopLinuxSupervisorChildren(timeout time.Duration) (bool, error) {
 			pid, err := unix.Wait4(-1, &status, unix.WNOHANG, nil)
 			switch {
 			case pid > 0:
-				survived = true
 				continue
 			case errors.Is(err, unix.EINTR):
 				continue

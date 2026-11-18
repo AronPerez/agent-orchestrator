@@ -124,6 +124,64 @@ func TestWindowsJobOwnsGrandchildBeforeShellExit(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStepCancellationWaitsForChildCreatedDuringCleanup(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	firstReady := filepath.Join(workspace, "first-ready")
+	firstPIDFile := filepath.Join(workspace, "first.pid")
+	spawnSecond := filepath.Join(workspace, "spawn-second")
+	secondReady := filepath.Join(workspace, "second-ready")
+	secondPIDFile := filepath.Join(workspace, "second.pid")
+	releaseFile := filepath.Join(workspace, "release-launcher")
+	env := newStepEnvironment(os.Environ(), map[string]string{
+		"GO_WANT_VERIFICATION_WINDOWS_LAUNCHER": "1",
+		"VERIFY_CHILD_READY":                    firstReady,
+		"VERIFY_CHILD_PID":                      firstPIDFile,
+		"VERIFY_LAUNCHER_RELEASE":               releaseFile,
+		"VERIFY_SPAWN_SECOND_CHILD":             spawnSecond,
+		"VERIFY_SECOND_CHILD_READY":             secondReady,
+		"VERIFY_SECOND_CHILD_PID":               secondPIDFile,
+	})
+	command := syscall.EscapeArg(executable) + ` -test.run=^TestVerificationWindowsLauncherHelper$`
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWorkspaceStep(ctx, workspace, command, env, io.Discard)
+	}()
+	firstPID := awaitWindowsChildPID(t, firstPIDFile)
+
+	originalHook := windowsJobProcessSnapshotHookFn
+	var hookErr error
+	windowsJobProcessSnapshotHookFn = func() {
+		if writeErr := os.WriteFile(spawnSecond, []byte("spawn"), 0o600); writeErr != nil {
+			hookErr = writeErr
+			return
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, statErr := os.Stat(secondReady); statErr == nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		hookErr = errors.New("second child did not start during cleanup")
+	}
+	t.Cleanup(func() { windowsJobProcessSnapshotHookFn = originalHook })
+	cancel()
+	if runErr := <-done; runErr == nil {
+		t.Fatal("runWorkspaceStep() succeeded after cancellation")
+	}
+	if hookErr != nil {
+		t.Fatal(hookErr)
+	}
+	secondPID := awaitWindowsChildPID(t, secondPIDFile)
+	assertWindowsProcessStopped(t, firstPID)
+	assertWindowsProcessStopped(t, secondPID)
+}
+
 func TestVerificationWindowsLauncherHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_VERIFICATION_WINDOWS_LAUNCHER") != "1" {
 		return
@@ -132,17 +190,15 @@ func TestVerificationWindowsLauncherHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(2)
 	}
-	child := exec.Command(executable, "-test.run=^TestVerificationWindowsChildHelper$")
-	child.Env = append(os.Environ(), "GO_WANT_VERIFICATION_WINDOWS_CHILD=1")
-	if err = child.Start(); err != nil {
+	childPID, err := startVerificationWindowsChild(executable, os.Getenv("VERIFY_CHILD_READY"))
+	if err != nil {
 		os.Exit(3)
 	}
 	if pidFile := os.Getenv("VERIFY_CHILD_PID"); pidFile != "" {
-		if err = os.WriteFile(pidFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		if err = os.WriteFile(pidFile, []byte(strconv.Itoa(childPID)), 0o600); err != nil {
 			os.Exit(7)
 		}
 	}
-	_ = child.Process.Release()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err = os.Stat(os.Getenv("VERIFY_CHILD_READY")); err == nil {
@@ -152,6 +208,25 @@ func TestVerificationWindowsLauncherHelper(t *testing.T) {
 			os.Exit(4)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if spawnFile := os.Getenv("VERIFY_SPAWN_SECOND_CHILD"); spawnFile != "" {
+		deadline = time.Now().Add(5 * time.Second)
+		for {
+			if _, err = os.Stat(spawnFile); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				os.Exit(9)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		secondPID, spawnErr := startVerificationWindowsChild(executable, os.Getenv("VERIFY_SECOND_CHILD_READY"))
+		if spawnErr != nil {
+			os.Exit(10)
+		}
+		if err = os.WriteFile(os.Getenv("VERIFY_SECOND_CHILD_PID"), []byte(strconv.Itoa(secondPID)), 0o600); err != nil {
+			os.Exit(11)
+		}
 	}
 	if releaseFile := os.Getenv("VERIFY_LAUNCHER_RELEASE"); releaseFile != "" {
 		deadline = time.Now().Add(5 * time.Second)
@@ -166,6 +241,22 @@ func TestVerificationWindowsLauncherHelper(t *testing.T) {
 		}
 	}
 	os.Exit(0)
+}
+
+func startVerificationWindowsChild(executable, readyFile string) (int, error) {
+	child := exec.Command(executable, "-test.run=^TestVerificationWindowsChildHelper$")
+	child.Env = append(os.Environ(),
+		"GO_WANT_VERIFICATION_WINDOWS_CHILD=1",
+		"VERIFY_CHILD_READY="+readyFile,
+	)
+	if err := child.Start(); err != nil {
+		return 0, err
+	}
+	pid := child.Process.Pid
+	if err := child.Process.Release(); err != nil {
+		return 0, err
+	}
+	return pid, nil
 }
 
 func TestVerificationWindowsChildHelper(t *testing.T) {

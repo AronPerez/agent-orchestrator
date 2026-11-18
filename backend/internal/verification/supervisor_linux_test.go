@@ -63,6 +63,26 @@ func TestLinuxSupervisorStopsFastSanitizedDoubleFork(t *testing.T) {
 	}
 }
 
+func TestLinuxSupervisorIgnoresAnOrphanThatExitedBeforeTheRoot(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := newStepEnvironment(os.Environ(), map[string]string{
+		"GO_WANT_VERIFICATION_EXITED_ORPHAN": "root",
+		"VERIFY_EXITED_ORPHAN_HELPER":        executable,
+	})
+	if err = runWorkspaceStep(
+		context.Background(),
+		t.TempDir(),
+		`"$VERIFY_EXITED_ORPHAN_HELPER" -test.run=^TestVerificationExitedOrphanHelper$`,
+		env,
+		io.Discard,
+	); err != nil {
+		t.Fatalf("runWorkspaceStep() = %v, want an already-exited orphan to be ignored", err)
+	}
+}
+
 func TestVerificationSanitizedForkHelper(t *testing.T) {
 	stage := os.Getenv("GO_WANT_VERIFICATION_SANITIZED_FORK")
 	if stage == "" {
@@ -108,4 +128,31 @@ func TestVerificationSanitizedForkHelper(t *testing.T) {
 		os.Exit(6)
 	}
 	os.Exit(0)
+}
+
+func TestVerificationExitedOrphanHelper(t *testing.T) {
+	switch os.Getenv("GO_WANT_VERIFICATION_EXITED_ORPHAN") {
+	case "":
+		return
+	case "child":
+		os.Exit(0)
+	case "root":
+		executable, err := os.Executable()
+		if err != nil {
+			os.Exit(2)
+		}
+		child := exec.Command(executable, "-test.run=^TestVerificationExitedOrphanHelper$")
+		child.Env = []string{"GO_WANT_VERIFICATION_EXITED_ORPHAN=child"}
+		child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err = child.Start(); err != nil {
+			os.Exit(3)
+		}
+		if err = child.Process.Release(); err != nil {
+			os.Exit(4)
+		}
+		time.Sleep(250 * time.Millisecond)
+		os.Exit(0)
+	default:
+		os.Exit(5)
+	}
 }

@@ -21,7 +21,13 @@ const (
 	windowsProcessStopWait           = 5 * time.Second
 )
 
-var isProcessInJobProc = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+var (
+	isProcessInJobProc       = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+	getProcessIDOfThreadProc = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetProcessIdOfThread")
+	suspendThreadProc        = windows.NewLazySystemDLL("kernel32.dll").NewProc("SuspendThread")
+
+	windowsJobProcessSnapshotHookFn = func() {}
+)
 
 type windowsWorkspaceProcessTree struct {
 	mu          sync.Mutex
@@ -29,12 +35,30 @@ type windowsWorkspaceProcessTree struct {
 	job         windows.Handle
 	rootProcess windows.Handle
 	closed      bool
+	stopOnce    sync.Once
+	stopResult  bool
+	stopErr     error
 }
 
 type jobBasicProcessIDList struct {
 	NumberOfAssignedProcesses uint32
 	NumberOfProcessIDsInList  uint32
 	ProcessIDList             [1]uintptr
+}
+
+type windowsProcessIdentity struct {
+	pid     uint32
+	created uint64
+}
+
+type windowsOwnedJobProcess struct {
+	identity windowsProcessIdentity
+	handle   windows.Handle
+}
+
+type windowsThreadIdentity struct {
+	process windowsProcessIdentity
+	tid     uint32
 }
 
 func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspaceProcessTree, error) {
@@ -125,48 +149,92 @@ func waitForWindowsProcess(process windows.Handle) error {
 }
 
 func (t *windowsWorkspaceProcessTree) terminate() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.closed || t.job == 0 {
-		return nil
-	}
-	return windows.TerminateJobObject(t.job, 1)
+	_, err := t.stop()
+	return err
 }
 
 func (t *windowsWorkspaceProcessTree) stopSurvivors() (bool, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.closed || t.job == 0 {
-		return false, nil
-	}
-	processes, err := liveWindowsJobProcesses(t.job)
-	if err != nil {
-		return false, errors.Join(err, windows.TerminateJobObject(t.job, 1))
-	}
-	if len(processes) == 0 {
-		return false, nil
-	}
-	defer func() {
-		for _, process := range processes {
-			_ = windows.CloseHandle(process)
-		}
-	}()
-	terminateErr := windows.TerminateJobObject(t.job, 1)
-	waitErr := waitForWindowsProcesses(processes, windowsProcessStopWait)
-	return true, errors.Join(terminateErr, waitErr)
+	return t.stop()
 }
 
-func liveWindowsJobProcesses(job windows.Handle) ([]windows.Handle, error) {
+func (t *windowsWorkspaceProcessTree) stop() (bool, error) {
+	t.stopOnce.Do(func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.closed || t.job == 0 {
+			return
+		}
+		processes, captureErr := quiesceWindowsJobProcesses(t.job, windowsProcessStopWait)
+		defer closeWindowsOwnedJobProcesses(processes)
+		t.stopResult = len(processes) > 0
+		if len(processes) == 0 && captureErr == nil {
+			return
+		}
+		terminateErr := windows.TerminateJobObject(t.job, 1)
+		waitErr := waitForWindowsOwnedJobProcesses(processes, windowsProcessStopWait)
+		t.stopErr = errors.Join(captureErr, terminateErr, waitErr)
+	})
+	return t.stopResult, t.stopErr
+}
+
+func quiesceWindowsJobProcesses(job windows.Handle, timeout time.Duration) ([]windowsOwnedJobProcess, error) {
+	deadline := time.Now().Add(timeout)
+	processes := make(map[windowsProcessIdentity]windows.Handle)
+	suspended := make(map[windowsThreadIdentity]struct{})
+	hookCalled := false
+	for {
+		active, err := liveWindowsJobProcesses(job)
+		if err != nil {
+			return windowsOwnedProcessesFromMap(processes), err
+		}
+		changed := false
+		activeByPID := make(map[uint32]windowsProcessIdentity, len(active))
+		for _, process := range active {
+			activeByPID[process.identity.pid] = process.identity
+			if _, ok := processes[process.identity]; ok {
+				_ = windows.CloseHandle(process.handle)
+				continue
+			}
+			processes[process.identity] = process.handle
+			changed = true
+		}
+		if !hookCalled {
+			hookCalled = true
+			windowsJobProcessSnapshotHookFn()
+		}
+		threads, err := windowsJobThreads(activeByPID)
+		if err != nil {
+			return windowsOwnedProcessesFromMap(processes), err
+		}
+		for _, thread := range threads {
+			if _, ok := suspended[thread]; ok {
+				continue
+			}
+			process := processes[thread.process]
+			didSuspend, suspendErr := suspendWindowsThread(process, thread.process.pid, thread.tid)
+			if suspendErr != nil {
+				return windowsOwnedProcessesFromMap(processes), suspendErr
+			}
+			if didSuspend {
+				suspended[thread] = struct{}{}
+				changed = true
+			}
+		}
+		if !changed {
+			return liveWindowsOwnedProcesses(processes)
+		}
+		if !time.Now().Before(deadline) {
+			return windowsOwnedProcessesFromMap(processes), errors.New("verification job did not quiesce before the deadline")
+		}
+	}
+}
+
+func liveWindowsJobProcesses(job windows.Handle) ([]windowsOwnedJobProcess, error) {
 	pids, err := windowsJobProcessIDs(job)
 	if err != nil {
 		return nil, fmt.Errorf("list verification job processes: %w", err)
 	}
-	processes := make([]windows.Handle, 0, len(pids))
-	closeProcesses := func() {
-		for _, process := range processes {
-			_ = windows.CloseHandle(process)
-		}
-	}
+	processes := make([]windowsOwnedJobProcess, 0, len(pids))
 	for _, pid := range pids {
 		if pid > uintptr(^uint32(0)) {
 			continue
@@ -180,13 +248,13 @@ func liveWindowsJobProcesses(job windows.Handle) ([]windows.Handle, error) {
 			continue
 		}
 		if openErr != nil {
-			closeProcesses()
+			closeWindowsOwnedJobProcesses(processes)
 			return nil, fmt.Errorf("open verification job process %d: %w", pid, openErr)
 		}
 		inJob, membershipErr := isProcessInJob(process, job)
 		if membershipErr != nil {
 			_ = windows.CloseHandle(process)
-			closeProcesses()
+			closeWindowsOwnedJobProcesses(processes)
 			return nil, fmt.Errorf("check verification job process %d: %w", pid, membershipErr)
 		}
 		if !inJob {
@@ -196,21 +264,38 @@ func liveWindowsJobProcesses(job windows.Handle) ([]windows.Handle, error) {
 		status, waitErr := windows.WaitForSingleObject(process, 0)
 		if waitErr != nil {
 			_ = windows.CloseHandle(process)
-			closeProcesses()
+			closeWindowsOwnedJobProcesses(processes)
 			return nil, fmt.Errorf("check verification job process %d state: %w", pid, waitErr)
 		}
 		switch status {
 		case windows.WAIT_OBJECT_0:
 			_ = windows.CloseHandle(process)
 		case uint32(windows.WAIT_TIMEOUT):
-			processes = append(processes, process)
+			identity, identityErr := windowsProcessIdentityForHandle(uint32(pid), process)
+			if identityErr != nil {
+				_ = windows.CloseHandle(process)
+				closeWindowsOwnedJobProcesses(processes)
+				return nil, identityErr
+			}
+			processes = append(processes, windowsOwnedJobProcess{identity: identity, handle: process})
 		default:
 			_ = windows.CloseHandle(process)
-			closeProcesses()
+			closeWindowsOwnedJobProcesses(processes)
 			return nil, fmt.Errorf("check verification job process %d state: unexpected wait status %d", pid, status)
 		}
 	}
 	return processes, nil
+}
+
+func windowsProcessIdentityForHandle(pid uint32, process windows.Handle) (windowsProcessIdentity, error) {
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
+		return windowsProcessIdentity{}, fmt.Errorf("identify verification job process %d: %w", pid, err)
+	}
+	return windowsProcessIdentity{
+		pid:     pid,
+		created: uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime),
+	}, nil
 }
 
 func windowsJobProcessIDs(job windows.Handle) ([]uintptr, error) {
@@ -267,7 +352,118 @@ func isProcessInJob(process, job windows.Handle) (bool, error) {
 	return inJob != 0, nil
 }
 
-func waitForWindowsProcesses(processes []windows.Handle, timeout time.Duration) error {
+func windowsJobThreads(active map[uint32]windowsProcessIdentity) ([]windowsThreadIdentity, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot verification job threads: %w", err)
+	}
+	defer windows.CloseHandle(snapshot) //nolint:errcheck // best-effort OS handle cleanup
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	if err = windows.Thread32First(snapshot, &entry); errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("list verification job threads: %w", err)
+	}
+	threads := make([]windowsThreadIdentity, 0)
+	for {
+		if process, ok := active[entry.OwnerProcessID]; ok {
+			threads = append(threads, windowsThreadIdentity{process: process, tid: entry.ThreadID})
+		}
+		err = windows.Thread32Next(snapshot, &entry)
+		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+			return threads, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list verification job threads: %w", err)
+		}
+	}
+}
+
+func suspendWindowsThread(process windows.Handle, expectedPID, tid uint32) (bool, error) {
+	status, err := windows.WaitForSingleObject(process, 0)
+	if err != nil {
+		return false, fmt.Errorf("check verification process %d before suspending thread %d: %w", expectedPID, tid, err)
+	}
+	if status == windows.WAIT_OBJECT_0 {
+		return false, nil
+	}
+	if status != uint32(windows.WAIT_TIMEOUT) {
+		return false, fmt.Errorf("check verification process %d before suspending thread %d: unexpected status %d", expectedPID, tid, status)
+	}
+	thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME|windows.THREAD_QUERY_LIMITED_INFORMATION, false, tid)
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("open verification thread %d: %w", tid, err)
+	}
+	defer windows.CloseHandle(thread) //nolint:errcheck // best-effort OS handle cleanup
+	owner, _, ownerErr := getProcessIDOfThreadProc.Call(uintptr(thread))
+	if owner == 0 {
+		return false, fmt.Errorf("identify verification thread %d: %w", tid, ownerErr)
+	}
+	if uint32(owner) != expectedPID {
+		return false, nil
+	}
+	status, err = windows.WaitForSingleObject(process, 0)
+	if err != nil {
+		return false, err
+	}
+	if status == windows.WAIT_OBJECT_0 {
+		return false, nil
+	}
+	if status != uint32(windows.WAIT_TIMEOUT) {
+		return false, fmt.Errorf("recheck verification process %d before suspending thread %d: unexpected status %d", expectedPID, tid, status)
+	}
+	previous, _, suspendErr := suspendThreadProc.Call(uintptr(thread))
+	if uint32(previous) == ^uint32(0) {
+		if errors.Is(suspendErr, windows.ERROR_INVALID_HANDLE) || errors.Is(suspendErr, windows.ERROR_INVALID_PARAMETER) {
+			return false, nil
+		}
+		return false, fmt.Errorf("suspend verification thread %d: %w", tid, suspendErr)
+	}
+	return true, nil
+}
+
+func windowsOwnedProcessesFromMap(processes map[windowsProcessIdentity]windows.Handle) []windowsOwnedJobProcess {
+	result := make([]windowsOwnedJobProcess, 0, len(processes))
+	for identity, handle := range processes {
+		result = append(result, windowsOwnedJobProcess{identity: identity, handle: handle})
+	}
+	return result
+}
+
+func liveWindowsOwnedProcesses(processes map[windowsProcessIdentity]windows.Handle) ([]windowsOwnedJobProcess, error) {
+	result := make([]windowsOwnedJobProcess, 0, len(processes))
+	signaled := make([]windowsProcessIdentity, 0)
+	for identity, handle := range processes {
+		status, err := windows.WaitForSingleObject(handle, 0)
+		if err != nil {
+			return windowsOwnedProcessesFromMap(processes), fmt.Errorf("check quiesced verification process %d: %w", identity.pid, err)
+		}
+		switch status {
+		case windows.WAIT_OBJECT_0:
+			signaled = append(signaled, identity)
+		case uint32(windows.WAIT_TIMEOUT):
+			result = append(result, windowsOwnedJobProcess{identity: identity, handle: handle})
+		default:
+			return windowsOwnedProcessesFromMap(processes), fmt.Errorf("check quiesced verification process %d: unexpected status %d", identity.pid, status)
+		}
+	}
+	for _, identity := range signaled {
+		_ = windows.CloseHandle(processes[identity])
+		delete(processes, identity)
+	}
+	return result, nil
+}
+
+func closeWindowsOwnedJobProcesses(processes []windowsOwnedJobProcess) {
+	for _, process := range processes {
+		_ = windows.CloseHandle(process.handle)
+	}
+}
+
+func waitForWindowsOwnedJobProcesses(processes []windowsOwnedJobProcess, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for _, process := range processes {
 		remaining := time.Until(deadline)
@@ -275,7 +471,7 @@ func waitForWindowsProcesses(processes []windows.Handle, timeout time.Duration) 
 			return errors.New("verification job processes did not stop before the deadline")
 		}
 		milliseconds := uint32((remaining + time.Millisecond - 1) / time.Millisecond)
-		status, err := windows.WaitForSingleObject(process, milliseconds)
+		status, err := windows.WaitForSingleObject(process.handle, milliseconds)
 		if err != nil {
 			return err
 		}
@@ -283,7 +479,7 @@ func waitForWindowsProcesses(processes []windows.Handle, timeout time.Duration) 
 			return errors.New("verification job processes did not stop before the deadline")
 		}
 		if status != windows.WAIT_OBJECT_0 {
-			return fmt.Errorf("wait for verification job process: unexpected status %d", status)
+			return fmt.Errorf("wait for verification job process %d: unexpected status %d", process.identity.pid, status)
 		}
 	}
 	return nil
