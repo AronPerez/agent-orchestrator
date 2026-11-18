@@ -19,10 +19,10 @@ import (
 )
 
 const (
-	linuxSupervisorArgument      = "__ao_internal_verification_supervisor_v1"
-	linuxSupervisorFailureCode   = 125
-	linuxSupervisorUncertainCode = 124
-	linuxSupervisorStopWait      = 5 * time.Second
+	linuxSupervisorArgument        = "__ao_internal_verification_supervisor_v1"
+	linuxSupervisorFailureCode     = 125
+	linuxSupervisorCleanupComplete = byte('C')
+	linuxSupervisorStopWait        = 5 * time.Second
 )
 
 // RunLinuxSupervisorIfRequested handles AO's private verification-supervisor
@@ -31,7 +31,7 @@ func RunLinuxSupervisorIfRequested(args []string) (bool, int, error) {
 	if len(args) < 2 || args[1] != linuxSupervisorArgument {
 		return false, 0, nil
 	}
-	if len(args) < 6 {
+	if len(args) < 7 {
 		return true, linuxSupervisorFailureCode, errors.New("invalid verification supervisor arguments")
 	}
 	gateFD, err := strconv.Atoi(args[2])
@@ -42,11 +42,33 @@ func RunLinuxSupervisorIfRequested(args []string) (bool, int, error) {
 	if err != nil || passthroughFiles < 0 || passthroughFiles > 64 || gateFD != 3+passthroughFiles {
 		return true, linuxSupervisorFailureCode, errors.New("invalid verification supervisor descriptor layout")
 	}
-	code, runErr := runLinuxSupervisor(gateFD, passthroughFiles, args[4], args[5:])
+	cleanupFD, err := strconv.Atoi(args[4])
+	if err != nil || cleanupFD != gateFD+1 {
+		return true, linuxSupervisorFailureCode, errors.New("invalid verification supervisor cleanup descriptor")
+	}
+	code, runErr := runLinuxSupervisor(gateFD, cleanupFD, passthroughFiles, args[5], args[6:])
 	return true, code, runErr
 }
 
-func runLinuxSupervisor(gateFD, passthroughFiles int, path string, args []string) (int, error) {
+func runLinuxSupervisor(gateFD, cleanupFD, passthroughFiles int, path string, args []string) (code int, runErr error) {
+	cleanupStatus := os.NewFile(uintptr(cleanupFD), "verification-cleanup-status")
+	if cleanupStatus == nil {
+		return linuxSupervisorFailureCode, errors.New("open verification cleanup status")
+	}
+	cleanupComplete := true
+	defer func() {
+		if cleanupComplete {
+			_, err := cleanupStatus.Write([]byte{linuxSupervisorCleanupComplete})
+			if err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("confirm verification cleanup: %w", err))
+				code = linuxSupervisorFailureCode
+			}
+		}
+		if err := cleanupStatus.Close(); err != nil {
+			runErr = errors.Join(runErr, err)
+			code = linuxSupervisorFailureCode
+		}
+	}()
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		return linuxSupervisorFailureCode, fmt.Errorf("enable verification subreaper: %w", err)
 	}
@@ -84,6 +106,7 @@ func runLinuxSupervisor(gateFD, passthroughFiles int, path string, args []string
 	if startErr != nil {
 		return linuxSupervisorFailureCode, startErr
 	}
+	cleanupComplete = false
 
 	rootDone := make(chan error, 1)
 	go func() { rootDone <- root.Wait() }()
@@ -95,11 +118,14 @@ func runLinuxSupervisor(gateFD, passthroughFiles int, path string, args []string
 		rootErr = <-rootDone
 	}
 	survived, cleanupErr := stopLinuxSupervisorChildren(linuxSupervisorStopWait)
-	code := linuxProcessExitCode(rootErr)
+	code = linuxProcessExitCode(rootErr)
 	if cleanupErr != nil {
-		code = linuxSupervisorUncertainCode
-	} else if survived {
 		code = linuxSupervisorFailureCode
+	} else if survived {
+		cleanupComplete = true
+		code = linuxSupervisorFailureCode
+	} else {
+		cleanupComplete = true
 	}
 	if survived {
 		cleanupErr = errors.Join(errLingeringProcessTree, cleanupErr)
