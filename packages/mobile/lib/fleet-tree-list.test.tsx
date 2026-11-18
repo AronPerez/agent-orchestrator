@@ -1,8 +1,8 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, type DashboardSession } from "./api";
+import { ApiError, type DashboardSession, type OrchestratorLink } from "./api";
 import type { ArchiveSource } from "./archive/useArchivedSessions";
-import type { HostedProject, HostedSession } from "./hostedRows";
+import type { HostedOrchestrator, HostedProject, HostedSession } from "./hostedRows";
 
 const fixtures = vi.hoisted(() => ({
 	push: vi.fn(),
@@ -99,6 +99,19 @@ function worker(id: string, over: Partial<DashboardSession> = {}): HostedSession
 	};
 }
 
+function orchestrator(id: string, over: Partial<OrchestratorLink> = {}): HostedOrchestrator {
+	return {
+		id,
+		projectId: "project",
+		projectName: "Project",
+		hostId: "box",
+		hostName: "Build box",
+		status: "working",
+		mode: "chat",
+		...over,
+	};
+}
+
 const project: HostedProject = { id: "project", name: "Project", hostId: "box", hostName: "Build box" };
 let mountedViews: ReactTestRenderer[] = [];
 
@@ -107,10 +120,11 @@ function render(
 	archiveSources: readonly ArchiveSource[] = [],
 	connection: "closed" | "connecting" | "open" = "closed",
 	additionalHosts: readonly MobileFleetHost[] = [],
+	orchestrators: readonly HostedOrchestrator[] = [],
 ): ReactTestRenderer {
 	let view!: ReactTestRenderer;
 	act(() => {
-		view = create(fleetList(sessions, archiveSources, connection, additionalHosts));
+		view = create(fleetList(sessions, archiveSources, connection, additionalHosts, orchestrators));
 	});
 	mountedViews.push(view);
 	return view;
@@ -121,6 +135,7 @@ function fleetList(
 	archiveSources: readonly ArchiveSource[] = [],
 	connection: "closed" | "connecting" | "open" = "closed",
 	additionalHosts: readonly MobileFleetHost[] = [],
+	orchestrators: readonly HostedOrchestrator[] = [],
 ) {
 	return (
 		<FleetTreeList
@@ -128,7 +143,7 @@ function fleetList(
 			archiveSources={archiveSources}
 			hosts={[{ hostId: "box", name: "Build box", connection }, ...additionalHosts]}
 			onRefresh={() => {}}
-			orchestrators={[]}
+			orchestrators={orchestrators}
 			projects={[project]}
 			refreshing={false}
 			sessions={sessions}
@@ -275,6 +290,21 @@ describe("FleetTreeList", () => {
 		);
 		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 		expect(view.root.findAllByProps({ accessibilityLabel: "project, No sessions" })).toHaveLength(0);
+	});
+
+	it("looks up a cross-host parent for an orchestrator child", () => {
+		fixtures.app.configForHost.mockImplementation((hostId: string) => ({
+			host: `${hostId}.test`, httpPort: "3011", muxPort: "3011", password: "secret", hostId,
+		}));
+		render([], [], "open", [{ hostId: "mac", name: "Mac", connection: "open" }], [
+			orchestrator("Child", { parentHostId: "mac", parentSessionId: "Parent" }),
+		]);
+
+		expect(fixtures.getSession).toHaveBeenCalledWith(
+			expect.objectContaining({ hostId: "mac" }),
+			"Parent",
+			expect.objectContaining({ signal: expect.any(AbortSignal) }),
+		);
 	});
 
 	it("gates ancestor lookup on an open host and retries after reconnect", async () => {

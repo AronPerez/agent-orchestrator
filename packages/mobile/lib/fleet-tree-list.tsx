@@ -108,6 +108,7 @@ function resolveFleetLineage(
 	};
 
 	for (const session of liveSessions) visit(session);
+	for (const orchestrator of orchestrators) visit(orchestrator);
 	return { ancestors: [...ancestors.values()], missing: [...missing.values()] };
 }
 
