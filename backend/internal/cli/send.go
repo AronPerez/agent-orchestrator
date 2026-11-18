@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -19,6 +20,8 @@ type sendOptions struct {
 	clientMessageID string
 	recoverOnly     bool
 }
+
+var clientMessageIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:@/+=,-]{1,256}$`)
 
 // sendAPIRequest mirrors the daemon's SendSessionMessageRequest body for
 // POST /api/v1/sessions/{id}/send. The CLI keeps its own copy so it need not
@@ -73,14 +76,18 @@ func newSendCommand(ctx *commandContext) *cobra.Command {
 }
 
 func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) error {
+	opts.clientMessageID = strings.TrimSpace(opts.clientMessageID)
 	if opts.recoverOnly && !opts.steer {
 		return usageError{errors.New("usage: --recover-only requires --steer")}
 	}
-	if strings.TrimSpace(opts.clientMessageID) != "" && !opts.steer {
+	if opts.clientMessageID != "" && !opts.steer {
 		return usageError{errors.New("usage: --client-message-id requires --steer")}
 	}
-	if opts.recoverOnly && strings.TrimSpace(opts.clientMessageID) == "" {
+	if opts.recoverOnly && opts.clientMessageID == "" {
 		return usageError{errors.New("usage: --recover-only requires --client-message-id")}
+	}
+	if opts.clientMessageID != "" && !clientMessageIDPattern.MatchString(opts.clientMessageID) {
+		return usageError{errors.New("usage: --client-message-id may contain only letters, digits, '.', '_', ':', '@', '/', '+', '=', ',' and '-'")}
 	}
 	if !opts.recoverOnly && strings.TrimSpace(opts.message) == "" {
 		return usageError{errors.New("usage: --message is required")}
@@ -143,7 +150,7 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 		}
 		return nil
 	}
-	return c.steerMessage(ctx, path, message, senderSessionID, strings.TrimSpace(opts.clientMessageID), automationAuthored, opts.recoverOnly)
+	return c.steerMessage(ctx, path, message, senderSessionID, opts.clientMessageID, automationAuthored, opts.recoverOnly)
 }
 
 func (c *commandContext) steerMessage(
@@ -160,6 +167,13 @@ func (c *commandContext) steerMessage(
 		AutomationAuthored: automationAuthored, RecoverOnly: recoverOnly,
 	}, &result)
 	if err != nil {
+		var preflightErr remotePreflightError
+		if errors.As(err, &preflightErr) {
+			if recoverOnly {
+				return fmt.Errorf("%w; recovery request was not sent; retry the same recovery command with delivery handle %s", err, clientMessageID)
+			}
+			return fmt.Errorf("%w; steering request was not sent; retry the original command with the same --client-message-id %s", err, clientMessageID)
+		}
 		var responseErr apiResponseError
 		hasResponseErr := errors.As(err, &responseErr)
 		if hasResponseErr && responseErr.ErrorBody.Code == "CHAT_STEER_UNCERTAIN" {

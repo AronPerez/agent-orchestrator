@@ -53,7 +53,15 @@ type remoteTarget struct {
 const remotesFileName = "remotes.json"
 
 var savedHostIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
-var commandArgumentPattern = regexp.MustCompile(`^[A-Za-z0-9._:@%/+=,-]+$`)
+var commandArgumentPattern = regexp.MustCompile(`^[A-Za-z0-9._:@/+=,-]+$`)
+
+// remotePreflightError means the destination credential was not sent. Callers
+// that normally treat transport failures as ambiguous may safely recommend a
+// retry of the original request instead of receipt-only recovery.
+type remotePreflightError struct{ cause error }
+
+func (e remotePreflightError) Error() string { return e.cause.Error() }
+func (e remotePreflightError) Unwrap() error { return e.cause }
 
 // activeCloudAccountFile is written by the desktop beside remotes.json. It is
 // the authorization boundary for account-owned hosts; telemetry state is not,
@@ -442,18 +450,20 @@ func (c *commandContext) remoteRelationToSource(ctx context.Context, sessionID s
 }
 
 func (c *commandContext) revalidateRemoteTarget(ctx context.Context) error {
-	if c.remote == nil || c.remote.expectedHostID == "" {
+	if c.remote == nil {
 		return nil
 	}
 	identity, err := c.probeSavedHostIdentity(ctx, c.remote.baseURL)
 	if err != nil {
-		return fmt.Errorf("revalidate remote host identity: %w", err)
+		return remotePreflightError{cause: fmt.Errorf("revalidate remote host identity: %w", err)}
 	}
-	if identity.HostID != c.remote.expectedHostID {
-		return fmt.Errorf("remote host identity changed: expected %s, got %s; credential was not sent", c.remote.expectedHostID, identity.HostID)
+	if c.remote.expectedHostID == "" {
+		c.remote.expectedHostID = identity.HostID
+	} else if identity.HostID != c.remote.expectedHostID {
+		return remotePreflightError{cause: fmt.Errorf("remote host identity changed: expected %s, got %s; credential was not sent", c.remote.expectedHostID, identity.HostID)}
 	}
 	if c.remote.accountUserID != "" && c.activeCloudAccount(ctx) != c.remote.accountUserID {
-		return errors.New("active Cloud account changed before the remote request; credential was not sent")
+		return remotePreflightError{cause: errors.New("active Cloud account changed before the remote request; credential was not sent")}
 	}
 	return nil
 }

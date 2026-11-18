@@ -227,7 +227,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 					return err
 				}
 			}
-			parentSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+			parentSessionID := callerSession()
 			if ctx.remote != nil && parentSessionID != "" {
 				_, sameHost, relationErr := ctx.remoteRelationToSource(cmd.Context(), parentSessionID)
 				if relationErr != nil {

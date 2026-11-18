@@ -133,6 +133,51 @@ func TestSpawnSavedHostPinsMachineAndOmitsUnqualifiedParent(t *testing.T) {
 	}
 }
 
+func TestSpawnSavedHostUserShellDoesNotNeedSourceDaemon(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "local-source")
+	t.Setenv("AO_SHELL_TERMINAL", "1")
+	var request spawnRequest
+	var capabilityRequests int
+	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/identity" {
+			writeSavedHostIdentity(t, w, r)
+			return
+		}
+		requireSavedHostRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
+			_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","kind":"single-repo"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/readiness/ensure":
+			_, _ = io.WriteString(w, authorizedAgentsJSON("codex"))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(w, `{"session":{"id":"remote-1","status":"idle","displayName":"Remote worker"}}`)
+		case r.URL.Path == "/api/v1/coordination/capabilities":
+			capabilityRequests++
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	if err := os.Remove(os.Getenv("AO_RUN_FILE")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, stderr, err := executeCLI(t, Deps{}, "spawn", "--host", testSavedHostLabel,
+		"--project", "demo", "--agent", "codex", "--name", "Remote worker"); err != nil {
+		t.Fatalf("user-shell spawn: %v stderr=%s", err, stderr)
+	}
+	if request.ParentSessionID != "" {
+		t.Fatalf("parentSessionId = %q, want none for a user-shell spawn", request.ParentSessionID)
+	}
+	if capabilityRequests != 0 {
+		t.Fatalf("capability requests = %d, want none for a user-shell spawn", capabilityRequests)
+	}
+}
+
 func TestSpawnSavedHostFailureNamesRemoteRecoveryLocation(t *testing.T) {
 	oldPollInterval := spawnStartPollInterval
 	spawnStartPollInterval = 0
@@ -317,7 +362,12 @@ func TestSendRawURLRecoveryKeepsTarget(t *testing.T) {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			t.Setenv("AO_SESSION_ID", "")
 			t.Setenv("AO_TOKEN", "raw-url-secret")
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/identity" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"hostId":"h_raw","apiVersion":1}`)
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				code := "INTERNAL"
@@ -333,6 +383,92 @@ func TestSendRawURLRecoveryKeepsTarget(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "--url") || !strings.Contains(err.Error(), srv.URL) ||
 				!strings.Contains(err.Error(), "--recover-only") || strings.Contains(err.Error(), "raw-url-secret") {
 				t.Fatalf("err = %v, want URL-qualified credential-free recovery command", err)
+			}
+		})
+	}
+}
+
+func TestRawURLHumanAndRecoveryRequestsPinIdentityAndRefuseRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "human send", args: []string{"--message", "continue"}},
+		{name: "receipt recovery", args: []string{"--steer", "--recover-only", "--client-message-id", "delivery-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AO_TOKEN", "raw-url-secret")
+			var redirected, writes int
+			sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				redirected++
+			}))
+			t.Cleanup(sink.Close)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/identity" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"hostId":"h_raw","apiVersion":1}`)
+					return
+				}
+				writes++
+				if got := r.Header.Get("Authorization"); got != "Bearer raw-url-secret" {
+					t.Fatalf("Authorization = %q", got)
+				}
+				if got := r.Header.Get("X-AO-Expected-Host-ID"); got != "h_raw" {
+					t.Fatalf("expected host = %q, want h_raw", got)
+				}
+				http.Redirect(w, r, sink.URL, http.StatusTemporaryRedirect)
+			}))
+			t.Cleanup(srv.Close)
+
+			args := append([]string{"send", "--url", srv.URL, "--session", "remote-1"}, tc.args...)
+			if _, _, err := executeCLI(t, Deps{}, args...); err == nil {
+				t.Fatal("request followed a cross-origin redirect")
+			}
+			if writes != 1 || redirected != 0 {
+				t.Fatalf("writes=%d redirected=%d, want one pinned write and no redirect", writes, redirected)
+			}
+		})
+	}
+}
+
+func TestSteerPreflightFailureRecommendsOriginalRetry(t *testing.T) {
+	var identityCalls, authenticatedRequests int
+	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/identity" {
+			identityCalls++
+			if identityCalls == 1 {
+				writeSavedHostIdentity(t, w, r)
+				return
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		authenticatedRequests++
+		http.NotFound(w, r)
+	}))
+
+	_, _, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel, "--session", "remote-1",
+		"--steer", "--client-message-id", "delivery-1", "--message", "continue")
+	if err == nil || !strings.Contains(err.Error(), "steering request was not sent") ||
+		!strings.Contains(err.Error(), "retry the original command") ||
+		!strings.Contains(err.Error(), "--client-message-id delivery-1") {
+		t.Fatalf("err = %v, want definitely-not-sent retry guidance", err)
+	}
+	if strings.Contains(err.Error(), "--recover-only") {
+		t.Fatalf("preflight failure incorrectly recommended receipt-only recovery: %v", err)
+	}
+	if authenticatedRequests != 0 {
+		t.Fatalf("authenticated requests = %d, want none after failed identity preflight", authenticatedRequests)
+	}
+}
+
+func TestSendRejectsNonPortableRecoveryHandle(t *testing.T) {
+	for _, handle := range []string{"job-$(Get-Date)", "job-%PATH%", "job with space", `job"quote`} {
+		t.Run(handle, func(t *testing.T) {
+			_, _, err := executeCLI(t, Deps{}, "send", "--session", "remote-1", "--steer",
+				"--client-message-id", handle, "--message", "continue")
+			if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--client-message-id may contain only") {
+				t.Fatalf("err=%v exit=%d, want portable-handle usage error", err, ExitCode(err))
 			}
 		})
 	}

@@ -45,6 +45,7 @@ type ControlDeps struct {
 // Middleware order (outermost first):
 //
 //	RequestID     → attach a request id for correlation
+//	expectedHost  → reject a request pinned to a different daemon identity
 //	requestLogger → slog-backed access log + 5xx telemetry, carries the request id
 //	recoverer     → turn a handler panic into 500 instead of crashing the daemon
 //	rendererOrigin → exact renderer-origin boundary for Codex account management
@@ -61,6 +62,9 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	api := newAPIWithLogger(cfg, deps, log)
 
 	r.Use(middleware.RequestID)
+	if deps.HostID != "" {
+		r.Use(expectedHostGuard(deps.HostID))
+	}
 	r.Use(caller.Middleware)
 	r.Use(requestLogger(log, deps.Telemetry))
 	r.Use(recoverTelemetry(log, deps.Telemetry))
