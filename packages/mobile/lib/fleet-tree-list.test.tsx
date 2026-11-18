@@ -1,13 +1,16 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DashboardSession } from "./api";
 import type { ArchiveSource } from "./archive/useArchivedSessions";
 import type { HostedProject, HostedSession } from "./hostedRows";
 
 const fixtures = vi.hoisted(() => ({
 	push: vi.fn(),
+	blur: () => {},
 	getItem: vi.fn(async (_key: string) => null as string | null),
 	setItem: vi.fn(async (_key: string, _value: string) => {}),
+	getSession: vi.fn(),
+	archiveOptions: null as null | { active: boolean; exhaustive: boolean },
 	archive: {
 		rows: [] as HostedSession[], total: 0, loading: false, error: null as string | null,
 		hasMore: false, loadMore: vi.fn(), retry: vi.fn(),
@@ -20,7 +23,11 @@ const fixtures = vi.hoisted(() => ({
 	theme: new Proxy({}, { get: (_, key) => `#${String(key)}` }),
 }));
 
-vi.mock("expo-router", () => ({ useRouter: () => ({ push: fixtures.push }) }));
+vi.mock("expo-router", () => ({
+	useRouter: () => ({ push: fixtures.push }),
+	useFocusEffect: (callback: () => void | (() => void)) => { fixtures.blur = callback() ?? (() => {}); },
+}));
+vi.mock("./api", () => ({ getSession: fixtures.getSession }));
 vi.mock("@react-native-async-storage/async-storage", () => ({
 	default: { getItem: fixtures.getItem, setItem: fixtures.setItem },
 }));
@@ -44,7 +51,12 @@ vi.mock("react-native", async () => {
 	};
 });
 vi.mock("./store", () => ({ useApp: () => fixtures.app }));
-vi.mock("./archive/useArchivedSessions", () => ({ useArchivedSessions: () => fixtures.archive }));
+vi.mock("./archive/useArchivedSessions", () => ({
+	useArchivedSessions: (_sources: unknown, options: { active: boolean; exhaustive: boolean }) => {
+		fixtures.archiveOptions = options;
+		return fixtures.archive;
+	},
+}));
 vi.mock("./worker-list-row", () => ({ WorkerListRow: "WorkerListRow" }));
 vi.mock("./archived-worker-row", () => ({ ArchivedWorkerRow: "ArchivedWorkerRow" }));
 vi.mock("./haptics", () => ({ haptics: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
@@ -80,15 +92,20 @@ function worker(id: string, over: Partial<DashboardSession> = {}): HostedSession
 }
 
 const project: HostedProject = { id: "project", name: "Project", hostId: "box", hostName: "Build box" };
+let mountedViews: ReactTestRenderer[] = [];
 
-function render(sessions: HostedSession[], archiveSources: readonly ArchiveSource[] = []): ReactTestRenderer {
+function render(
+	sessions: HostedSession[],
+	archiveSources: readonly ArchiveSource[] = [],
+	connection: "closed" | "connecting" | "open" = "closed",
+): ReactTestRenderer {
 	let view!: ReactTestRenderer;
 	act(() => {
 		view = create(
 			<FleetTreeList
 				contentBottomInset={0}
 				archiveSources={archiveSources}
-				hosts={[{ hostId: "box", name: "Build box", connection: "closed" }]}
+				hosts={[{ hostId: "box", name: "Build box", connection }]}
 				onRefresh={() => {}}
 				orchestrators={[]}
 				projects={[project]}
@@ -97,14 +114,28 @@ function render(sessions: HostedSession[], archiveSources: readonly ArchiveSourc
 			/>,
 		);
 	});
+	mountedViews.push(view);
 	return view;
 }
+
+afterEach(() => {
+	act(() => {
+		for (const view of mountedViews) view.unmount();
+	});
+	mountedViews = [];
+});
 
 beforeEach(() => {
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 	fixtures.push.mockClear();
 	fixtures.getItem.mockReset().mockResolvedValue(null);
 	fixtures.setItem.mockClear();
+	fixtures.getSession.mockReset().mockImplementation(() => new Promise(() => {}));
+	fixtures.app.configForHost.mockReset().mockReturnValue({
+		host: "box.test", httpPort: "3011", muxPort: "3011", password: "secret", hostId: "box",
+	});
+	fixtures.app.restore.mockReset().mockResolvedValue(undefined);
+	fixtures.archiveOptions = null;
 	Object.assign(fixtures.archive, { rows: [], total: 0, loading: false, error: null, hasMore: false });
 	fixtures.archive.loadMore.mockClear();
 	fixtures.archive.retry.mockClear();
@@ -133,6 +164,8 @@ describe("FleetTreeList", () => {
 
 		expect(child.props.hostId).toBe("box");
 		expect(child.props.session.projectId).toBe("project");
+		expect(view.root.findAllByType("WorkerListRow" as never).find((row) => row.props.session.id === "Manager")?.props.treeDepth).toBe(2);
+		expect(child.props.treeDepth).toBe(3);
 	});
 
 	it("announces descendant attention and missing-parent state", () => {
@@ -162,7 +195,7 @@ describe("FleetTreeList", () => {
 		fixtures.archive.rows = [
 			worker("Grandparent", { status: "terminated", isTerminated: true }),
 			worker("Parent", { parentSessionId: "Grandparent", status: "terminated", isTerminated: true }),
-			worker("Unrelated", { status: "terminated", isTerminated: true }),
+			worker("Unrelated", { projectId: "other", status: "terminated", isTerminated: true }),
 		];
 		fixtures.archive.total = 3;
 		const sources: ArchiveSource[] = [{ hostId: "box", summary: { total: 3, byProject: { project: 3 } } }];
@@ -170,6 +203,77 @@ describe("FleetTreeList", () => {
 
 		expect(view.root.findAllByType("WorkerListRow" as never).map((row) => row.props.session.id)).toEqual(["Grandparent", "Parent", "Child"]);
 		expect(view.root.findByProps({ accessibilityLabel: "Archive, 3 sessions" })).toBeTruthy();
+		expect(view.root.findAllByProps({ accessibilityLabel: "other, No sessions" })).toHaveLength(0);
+		expect(fixtures.archiveOptions).toMatchObject({ active: false, exhaustive: false });
+	});
+
+	it("looks up a replaced orchestrator directly without exhausting the worker archive", async () => {
+		let answer!: (session: DashboardSession) => void;
+		fixtures.getSession.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+		const historical = {
+			...worker("Past orchestrator", { kind: "orchestrator", status: "terminated", isTerminated: true }),
+			hostId: undefined,
+			hostName: undefined,
+		};
+		const view = render([worker("Child", { parentSessionId: "Past orchestrator" })]);
+
+		expect(fixtures.getSession).toHaveBeenCalledWith(
+			expect.objectContaining({ hostId: "box" }),
+			"Past orchestrator",
+			expect.objectContaining({ signal: expect.any(AbortSignal) }),
+		);
+		await act(async () => {
+			answer(historical);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+		const labels = view.root.findAllByType("Pressable" as never)
+			.map((row) => row.props.accessibilityLabel)
+			.filter(Boolean);
+		expect(labels).toEqual(expect.arrayContaining([expect.stringContaining("Past orchestrator, Orchestrator")]));
+		expect(fixtures.archiveOptions).toMatchObject({ active: false, exhaustive: false });
+	});
+
+	it("serializes archive restore and opens the restored session", async () => {
+		let finishRestore!: () => void;
+		fixtures.app.restore.mockReturnValueOnce(new Promise<void>((resolve) => { finishRestore = resolve; }));
+		const archived = worker("Archived", { status: "terminated", isTerminated: true });
+		fixtures.archive.rows = [archived];
+		fixtures.archive.total = 1;
+		const view = render([worker("Live")], [], "open");
+
+		act(() => view.root.findByProps({ accessibilityLabel: "Archive, 1 session" }).props.onPress());
+		expect(fixtures.archiveOptions).toMatchObject({ active: true, exhaustive: false });
+		expect(view.root.findByType("FlatList" as never).props.onEndReached).toBe(fixtures.archive.loadMore);
+		let row = view.root.findByType("ArchivedWorkerRow" as never);
+		act(() => row.props.onRestore(archived));
+		row = view.root.findByType("ArchivedWorkerRow" as never);
+
+		expect(row.props.restoring).toBe(true);
+		expect(row.props.restoreDisabled).toBe(true);
+		act(() => row.props.onRestore(archived));
+		expect(fixtures.app.restore).toHaveBeenCalledTimes(1);
+
+		await act(async () => finishRestore());
+		expect(fixtures.push).toHaveBeenCalledWith({
+			pathname: "/session/[id]",
+			params: { id: "Archived", projectId: "project", hostId: "box" },
+		});
+	});
+
+	it("does not navigate when archive restore finishes after the page loses focus", async () => {
+		let finishRestore!: () => void;
+		fixtures.app.restore.mockReturnValueOnce(new Promise<void>((resolve) => { finishRestore = resolve; }));
+		const archived = worker("Archived", { status: "terminated", isTerminated: true });
+		fixtures.archive.rows = [archived];
+		fixtures.archive.total = 1;
+		const view = render([worker("Live")], [], "open");
+
+		act(() => view.root.findByProps({ accessibilityLabel: "Archive, 1 session" }).props.onPress());
+		act(() => view.root.findByType("ArchivedWorkerRow" as never).props.onRestore(archived));
+		act(() => fixtures.blur());
+		await act(async () => finishRestore());
+
+		expect(fixtures.push).not.toHaveBeenCalled();
 	});
 
 	it("merges a tap made before stored disclosure preferences finish loading", async () => {

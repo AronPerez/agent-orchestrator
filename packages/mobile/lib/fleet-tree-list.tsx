@@ -1,4 +1,4 @@
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from "react";
 import {
 	Alert,
@@ -19,7 +19,7 @@ import {
 	type FleetSessionNode,
 } from "../../product-ui/src/fleet-tree";
 import { AppSymbol } from "./AppSymbol";
-import type { DashboardSession } from "./api";
+import { getSession, type DashboardSession } from "./api";
 import { ArchivedWorkerRow } from "./archived-worker-row";
 import { useArchivedSessions, type ArchiveSource } from "./archive/useArchivedSessions";
 import { isArchived } from "./agentsView";
@@ -61,6 +61,46 @@ type ArchiveHeaderRow = { kind: "archive"; key: string };
 type ArchivedSessionRow = { kind: "archived"; key: string; session: DashboardSession };
 type ArchiveStatusRow = { kind: "archive-status"; key: string };
 export type MobileFleetRow = ProjectRow | MachineRow | SessionRow | ArchiveHeaderRow | ArchivedSessionRow | ArchiveStatusRow;
+
+type MissingAncestor = { key: string; hostId: string; sessionId: string };
+type LineageRow = { id: string; hostId: string; parentSessionId?: string };
+
+function resolveFleetLineage(
+	liveSessions: readonly HostedSession[],
+	orchestrators: readonly HostedOrchestrator[],
+	candidates: readonly HostedSession[],
+): { ancestors: HostedSession[]; missing: MissingAncestor[] } {
+	const current = new Map<string, LineageRow>();
+	for (const session of liveSessions) current.set(hostedRowKey(session.hostId, session.id), session);
+	for (const orchestrator of orchestrators) current.set(hostedRowKey(orchestrator.hostId, orchestrator.id), orchestrator);
+	const history = new Map(candidates.map((session) => [hostedRowKey(session.hostId, session.id), session]));
+	const ancestors = new Map<string, HostedSession>();
+	const missing = new Map<string, MissingAncestor>();
+	const visited = new Set<string>();
+
+	const visit = (row: LineageRow) => {
+		const rowKey = hostedRowKey(row.hostId, row.id);
+		if (visited.has(rowKey)) return;
+		visited.add(rowKey);
+		if (!row.parentSessionId || row.parentSessionId === row.id) return;
+		const parentKey = hostedRowKey(row.hostId, row.parentSessionId);
+		const available = current.get(parentKey);
+		if (available) {
+			visit(available);
+			return;
+		}
+		const historical = history.get(parentKey);
+		if (!historical) {
+			missing.set(parentKey, { key: parentKey, hostId: row.hostId, sessionId: row.parentSessionId });
+			return;
+		}
+		ancestors.set(parentKey, historical);
+		visit(historical);
+	};
+
+	for (const session of liveSessions) visit(session);
+	return { ancestors: [...ancestors.values()], missing: [...missing.values()] };
+}
 
 const rollupOrder = ["action", "merge", "pending", "working", "done"] as const;
 const rollupLabels = {
@@ -107,7 +147,7 @@ function rowHasChildren(row: ProjectRow | MachineRow | SessionRow): boolean {
 }
 
 function isWorkerSession(source: DashboardSession | { projectId: string }): source is DashboardSession {
-	return "createdAt" in source;
+	return "createdAt" in source && source.kind !== "orchestrator";
 }
 
 function sessionRole(node: FleetSessionNode<MobileFleetSession>): "Orchestrator" | "Manager" | "Worker" {
@@ -151,6 +191,7 @@ export function FleetTreeList({
 	const theme = useTheme();
 	const styles = useThemedStyles(makeStyles);
 	const {
+		configForHost,
 		currentHostId,
 		kill,
 		renameWorker,
@@ -178,41 +219,84 @@ export function FleetTreeList({
 		return () => { active = false; };
 	}, []);
 
+	const liveSessions = useMemo(() => sessions.filter((session) => !isArchived(session)), [sessions]);
 	const inlineArchive = useMemo(() => sessions.filter(isArchived), [sessions]);
-	const unresolvedParents = useMemo(() => {
-		const known = new Set([
-			...sessions.map((session) => hostedRowKey(session.hostId, session.id)),
-			...orchestrators.map((orchestrator) => hostedRowKey(orchestrator.hostId, orchestrator.id)),
-		]);
-		return sessions.some((session) =>
-			!isArchived(session) && Boolean(session.parentSessionId) &&
-			!known.has(hostedRowKey(session.hostId, session.parentSessionId!)));
-	}, [orchestrators, sessions]);
+	const hostsById = useMemo(() => new Map(hosts.map((host) => [host.hostId, host])), [hosts]);
 	const [archiveOpen, setArchiveOpen] = useState(false);
 	const [archiveRefresh, setArchiveRefresh] = useState(0);
 	const archive = useArchivedSessions(archiveSources, {
-		active: archiveOpen || unresolvedParents,
-		exhaustive: unresolvedParents,
+		active: archiveOpen,
+		exhaustive: false,
 		inline: inlineArchive,
 		refreshToken: archiveRefresh,
 	});
 	const liveKeys = useMemo(
-		() => new Set(sessions.filter((session) => !isArchived(session)).map(hostedSessionKey)),
-		[sessions],
+		() => new Set(liveSessions.map(hostedSessionKey)),
+		[liveSessions],
 	);
 	const archivedRows = useMemo(
 		() => archive.rows.filter((session) => !liveKeys.has(hostedSessionKey(session))),
 		[archive.rows, liveKeys],
 	);
+	const [lookedUpAncestors, setLookedUpAncestors] = useState<Map<string, HostedSession>>(() => new Map());
+	const archiveCandidates = useMemo(
+		() => archivedRows.flatMap((session) => sessionHostId(session) ? [session as HostedSession] : []),
+		[archivedRows],
+	);
+	const lineage = useMemo(
+		() => resolveFleetLineage(liveSessions, orchestrators, [...archiveCandidates, ...lookedUpAncestors.values()]),
+		[archiveCandidates, liveSessions, lookedUpAncestors, orchestrators],
+	);
+	const ancestorAttempts = useRef(new Map<string, number>());
+	const ancestorControllers = useRef(new Map<string, AbortController>());
+	useEffect(() => {
+		const missingKeys = new Set(lineage.missing.map((request) => request.key));
+		for (const key of ancestorAttempts.current.keys()) {
+			if (!missingKeys.has(key)) ancestorAttempts.current.delete(key);
+		}
+		for (const [key, controller] of ancestorControllers.current) {
+			if (!missingKeys.has(key)) {
+				controller.abort();
+				ancestorControllers.current.delete(key);
+			}
+		}
+		for (const request of lineage.missing) {
+			if (ancestorControllers.current.has(request.key) || ancestorAttempts.current.get(request.key) === archiveRefresh) continue;
+			const config = configForHost(request.hostId);
+			if (!config) continue;
+			ancestorAttempts.current.set(request.key, archiveRefresh);
+			const controller = new AbortController();
+			ancestorControllers.current.set(request.key, controller);
+			void getSession(config, request.sessionId, { signal: controller.signal }).then((session) => {
+				if (controller.signal.aborted || session.id !== request.sessionId) return;
+				const hosted: HostedSession = {
+					...session,
+					hostId: request.hostId,
+					hostName: hostsById.get(request.hostId)?.name ?? request.hostId,
+				};
+				setLookedUpAncestors((current) => {
+					const next = new Map(current);
+					next.set(request.key, hosted);
+					return next;
+				});
+			}).catch(() => {
+				// A deleted or temporarily unreachable parent remains explicitly unavailable.
+			}).finally(() => {
+				if (ancestorControllers.current.get(request.key) === controller) ancestorControllers.current.delete(request.key);
+			});
+		}
+	}, [archiveRefresh, configForHost, hostsById, lineage.missing]);
+	useEffect(() => () => {
+		for (const controller of ancestorControllers.current.values()) controller.abort();
+		ancestorControllers.current.clear();
+	}, []);
 	const treeSessions = useMemo(() => {
 		const byAddress = new Map<string, HostedSession>();
-		for (const session of archivedRows) {
-			if (sessionHostId(session)) byAddress.set(hostedSessionKey(session), session as HostedSession);
-		}
+		for (const session of lineage.ancestors) byAddress.set(hostedSessionKey(session), session);
 		// A live poll is newer than the archive page when the same address appears in both.
-		for (const session of sessions) byAddress.set(hostedSessionKey(session), session);
+		for (const session of liveSessions) byAddress.set(hostedSessionKey(session), session);
 		return [...byAddress.values()];
-	}, [archivedRows, sessions]);
+	}, [lineage.ancestors, liveSessions]);
 	const tree = useMemo(
 		() => buildMobileFleetTree({ projects, sessions: treeSessions, orchestrators, hosts }),
 		[hosts, orchestrators, projects, treeSessions],
@@ -237,7 +321,6 @@ export function FleetTreeList({
 		}
 		return [...treeRows, ...archiveRows];
 	}, [archive.error, archive.hasMore, archive.loading, archive.total, archiveOpen, archivedRows, treeRows]);
-	const hostsById = useMemo(() => new Map(hosts.map((host) => [host.hostId, host])), [hosts]);
 	const projectNames = useMemo(
 		() => new Map(projects.map((project) => [hostedRowKey(project.hostId, project.id), project.name])),
 		[projects],
@@ -304,6 +387,45 @@ export function FleetTreeList({
 		const hostId = sessionHostId(session);
 		return hostId ? hostsById.get(hostId)?.connection !== "open" : false;
 	}, [hostsById]);
+	const [restoringKey, setRestoringKey] = useState<string>();
+	const [restoreErrors, setRestoreErrors] = useState<Record<string, string>>({});
+	const restoringRef = useRef<string | undefined>(undefined);
+	const restoreGeneration = useRef(0);
+	const focusEpoch = useRef(0);
+	useFocusEffect(useCallback(() => () => { focusEpoch.current += 1; }, []));
+	useEffect(() => () => { restoreGeneration.current += 1; }, []);
+	const restoreArchived = useCallback(async (session: DashboardSession) => {
+		if (restoringRef.current || machineOffline(session)) return;
+		const key = hostedSessionKey(session);
+		const generation = restoreGeneration.current;
+		const focusedAt = focusEpoch.current;
+		const current = () => generation === restoreGeneration.current;
+		restoringRef.current = key;
+		setRestoringKey(key);
+		setRestoreErrors(({ [key]: _cleared, ...rest }) => rest);
+		try {
+			await restore(session.id, sessionHostId(session));
+			if (!current()) return;
+			haptics.success();
+			if (focusEpoch.current !== focusedAt) return;
+			router.push({
+				pathname: "/session/[id]",
+				params: { id: session.id, projectId: session.projectId, hostId: sessionHostId(session) ?? currentHostId },
+			});
+		} catch (cause) {
+			if (!current()) return;
+			haptics.error();
+			setRestoreErrors((currentErrors) => ({
+				...currentErrors,
+				[key]: userFacingError(cause, "Couldn't restore this session."),
+			}));
+		} finally {
+			if (current()) {
+				restoringRef.current = undefined;
+				setRestoringKey(undefined);
+			}
+		}
+	}, [currentHostId, machineOffline, restore, router]);
 	const refreshTree = useCallback(async () => {
 		try {
 			await onRefresh();
@@ -353,14 +475,16 @@ export function FleetTreeList({
 		}
 		if (item.kind === "archived") {
 			const hostId = sessionHostId(item.session);
+			const key = hostedSessionKey(item.session);
 			return (
 				<ArchivedWorkerRow
 					nowBucket={nowBucket}
 					offline={machineOffline(item.session)}
-					onRestore={(session) => void runWorkerRecovery(session, "restore")}
+					onRestore={(session) => void restoreArchived(session)}
 					projectName={projectNames.get(hostId ? hostedRowKey(hostId, item.session.projectId) : item.session.projectId)}
-					restoreDisabled={false}
-					restoring={false}
+					restoreDisabled={restoringKey !== undefined}
+					restoreError={restoreErrors[key]}
+					restoring={restoringKey === key}
 					session={item.session}
 					showMachine
 				/>
@@ -442,7 +566,7 @@ export function FleetTreeList({
 					projectName={projectName}
 					rowKey={rowKey}
 					session={source}
-					treeDepth={Math.max(0, item.depth - 2)}
+					treeDepth={item.depth}
 					treeExpanded={expanded}
 				/>
 			);
@@ -492,8 +616,8 @@ export function FleetTreeList({
 		);
 	}, [activeSwipeId, archive.error, archive.loadMore, archive.loading, archive.retry, archive.total, archiveOpen,
 		closeExclusiveSwipe, collapsed, confirmDeleteSession, currentHostId, hostsById, machineOffline, nowBucket,
-		openExclusiveSwipe, projectNames, renameWorker, renamingWorkerId, router, runWorkerRecovery, styles, theme, toggle,
-		updateWorkerPin]);
+		openExclusiveSwipe, projectNames, renameWorker, renamingWorkerId, restoreArchived, restoreErrors, restoringKey, router,
+		runWorkerRecovery, styles, theme, toggle, updateWorkerPin]);
 
 	return (
 		<FlatList

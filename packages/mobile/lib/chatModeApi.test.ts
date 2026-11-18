@@ -5,7 +5,7 @@ vi.mock("expo-secure-store", () => ({ getItemAsync: vi.fn(), setItemAsync: vi.fn
 vi.mock("expo/fetch", () => ({ fetch: vi.fn() }));
 
 import { fetch as expoFetch } from "expo/fetch";
-import { ApiError, apiRequest, delegateTask, getAgentModels, getPreview, getSessions, getSettings, launchOrchestrator, mobileReachablePreviewURL, pinSession, renameSession, restoreSession, resumeSessionAgent, setSessionAutoInjectCI, setSessionAutoInjectReview, setSessionAutoReview, spawnSession, unpinSession } from "./api";
+import { ApiError, apiRequest, delegateTask, getAgentModels, getPreview, getSession, getSessions, getSettings, launchOrchestrator, mobileReachablePreviewURL, pinSession, renameSession, restoreSession, resumeSessionAgent, setSessionAutoInjectCI, setSessionAutoInjectReview, setSessionAutoReview, spawnSession, unpinSession } from "./api";
 import * as chatApi from "./chat/api";
 import { UNREACHABLE_ACTION_COPY, UnreachableError, userFacingError } from "./connectionError";
 import type { ServerConfig } from "./config";
@@ -108,6 +108,20 @@ describe("mobile Chat API boundaries", () => {
 		const result = await getSessions(cfg);
 
 		expect(result.sessions[0]).toMatchObject({ id: "child", parentSessionId: "manager" });
+	});
+
+	it("looks up one historical fleet ancestor with cancellation", async () => {
+		vi.mocked(fetch).mockImplementationOnce(() => new Promise(() => {}));
+		const controller = new AbortController();
+
+		const request = getSession(cfg, "old/orchestrator", { signal: controller.signal });
+
+		const [url, init] = vi.mocked(fetch).mock.calls[0];
+		expect(url).toBe("http://ao.test:3011/api/v1/sessions/old%2Forchestrator");
+		expect(init?.signal?.aborted).toBe(false);
+		controller.abort();
+		expect(init?.signal?.aborted).toBe(true);
+		await expect(request).rejects.toMatchObject({ name: "AbortError" });
 	});
 
 	it("preserves review automation policies from the session read model", async () => {

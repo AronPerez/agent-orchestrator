@@ -1478,8 +1478,12 @@ export type SpawnAttachmentInput = {
 	data: string;
 };
 
-export async function getSession(cfg: ServerConfig, id: string): Promise<DashboardSession> {
-	const res = await req(cfg, `${API}/sessions/${encodeURIComponent(id)}`);
+export async function getSession(
+	cfg: ServerConfig,
+	id: string,
+	init?: Pick<RequestInit, "signal">,
+): Promise<DashboardSession> {
+	const res = await req(cfg, `${API}/sessions/${encodeURIComponent(id)}`, init);
 	const data = await res.json();
 	return mapSession(data?.session ?? data);
 }
