@@ -686,16 +686,17 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.launchToken == "" {
 		cfg.launchToken = envLaunchToken
 	}
-	if err := awaitLaunchReady(ctx, cfg); err != nil {
-		return err
-	}
 	if cfg.launchToken != "" {
 		// Keep the durable fence for the host's full lifetime. On Unix the
 		// provider owns a separate process group and can survive an abrupt host
 		// exit, so descriptor publication alone does not prove that later host
-		// death also stopped the provider tree. This defer runs after the
-		// provider-tree closer and host-lock release on orderly shutdown.
+		// death also stopped the provider tree. Register before readiness so a
+		// definite pre-admission exit also removes the exact launch records. This
+		// defer still runs after provider-tree and host-lock cleanup on shutdown.
 		defer clearLaunchIntent(cfg.DataDir, cfg.SessionID, cfg.launchToken)
+	}
+	if err := awaitLaunchReady(ctx, cfg); err != nil {
+		return err
 	}
 	releaseLock, err := acquireHostLock(cfg.DataDir, cfg.SessionID)
 	if err != nil {

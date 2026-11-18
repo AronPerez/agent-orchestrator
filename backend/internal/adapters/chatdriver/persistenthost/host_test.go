@@ -1074,6 +1074,33 @@ func TestLaunchProbeRechecksReadinessAfterLauncherExit(t *testing.T) {
 	}
 }
 
+func TestRunClearsLaunchIntentBeforeLateReadiness(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "late-readiness"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = Run(ctx, Config{
+		SessionID: sessionID, DataDir: dataDir, Workdir: t.TempDir(),
+		Argv: []string{"unused"}, launchToken: token,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context canceled", err)
+	}
+	if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("late readiness publication error = %v, want removed intent", err)
+	}
+	if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("launch intent remains after pre-admission exit: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("launch readiness remains after pre-admission exit: %v", err)
+	}
+}
+
 func TestLaunchProbeClearsReadinessFromPriorBoot(t *testing.T) {
 	dataDir := t.TempDir()
 	sessionID := "prior-boot"
