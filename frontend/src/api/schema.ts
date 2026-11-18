@@ -6722,6 +6722,7 @@ export interface components {
             lastInteractionAt?: null | string;
             /** Format: date-time */
             lastUserMessageAt?: null | string;
+            latestDoneReport?: components["schemas"]["SessionDoneReportResponse"];
             /** @enum {string} */
             mode: "chat" | "tui";
             model?: string;
@@ -7983,6 +7984,16 @@ export interface components {
             open: boolean;
             url: string;
         };
+        PRTamperAssessmentResponse: {
+            /** Format: date-time */
+            assessedAt: string;
+            ciWorkflowEdited?: boolean;
+            headSha: string;
+            skipMarkersAdded?: number;
+            testCasesAdded?: number;
+            testCasesRemoved?: number;
+            testFilesDeleted?: number;
+        };
         PostPRCommentRequest: {
             attachments?: components["schemas"]["PRCommentAttachment"][];
             body: string;
@@ -8522,6 +8533,10 @@ export interface components {
             events: components["schemas"]["CoordinationEvent"][];
             hasMore: boolean;
         };
+        SessionDoneReportResponse: {
+            id: string;
+            verification?: components["schemas"]["ReportVerificationResponse"];
+        };
         SessionHistoryResponse: {
             offset: number;
             total: number;
@@ -8667,6 +8682,7 @@ export interface components {
             stackParent?: number;
             /** @enum {string} */
             state: "draft" | "open" | "merged" | "closed";
+            tamper?: components["schemas"]["PRTamperAssessmentResponse"];
             /** Format: date-time */
             updatedAt: string;
             url: string;

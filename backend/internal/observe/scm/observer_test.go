@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -1172,9 +1173,16 @@ func TestPoll_DiscoversSameRepoPRAfterRename(t *testing.T) {
 
 func mustGit(t *testing.T, args ...string) {
 	t.Helper()
-	if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+	_ = mustGitOutput(t, args...)
+}
+
+func mustGitOutput(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
 		t.Fatalf("git %v: %v (%s)", args, err, out)
 	}
+	return string(out)
 }
 
 // A PR opened from the fork push origin against an upstream base repo (the
@@ -1567,6 +1575,90 @@ func TestPoll_UnchangedHashesDoNotWriteOrNotify(t *testing.T) {
 	}
 	if len(store.writes) != 0 || len(lc.observed) != 0 {
 		t.Fatalf("unchanged hashes wrote/notified: writes=%d observed=%d", len(store.writes), len(lc.observed))
+	}
+}
+
+func TestPoll_BackfillsHeadBoundTamperEvidenceWithoutSemanticChange(t *testing.T) {
+	repo := t.TempDir()
+	mustGit(t, "init", repo)
+	mustGit(t, "-C", repo, "config", "user.name", "AO Test")
+	mustGit(t, "-C", repo, "config", "user.email", "ao@example.test")
+	mustGit(t, "-C", repo, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "widget_test.go"), []byte("package widget\n\nfunc TestKeep(t *testing.T) {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "-C", repo, "add", ".")
+	mustGit(t, "-C", repo, "commit", "-m", "base")
+	baseSHA := strings.TrimSpace(mustGitOutput(t, "-C", repo, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(repo, "widget_test.go"), []byte("package widget\n\nfunc TestKeep(t *testing.T) { t.Skip(\"later\") }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "-C", repo, "add", ".")
+	mustGit(t, "-C", repo, "commit", "-m", "head")
+	headSHA := strings.TrimSpace(mustGitOutput(t, "-C", repo, "rev-parse", "HEAD"))
+
+	store := testStoreWithSession()
+	store.sessions[0].Metadata.WorkspaceRepoPath = repo
+	obsValue := testObs(1)
+	obsValue.PR.BaseSHA = baseSHA
+	obsValue.PR.HeadSHA = headSHA
+	obsValue.CI.HeadSHA = headSHA
+	local := knownPR(1)
+	local.BaseSHA = baseSHA
+	local.HeadSHA = headSHA
+	local.MetadataHash = metadataSemanticHash(obsValue)
+	local.CIHash = ciSemanticHash(obsValue.CI)
+	local.ReviewHash = reviewSemanticHash(obsValue.Review)
+	store.prs["p-1"] = []domain.PullRequest{local}
+	provider := &fakeProvider{
+		repoGuards:   map[string]ports.SCMGuardResult{prKey(testRepo, 0): {ETag: "repo"}},
+		observations: map[string]ports.SCMObservation{prKey(testRepo, 1): obsValue},
+	}
+	lifecycle := &fakeLifecycle{}
+	observer := newTestObserver(store, provider, lifecycle, time.Unix(100, 0).UTC())
+
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.writes) != 1 {
+		t.Fatalf("writes = %d, want one tamper-evidence backfill", len(store.writes))
+	}
+	written := store.writes[0].pr
+	if written.Tamper == nil || written.Tamper.HeadSHA != headSHA || !written.Tamper.Suspected() || written.Tamper.SkipMarkersAdded != 1 {
+		t.Fatalf("tamper assessment = %+v", written.Tamper)
+	}
+	if len(lifecycle.observed) != 0 {
+		t.Fatalf("tamper backfill notified lifecycle: %+v", lifecycle.observed)
+	}
+
+	store.prs["p-1"] = []domain.PullRequest{written}
+	store.writes = nil
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("matching head evidence rewrote PR: %+v", store.writes)
+	}
+}
+
+func TestTamperAssessmentDoesNotReuseEvidenceWhenBaseChanges(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	local := domain.PullRequest{
+		BaseSHA: "base-1",
+		HeadSHA: "head-1",
+		Tamper:  &domain.PRTamperAssessment{HeadSHA: "head-1", SkipMarkersAdded: 1, AssessedAt: now},
+	}
+	changedBase := domain.PullRequest{BaseSHA: "base-2", HeadSHA: "head-1"}
+
+	assessment, backfilled := (&Observer{}).tamperAssessment(
+		context.Background(),
+		domain.SessionRecord{},
+		changedBase,
+		local,
+		now.Add(time.Minute),
+	)
+	if assessment != nil || backfilled {
+		t.Fatalf("changed base reused assessment: assessment=%+v backfilled=%t", assessment, backfilled)
 	}
 }
 

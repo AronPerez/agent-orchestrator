@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -740,6 +741,7 @@ func genPRParams(r domain.PullRequest) gen.UpsertPRParams {
 		CIObservedAt:             nullTime(r.CIObservedAt),
 		ReviewObservedAt:         nullTime(r.ReviewObservedAt),
 		ReviewPartial:            r.ReviewPartial,
+		TamperAssessmentJson:     encodePRTamperAssessment(r.Tamper),
 		ID:                       r.SessionID,
 	}
 }
@@ -847,7 +849,30 @@ func prRowFromGen(p gen.PR) domain.PullRequest {
 		ReviewObservedAt:         timeFromNull(p.ReviewObservedAt),
 		ReviewPartial:            p.ReviewPartial,
 		AutoInjectCI:             p.AutoInjectCI,
+		Tamper:                   decodePRTamperAssessment(p.TamperAssessmentJson),
 	}
+}
+
+func encodePRTamperAssessment(assessment *domain.PRTamperAssessment) string {
+	if assessment == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(assessment)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func decodePRTamperAssessment(raw string) *domain.PRTamperAssessment {
+	if raw == "" {
+		return nil
+	}
+	var assessment domain.PRTamperAssessment
+	if err := json.Unmarshal([]byte(raw), &assessment); err != nil {
+		return nil
+	}
+	return &assessment
 }
 
 func genCheckParams(prURL string, c domain.PullRequestCheck) gen.UpsertPRCheckParams {

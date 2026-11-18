@@ -574,6 +574,7 @@ type PR struct {
 	ReviewPartial            bool
 	HeadFromFork             bool
 	HeadIsDefaultBranch      bool
+	TamperAssessmentJson     string
 }
 
 type PRCheck struct {

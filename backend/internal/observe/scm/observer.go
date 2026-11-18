@@ -24,6 +24,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
+	"github.com/aoagents/agent-orchestrator/backend/internal/verification"
 )
 
 const (
@@ -702,6 +703,9 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 			preserveLocalReviewDecision: reviewStale[key],
 		}
 		prepared := o.prepareForPersistence(obs, local, opts, now)
+		finalPR, finalChecks, finalReviews, finalThreads, finalComments := domainFromObservation(subj.session.ID, subj.session, prepared, local, opts, now)
+		tamper, tamperBackfilled := o.tamperAssessment(ctx, subj.session, finalPR, local, now)
+		finalPR.Tamper = tamper
 		if !prepared.Changed.Metadata && !prepared.Changed.CI && !prepared.Changed.Review {
 			// Details are left out of the hashes, and a provider reads them only
 			// when none are stored or the PR's updatedAt moved, so details here
@@ -711,17 +715,15 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 			// Details still owed (a failed read or write) keep the refresh
 			// incomplete, so the repository cursor waits and they are retried.
 			refreshed := !prepared.PR.DetailsPending
-			if prepared.PR.Details != nil {
-				pr, _, _, _, _ := domainFromObservation(subj.session.ID, subj.session, prepared, local, opts, now)
-				if err := o.store.WriteSCMObservation(ctx, pr, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
-					o.logger.Warn("scm observer: PR details write failed", "session", subj.session.ID, "pr", pr.URL, "err", err)
+			if finalPR.Details != nil || tamperBackfilled {
+				if err := o.store.WriteSCMObservation(ctx, finalPR, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+					o.logger.Warn("scm observer: PR details or tamper write failed", "session", subj.session.ID, "pr", finalPR.URL, "err", err)
 					refreshed = false
 				}
 			}
 			prRefreshOK[key] = refreshed
 			continue
 		}
-		finalPR, finalChecks, finalReviews, finalThreads, finalComments := domainFromObservation(subj.session.ID, subj.session, prepared, local, opts, now)
 		pr, checks, reviews, threads, comments := finalPR, finalChecks, finalReviews, finalThreads, finalComments
 		// Lifecycle is allowed to run only after the observed facts are durable,
 		// but semantic hashes are the observer's acknowledgement cursor. Keep
@@ -740,6 +742,7 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 				pendingOpts.preserveLocalReviewHash = true
 			}
 			pr, checks, reviews, threads, comments = domainFromObservation(subj.session.ID, subj.session, prepared, local, pendingOpts, now)
+			pr.Tamper = tamper
 		}
 		if err := o.store.WriteSCMObservation(ctx, pr, checks, reviews, threads, comments, reviewMode); err != nil {
 			o.logger.Error("scm observer: DB write failed", "session", subj.session.ID, "pr", pr.URL, "err", err)
@@ -1929,6 +1932,28 @@ func (o *Observer) prepareForPersistence(obs ports.SCMObservation, local domain.
 	obs.PR.State = firstNonEmpty(obs.PR.State, normalizePRState(obs.PR.Draft, obs.PR.Merged, obs.PR.Closed))
 	obs.ObservedAt = firstTime(obs.ObservedAt, now)
 	return obs
+}
+
+func (o *Observer) tamperAssessment(ctx context.Context, session domain.SessionRecord, pr, local domain.PullRequest, now time.Time) (*domain.PRTamperAssessment, bool) {
+	if pr.HeadSHA != "" && pr.HeadSHA == local.HeadSHA && pr.BaseSHA != "" && pr.BaseSHA == local.BaseSHA && local.Tamper != nil && local.Tamper.HeadSHA == pr.HeadSHA {
+		return local.Tamper, false
+	}
+	workspacePath := strings.TrimSpace(session.Metadata.WorkspaceRepoPath)
+	if workspacePath == "" {
+		workspacePath = strings.TrimSpace(session.Metadata.WorkspacePath)
+	}
+	baseSHA := firstNonEmpty(pr.BaseSHA, local.BaseSHA)
+	if workspacePath == "" || baseSHA == "" || pr.HeadSHA == "" {
+		return nil, false
+	}
+	assessment, err := verification.AssessPullRequestTampering(ctx, workspacePath, baseSHA, pr.HeadSHA, now)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			o.logger.Debug("scm observer: PR tamper assessment unavailable", "session", session.ID, "pr", pr.URL, "head", pr.HeadSHA, "err", err)
+		}
+		return nil, false
+	}
+	return &assessment, true
 }
 
 func domainFromObservation(sessionID domain.SessionID, sessionRecord domain.SessionRecord, obs ports.SCMObservation, local domain.PullRequest, opts persistenceOptions, now time.Time) (domain.PullRequest, []domain.PullRequestCheck, []domain.PullRequestReview, []domain.PullRequestReviewThread, []domain.PullRequestComment) {

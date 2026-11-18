@@ -239,6 +239,14 @@ type ReportVerification struct {
 	OutputTail  string
 }
 
+// SessionDoneReport is the latest done report fact used by session read
+// models. Its presence means the session reported done; Verification remains
+// nil when that report had no configured verify commands.
+type SessionDoneReport struct {
+	ID           string
+	Verification *ReportVerification
+}
+
 // Validate checks the persisted verification fields. OutputTail is ephemeral
 // response data and is intentionally not part of the durable invariant.
 func (v ReportVerification) Validate() error {

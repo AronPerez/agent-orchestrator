@@ -44,6 +44,7 @@ type PRFacts struct {
 	StackParent int
 	Host        string
 	Repo        string
+	Tamper      *PRTamperAssessment
 }
 
 // PullRequest is the app-level representation of one tracked pull request as
@@ -114,12 +115,52 @@ type PullRequest struct {
 	// provider's thread-window cap, so stored thread rows are a partial view.
 	ReviewPartial bool
 	AutoInjectCI  bool
+	// Tamper is a deterministic assessment for HeadSHA. Nil means AO has not
+	// been able to inspect that exact head locally yet.
+	Tamper *PRTamperAssessment
 
 	// Details is the PR's description, labels, requested reviewers and commits
 	// from the latest observation. It is a write carrier: nil means the
 	// observation did not carry details, and the stored ones are left as they
 	// are. Reads load stored details separately.
 	Details *PullRequestDetails
+}
+
+// PRTamperAssessment is the head-bound result of AO's deterministic pull
+// request diff heuristics. It is advisory evidence, never a merge block.
+type PRTamperAssessment struct {
+	HeadSHA          string    `json:"headSha"`
+	TestFilesDeleted int       `json:"testFilesDeleted,omitempty"`
+	TestCasesRemoved int       `json:"testCasesRemoved,omitempty"`
+	TestCasesAdded   int       `json:"testCasesAdded,omitempty"`
+	SkipMarkersAdded int       `json:"skipMarkersAdded,omitempty"`
+	CIWorkflowEdited bool      `json:"ciWorkflowEdited,omitempty"`
+	AssessedAt       time.Time `json:"assessedAt"`
+}
+
+// Suspected reports whether any approved heuristic found a reason to inspect
+// the change. Test-case churn only flags when removals exceed additions.
+func (a PRTamperAssessment) Suspected() bool {
+	return a.TestFilesDeleted > 0 || a.TestCasesRemoved > a.TestCasesAdded || a.SkipMarkersAdded > 0 || a.CIWorkflowEdited
+}
+
+// Reasons returns stable machine-readable reason names for reviewers and UI
+// adapters. Counts remain on the assessment so each surface can explain them.
+func (a PRTamperAssessment) Reasons() []string {
+	var reasons []string
+	if a.TestFilesDeleted > 0 {
+		reasons = append(reasons, "test_files_deleted")
+	}
+	if a.TestCasesRemoved > a.TestCasesAdded {
+		reasons = append(reasons, "test_cases_removed")
+	}
+	if a.SkipMarkersAdded > 0 {
+		reasons = append(reasons, "skip_markers_added")
+	}
+	if a.CIWorkflowEdited {
+		reasons = append(reasons, "ci_workflow_edited")
+	}
+	return reasons
 }
 
 // MaxPullRequestDescriptionBytes caps a stored PR description. Providers allow

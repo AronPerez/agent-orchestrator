@@ -517,6 +517,75 @@ func (q *Queries) GetReportInterrupt(ctx context.Context, sessionID string) (tim
 	return last_interrupted_at, err
 }
 
+const listLatestDoneReportsBySessions = `-- name: ListLatestDoneReportsBySessions :many
+WITH wanted_session AS (
+    SELECT CAST(j.value AS TEXT) AS session_id
+    FROM json_each(?) AS j
+)
+SELECT
+    r.session_id,
+    r.id,
+    r.verification_state,
+    r.verification_evidence,
+    r.verification_started_at,
+    r.verification_completed_at
+FROM reports r
+JOIN wanted_session ON wanted_session.session_id = r.session_id
+WHERE r.state = 'done'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM reports newer
+      WHERE newer.session_id = r.session_id
+        AND newer.state = 'done'
+        AND (
+            newer.created_at > r.created_at
+            OR (newer.created_at = r.created_at AND newer.id > r.id)
+        )
+  )
+`
+
+type ListLatestDoneReportsBySessionsRow struct {
+	SessionID               string
+	ID                      string
+	VerificationState       string
+	VerificationEvidence    string
+	VerificationStartedAt   sql.NullTime
+	VerificationCompletedAt sql.NullTime
+}
+
+// Batch projection for session cards. A done report without verification is
+// still returned so clients can distinguish unverified completion from no
+// completion report at all.
+func (q *Queries) ListLatestDoneReportsBySessions(ctx context.Context, jsonEach interface{}) ([]ListLatestDoneReportsBySessionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLatestDoneReportsBySessions, jsonEach)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLatestDoneReportsBySessionsRow{}
+	for rows.Next() {
+		var i ListLatestDoneReportsBySessionsRow
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.ID,
+			&i.VerificationState,
+			&i.VerificationEvidence,
+			&i.VerificationStartedAt,
+			&i.VerificationCompletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingReportSchedule = `-- name: ListPendingReportSchedule :many
 SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at FROM reports
 WHERE delivery_state = 'pending'

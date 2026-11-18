@@ -93,6 +93,7 @@ func prFactsFromListRow(r gen.ListPRFactsBySessionRow) domain.PRFacts {
 		StackParent:              int(r.StackParentNumber),
 		Host:                     r.Host,
 		Repo:                     r.Repo,
+		Tamper:                   decodePRTamperAssessment(r.TamperAssessmentJson),
 	}
 }
 
@@ -110,5 +111,6 @@ func prFactsFromGen(r gen.GetDisplayPRFactsBySessionRow) domain.PRFacts {
 		ReviewComments: r.ReviewComments,
 		HeadSHA:        r.HeadSha,
 		UpdatedAt:      r.UpdatedAt,
+		Tamper:         decodePRTamperAssessment(r.TamperAssessmentJson),
 	}
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -164,6 +165,37 @@ func (s *Store) ListReportsBySession(ctx context.Context, id domain.SessionID) (
 		return nil, fmt.Errorf("list reports: %w", err)
 	}
 	return s.reportsWithOutputs(ctx, rows)
+}
+
+// ListLatestDoneReportsForSessions returns at most one done-report fact per
+// requested session. A present row with nil Verification means the session
+// reported done without configured verification commands.
+func (s *Store) ListLatestDoneReportsForSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID]domain.SessionDoneReport, error) {
+	out := make(map[domain.SessionID]domain.SessionDoneReport)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("marshal session ids: %w", err)
+	}
+	rows, err := s.qr.ListLatestDoneReportsBySessions(ctx, string(encoded))
+	if err != nil {
+		return nil, fmt.Errorf("list latest done reports: %w", err)
+	}
+	for _, row := range rows {
+		latest := domain.SessionDoneReport{ID: row.ID}
+		if row.VerificationState != "" {
+			latest.Verification = &domain.ReportVerification{
+				State:       domain.ReportVerificationState(row.VerificationState),
+				Evidence:    row.VerificationEvidence,
+				StartedAt:   timeFromNull(row.VerificationStartedAt),
+				CompletedAt: timeFromNull(row.VerificationCompletedAt),
+			}
+		}
+		out[domain.SessionID(row.SessionID)] = latest
+	}
+	return out, nil
 }
 
 // ListReportedPRURLs returns only a worker's structured created-PR outputs.

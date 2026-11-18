@@ -80,6 +80,76 @@ func TestListPRFactsForSessionProjectsAllPRsNewestFirst(t *testing.T) {
 	}
 }
 
+func TestPRTamperAssessmentRoundTripsAndTracksHead(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	r, _ := s.CreateSession(ctx, sampleRecord("mer"))
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	assessment := &domain.PRTamperAssessment{
+		HeadSHA: "head-1", TestFilesDeleted: 1, TestCasesRemoved: 3, TestCasesAdded: 1,
+		SkipMarkersAdded: 2, CIWorkflowEdited: true, AssessedAt: now,
+	}
+	pr := domain.PullRequest{
+		URL: "pr/1", SessionID: r.ID, Number: 1, BaseSHA: "base-1", HeadSHA: "head-1",
+		UpdatedAt: now, ObservedAt: now, Tamper: assessment,
+	}
+	if err := s.WriteSCMObservation(ctx, pr, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+		t.Fatal(err)
+	}
+
+	assertAssessment := func(label string, got *domain.PRTamperAssessment) {
+		t.Helper()
+		if got == nil || *got != *assessment {
+			t.Fatalf("%s assessment = %+v, want %+v", label, got, assessment)
+		}
+	}
+	stored, ok, err := s.GetPR(ctx, pr.URL)
+	if err != nil || !ok {
+		t.Fatalf("GetPR: ok=%v err=%v", ok, err)
+	}
+	assertAssessment("full PR", stored.Tamper)
+	facts, err := s.ListPRFactsForSession(ctx, r.ID)
+	if err != nil || len(facts) != 1 {
+		t.Fatalf("ListPRFactsForSession: facts=%+v err=%v", facts, err)
+	}
+	assertAssessment("PR facts", facts[0].Tamper)
+
+	pr.Title = "same-head refresh"
+	pr.Tamper = nil
+	pr.UpdatedAt = now.Add(time.Minute)
+	if err := s.WriteSCMObservation(ctx, pr, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, _ = s.GetPR(ctx, pr.URL)
+	assertAssessment("same head", stored.Tamper)
+
+	pr.BaseSHA = "base-2"
+	pr.UpdatedAt = now.Add(2 * time.Minute)
+	if err := s.WriteSCMObservation(ctx, pr, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, _ = s.GetPR(ctx, pr.URL)
+	if stored.Tamper != nil {
+		t.Fatalf("new base retained stale assessment: %+v", stored.Tamper)
+	}
+
+	pr.Tamper = assessment
+	if err := s.WriteSCMObservation(ctx, pr, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+		t.Fatal(err)
+	}
+	pr.Tamper = nil
+	pr.HeadSHA = "head-2"
+	pr.UpdatedAt = now.Add(3 * time.Minute)
+	if err := s.WriteSCMObservation(ctx, pr, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, _ = s.GetPR(ctx, pr.URL)
+	if stored.Tamper != nil {
+		t.Fatalf("new head retained stale assessment: %+v", stored.Tamper)
+	}
+}
+
 func TestPRStateChangedAtPersistsOnlyOnStateTransitions(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

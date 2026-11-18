@@ -54,6 +54,7 @@ type Store interface {
 	GetDisplayPRFactsForSession(ctx context.Context, id domain.SessionID) (domain.PRFacts, bool, error)
 	ListPRFactsForSession(ctx context.Context, id domain.SessionID) ([]domain.PRFacts, error)
 	ListPRFactsForSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID][]domain.PRFacts, error)
+	ListLatestDoneReportsForSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID]domain.SessionDoneReport, error)
 	ListCurrentHeadReviewRunsForSession(ctx context.Context, id domain.SessionID) ([]domain.CurrentHeadReviewRun, error)
 	ListCurrentHeadReviewRunsForSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID][]domain.CurrentHeadReviewRun, error)
 	ListInterruptedSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID]bool, error)
@@ -1724,6 +1725,10 @@ func (s *Service) sessionsFromRecords(ctx context.Context, filtered []domain.Ses
 	if err != nil {
 		return nil, fmt.Errorf("list session artifacts: %w", err)
 	}
+	doneReportsBySession, err := s.store.ListLatestDoneReportsForSessions(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list latest done reports: %w", err)
+	}
 	var cleanupBySession map[domain.SessionID]domain.SessionCleanupRecord
 	if len(archived) > 0 {
 		if cleanupBySession, err = s.store.ListSessionCleanupFactsForSessions(ctx, archived); err != nil {
@@ -1747,6 +1752,9 @@ func (s *Service) sessionsFromRecords(ctx context.Context, filtered []domain.Ses
 		}
 		sess.ActiveAgentSwitch = switches[rec.ID]
 		sess.TerminalTitle = presentedTerminalTitle(rec, titles[rec.ID])
+		if latest, ok := doneReportsBySession[rec.ID]; ok {
+			sess.LatestDoneReport = &latest
+		}
 		out = append(out, sess)
 	}
 	if s.statusRecoveryRevision() != recoveryRevision {
@@ -2273,9 +2281,16 @@ func (s *Service) toSession(ctx context.Context, rec domain.SessionRecord) (doma
 	if err != nil {
 		return domain.Session{}, fmt.Errorf("list session artifacts %s: %w", rec.ID, err)
 	}
+	doneReports, err := s.store.ListLatestDoneReportsForSessions(ctx, []domain.SessionID{rec.ID})
+	if err != nil {
+		return domain.Session{}, fmt.Errorf("list latest done report %s: %w", rec.ID, err)
+	}
 	sess, err := s.toSessionWithFacts(ctx, rec, prs, runs, interrupted[rec.ID], artifacts[rec.ID], cleanup)
 	if err != nil {
 		return domain.Session{}, err
+	}
+	if latest, ok := doneReports[rec.ID]; ok {
+		sess.LatestDoneReport = &latest
 	}
 	sess.TerminalTitle = presentedTerminalTitle(rec, s.storedTerminalTitles(ctx, []domain.SessionID{rec.ID})[rec.ID])
 	return sess, nil

@@ -777,6 +777,9 @@ type Session struct {
 	// They feed status derivation and are surfaced on the API read model. Not
 	// serialized here: the HTTP boundary maps them to the curated wire shape.
 	PRs []PRFacts `json:"-"`
+	// LatestDoneReport is the newest durable done report for this session. Its
+	// presence and verification fact drive the derived verification marker.
+	LatestDoneReport *SessionDoneReport `json:"-"`
 }
 
 // LastEventAt is when something a person would notice last happened to the

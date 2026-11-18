@@ -30,6 +30,35 @@ SELECT * FROM report_outputs WHERE report_id = ? ORDER BY position;
 -- name: ListReportsBySession :many
 SELECT * FROM reports WHERE session_id = ? ORDER BY created_at, id;
 
+-- name: ListLatestDoneReportsBySessions :many
+-- Batch projection for session cards. A done report without verification is
+-- still returned so clients can distinguish unverified completion from no
+-- completion report at all.
+WITH wanted_session AS (
+    SELECT CAST(j.value AS TEXT) AS session_id
+    FROM json_each(?) AS j
+)
+SELECT
+    r.session_id,
+    r.id,
+    r.verification_state,
+    r.verification_evidence,
+    r.verification_started_at,
+    r.verification_completed_at
+FROM reports r
+JOIN wanted_session ON wanted_session.session_id = r.session_id
+WHERE r.state = 'done'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM reports newer
+      WHERE newer.session_id = r.session_id
+        AND newer.state = 'done'
+        AND (
+            newer.created_at > r.created_at
+            OR (newer.created_at = r.created_at AND newer.id > r.id)
+        )
+  );
+
 -- name: ListReportedPRURLs :many
 SELECT o.reference FROM report_outputs o
 JOIN reports r ON r.id = o.report_id

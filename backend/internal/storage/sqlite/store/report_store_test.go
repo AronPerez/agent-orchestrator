@@ -116,6 +116,57 @@ func TestReportStorePersistsVerificationFact(t *testing.T) {
 	}
 }
 
+func TestListLatestDoneReportsForSessions(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "ao")
+	one, err := s.CreateSession(ctx, sampleRecord("ao"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := s.CreateSession(ctx, sampleRecord("ao"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	create := func(id string, sessionID domain.SessionID, state domain.ReportState, created time.Time, verification *domain.ReportVerification) {
+		t.Helper()
+		report := domain.ReportRecord{
+			ID: id, SessionID: sessionID, ProjectID: "ao", State: state, Note: string(state), CreatedAt: created,
+			DeliveryState: domain.ReportPending, AvailableAt: created, RepeatCount: 1, Verification: verification,
+		}
+		if state == domain.ReportDone {
+			report.SettlementDeadline = created.Add(domain.ReportSettlementWindow)
+		}
+		if _, err := s.CreateReport(ctx, report); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	create("done-old", one.ID, domain.ReportDone, base, &domain.ReportVerification{
+		State: domain.ReportVerificationPassed, Evidence: "verification/done-old.txt", StartedAt: base, CompletedAt: base.Add(time.Second),
+	})
+	create("checkpoint-newer", one.ID, domain.ReportCheckpoint, base.Add(2*time.Minute), nil)
+	wantVerification := &domain.ReportVerification{
+		State: domain.ReportVerificationFailed, Evidence: "verification/done-new.txt", StartedAt: base.Add(3 * time.Minute), CompletedAt: base.Add(3*time.Minute + time.Second),
+	}
+	create("done-new", one.ID, domain.ReportDone, base.Add(3*time.Minute), wantVerification)
+	create("done-unverified", two.ID, domain.ReportDone, base.Add(time.Minute), nil)
+
+	got, err := s.ListLatestDoneReportsForSessions(ctx, []domain.SessionID{one.ID, two.ID, "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest, ok := got[one.ID]; !ok || latest.ID != "done-new" || latest.Verification == nil || *latest.Verification != *wantVerification {
+		t.Fatalf("latest verified report = %+v", latest)
+	}
+	if latest, ok := got[two.ID]; !ok || latest.ID != "done-unverified" || latest.Verification != nil {
+		t.Fatalf("latest unverified report = %+v, present=%v", latest, ok)
+	}
+	if _, ok := got["missing"]; ok {
+		t.Fatalf("missing session received latest report: %+v", got["missing"])
+	}
+}
+
 func TestReportStoreCreatesReportWithFirstContractOutcome(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

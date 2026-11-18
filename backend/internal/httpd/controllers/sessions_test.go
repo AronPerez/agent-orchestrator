@@ -5474,6 +5474,54 @@ func TestSessionsAPI_InteractionRecencyKeepsHumanTimestampSeparate(t *testing.T)
 	}
 }
 
+func TestSessionsAPI_ExposesLatestDoneVerificationAndPRTamperFact(t *testing.T) {
+	svc := newFakeSessionService()
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	session := svc.sessions["ao-1"]
+	session.LatestDoneReport = &domain.SessionDoneReport{
+		ID: "done-1",
+		Verification: &domain.ReportVerification{
+			State: domain.ReportVerificationPassed, Evidence: "verification/done-1.txt",
+			StartedAt: at, CompletedAt: at.Add(time.Second),
+		},
+	}
+	session.PRs = []domain.PRFacts{{
+		URL: "https://github.com/o/r/pull/1", Number: 1, CI: domain.CIPassing,
+		Tamper: &domain.PRTamperAssessment{HeadSHA: "head-1", SkipMarkersAdded: 2, AssessedAt: at},
+	}}
+	svc.sessions["ao-1"] = session
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1", "")
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var response struct {
+		Session struct {
+			LatestDoneReport struct {
+				ID           string `json:"id"`
+				Verification struct {
+					State    string `json:"state"`
+					Evidence string `json:"evidence"`
+				} `json:"verification"`
+			} `json:"latestDoneReport"`
+			PRs []struct {
+				Tamper struct {
+					HeadSHA          string `json:"headSha"`
+					SkipMarkersAdded int    `json:"skipMarkersAdded"`
+				} `json:"tamper"`
+			} `json:"prs"`
+		} `json:"session"`
+	}
+	mustJSON(t, body, &response)
+	if response.Session.LatestDoneReport.ID != "done-1" || response.Session.LatestDoneReport.Verification.State != "passed" || response.Session.LatestDoneReport.Verification.Evidence != "verification/done-1.txt" {
+		t.Fatalf("latest done report = %+v", response.Session.LatestDoneReport)
+	}
+	if len(response.Session.PRs) != 1 || response.Session.PRs[0].Tamper.HeadSHA != "head-1" || response.Session.PRs[0].Tamper.SkipMarkersAdded != 2 {
+		t.Fatalf("PR tamper fact = %+v", response.Session.PRs)
+	}
+}
+
 func (f *fakeSessionService) RequestKill(ctx context.Context, id domain.SessionID) (sessionmanager.KillResult, error) {
 	freed, err := f.Kill(ctx, id)
 	return sessionmanager.KillResult{Freed: freed && !f.cleanupPending, CleanupPending: f.cleanupPending}, err
