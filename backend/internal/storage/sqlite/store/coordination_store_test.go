@@ -25,11 +25,13 @@ func TestSessionParentSurvivesRestartAndUpdates(t *testing.T) {
 	}
 	child := sampleRecord("fleet")
 	child.ParentSessionID = parent.ID
+	child.ParentHostID = "h_source"
 	child, err = s.CreateSession(ctx, child)
 	if err != nil {
 		t.Fatal(err)
 	}
 	child.ParentSessionID = "attempted-reparent"
+	child.ParentHostID = "h_attempted"
 	if err := s.UpdateSession(ctx, child); err != nil {
 		t.Fatal(err)
 	}
@@ -45,11 +47,11 @@ func TestSessionParentSurvivesRestartAndUpdates(t *testing.T) {
 	}
 	defer s.Close()
 	got, ok, err := s.GetSession(ctx, child.ID)
-	if err != nil || !ok || got.ParentSessionID != parent.ID {
+	if err != nil || !ok || got.ParentSessionID != parent.ID || got.ParentHostID != "h_source" {
 		t.Fatalf("child=%+v ok=%v err=%v", got, ok, err)
 	}
 	rows, err := s.ListSessions(ctx, "fleet")
-	if err != nil || len(rows) != 2 || rows[1].ParentSessionID != parent.ID || rows[0].ParentSessionID != "" {
+	if err != nil || len(rows) != 2 || rows[1].ParentSessionID != parent.ID || rows[1].ParentHostID != "h_source" || rows[0].ParentSessionID != "" || rows[0].ParentHostID != "" {
 		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 }

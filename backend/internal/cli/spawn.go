@@ -53,6 +53,7 @@ type spawnOptions struct {
 type spawnRequest struct {
 	ProjectID           string `json:"projectId,omitempty"`
 	IssueID             string `json:"issueId,omitempty"`
+	ParentHostID        string `json:"parentHostId,omitempty"`
 	ParentSessionID     string `json:"parentSessionId,omitempty"`
 	TrackerProvider     string `json:"trackerProvider,omitempty"`
 	Kind                string `json:"kind,omitempty"`
@@ -237,20 +238,23 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				}
 			}
 			parentSessionID := callerSession()
+			parentHostID := ""
 			if ctx.remote != nil && parentSessionID != "" {
-				_, sameHost, relationErr := ctx.remoteRelationToSource(cmd.Context(), parentSessionID)
+				sourceHostID, sameHost, relationErr := ctx.remoteRelationToSource(cmd.Context(), parentSessionID)
 				if relationErr != nil {
 					return relationErr
 				}
 				if !sameHost {
-					// Session IDs are host-local. Do not misrepresent a source session as
-					// one on a different destination before host-qualified lineage lands.
-					parentSessionID = ""
+					if err := ctx.requireRemoteCoordinationCapability(cmd.Context(), coordinationCapabilityHostQualifiedParent); err != nil {
+						return fmt.Errorf("remote host-qualified parent lineage is unavailable: %w", err)
+					}
+					parentHostID = sourceHostID
 				}
 			}
 			req := spawnRequest{
 				ProjectID:           opts.project,
 				IssueID:             opts.issue,
+				ParentHostID:        parentHostID,
 				ParentSessionID:     parentSessionID,
 				TrackerProvider:     opts.trackerProvider,
 				Kind:                opts.kind,

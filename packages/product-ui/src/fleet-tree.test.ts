@@ -15,6 +15,7 @@ import type { SessionStatus } from "./session-models";
 type Session = {
 	id: string;
 	title: string;
+	parentHostId?: string;
 	parentSessionId?: string;
 	kind?: "orchestrator" | "worker";
 	status: SessionStatus;
@@ -132,6 +133,17 @@ describe("buildFleetTree", () => {
 		expect(manager.role).toBe("manager");
 	});
 
+	it("keeps registered scopes whose sessions are hidden by archive filtering", () => {
+		const archived = scope("ao", "server", [
+			session("archived", "terminated", { isTerminated: true }),
+		]);
+
+		const active = buildFleetTree([archived]);
+		expect(active).toHaveLength(1);
+		expect(active[0]!.machines[0]!.sessions).toEqual([]);
+		expect(buildFleetTree([archived], { showArchived: true })).toHaveLength(1);
+	});
+
 	it("counts terminated merged sessions as done when retained or archives are shown", () => {
 		const sessions = [
 			session("retained", "merged", { kind: "orchestrator", isTerminated: true }),
@@ -163,6 +175,26 @@ describe("buildFleetTree", () => {
 		expect(rows.find(({ node }) => node.session.id === "orphan")?.node.parentUnavailable).toBe(true);
 		expect(rows.find(({ node }) => node.session.id === "a")?.node.parentUnavailable).toBe(true);
 		expect(rows.find(({ node }) => node.session.id === "self")?.node.parentUnavailable).toBe(true);
+	});
+
+	it("keeps same-host qualified parents local and exposes cross-machine parents without attaching them", () => {
+		const machine = buildFleetTree([
+			scope("ao", "laptop", [
+				session("parent", "working"),
+				session("local-child", "idle", { parentHostId: "laptop", parentSessionId: "parent" }),
+				session("remote-child", "idle", { parentHostId: "server", parentSessionId: "parent" }),
+			]),
+		])[0]!.machines[0]!;
+		const rows = flattenFleetSessions(machine.sessions, new Set());
+		const localChild = rows.find(({ node }) => node.session.id === "local-child")!;
+		const remoteChild = rows.find(({ node }) => node.session.id === "remote-child")!;
+
+		expect(localChild.depth).toBe(1);
+		expect(localChild.node.parentUnavailable).toBe(false);
+		expect(localChild.node.parentAddress).toEqual({ machineId: "laptop", sessionId: "parent" });
+		expect(remoteChild.depth).toBe(0);
+		expect(remoteChild.node.parentUnavailable).toBe(true);
+		expect(remoteChild.node.parentAddress).toEqual({ machineId: "server", sessionId: "parent" });
 	});
 
 	it("flattens collapse state by qualified node key", () => {

@@ -18,6 +18,11 @@ const MobileAPIVersion = 1
 // foreign session ID.
 const CoordinationCapabilityAutomationAuthored = "automation-authored"
 
+// CoordinationCapabilityHostQualifiedParent means a spawned session's parent
+// can be qualified with the source daemon's stable host ID. Older daemons must
+// never receive the host-local session ID by itself because it can collide.
+const CoordinationCapabilityHostQualifiedParent = "host-qualified-parent"
+
 // IdentityController serves the unauthenticated host-identity probe.
 //
 // The phone races several endpoints, and a private address is not an identity:
@@ -47,6 +52,9 @@ func (c *IdentityController) identity(w http.ResponseWriter, r *http.Request) {
 
 func (c *IdentityController) coordinationCapabilities(w http.ResponseWriter, _ *http.Request) {
 	envelope.WriteJSON(w, http.StatusOK, CoordinationCapabilitiesResponse{
-		Capabilities: []string{CoordinationCapabilityAutomationAuthored},
+		Capabilities: []string{
+			CoordinationCapabilityAutomationAuthored,
+			CoordinationCapabilityHostQualifiedParent,
+		},
 	})
 }

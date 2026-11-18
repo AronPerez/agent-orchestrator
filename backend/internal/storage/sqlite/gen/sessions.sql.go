@@ -253,7 +253,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
     client_request_id, client_request_hash, client_request_committed,
-    runtime_released_launch_id, import_source, parent_session_id
+    runtime_released_launch_id, import_source, parent_session_id, parent_host_id
 FROM sessions WHERE id = ?
 `
 
@@ -346,6 +346,7 @@ type GetSessionRow struct {
 	RuntimeReleasedLaunchID          string
 	ImportSource                     string
 	ParentSessionID                  string
+	ParentHostID                     string
 }
 
 func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessionRow, error) {
@@ -440,6 +441,7 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.RuntimeReleasedLaunchID,
 		&i.ImportSource,
 		&i.ParentSessionID,
+		&i.ParentHostID,
 	)
 	return i, err
 }
@@ -464,7 +466,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
     client_request_id, client_request_hash, client_request_committed,
-    runtime_released_launch_id, import_source, parent_session_id
+    runtime_released_launch_id, import_source, parent_session_id, parent_host_id
 FROM sessions WHERE automation_run_id = ?
 `
 
@@ -557,6 +559,7 @@ type GetSessionByAutomationRunIDRow struct {
 	RuntimeReleasedLaunchID          string
 	ImportSource                     string
 	ParentSessionID                  string
+	ParentHostID                     string
 }
 
 func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRunID *domain.AutomationRunID) (GetSessionByAutomationRunIDRow, error) {
@@ -651,6 +654,7 @@ func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRun
 		&i.RuntimeReleasedLaunchID,
 		&i.ImportSource,
 		&i.ParentSessionID,
+		&i.ParentHostID,
 	)
 	return i, err
 }
@@ -682,7 +686,7 @@ INSERT INTO sessions (
     requested_output, goal, timebox_deadline_at, contract_outcome,
     created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
     provision_state, provision_error, is_task_preparation, automation_run_id, automation_launch_completed,
-    client_request_id, client_request_hash, parent_session_id, import_source, display_name_explicit
+    client_request_id, client_request_hash, parent_session_id, parent_host_id, import_source, display_name_explicit
 ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -690,7 +694,7 @@ INSERT INTO sessions (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 `
 
@@ -763,6 +767,7 @@ type InsertSessionParams struct {
 	ClientRequestID                  string
 	ClientRequestHash                string
 	ParentSessionID                  string
+	ParentHostID                     string
 	ImportSource                     string
 	DisplayNameExplicit              bool
 }
@@ -837,6 +842,7 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.ClientRequestID,
 		arg.ClientRequestHash,
 		arg.ParentSessionID,
+		arg.ParentHostID,
 		arg.ImportSource,
 		arg.DisplayNameExplicit,
 	)
@@ -863,7 +869,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
     client_request_id, client_request_hash, client_request_committed,
-    runtime_released_launch_id, import_source, parent_session_id
+    runtime_released_launch_id, import_source, parent_session_id, parent_host_id
 FROM sessions ORDER BY project_id, num
 `
 
@@ -956,6 +962,7 @@ type ListAllSessionsRow struct {
 	RuntimeReleasedLaunchID          string
 	ImportSource                     string
 	ParentSessionID                  string
+	ParentHostID                     string
 }
 
 func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, error) {
@@ -1056,6 +1063,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.RuntimeReleasedLaunchID,
 			&i.ImportSource,
 			&i.ParentSessionID,
+			&i.ParentHostID,
 		); err != nil {
 			return nil, err
 		}
@@ -1182,7 +1190,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
     client_request_id, client_request_hash, client_request_committed,
-    runtime_released_launch_id, import_source, parent_session_id
+    runtime_released_launch_id, import_source, parent_session_id, parent_host_id
 FROM sessions WHERE project_id IS ? ORDER BY num
 `
 
@@ -1275,6 +1283,7 @@ type ListSessionsByProjectRow struct {
 	RuntimeReleasedLaunchID          string
 	ImportSource                     string
 	ParentSessionID                  string
+	ParentHostID                     string
 }
 
 func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.ProjectID) ([]ListSessionsByProjectRow, error) {
@@ -1375,6 +1384,7 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.P
 			&i.RuntimeReleasedLaunchID,
 			&i.ImportSource,
 			&i.ParentSessionID,
+			&i.ParentHostID,
 		); err != nil {
 			return nil, err
 		}
@@ -1569,38 +1579,40 @@ func (q *Queries) NextStandaloneSessionNum(ctx context.Context) (int64, error) {
 
 const promoteTaskPreparation = `-- name: PromoteTaskPreparation :execrows
 UPDATE sessions SET
-    parent_session_id = ?1,
-    issue_id = ?2,
-    kind = ?3,
-    harness = ?4,
-    auto_review_enabled = ?5,
-    display_name = ?6,
-    display_name_explicit = ?7,
-    activity_state = ?8,
-    activity_last_at = ?9,
+    parent_host_id = ?1,
+    parent_session_id = ?2,
+    issue_id = ?3,
+    kind = ?4,
+    harness = ?5,
+    auto_review_enabled = ?6,
+    display_name = ?7,
+    display_name_explicit = ?8,
+    activity_state = ?9,
+    activity_last_at = ?10,
     is_terminated = 0,
-    session_mode = ?10,
-    model = ?11,
-    effort = ?12,
-    session_permissions = ?13,
-    requested_output = ?14,
-    goal = ?15,
-    timebox_deadline_at = ?16,
-    contract_outcome = ?17,
-    created_at = ?18,
-    updated_at = ?19,
-    auto_inject_review = ?20,
-    auto_inject_ci = ?21,
-    plan_first_state = ?22,
-    provision_state = ?23,
+    session_mode = ?11,
+    model = ?12,
+    effort = ?13,
+    session_permissions = ?14,
+    requested_output = ?15,
+    goal = ?16,
+    timebox_deadline_at = ?17,
+    contract_outcome = ?18,
+    created_at = ?19,
+    updated_at = ?20,
+    auto_inject_review = ?21,
+    auto_inject_ci = ?22,
+    plan_first_state = ?23,
+    provision_state = ?24,
     provision_error = '',
-    client_request_id = ?24,
-    client_request_hash = ?25,
+    client_request_id = ?25,
+    client_request_hash = ?26,
     is_task_preparation = 0
-WHERE id = ?26 AND is_task_preparation = 1
+WHERE id = ?27 AND is_task_preparation = 1
 `
 
 type PromoteTaskPreparationParams struct {
+	ParentHostID        string
 	ParentSessionID     string
 	IssueID             domain.IssueID
 	Kind                domain.SessionKind
@@ -1633,6 +1645,7 @@ type PromoteTaskPreparationParams struct {
 // published concurrently by speculative worktree creation.
 func (q *Queries) PromoteTaskPreparation(ctx context.Context, arg PromoteTaskPreparationParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, promoteTaskPreparation,
+		arg.ParentHostID,
 		arg.ParentSessionID,
 		arg.IssueID,
 		arg.Kind,

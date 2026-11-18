@@ -319,6 +319,11 @@ describe("subscribeApiBaseUrl", () => {
 });
 
 describe("normalizeApiOperation", () => {
+	it("normalizes decision IDs and action routes", () => {
+		expect(normalizeApiOperation("GET", "/api/v1/decisions")).toBe("GET /api/v1/decisions");
+		expect(normalizeApiOperation("POST", "/api/v1/decisions/dec_private/answer")).toBe("POST /api/v1/decisions/:id/answer");
+	});
+
     it("normalizes Stay Awake source identifiers", () => {
         expect(normalizeApiOperation("POST", "/api/v1/awake/sessions/private-source/end")).toBe("POST /api/v1/awake/sessions/:id/end");
         expect(normalizeApiOperation("GET", "/api/v1/awake")).toBe("GET /api/v1/awake");

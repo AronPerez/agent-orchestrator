@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, ExternalLink, GitBranch, MessageSquare } from "lucide-react";
 import type { components } from "../../api/schema";
 import type { WorkspaceSession } from "../types/workspace";
-import { apiErrorCode } from "../lib/api-client";
+import { apiClient, apiErrorCode } from "../lib/api-client";
 import { apiErrorException } from "../lib/api-error-exception";
 import { clientForSessionHost } from "../lib/host-clients";
 import { HOST_UNREACHABLE_CODES, LOCAL_HOST } from "../lib/hosts";
@@ -18,6 +18,7 @@ import { AppLink } from "./AppLink";
 import { Button } from "./ui/button";
 
 type Coordination = components["schemas"]["SessionCoordinationResponse"];
+type Identity = components["schemas"]["IdentityResponse"];
 type CoordinationRequestError = Error & { status?: number; code?: string };
 
 export function SessionFleet({
@@ -41,7 +42,21 @@ export function SessionFleet({
 	const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 	const [showArchived, setShowArchived] = useState(false);
 	const [selectedId, setSelectedId] = useState<string>();
-	const rows = useMemo(() => fleetRows(sessions, collapsed, showArchived), [sessions, collapsed, showArchived]);
+	const localIdentity = useQuery<Identity>({
+		queryKey: ["local-host-identity"],
+		enabled: !remote && sessions.length > 0,
+		retry: false,
+		staleTime: Infinity,
+		queryFn: async ({ signal }) => {
+			const { data, error } = await apiClient.GET("/api/v1/identity", { signal });
+			if (error || !data) throw apiErrorException(error);
+			return data;
+		},
+	});
+	const rows = useMemo(
+		() => fleetRows(sessions, collapsed, showArchived, localIdentity.data?.hostId),
+		[sessions, collapsed, showArchived, localIdentity.data?.hostId],
+	);
 	const selected = rows.find((row) => row.session.id === selectedId) ?? rows[0];
 	const session = selected?.session;
 	useEffect(() => {
@@ -73,6 +88,11 @@ export function SessionFleet({
 	const historyError = coordination.error as CoordinationRequestError | null;
 	const offline = remote && (!connected || HOST_UNREACHABLE_CODES.has(historyError?.code));
 	const names = new Map(sessions.map((item) => [item.id, item.title]));
+	const parentName = selected?.parentUnavailable && selected.parentAddress
+		? `${selected.parentAddress.machineId}/${selected.parentAddress.sessionId}`
+		: session?.parentSessionId
+			? names.get(session.parentSessionId) ?? session.parentSessionId
+			: "";
 	const toggle = (id: string) =>
 		setCollapsed((current) => {
 			const next = new Set(current);
@@ -167,7 +187,7 @@ export function SessionFleet({
 								</p>
 								{session.parentSessionId ? (
 									<p className="text-xs text-muted-foreground">
-										{t("fleet.spawnedBy", { name: names.get(session.parentSessionId) ?? session.parentSessionId })}
+										{t("fleet.spawnedBy", { name: parentName })}
 									</p>
 								) : (
 									<p className="text-xs text-muted-foreground">

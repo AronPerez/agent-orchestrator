@@ -308,6 +308,7 @@ func (s *Store) PromoteTaskPreparation(ctx context.Context, id domain.SessionID,
 	defer s.writeMu.Unlock()
 	activity := normalActivity(rec.Activity, rec.UpdatedAt)
 	rows, err := s.qw.PromoteTaskPreparation(ctx, gen.PromoteTaskPreparationParams{
+		ParentHostID:        rec.ParentHostID,
 		ParentSessionID:     string(rec.ParentSessionID),
 		IssueID:             rec.IssueID,
 		Kind:                rec.Kind,
@@ -1294,6 +1295,7 @@ func mapListAllSessionsRows(rows []gen.ListAllSessionsRow) []domain.SessionRecor
 
 func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 	return domain.SessionRecord{
+		ParentHostID:              row.ParentHostID,
 		ParentSessionID:           domain.SessionID(row.ParentSessionID),
 		Revision:                  row.Revision,
 		ID:                        row.ID,
@@ -1447,6 +1449,7 @@ func listAllSessionsRowToRecord(row gen.ListAllSessionsRow) domain.SessionRecord
 func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams {
 	activity := normalActivity(rec.Activity, rec.CreatedAt)
 	return gen.InsertSessionParams{
+		ParentHostID:                     rec.ParentHostID,
 		ParentSessionID:                  string(rec.ParentSessionID),
 		ImportSource:                     marshalImportSource(rec.Metadata.ImportSource),
 		ID:                               rec.ID,

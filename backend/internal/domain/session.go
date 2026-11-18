@@ -470,6 +470,10 @@ type SessionMetadata struct {
 // facts: identity, agent harness, activity_state, is_terminated, and operational
 // metadata. The user-facing Status is derived from these facts plus PR facts.
 type SessionRecord struct {
+	// ParentHostID is the stable installation that owns ParentSessionID when the
+	// parent lives elsewhere. Empty means the parent is local. It is immutable
+	// spawn lineage, never authority for this host.
+	ParentHostID string `json:"parentHostId,omitempty"`
 	// ParentSessionID is immutable spawn lineage, not an authority or reporting relationship.
 	ParentSessionID SessionID `json:"parentSessionId,omitempty"`
 	ID              SessionID `json:"id"`

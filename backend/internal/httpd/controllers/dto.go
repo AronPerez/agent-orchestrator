@@ -881,8 +881,12 @@ type SpawnSessionRequest struct {
 	// ProjectID is omitted for a standalone worker session.
 	ProjectID domain.ProjectID `json:"projectId,omitempty"`
 	IssueID   domain.IssueID   `json:"issueId,omitempty"`
+	// ParentHostID is the stable installation that owns ParentSessionID when
+	// the caller is spawning across machines. Empty keeps the existing local
+	// parent validation and inheritance path.
+	ParentHostID string `json:"parentHostId,omitempty" maxLength:"128"`
 	// ParentSessionID is supplied by `ao spawn` inside an AO session. The daemon
-	// validates it before deriving inherited worker settings.
+	// validates local parents before deriving inherited worker settings.
 	ParentSessionID domain.SessionID       `json:"parentSessionId,omitempty"`
 	TrackerProvider domain.TrackerProvider `json:"trackerProvider,omitempty" enum:"github,gitlab"`
 	Kind            domain.SessionKind     `json:"kind,omitempty" enum:"worker,orchestrator"`
