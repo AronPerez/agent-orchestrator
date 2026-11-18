@@ -11,6 +11,7 @@ import type {
 export type SessionPresentationMessageKey =
 	| "session.statusChecking"
 	| "session.statusUnavailable"
+	| "session.contractStalled"
 	| `activity.${SessionActivityState}`
 	| `status.${SessionStatus}`
 	| `zone.${AttentionZone}`
@@ -26,6 +27,7 @@ export type ProductUITranslator = (
 const englishLabels: Record<SessionPresentationMessageKey, string> = {
 	"session.statusChecking": "Checking…",
 	"session.statusUnavailable": "Unable to verify",
+	"session.contractStalled": "Stalled",
 	"activity.active": "Working",
 	"activity.idle": "Idle",
 	"activity.waiting_input": "Input Needed",

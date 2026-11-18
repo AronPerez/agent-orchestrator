@@ -80,6 +80,8 @@ func Build() ([]byte, error) {
 			"Durable dashboard notifications"),
 		*(&openapi31.Tag{Name: "reports"}).WithDescription(
 			"Durable worker reports"),
+		*(&openapi31.Tag{Name: "decisions"}).WithDescription(
+			"Durable decision calls and their immutable history"),
 		*(&openapi31.Tag{Name: "usage"}).WithDescription(
 			"Token usage telemetry for AO sessions"),
 		*(&openapi31.Tag{Name: "push"}).WithDescription(
@@ -607,6 +609,19 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"DomainCoordinationEvent":                     "CoordinationEvent",
 	"ControllersReportResponse":                   "ReportResponse",
 	"ControllersListReportsResponse":              "ListReportsResponse",
+	"ControllersDecisionOptionPayload":            "DecisionOptionPayload",
+	"ControllersDecisionLinkPayload":              "DecisionLinkPayload",
+	"ControllersRaiseDecisionRequest":             "RaiseDecisionRequest",
+	"ControllersAnswerDecisionRequest":            "AnswerDecisionRequest",
+	"ControllersDismissDecisionRequest":           "DismissDecisionRequest",
+	"ControllersDecisionOutcomeRequest":           "DecisionOutcomeRequest",
+	"ControllersRetireDecisionRequest":            "RetireDecisionRequest",
+	"ControllersDecisionCallResponse":             "DecisionCallResponse",
+	"ControllersListDecisionsQuery":               "ListDecisionsQuery",
+	"ControllersListDecisionsResponse":            "ListDecisionsResponse",
+	"ControllersDecisionIDParam":                  "DecisionIDParam",
+	"ControllersDecisionEntryResponse":            "DecisionEntryResponse",
+	"ControllersDecisionDetailResponse":           "DecisionDetailResponse",
 	"ControllersClearNotificationsResponse":       "ClearNotificationsResponse",
 	"ControllersUsageHookMetadata":                "UsageHookMetadata",
 	"ControllersListUsageSessionsQuery":           "ListUsageSessionsQuery",
@@ -880,6 +895,7 @@ func operations() []operation {
 	ops = append(ops, reviewOperations()...)
 	ops = append(ops, notificationOperations()...)
 	ops = append(ops, reportOperations()...)
+	ops = append(ops, decisionOperations()...)
 	ops = append(ops, usageOperations()...)
 	ops = append(ops, pushOperations()...)
 	ops = append(ops, importOperations()...)
@@ -1047,6 +1063,69 @@ func reportOperations() []operation {
 			{http.StatusNotImplemented, envelope.APIError{}},
 		},
 	}}
+}
+
+func decisionOperations() []operation {
+	commonErrors := []respUnit{
+		{http.StatusBadRequest, envelope.APIError{}},
+		{http.StatusNotFound, envelope.APIError{}},
+		{http.StatusInternalServerError, envelope.APIError{}},
+		{http.StatusNotImplemented, envelope.APIError{}},
+	}
+	actionErrors := []respUnit{
+		{http.StatusBadRequest, envelope.APIError{}},
+		{http.StatusForbidden, envelope.APIError{}},
+		{http.StatusNotFound, envelope.APIError{}},
+		{http.StatusConflict, envelope.APIError{}},
+		{http.StatusInternalServerError, envelope.APIError{}},
+		{http.StatusNotImplemented, envelope.APIError{}},
+	}
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/decisions", id: "raiseDecision", tag: "decisions",
+			summary: "Raise a decision call from a session", reqBody: controllers.RaiseDecisionRequest{},
+			resps: append([]respUnit{{http.StatusCreated, controllers.DecisionCallResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/decisions", id: "listDecisions", tag: "decisions",
+			summary: "List or search decision calls", pathParams: []any{controllers.ListDecisionsQuery{}},
+			resps: append([]respUnit{{http.StatusOK, controllers.ListDecisionsResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/decisions/{id}", id: "getDecision", tag: "decisions",
+			summary: "Get one decision call and its history", pathParams: []any{controllers.DecisionIDParam{}},
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionDetailResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/answer", id: "answerDecision", tag: "decisions",
+			summary: "Answer a decision call", pathParams: []any{controllers.DecisionIDParam{}},
+			reqBody: controllers.AnswerDecisionRequest{},
+			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/dismiss", id: "dismissDecision", tag: "decisions",
+			summary: "Dismiss a decision call", pathParams: []any{controllers.DecisionIDParam{}},
+			reqBody: controllers.DismissDecisionRequest{}, optionalReqBody: true,
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/outcome", id: "recordDecisionOutcome", tag: "decisions",
+			summary: "Record the outcome of a decision call", pathParams: []any{controllers.DecisionIDParam{}},
+			reqBody: controllers.DecisionOutcomeRequest{},
+			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/withdraw", id: "withdrawDecision", tag: "decisions",
+			summary: "Withdraw a decision call", pathParams: []any{controllers.DecisionIDParam{}},
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/retire", id: "retireDecision", tag: "decisions",
+			summary: "Change whether a completed decision call still applies", pathParams: []any{controllers.DecisionIDParam{}},
+			reqBody: controllers.RetireDecisionRequest{},
+			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+	}
 }
 
 // systemOperations declares the startup requirements gate the desktop loading

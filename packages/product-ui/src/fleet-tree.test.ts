@@ -14,6 +14,7 @@ type Session = {
 	parentSessionId?: string;
 	kind?: "orchestrator" | "worker";
 	status: SessionStatus;
+	rollupStatus?: SessionStatus;
 	isTerminated?: boolean;
 };
 
@@ -83,6 +84,16 @@ describe("buildFleetTree", () => {
 		expect(manager.rollup).toEqual({ ...emptyFleetRollup(), action: 1, pending: 1 });
 		expect(orchestrator.rollup).toEqual({ action: 1, done: 0, merge: 1, pending: 1, working: 1 });
 		expect(machine.rollup).toEqual({ action: 1, done: 0, merge: 1, pending: 1, working: 2 });
+	});
+
+	it("can roll up a delivery status while retaining the session's live agent status", () => {
+		const tree = buildFleetTree([
+			scope("ao", "laptop", [session("worker", "working", { rollupStatus: "ci_failed" })]),
+		]);
+
+		expect(tree[0]!.machines[0]!.sessions[0]!.session.status).toBe("working");
+		expect(tree[0]!.machines[0]!.sessions[0]!.zone).toBe("action");
+		expect(tree[0]!.rollup).toEqual({ ...emptyFleetRollup(), action: 1 });
 	});
 
 	it("keeps a terminated ancestor needed by a live descendant but hides unrelated archives", () => {

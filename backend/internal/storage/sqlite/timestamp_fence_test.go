@@ -117,7 +117,7 @@ func TestTimestampRepairTriggerInventory(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	const reviewed = "c7f5ef4ed4f969ae196480114367fc1dd84d006c7824da6dc5b01efc913ed664"
+	const reviewed = "6ffb8340975452c70323b7e9c90a677a6bbb2e33eb80a3c241b533fd130ecca8"
 	if got := fmt.Sprintf("%x", hash.Sum(nil)); got != reviewed {
 		t.Fatalf("timestamp trigger inventory changed; review preservation logic before updating fingerprint: %s", got)
 	}
