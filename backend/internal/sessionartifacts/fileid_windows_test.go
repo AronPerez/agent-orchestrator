@@ -31,3 +31,14 @@ func TestWindowsFileIdentitySurvivesRename(t *testing.T) {
 		t.Fatalf("renamed file identity changed: before=%+v after=%+v", before, after)
 	}
 }
+
+func TestWindowsUnchangedScanDoesNotWriteArtifactRows(t *testing.T) {
+	d := newIdentityDir(t)
+	d.write("plan.md", "# Plan")
+	if changes, _ := d.scan(); len(changes.Insert) != 1 {
+		t.Fatalf("first scan = %+v", changes)
+	}
+	if changes, _ := d.scan(); !changes.Empty() {
+		t.Fatalf("unchanged scan = %+v", changes)
+	}
+}

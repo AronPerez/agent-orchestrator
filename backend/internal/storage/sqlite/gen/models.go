@@ -442,6 +442,7 @@ type ConversationTurn struct {
 	BatchDeliveryKind     string
 	BatchDeliverySteerID  string
 	ArtifactsJson         string
+	ProviderDeliveryState string
 }
 
 type Cue struct {

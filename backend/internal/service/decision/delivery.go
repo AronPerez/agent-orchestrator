@@ -44,29 +44,31 @@ type DeliveryStore interface {
 
 // DelivererDeps configures decision answer delivery.
 type DelivererDeps struct {
-	Store      DeliveryStore
-	Messenger  Messenger
-	HostID     string
-	Now        func() time.Time
-	NewID      func(prefix string) string
-	RetryDelay time.Duration
-	Log        *slog.Logger
+	Store        DeliveryStore
+	Messenger    Messenger
+	HostID       string
+	MutationGate *MutationGate
+	Now          func() time.Time
+	NewID        func(prefix string) string
+	RetryDelay   time.Duration
+	Log          *slog.Logger
 	// FallbackAuthorizer is shared with the decision service in daemon wiring.
 	FallbackAuthorizer FallbackOutcomeAuthorizer
 }
 
 // Deliverer sends pending standing answers and records their delivery state.
 type Deliverer struct {
-	store      DeliveryStore
-	messenger  Messenger
-	hostID     string
-	now        func() time.Time
-	newID      func(string) string
-	retryDelay time.Duration
-	log        *slog.Logger
-	fallback   FallbackOutcomeAuthorizer
-	wake       chan struct{}
-	mu         sync.Mutex
+	store        DeliveryStore
+	messenger    Messenger
+	hostID       string
+	now          func() time.Time
+	newID        func(string) string
+	retryDelay   time.Duration
+	log          *slog.Logger
+	fallback     FallbackOutcomeAuthorizer
+	mutationGate *MutationGate
+	wake         chan struct{}
+	mu           sync.Mutex
 }
 
 // NewDeliverer constructs an idle decision answer deliverer.
@@ -83,10 +85,13 @@ func NewDeliverer(d DelivererDeps) *Deliverer {
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
+	if d.MutationGate == nil {
+		d.MutationGate = &MutationGate{}
+	}
 	return &Deliverer{
 		store: d.Store, messenger: d.Messenger, hostID: d.HostID,
 		now: d.Now, newID: d.NewID, retryDelay: d.RetryDelay, log: d.Log,
-		fallback: d.FallbackAuthorizer, wake: make(chan struct{}, 1),
+		fallback: d.FallbackAuthorizer, mutationGate: d.MutationGate, wake: make(chan struct{}, 1),
 	}
 }
 
@@ -161,37 +166,10 @@ func (d *Deliverer) RunDue(ctx context.Context) (int, error) {
 			pending++
 			continue
 		}
-		if isPlanFirstCall(call) {
-			current, found, currentErr := d.store.GetDecisionCall(ctx, call.ID)
-			if currentErr != nil || !found {
-				if currentErr == nil {
-					currentErr = errors.New("current decision call no longer exists")
-				}
-				d.logFailure(call.ID, "load current plan answer", currentErr)
-				pending++
-				blocked[call.ID] = true
-				continue
-			}
-			if current.Delivery == domain.DecisionDeliveryPending && !d.holdPlanFirstBeforeDelivery(ctx, current) {
-				pending++
-				blocked[call.ID] = true
-				continue
-			}
-			if current.StandingEntryID != call.StandingEntryID {
-				if !d.record(ctx, call, domain.DecisionDeliveredPayload{
-					ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSuperseded,
-				}) {
-					pending++
-					blocked[call.ID] = true
-				}
-				continue
-			}
-			call = current
-		}
 		if call.StandingKind == domain.DecisionKindAnswered && sentAnswers[call.ID] {
 			call.Redelivery = true
 		}
-		retry, sent := d.deliver(ctx, call)
+		retry, sent := d.deliverCurrent(ctx, call)
 		if sent && call.StandingKind == domain.DecisionKindAnswered {
 			sentAnswers[call.ID] = true
 		}
@@ -201,6 +179,32 @@ func (d *Deliverer) RunDue(ctx context.Context) (int, error) {
 		}
 	}
 	return pending, nil
+}
+
+func (d *Deliverer) deliverCurrent(ctx context.Context, call domain.DecisionCall) (bool, bool) {
+	if !isPlanFirstCall(call) {
+		return d.deliver(ctx, call)
+	}
+	d.mutationGate.mu.Lock()
+	defer d.mutationGate.mu.Unlock()
+
+	current, found, err := d.store.GetDecisionCall(ctx, call.ID)
+	if err != nil || !found {
+		if err == nil {
+			err = errors.New("current decision call no longer exists")
+		}
+		d.logFailure(call.ID, "load current plan answer", err)
+		return true, false
+	}
+	if current.Delivery == domain.DecisionDeliveryPending && !d.holdPlanFirstBeforeDelivery(ctx, current) {
+		return true, false
+	}
+	if current.StandingEntryID != call.StandingEntryID {
+		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
+			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSuperseded,
+		}), false
+	}
+	return d.deliver(ctx, current)
 }
 
 func (d *Deliverer) holdPlanFirstBeforeDelivery(ctx context.Context, call domain.DecisionCall) bool {

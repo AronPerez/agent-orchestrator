@@ -499,6 +499,62 @@ func TestDelivererSkipsSupersededPlanApprovalWhenWorkerResumes(t *testing.T) {
 	}
 }
 
+func TestDelivererSerializesPlanApprovalWithChangedAnswer(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	approval := answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	messenger := &blockingDecisionMessenger{
+		fakeDecisionMessenger: newFakeDecisionMessenger(), block: fixture.loose,
+		started: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	deliverer := newTestDeliverer(fixture.store, messenger, "h_a")
+	deliverer.mutationGate = fixture.service.mutationGate
+	type deliveryResult struct {
+		pending int
+		err     error
+	}
+	delivered := make(chan deliveryResult, 1)
+	go func() {
+		pending, err := deliverer.RunDue(context.Background())
+		delivered <- deliveryResult{pending: pending, err: err}
+	}()
+	<-messenger.started
+
+	type answerResult struct {
+		call domain.DecisionCall
+		err  error
+	}
+	answered := make(chan answerResult, 1)
+	go func() {
+		call, err := fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, approval.ID, AnswerInput{
+			Choice: domain.DecisionChoiceOption, Option: 3,
+		})
+		answered <- answerResult{call: call, err: err}
+	}()
+	answeredBeforeDelivery := false
+	var answer answerResult
+	select {
+	case answer = <-answered:
+		answeredBeforeDelivery = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(messenger.release)
+	result := <-delivered
+	if !answeredBeforeDelivery {
+		answer = <-answered
+	}
+	if result.err != nil || result.pending != 0 || answer.err != nil {
+		t.Fatalf("delivery=%+v answer=%+v", result, answer)
+	}
+	record, ok, err := fixture.store.GetSession(context.Background(), fixture.loose)
+	if answeredBeforeDelivery || err != nil || !ok || record.PlanFirstState != domain.PlanFirstDeclined ||
+		answer.call.Option != 3 {
+		t.Fatalf("answeredBeforeDelivery=%v state=%q ok=%v err=%v answer=%+v", answeredBeforeDelivery, record.PlanFirstState, ok, err, answer.call)
+	}
+}
+
 func TestDelivererRequiresANoteThenAcceptsTheReplacementPlanCall(t *testing.T) {
 	fixture := newDecisionService(t)
 	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.w1, domain.PlanFirstPending); err != nil || !updated {

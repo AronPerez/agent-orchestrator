@@ -102,6 +102,19 @@ func (o Observation) Changes(rows []domain.SessionArtifactRecord, now time.Time,
 	for _, path := range candidates {
 		full[path] = o.fullIdentity(path)
 	}
+	// Platforms without a useful quick identity (notably Windows) put every
+	// path in candidates. A full identity match is unchanged and must not cause
+	// a SetFile write on every list refresh.
+	candidates = slices.DeleteFunc(candidates, func(path string) bool {
+		row, ok := byPath[path]
+		return ok && row.File.SameFile(full[path])
+	})
+	if len(candidates) == 0 {
+		for _, row := range gone {
+			forgetOrClear(&changes, row)
+		}
+		return changes
+	}
 
 	// A row is a rename source when its file left its path: the path is gone,
 	// or holds another file now.
@@ -116,7 +129,7 @@ func (o Observation) Changes(rows []domain.SessionArtifactRecord, now time.Time,
 	}
 	matches := make(map[string]domain.SessionArtifactRecord)
 	for _, path := range candidates {
-		if source, ok := sources[full[path]]; ok && source.Path != path {
+		if source, ok := renameSource(sources, full[path]); ok && source.Path != path {
 			matches[path] = source
 		}
 	}
@@ -224,6 +237,25 @@ func addSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, row
 	}
 }
 
+// renameSource uses the exact identity first. A plan-approval row gets one
+// narrow fallback on filesystems without birth times: device+inode survives a
+// rename followed by an edit, while the changed modification time does not.
+// Keeping this exception role-scoped preserves the ordinary inode-reuse guard.
+func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, observed domain.FileIdentity) (domain.SessionArtifactRecord, bool) {
+	if source, ok := sources[observed]; ok {
+		return source, true
+	}
+	for _, source := range sources {
+		stored := source.File
+		if source.Role == domain.SessionArtifactRolePlanApproval &&
+			stored.Ino != 0 && stored.Dev == observed.Dev && stored.Ino == observed.Ino &&
+			stored.Birth == 0 && observed.Birth == 0 && stored.Generation == observed.Generation {
+			return source, true
+		}
+	}
+	return domain.SessionArtifactRecord{}, false
+}
+
 // sameQuick reports whether quick, which may lack the birth time and
 // generation, names the file stored. The modification time counts only where
 // it is part of the stored identity.
@@ -265,7 +297,7 @@ func (o Observation) Apply(rows []domain.SessionArtifactRecord) []domain.Session
 	for i := range files {
 		row, found := byPath[files[i].Path]
 		if !found {
-			row = byFile[o.fullIdentity(files[i].Path)]
+			row, _ = renameSource(byFile, o.fullIdentity(files[i].Path))
 		}
 		files[i].ID = row.ID
 		files[i].Role = row.Role

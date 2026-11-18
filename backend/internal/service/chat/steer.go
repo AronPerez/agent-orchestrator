@@ -289,10 +289,10 @@ func (s *Service) sendIfIdleReceipt(ctx context.Context, id domain.SessionID, ms
 	if err != nil || !found {
 		return false, found, err
 	}
-	if turn.ProviderTurnID != "" {
+	if turn.ProviderDeliveryState == domain.ProviderDeliveryAccepted {
 		return true, true, nil
 	}
-	if turn.ProviderInputText != "" {
+	if turn.ProviderDeliveryState == domain.ProviderDeliveryAttempted {
 		return false, true, ErrSteerDeliveryUncertain
 	}
 	return false, true, nil
@@ -742,10 +742,10 @@ func (c *Controller) SendIfIdle(ctx context.Context, msg ports.ChatUserMessage) 
 	if turn, found, err := sentMessageReceipt(ctx, c.store, c.conversation.ID, msg, false); err != nil {
 		return false, err
 	} else if found {
-		if turn.ProviderTurnID != "" {
+		if turn.ProviderDeliveryState == domain.ProviderDeliveryAccepted {
 			return true, nil
 		}
-		if turn.ProviderInputText != "" {
+		if turn.ProviderDeliveryState == domain.ProviderDeliveryAttempted {
 			return false, ErrSteerDeliveryUncertain
 		}
 		if turn.State != domain.TurnStateFailed && turn.State != domain.TurnStateCancelled {
@@ -772,7 +772,7 @@ func (c *Controller) SendIfIdle(ctx context.Context, msg ports.ChatUserMessage) 
 			c.clearSendingTurn(turn.ID)
 			return false, retryErr
 		}
-		return retried.ProviderTurnID != "", nil
+		return retried.ProviderDeliveryState == domain.ProviderDeliveryAccepted, nil
 	}
 	if c.busy() {
 		return false, nil
@@ -786,7 +786,7 @@ func (c *Controller) SendIfIdle(ctx context.Context, msg ports.ChatUserMessage) 
 	if err != nil {
 		return false, err
 	}
-	return turn.ProviderTurnID != "", nil
+	return turn.ProviderDeliveryState == domain.ProviderDeliveryAccepted, nil
 }
 
 func steerOrSendReceipt(

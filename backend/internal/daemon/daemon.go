@@ -1210,8 +1210,10 @@ func Run(buildVersion string) (retErr error) {
 		log.Warn("could not establish host identity; /api/v1/identity will report unimplemented", "error", identityErr)
 	}
 	var decisionDeliverer *decisionsvc.Deliverer
+	decisionMutationGate := &decisionsvc.MutationGate{}
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
+		MutationGate: decisionMutationGate,
 		OnAppended: func(domain.DecisionEntry) {
 			if decisionDeliverer != nil {
 				decisionDeliverer.Wake()
@@ -1220,6 +1222,7 @@ func Run(buildVersion string) (retErr error) {
 	})
 	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
 		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
+		MutationGate:       decisionMutationGate,
 		FallbackAuthorizer: decisionSvc,
 	})
 	decisionDeliveryDone := decisionDeliverer.Start(ctx)

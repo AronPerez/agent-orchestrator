@@ -1669,6 +1669,35 @@ func (s *Store) ReopenUndispatchedTurn(ctx context.Context, turnID string) (bool
 	return rows == 1, nil
 }
 
+// MarkTurnProviderDeliveryAttempted records that AO crossed the provider boundary
+// without yet confirming acceptance.
+func (s *Store) MarkTurnProviderDeliveryAttempted(ctx context.Context, turnID string) error {
+	q, unlock := s.conversationWriter(ctx)
+	defer unlock()
+	rows, err := q.MarkConversationTurnProviderDeliveryAttempted(ctx, turnID)
+	return expectBatchRow("mark provider delivery attempted", turnID, rows, err)
+}
+
+// MarkTurnProviderDeliveryAccepted records confirmed provider acceptance.
+func (s *Store) MarkTurnProviderDeliveryAccepted(ctx context.Context, turnID string) error {
+	q, unlock := s.conversationWriter(ctx)
+	defer unlock()
+	rows, err := q.MarkConversationTurnProviderDeliveryAccepted(ctx, turnID)
+	return expectBatchRow("mark provider delivery accepted", turnID, rows, err)
+}
+
+// MarkTurnProviderDeliveryAcceptedByProviderID records acceptance proven by a
+// provider lifecycle event.
+func (s *Store) MarkTurnProviderDeliveryAcceptedByProviderID(ctx context.Context, conversationID, providerTurnID string) error {
+	q, unlock := s.conversationWriter(ctx)
+	defer unlock()
+	rows, err := q.MarkConversationTurnProviderDeliveryAcceptedByProviderID(ctx,
+		gen.MarkConversationTurnProviderDeliveryAcceptedByProviderIDParams{
+			ConversationID: conversationID, ProviderTurnID: providerTurnID,
+		})
+	return expectBatchRow("mark provider delivery accepted", providerTurnID, rows, err)
+}
+
 func expectBatchRow(action, id string, rows int64, err error) error {
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", action, id, err)
@@ -1679,8 +1708,8 @@ func expectBatchRow(action, id string, rows int64, err error) error {
 	return nil
 }
 
-// BindTurnToProvider records the provider's turn id once a send is accepted and
-// marks the turn running.
+// BindTurnToProvider records the provider's turn id and marks the turn running.
+// Deferred drivers bind a prepared turn before they cross the provider boundary.
 func (s *Store) BindTurnToProvider(ctx context.Context, turnID, providerTurnID string, now time.Time) error {
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
@@ -4905,16 +4934,17 @@ func rateLimitsFromRow(row gen.Conversation) *domain.ConversationRateLimits {
 
 func turnToDomain(row gen.ConversationTurn) domain.ConversationTurn {
 	turn := domain.ConversationTurn{
-		ID:                 row.ID,
-		ConversationID:     row.ConversationID,
-		BranchID:           row.BranchID,
-		HandledBySessionID: row.HandledBySessionID,
-		ProviderTurnID:     row.ProviderTurnID,
-		ProviderInputText:  row.ProviderInputText,
-		State:              row.State,
-		ErrorMessage:       row.ErrorMessage,
-		FailureCode:        domain.ConversationFailureCode(row.FailureCode),
-		RequestedAt:        row.RequestedAt,
+		ID:                    row.ID,
+		ConversationID:        row.ConversationID,
+		BranchID:              row.BranchID,
+		HandledBySessionID:    row.HandledBySessionID,
+		ProviderTurnID:        row.ProviderTurnID,
+		ProviderInputText:     row.ProviderInputText,
+		ProviderDeliveryState: domain.ProviderDeliveryState(row.ProviderDeliveryState),
+		State:                 row.State,
+		ErrorMessage:          row.ErrorMessage,
+		FailureCode:           domain.ConversationFailureCode(row.FailureCode),
+		RequestedAt:           row.RequestedAt,
 	}
 	if row.RetryOfTurnID.Valid {
 		turn.RetryOfTurnID = row.RetryOfTurnID.String

@@ -141,17 +141,27 @@ func TestObservationApplyKeepsPlanApprovalRoleAcrossRenameBeforePersistence(t *t
 	}
 }
 
-func TestRenameSourceKeepsPlanApprovalRoleWithoutBirthTime(t *testing.T) {
-	id := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 13}
+func TestObservationApplyKeepsEditedPlanApprovalRoleAcrossRenameWithoutBirthTime(t *testing.T) {
+	stored := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 13}
+	observed := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 17}
 	row := domain.SessionArtifactRecord{
-		ID: "approval", Path: "plan.md", File: id, Role: domain.SessionArtifactRolePlanApproval,
+		ID: "approval", Path: "plan.md", File: stored, Role: domain.SessionArtifactRolePlanApproval,
 	}
+	observation := Observation{
+		Files: []domain.SessionArtifactFile{{Path: "project-plan.md"}},
+		quick: map[string]domain.FileIdentity{"project-plan.md": observed},
+		dir:   t.TempDir(),
+	}
+	files := observation.Apply([]domain.SessionArtifactRecord{row})
+	if len(files) != 1 || files[0].ID != row.ID || files[0].Role != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("edited renamed approval artifact = %+v", files)
+	}
+
+	row.Role = ""
 	sources := map[domain.FileIdentity]domain.SessionArtifactRecord{}
 	addSource(sources, row)
-
-	matched, ok := sources[id]
-	if !ok || matched.ID != row.ID || matched.Role != domain.SessionArtifactRolePlanApproval {
-		t.Fatalf("rename source = %+v, found=%v", matched, ok)
+	if matched, ok := renameSource(sources, observed); ok {
+		t.Fatalf("ordinary modified inode matched as rename: %+v", matched)
 	}
 }
 

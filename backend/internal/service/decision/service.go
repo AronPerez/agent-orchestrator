@@ -37,6 +37,7 @@ type Store interface {
 type Deps struct {
 	Store        Store
 	HostID       string
+	MutationGate *MutationGate
 	MachineLabel func() string
 	Now          func() time.Time
 	NewID        func(prefix string) string
@@ -51,10 +52,15 @@ type Service struct {
 	now          func() time.Time
 	newID        func(string) string
 	onAppended   func(domain.DecisionEntry)
-	mutateMu     sync.Mutex
+	mutationGate *MutationGate
 	fallbackMu   sync.RWMutex
 	fallback     map[fallbackOutcomeGrant]struct{}
 }
+
+// MutationGate serializes standing-answer changes with delivery. The gate is
+// shared by the service and deliverer so an answer cannot become authoritative
+// halfway through dispatching the entry it replaces.
+type MutationGate struct{ mu sync.Mutex }
 
 type fallbackOutcomeGrant struct {
 	callID   string
@@ -79,10 +85,14 @@ func New(d Deps) *Service {
 			return label
 		}
 	}
+	if d.MutationGate == nil {
+		d.MutationGate = &MutationGate{}
+	}
 	return &Service{
 		store: d.Store, hostID: d.HostID, machineLabel: d.MachineLabel,
 		now: d.Now, newID: d.NewID, onAppended: d.OnAppended,
-		fallback: make(map[fallbackOutcomeGrant]struct{}),
+		mutationGate: d.MutationGate,
+		fallback:     make(map[fallbackOutcomeGrant]struct{}),
 	}
 }
 
@@ -216,8 +226,8 @@ func (s *Service) Get(ctx context.Context, callID string) (Detail, error) {
 
 // Answer records the person's standing answer to an open call.
 func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input AnswerInput) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
+	s.mutationGate.mu.Lock()
+	defer s.mutationGate.mu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -240,8 +250,8 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 
 // Dismiss records that the person declined to choose from a pending call.
 func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
+	s.mutationGate.mu.Lock()
+	defer s.mutationGate.mu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -295,8 +305,8 @@ func planFirstStateBeforeDelivery(answer domain.DecisionAnsweredPayload) domain.
 
 // RecordOutcome closes an in-progress call with the result of carrying it out.
 func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string, input OutcomeInput) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
+	s.mutationGate.mu.Lock()
+	defer s.mutationGate.mu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -330,8 +340,8 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 
 // Withdraw closes a pending call at the owning session's request.
 func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
+	s.mutationGate.mu.Lock()
+	defer s.mutationGate.mu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -347,8 +357,8 @@ func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (dom
 
 // Retire changes whether a completed call still applies.
 func (s *Service) Retire(ctx context.Context, actor Actor, callID string, retired bool) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
+	s.mutationGate.mu.Lock()
+	defer s.mutationGate.mu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
