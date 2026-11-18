@@ -401,7 +401,6 @@ func (c *commandContext) requireRemoteCoordinationCapability(ctx context.Context
 	}
 	return fmt.Errorf("destination does not support %s; upgrade Orchestrator on that machine before sending this agent-authored message", capability)
 }
-
 func (c *commandContext) localDaemonHostID(ctx context.Context) string {
 	base, err := c.localDaemonBase()
 	if err == nil {

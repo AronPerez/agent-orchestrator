@@ -202,6 +202,15 @@ export type WorkspaceSession = {
 	 */
 	displayStatus?: string;
 	statusReadiness?: "checking" | "ready" | "unavailable";
+	/** Durable objective for a supervised worker. Present only with a timebox. */
+	goal?: string;
+	/** ISO deadline paired with {@link goal}. */
+	timeboxDeadlineAt?: string;
+	contractOutcome?: "met" | "blocked" | "limit_hit";
+	/** Daemon-derived current stall state. Absent when connected to an older daemon. */
+	contractStalled?: boolean;
+	/** Set once the daemon escalates a stalled contract. */
+	contractStallEscalatedAt?: string;
 	/**
 	 * How far this session's start-up got. A Chat spawn answers as soon as the
 	 * session is addressable, so a session can be open and typeable while its
