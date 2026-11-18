@@ -4,6 +4,7 @@ import type { components } from "../../api/schema";
 import { aoBridge } from "./bridge";
 import { apiClient, eventStreamBaseUrl, getApiBaseUrl, subscribeApiBaseUrl } from "./api-client";
 import { computeSseRetryDelayMs } from "./sse-backoff";
+import { LOCAL_HOST } from "./hosts";
 
 export type NotificationDTO = components["schemas"]["NotificationResponse"];
 export type NotificationsPage = components["schemas"]["ListNotificationsResponse"];
@@ -22,12 +23,114 @@ const EVENTSOURCE_CLOSED = 2;
 const MAX_CONFIRMED_NOTIFICATION_DELETIONS = 256;
 
 /**
- * Only these two kinds describe something still waiting on the user.
+ * Only these kinds describe something still waiting on the user.
  * `pr_merged` / `pr_closed_unmerged` report something that already happened.
  * Mirrors NotificationType.NeedsResolution on the backend — used here only to
  * keep `unresolvedCount` accurate on the unread/all caches.
  */
-const UNRESOLVABLE_TYPES = new Set(["needs_input", "ready_to_merge"]);
+const UNRESOLVABLE_TYPES = new Set(["needs_input", "ready_to_merge", "decision_needed"]);
+
+/** One notification row and the machine whose daemon stored it. */
+export type HostedNotification = { hostId: string; notification: NotificationDTO };
+
+/** Every stored copy of one alert. A decision call is one group across machines. */
+export type NotificationGroup = { key: string; primary: HostedNotification; sources: HostedNotification[] };
+
+/**
+ * Alert metadata for one decision call. The Attention inbox card owns the call
+ * itself; this only says whether its announcement is still unread and which
+ * rows on which machines back it.
+ */
+export type DecisionAlertState = {
+	unread: boolean;
+	resolved: boolean;
+	sources: { hostId: string; id: string }[];
+};
+
+/** The call a well-formed decision notification announces, else undefined. */
+export function decisionCallIdOf(notification: NotificationDTO): string | undefined {
+	if (notification.type !== "decision_needed" || notification.target.kind !== "decision") return undefined;
+	return notification.target.callId?.trim() || undefined;
+}
+
+/**
+ * A decision call is one alert however many machines announce it; every other
+ * row keeps its machine-scoped identity, because daemon-local ids repeat.
+ */
+export function notificationGroupKey(hostId: string, notification: NotificationDTO): string {
+	const callId = decisionCallIdOf(notification);
+	return callId ? `decision:${callId}` : `${hostId}:${notification.id}`;
+}
+
+const sourceOrder = (a: HostedNotification, b: HostedNotification) =>
+	`${a.hostId}:${a.notification.id}`.localeCompare(`${b.hostId}:${b.notification.id}`);
+
+/**
+ * Groups rows by notificationGroupKey in first-seen order. The primary is the
+ * local copy when there is one, else the newest, else the lexically first.
+ */
+export function groupNotifications(items: HostedNotification[]): NotificationGroup[] {
+	const groups = new Map<string, HostedNotification[]>();
+	for (const item of items) {
+		const key = notificationGroupKey(item.hostId, item.notification);
+		groups.set(key, [...(groups.get(key) ?? []), item]);
+	}
+	return [...groups.entries()].map(([key, copies]) => {
+		const sources = [...copies].sort(sourceOrder);
+		const primary = [...copies].sort((a, b) =>
+			Number(b.hostId === LOCAL_HOST) - Number(a.hostId === LOCAL_HOST) ||
+			b.notification.createdAt.localeCompare(a.notification.createdAt) ||
+			sourceOrder(a, b),
+		)[0];
+		return { key, primary, sources };
+	});
+}
+
+/** Decision alert metadata keyed by call id, for joining onto the call cards. */
+export function decisionAlertStateByCall(groups: NotificationGroup[]): Map<string, DecisionAlertState> {
+	const states = new Map<string, DecisionAlertState>();
+	for (const group of groups) {
+		const callId = decisionCallIdOf(group.primary.notification);
+		if (!callId) continue;
+		states.set(callId, {
+			unread: group.sources.some(({ notification }) => notification.status === "unread"),
+			resolved: group.sources.every(({ notification }) => Boolean(notification.resolvedAt)),
+			sources: group.sources.map(({ hostId, notification }) => ({ hostId, id: notification.id })),
+		});
+	}
+	return states;
+}
+
+/**
+ * How many unread rows are extra copies of a call another unread row already
+ * announces. The badge sums each machine's unread count, so subtracting these
+ * counts one call once.
+ */
+export function decisionUnreadDuplicates(items: HostedNotification[]): number {
+	const unread = items.filter(({ notification }) => notification.status === "unread" && decisionCallIdOf(notification));
+	return unread.length - new Set(unread.map(({ notification }) => decisionCallIdOf(notification))).size;
+}
+
+const MAX_CLAIMED_DECISION_TOASTS = 256;
+const claimedDecisionToasts = new Set<string>();
+
+/**
+ * Lets one OS toast through per decision call for this renderer's lifetime, so
+ * a retried create or a second machine announcing the call cannot sound twice.
+ */
+export function claimDecisionToast(callId: string): boolean {
+	if (claimedDecisionToasts.has(callId)) return false;
+	claimedDecisionToasts.add(callId);
+	if (claimedDecisionToasts.size > MAX_CLAIMED_DECISION_TOASTS) {
+		claimedDecisionToasts.delete(claimedDecisionToasts.values().next().value!);
+	}
+	return true;
+}
+
+/** The OS toast id for a decision call. */
+export function decisionToastId(callId: string): string {
+	return `decision:${callId}`;
+}
 
 type NotificationsQueryKey = typeof unreadNotificationsQueryKey | typeof recentNotificationsQueryKey;
 
@@ -546,9 +649,10 @@ export function createNotificationsTransport(
 				}
 				const inserted = mergeUnreadNotification(queryClient, event.notification);
 				mergeRecentNotification(queryClient, event.notification);
-				if (inserted) {
+				const callId = decisionCallIdOf(event.notification);
+				if (inserted && (!callId || claimDecisionToast(callId))) {
 					void aoBridge.notifications.show({
-						id: event.notification.id,
+						id: callId ? decisionToastId(callId) : event.notification.id,
 						title: event.notification.title,
 						body: event.notification.body || undefined,
 						type: event.notification.type,
