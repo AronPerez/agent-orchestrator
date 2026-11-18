@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/datadirlock"
 )
 
 func TestMain(m *testing.M) {
@@ -893,6 +895,55 @@ func TestAcquireHostLockReclaimsDeadOwner(t *testing.T) {
 		t.Fatalf("acquire stale host lock: %v", err)
 	}
 	release()
+}
+
+func TestOwnershipMutationLockFallsBackWhenAdvisoryLocksUnsupported(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "unsupported-advisory-lock"
+	unsupported := func(context.Context, string, time.Duration) (*datadirlock.Lock, error) {
+		return nil, fmt.Errorf("lock probe: %w", datadirlock.ErrUnsupported)
+	}
+	first, err := acquireHostOwnershipMutationLockWith(dataDir, sessionID, unsupported)
+	if err != nil {
+		t.Fatalf("first fallback lock: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Release() })
+
+	type result struct {
+		lock hostOwnershipMutationLock
+		err  error
+	}
+	secondDone := make(chan result, 1)
+	go func() {
+		lock, lockErr := acquireHostOwnershipMutationLockWith(dataDir, sessionID, unsupported)
+		secondDone <- result{lock: lock, err: lockErr}
+	}()
+	select {
+	case got := <-secondDone:
+		if got.lock != nil {
+			_ = got.lock.Release()
+		}
+		t.Fatalf("second fallback lock acquired while first held: %v", got.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if err := first.Release(); err != nil {
+		t.Fatalf("release first fallback lock: %v", err)
+	}
+	select {
+	case got := <-secondDone:
+		if got.err != nil {
+			t.Fatalf("second fallback lock: %v", got.err)
+		}
+		if got.lock == nil {
+			t.Fatal("second fallback lock is nil")
+		}
+		if err := got.lock.Release(); err != nil {
+			t.Fatalf("release second fallback lock: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("second fallback lock did not acquire after release")
+	}
 }
 
 func TestConnectOrStartWaitsForOldControllerToDetach(t *testing.T) {

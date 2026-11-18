@@ -24,7 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/datadirlock"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
 )
@@ -204,18 +203,6 @@ func lockPath(dataDir, sessionID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "host.lock"), nil
-}
-
-func acquireHostOwnershipMutationLock(dataDir, sessionID string) (*datadirlock.Lock, error) {
-	dir, err := hostDir(dataDir, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	lock, err := datadirlock.Acquire(context.Background(), filepath.Join(dir, ".ownership-lock"), startupTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("%w: lock chat host ownership: %w", ErrOwnershipInconclusive, err)
-	}
-	return lock, nil
 }
 
 func acquireHostLock(dataDir, sessionID string) (func(), error) {
