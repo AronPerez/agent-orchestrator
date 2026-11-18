@@ -20,6 +20,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/datadirlock"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
+	"github.com/aoagents/agent-orchestrator/backend/internal/procmem"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
@@ -89,6 +90,7 @@ type Deps struct {
 	Executable            func() (string, error)
 	StartProcess          func(processStartConfig) error
 	ProcessAlive          func(pid int) bool
+	ProcessStartedAt      func(context.Context, int) (time.Time, bool)
 	LookPath              func(file string) (string, error)
 	ResolveAgentBinary    func(context.Context, string) (string, error)
 	CommandOutput         func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -115,6 +117,7 @@ func DefaultDeps() Deps {
 		Executable:            os.Executable,
 		StartProcess:          startProcess,
 		ProcessAlive:          processalive.Alive,
+		ProcessStartedAt:      processStartedAt,
 		LookPath:              exec.LookPath,
 		CommandOutput:         commandOutput,
 		CommandOutputInDir:    commandOutputInDir,
@@ -132,6 +135,15 @@ func DefaultDeps() Deps {
 			return codex.ResolveCodexBinary(ctx)
 		},
 	}
+}
+
+func processStartedAt(ctx context.Context, pid int) (time.Time, bool) {
+	identities, err := procmem.Identities(ctx)
+	if err != nil {
+		return time.Time{}, false
+	}
+	identity, ok := identities[pid]
+	return identity.StartedAt, ok && !identity.StartedAt.IsZero()
 }
 
 func commandOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -166,6 +178,9 @@ func (d Deps) withDefaults() Deps {
 	}
 	if d.ProcessAlive == nil {
 		d.ProcessAlive = def.ProcessAlive
+	}
+	if d.ProcessStartedAt == nil {
+		d.ProcessStartedAt = def.ProcessStartedAt
 	}
 	if d.LookPath == nil {
 		if d.ResolveAgentBinary == nil {
