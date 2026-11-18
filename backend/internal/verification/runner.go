@@ -79,9 +79,12 @@ type Runner struct {
 }
 
 type projectGate struct {
-	token chan struct{}
-	refs  int
+	token    chan struct{}
+	refs     int
+	poisoned bool
 }
+
+var errVerificationProjectUnsafe = errors.New("verification is blocked because prior process cleanup was not confirmed")
 
 // NewRunner constructs the shared host runner.
 func NewRunner() *Runner {
@@ -116,7 +119,8 @@ func (r *Runner) Run(ctx context.Context, request Request) (result Result, runEr
 	if err != nil {
 		return result, err
 	}
-	defer release()
+	cleanupUncertain := false
+	defer func() { release(cleanupUncertain) }()
 
 	env := newStepEnvironment(os.Environ(), agentlaunch.MergeEnv(request.Env, map[string]string{
 		"AO_PROJECT_ID":    string(request.ProjectID),
@@ -136,6 +140,9 @@ func (r *Runner) Run(ctx context.Context, request Request) (result Result, runEr
 		_, _ = fmt.Fprintf(output, "Verification step %d of %d\n", index+1, len(steps))
 		stepCtx, cancel := context.WithTimeout(ctx, timeout)
 		err := r.execute(stepCtx, request.WorkspacePath, command, env, output)
+		if isCleanupUncertain(err) {
+			cleanupUncertain = true
+		}
 		parentErr := ctx.Err()
 		stepContextErr := stepCtx.Err()
 		timedOut := err != nil && parentErr == nil && errors.Is(stepContextErr, context.DeadlineExceeded)
@@ -192,13 +199,16 @@ func (r *Runner) ensureDefaults() {
 	}
 }
 
-func (r *Runner) acquire(ctx context.Context, projectID domain.ProjectID) (func(), error) {
+func (r *Runner) acquire(ctx context.Context, projectID domain.ProjectID) (func(bool), error) {
 	r.mu.Lock()
 	gate := r.projects[projectID]
 	if gate == nil {
 		gate = &projectGate{token: make(chan struct{}, 1)}
 		gate.token <- struct{}{}
 		r.projects[projectID] = gate
+	} else if gate.poisoned {
+		r.mu.Unlock()
+		return nil, errVerificationProjectUnsafe
 	}
 	gate.refs++
 	r.mu.Unlock()
@@ -208,7 +218,20 @@ func (r *Runner) acquire(ctx context.Context, projectID domain.ProjectID) (func(
 		r.dropGateRef(projectID, gate)
 		return nil, ctx.Err()
 	case <-gate.token:
-		return func() {
+		r.mu.Lock()
+		poisoned := gate.poisoned
+		r.mu.Unlock()
+		if poisoned {
+			gate.token <- struct{}{}
+			r.dropGateRef(projectID, gate)
+			return nil, errVerificationProjectUnsafe
+		}
+		return func(cleanupUncertain bool) {
+			if cleanupUncertain {
+				r.mu.Lock()
+				gate.poisoned = true
+				r.mu.Unlock()
+			}
 			gate.token <- struct{}{}
 			r.dropGateRef(projectID, gate)
 		}, nil
@@ -219,7 +242,7 @@ func (r *Runner) dropGateRef(projectID domain.ProjectID, gate *projectGate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	gate.refs--
-	if gate.refs == 0 && r.projects[projectID] == gate {
+	if gate.refs == 0 && !gate.poisoned && r.projects[projectID] == gate {
 		delete(r.projects, projectID)
 	}
 }
