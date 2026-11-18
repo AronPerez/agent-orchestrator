@@ -2,7 +2,9 @@ import {
 	attentionZone,
 	buildFleetTree,
 	getDisplayStatusLabel,
+	limitFleetCollapsePreferences,
 	parseFleetCollapsePreferences,
+	rememberFleetCollapsePreference,
 	resolveFleetCollapsedKeys,
 	type AttentionZone,
 	type FleetCollapsePreferences,
@@ -74,7 +76,10 @@ function readCollapsePreferences(): FleetCollapsePreferences {
 
 function writeCollapsePreferences(preferences: FleetCollapsePreferences): void {
 	try {
-		window.localStorage.setItem(FLEET_COLLAPSE_STORAGE_KEY, JSON.stringify(preferences));
+		window.localStorage.setItem(
+			FLEET_COLLAPSE_STORAGE_KEY,
+			JSON.stringify(limitFleetCollapsePreferences(preferences)),
+		);
 	} catch {
 		// A full or unavailable preference store should never make the fleet unusable.
 	}
@@ -335,7 +340,7 @@ export function FleetOverview({
 
 	const toggle = (key: string) => {
 		setCollapsePreferences((current) => {
-			const next = { ...current, [key]: !collapsed.has(key) };
+			const next = rememberFleetCollapsePreference(current, key, !collapsed.has(key));
 			writeCollapsePreferences(next);
 			return next;
 		});

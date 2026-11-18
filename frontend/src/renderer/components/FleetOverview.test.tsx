@@ -396,6 +396,20 @@ describe("FleetOverview", () => {
 		expect(screen.getByText("This computer")).toBeInTheDocument();
 	});
 
+	it("evicts the oldest collapse choice when storage is full", async () => {
+		window.localStorage.setItem("ao.fleet.branch-state.v1", JSON.stringify(Object.fromEntries(
+			Array.from({ length: 2_000 }, (_, index) => [`old-${index}`, true]),
+		)));
+		render(<FleetOverview localWorkspaces={[workspace("project", "Project", [session("worker", "Worker")])]} onOpen={vi.fn()} />);
+
+		await userEvent.click(screen.getByRole("treeitem", { name: /^Project/ }));
+
+		const saved = JSON.parse(window.localStorage.getItem("ao.fleet.branch-state.v1") ?? "{}");
+		expect(Object.keys(saved)).toHaveLength(2_000);
+		expect(saved["old-0"]).toBeUndefined();
+		expect(Object.keys(saved).some((key) => key.startsWith("["))).toBe(true);
+	});
+
 	it("remembers a collapsed host-local project without folding the same id on another machine", async () => {
 		const local = workspace("same", "Same", [session("local", "Local")]);
 		const remote = workspace("same", "Same", [session("remote", "Remote", "idle", { hostId: "build-box" })], { hostId: "build-box" });

@@ -32,4 +32,14 @@ describe("fleet collapse storage", () => {
 			JSON.stringify({ '["project","mac","ao"]': false }),
 		);
 	});
+
+	it("bounds oversized preference records when writing", async () => {
+		await writeFleetCollapsePreferences(Object.fromEntries(
+			Array.from({ length: 2_001 }, (_, index) => [String(index), true]),
+		));
+		const saved = JSON.parse(vi.mocked(AsyncStorage.setItem).mock.calls.at(-1)![1]);
+		expect(Object.keys(saved)).toHaveLength(2_000);
+		expect(saved["0"]).toBeUndefined();
+		expect(saved["2000"]).toBe(true);
+	});
 });

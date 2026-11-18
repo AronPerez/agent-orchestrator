@@ -12,6 +12,8 @@ import {
 	type ScrollViewProps,
 } from "react-native";
 import {
+	limitFleetCollapsePreferences,
+	rememberFleetCollapsePreference,
 	resolveFleetCollapsedKeys,
 	type FleetMachineNode,
 	type FleetProjectNode,
@@ -65,6 +67,8 @@ export type MobileFleetRow = ProjectRow | MachineRow | SessionRow | ArchiveHeade
 type MissingAncestor = { key: string; hostId: string; sessionId: string };
 type LineageRow = { id: string; hostId: string; parentSessionId?: string };
 type AncestorController = { hostId: string; controller: AbortController };
+type AncestorFailure = { hostId: string; count: number; retryAt: number };
+type AncestorRetryTimer = { hostId: string; timer: ReturnType<typeof setTimeout> };
 
 const ANCESTOR_RETRY_BASE_MS = 1_000;
 const ANCESTOR_RETRY_MAX_MS = 30_000;
@@ -211,7 +215,10 @@ export function FleetTreeList({
 		let active = true;
 		void readFleetCollapsePreferences().then((stored) => {
 			if (!active) return;
-			const merged = { ...stored, ...preferencesRef.current };
+			const merged = Object.entries(preferencesRef.current).reduce(
+				(current, [key, value]) => rememberFleetCollapsePreference(current, key, value),
+				limitFleetCollapsePreferences(stored),
+			);
 			preferencesRef.current = merged;
 			preferencesLoaded.current = true;
 			setPreferences(merged);
@@ -243,10 +250,23 @@ export function FleetTreeList({
 		[archive.rows, liveKeys],
 	);
 	const [lookedUpAncestors, setLookedUpAncestors] = useState<Map<string, HostedSession>>(() => new Map());
+	const lookedUpAncestorsRef = useRef(lookedUpAncestors);
+	lookedUpAncestorsRef.current = lookedUpAncestors;
 	const archiveCandidates = useMemo(
 		() => archivedRows.flatMap((session) => sessionHostId(session) ? [session as HostedSession] : []),
 		[archivedRows],
 	);
+	useEffect(() => {
+		if (!archiveCandidates.length) return;
+		const refreshedKeys = new Set(archiveCandidates.map(hostedSessionKey));
+		setLookedUpAncestors((current) => {
+			if (![...refreshedKeys].some((key) => current.has(key))) return current;
+			const next = new Map(current);
+			for (const key of refreshedKeys) next.delete(key);
+			lookedUpAncestorsRef.current = next;
+			return next;
+		});
+	}, [archiveCandidates]);
 	const lineage = useMemo(
 		() => resolveFleetLineage(liveSessions, orchestrators, [...archiveCandidates, ...lookedUpAncestors.values()]),
 		[archiveCandidates, liveSessions, lookedUpAncestors, orchestrators],
@@ -255,8 +275,8 @@ export function FleetTreeList({
 	const ancestorControllers = useRef(new Map<string, AncestorController>());
 	const ancestorMissingAtRefresh = useRef(new Map<string, number>());
 	const ancestorAuthBlockedHosts = useRef(new Set<string>());
-	const ancestorHostFailures = useRef(new Map<string, { count: number; retryAt: number }>());
-	const ancestorRetryTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+	const ancestorFailures = useRef(new Map<string, AncestorFailure>());
+	const ancestorRetryTimers = useRef(new Map<string, AncestorRetryTimer>());
 	const previousHostConnections = useRef(new Map<string, MobileFleetHost["connection"]>());
 	useEffect(() => {
 		const next = new Map(hosts.map((host) => [host.hostId, host.connection]));
@@ -265,10 +285,14 @@ export function FleetTreeList({
 			const previous = previousHostConnections.current.get(host.hostId);
 			if (host.connection === "open" && previous !== undefined && previous !== "open") {
 				ancestorAuthBlockedHosts.current.delete(host.hostId);
-				ancestorHostFailures.current.delete(host.hostId);
-				const timer = ancestorRetryTimers.current.get(host.hostId);
-				if (timer) clearTimeout(timer);
-				ancestorRetryTimers.current.delete(host.hostId);
+				for (const [key, failure] of ancestorFailures.current) {
+					if (failure.hostId === host.hostId) ancestorFailures.current.delete(key);
+				}
+				for (const [key, retry] of ancestorRetryTimers.current) {
+					if (retry.hostId !== host.hostId) continue;
+					clearTimeout(retry.timer);
+					ancestorRetryTimers.current.delete(key);
+				}
 				recovered = true;
 			}
 		}
@@ -280,6 +304,14 @@ export function FleetTreeList({
 		for (const key of ancestorMissingAtRefresh.current.keys()) {
 			if (!missingKeys.has(key)) ancestorMissingAtRefresh.current.delete(key);
 		}
+		for (const key of ancestorFailures.current.keys()) {
+			if (!missingKeys.has(key)) ancestorFailures.current.delete(key);
+		}
+		for (const [key, retry] of ancestorRetryTimers.current) {
+			if (missingKeys.has(key)) continue;
+			clearTimeout(retry.timer);
+			ancestorRetryTimers.current.delete(key);
+		}
 		for (const [key, active] of ancestorControllers.current) {
 			if (!missingKeys.has(key) || hostsById.get(active.hostId)?.connection !== "open") {
 				active.controller.abort();
@@ -287,21 +319,21 @@ export function FleetTreeList({
 			}
 		}
 		const busyHosts = new Set([...ancestorControllers.current.values()].map((active) => active.hostId));
-		const scheduleRetry = (hostId: string, retryAt: number) => {
-			if (ancestorRetryTimers.current.has(hostId)) return;
+		const scheduleRetry = (key: string, hostId: string, retryAt: number) => {
+			if (ancestorRetryTimers.current.has(key)) return;
 			const timer = setTimeout(() => {
-				ancestorRetryTimers.current.delete(hostId);
+				ancestorRetryTimers.current.delete(key);
 				setAncestorRequestEpoch((value) => value + 1);
 			}, Math.max(0, retryAt - Date.now()));
-			ancestorRetryTimers.current.set(hostId, timer);
+			ancestorRetryTimers.current.set(key, { hostId, timer });
 		};
 		for (const request of lineage.missing) {
 			if (hostsById.get(request.hostId)?.connection !== "open") continue;
 			if (ancestorAuthBlockedHosts.current.has(request.hostId) || busyHosts.has(request.hostId)) continue;
 			if (ancestorMissingAtRefresh.current.get(request.key) === archiveRefresh) continue;
-			const failure = ancestorHostFailures.current.get(request.hostId);
+			const failure = ancestorFailures.current.get(request.key);
 			if (failure && failure.retryAt > Date.now()) {
-				scheduleRetry(request.hostId, failure.retryAt);
+				scheduleRetry(request.key, request.hostId, failure.retryAt);
 				continue;
 			}
 			const config = configForHost(request.hostId);
@@ -315,7 +347,7 @@ export function FleetTreeList({
 					ancestorMissingAtRefresh.current.set(request.key, archiveRefresh);
 					return;
 				}
-				ancestorHostFailures.current.delete(request.hostId);
+				ancestorFailures.current.delete(request.key);
 				const hosted: HostedSession = {
 					...session,
 					hostId: request.hostId,
@@ -324,6 +356,7 @@ export function FleetTreeList({
 				setLookedUpAncestors((current) => {
 					const next = new Map(current);
 					next.set(request.key, hosted);
+					lookedUpAncestorsRef.current = next;
 					return next;
 				});
 			}).catch((cause) => {
@@ -332,14 +365,15 @@ export function FleetTreeList({
 					ancestorAuthBlockedHosts.current.add(request.hostId);
 					return;
 				}
-				if (cause instanceof ApiError && cause.status === 404) {
+				if (cause instanceof ApiError && (cause.status === 404 || cause.status === 410)) {
+					ancestorFailures.current.delete(request.key);
 					ancestorMissingAtRefresh.current.set(request.key, archiveRefresh);
 					return;
 				}
-				const count = (ancestorHostFailures.current.get(request.hostId)?.count ?? 0) + 1;
+				const count = (ancestorFailures.current.get(request.key)?.count ?? 0) + 1;
 				const retryAt = Date.now() + Math.min(ANCESTOR_RETRY_MAX_MS, ANCESTOR_RETRY_BASE_MS * (2 ** (count - 1)));
-				ancestorHostFailures.current.set(request.hostId, { count, retryAt });
-				scheduleRetry(request.hostId, retryAt);
+				ancestorFailures.current.set(request.key, { hostId: request.hostId, count, retryAt });
+				scheduleRetry(request.key, request.hostId, retryAt);
 			}).finally(() => {
 				if (ancestorControllers.current.get(request.key)?.controller === controller) ancestorControllers.current.delete(request.key);
 				if (!controller.signal.aborted) setAncestorRequestEpoch((value) => value + 1);
@@ -349,8 +383,40 @@ export function FleetTreeList({
 	useEffect(() => () => {
 		for (const active of ancestorControllers.current.values()) active.controller.abort();
 		ancestorControllers.current.clear();
-		for (const timer of ancestorRetryTimers.current.values()) clearTimeout(timer);
+		for (const retry of ancestorRetryTimers.current.values()) clearTimeout(retry.timer);
 		ancestorRetryTimers.current.clear();
+	}, []);
+	const updateLookedUpAncestor = useCallback((session: DashboardSession, changes: Partial<DashboardSession>) => {
+		const key = hostedSessionKey(session);
+		const current = lookedUpAncestorsRef.current;
+		const cached = current.get(key);
+		if (!cached) return;
+		const next = new Map(current);
+		next.set(key, { ...cached, ...changes });
+		lookedUpAncestorsRef.current = next;
+		setLookedUpAncestors(next);
+		setArchiveRefresh((value) => value + 1);
+	}, []);
+	const dropLookedUpAncestor = useCallback((session: DashboardSession) => {
+		const key = hostedSessionKey(session);
+		const current = lookedUpAncestorsRef.current;
+		if (!current.has(key)) return;
+		const next = new Map(current);
+		next.delete(key);
+		lookedUpAncestorsRef.current = next;
+		setLookedUpAncestors(next);
+		setArchiveRefresh((value) => value + 1);
+	}, []);
+	const clearLookedUpAncestors = useCallback(() => {
+		for (const active of ancestorControllers.current.values()) active.controller.abort();
+		ancestorControllers.current.clear();
+		for (const retry of ancestorRetryTimers.current.values()) clearTimeout(retry.timer);
+		ancestorRetryTimers.current.clear();
+		ancestorFailures.current.clear();
+		ancestorMissingAtRefresh.current.clear();
+		const next = new Map<string, HostedSession>();
+		lookedUpAncestorsRef.current = next;
+		setLookedUpAncestors(next);
 	}, []);
 	const treeSessions = useMemo(() => {
 		const byAddress = new Map<string, HostedSession>();
@@ -389,7 +455,7 @@ export function FleetTreeList({
 	);
 
 	const setCollapsed = useCallback((key: string, nextCollapsed: boolean) => {
-		const next = { ...preferencesRef.current, [key]: nextCollapsed };
+		const next = rememberFleetCollapsePreference(preferencesRef.current, key, nextCollapsed);
 		preferencesRef.current = next;
 		setPreferences(next);
 		if (preferencesLoaded.current) void writeFleetCollapsePreferences(next);
@@ -410,20 +476,26 @@ export function FleetTreeList({
 		if (activeSwipeRef.current?.id === id) activeSwipeRef.current = undefined;
 		setActiveSwipeId((active) => active === id ? undefined : active);
 	}, []);
+	const renameTreeWorker = useCallback(async (session: DashboardSession, displayName: string) => {
+		await renameWorker(session.id, displayName, sessionHostId(session));
+		updateLookedUpAncestor(session, { displayName });
+	}, [renameWorker, updateLookedUpAncestor]);
 	const updateWorkerPin = useCallback(async (session: DashboardSession, pinned: boolean) => {
 		try {
 			await setWorkerPinned(session.id, pinned, sessionHostId(session));
+			updateLookedUpAncestor(session, { isPinned: pinned });
 			haptics.success();
 		} catch (cause) {
 			haptics.error();
 			Alert.alert("Couldn't update pin", userFacingError(cause, "Please try again."));
 		}
-	}, [setWorkerPinned]);
+	}, [setWorkerPinned, updateLookedUpAncestor]);
 	const runWorkerRecovery = useCallback(async (session: DashboardSession, kind: "resume" | "restore") => {
 		try {
 			await (kind === "resume"
 				? resumeAgent(session.id, sessionHostId(session))
 				: restore(session.id, sessionHostId(session)));
+			dropLookedUpAncestor(session);
 			haptics.success();
 		} catch (cause) {
 			haptics.error();
@@ -432,7 +504,7 @@ export function FleetTreeList({
 				userFacingError(cause, "Please try again."),
 			);
 		}
-	}, [restore, resumeAgent]);
+	}, [dropLookedUpAncestor, restore, resumeAgent]);
 	const confirmDeleteSession = useCallback((session: DashboardSession) => {
 		haptics.warning();
 		const copy = isCloudHost(sessionHostId(session)) ? ARCHIVE_CLOUD_SESSION_CONFIRM : ARCHIVE_SESSION_CONFIRM;
@@ -441,10 +513,12 @@ export function FleetTreeList({
 			{
 				text: copy.confirm,
 				style: "destructive",
-				onPress: () => void kill(session.id, sessionHostId(session)).catch(() => {}),
+				onPress: () => void kill(session.id, sessionHostId(session))
+					.then(() => dropLookedUpAncestor(session))
+					.catch(() => {}),
 			},
 		]);
-	}, [kill]);
+	}, [dropLookedUpAncestor, kill]);
 	const machineOffline = useCallback((session: DashboardSession) => {
 		const hostId = sessionHostId(session);
 		return hostId ? hostsById.get(hostId)?.connection !== "open" : false;
@@ -492,9 +566,10 @@ export function FleetTreeList({
 		try {
 			await onRefresh();
 		} finally {
+			clearLookedUpAncestors();
 			setArchiveRefresh((value) => value + 1);
 		}
-	}, [onRefresh]);
+	}, [clearLookedUpAncestors, onRefresh]);
 
 	const renderItem = useCallback(({ item }: { item: MobileFleetRow }) => {
 		if (item.kind === "archive") {
@@ -616,7 +691,7 @@ export function FleetTreeList({
 					isRenaming={renamingWorkerId === rowKey}
 					nowBucket={nowBucket}
 					onDelete={() => confirmDeleteSession(source)}
-					onRename={(title) => renameWorker(source.id, title, sessionHostId(source))}
+					onRename={(title) => renameTreeWorker(source, title)}
 					onRenameCancel={() => setRenamingWorkerId(undefined)}
 					onRenameStart={() => setRenamingWorkerId(rowKey)}
 					onRestore={() => void runWorkerRecovery(source, "restore")}
@@ -685,7 +760,7 @@ export function FleetTreeList({
 		);
 	}, [activeSwipeId, archive.error, archive.loadMore, archive.loading, archive.retry, archive.total, archiveOpen,
 		closeExclusiveSwipe, collapsed, confirmDeleteSession, currentHostId, hostsById, machineOffline, nowBucket,
-		openExclusiveSwipe, projectNames, renameWorker, renamingWorkerId, restoreArchived, restoreErrors, restoringKey, router,
+		openExclusiveSwipe, projectNames, renameTreeWorker, renamingWorkerId, restoreArchived, restoreErrors, restoringKey, router,
 		runWorkerRecovery, styles, theme, toggle, updateWorkerPin]);
 
 	return (

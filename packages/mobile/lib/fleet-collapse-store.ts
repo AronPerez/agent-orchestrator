@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
+	limitFleetCollapsePreferences,
 	parseFleetCollapsePreferences,
 	type FleetCollapsePreferences,
 } from "../../product-ui/src/fleet-tree";
@@ -12,5 +13,8 @@ export async function readFleetCollapsePreferences(): Promise<Record<string, boo
 }
 
 export async function writeFleetCollapsePreferences(preferences: FleetCollapsePreferences): Promise<void> {
-	await AsyncStorage.setItem(FLEET_COLLAPSE_STORAGE_KEY, JSON.stringify(preferences)).catch(() => {});
+	await AsyncStorage.setItem(
+		FLEET_COLLAPSE_STORAGE_KEY,
+		JSON.stringify(limitFleetCollapsePreferences(preferences)),
+	).catch(() => {});
 }

@@ -70,6 +70,27 @@ export const DEFAULT_FLEET_COLLAPSE_SIZE = 8;
 const MAX_FLEET_COLLAPSE_PREFERENCES = 2_000;
 const MAX_FLEET_COLLAPSE_KEY_LENGTH = 1_024;
 
+/** Keep the newest valid preferences within the storage contract's hard limit. */
+export function limitFleetCollapsePreferences(
+	preferences: Readonly<Record<string, unknown>>,
+): Record<string, boolean> {
+	const valid = Object.entries(preferences).filter(([key, value]) =>
+		key.length <= MAX_FLEET_COLLAPSE_KEY_LENGTH && typeof value === "boolean");
+	return Object.fromEntries(valid.slice(-MAX_FLEET_COLLAPSE_PREFERENCES)) as Record<string, boolean>;
+}
+
+/** Remember one choice as the newest entry, evicting the oldest choice when full. */
+export function rememberFleetCollapsePreference(
+	preferences: FleetCollapsePreferences,
+	key: string,
+	collapsed: boolean,
+): Record<string, boolean> {
+	const next = { ...preferences };
+	delete next[key];
+	next[key] = collapsed;
+	return limitFleetCollapsePreferences(next);
+}
+
 export function emptyFleetRollup(): FleetRollup {
 	return { merge: 0, action: 0, pending: 0, working: 0, done: 0 };
 }
@@ -289,10 +310,7 @@ export function parseFleetCollapsePreferences(raw: string | null | undefined): R
 	try {
 		const parsed: unknown = JSON.parse(raw);
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-		const entries = Object.entries(parsed);
-		if (entries.length > MAX_FLEET_COLLAPSE_PREFERENCES) return {};
-		return Object.fromEntries(entries.filter(([key, value]) =>
-			key.length <= MAX_FLEET_COLLAPSE_KEY_LENGTH && typeof value === "boolean"));
+		return limitFleetCollapsePreferences(parsed as Record<string, unknown>);
 	} catch {
 		return {};
 	}

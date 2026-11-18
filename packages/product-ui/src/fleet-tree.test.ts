@@ -3,7 +3,9 @@ import {
 	buildFleetTree,
 	emptyFleetRollup,
 	flattenFleetSessions,
+	limitFleetCollapsePreferences,
 	parseFleetCollapsePreferences,
+	rememberFleetCollapsePreference,
 	resolveFleetCollapsedKeys,
 	fleetSessionKey,
 	type FleetTreeScope,
@@ -216,7 +218,20 @@ describe("buildFleetTree", () => {
 		expect(parseFleetCollapsePreferences(JSON.stringify({ a: true, b: false, ignored: "yes" })))
 			.toEqual({ a: true, b: false });
 		expect(parseFleetCollapsePreferences("not json")).toEqual({});
-		expect(parseFleetCollapsePreferences(JSON.stringify(Object.fromEntries(Array.from({ length: 2_001 }, (_, index) => [String(index), true])))))
-			.toEqual({});
+		const restored = parseFleetCollapsePreferences(JSON.stringify(Object.fromEntries(
+			Array.from({ length: 2_001 }, (_, index) => [String(index), true]),
+		)));
+		expect(Object.keys(restored)).toHaveLength(2_000);
+		expect(restored["0"]).toBeUndefined();
+		expect(restored["2000"]).toBe(true);
+	});
+
+	it("evicts the oldest stored branch when remembering a new choice", () => {
+		const full = Object.fromEntries(Array.from({ length: 2_000 }, (_, index) => [String(index), true]));
+		const remembered = rememberFleetCollapsePreference(full, "newest", false);
+		expect(Object.keys(remembered)).toHaveLength(2_000);
+		expect(remembered["0"]).toBeUndefined();
+		expect(remembered.newest).toBe(false);
+		expect(limitFleetCollapsePreferences({ ...full, newest: false })).toEqual(remembered);
 	});
 });

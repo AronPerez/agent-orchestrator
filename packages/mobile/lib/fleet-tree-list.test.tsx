@@ -285,6 +285,84 @@ describe("FleetTreeList", () => {
 		expect(fixtures.getSession).toHaveBeenCalledTimes(1);
 	});
 
+	it("continues with healthy parents while a sibling lookup backs off", async () => {
+		fixtures.getSession
+			.mockRejectedValueOnce(new ApiError(500, "Parent one failed"))
+			.mockResolvedValueOnce(worker("Parent two", { status: "terminated", isTerminated: true }));
+		render([
+			worker("First", { parentSessionId: "Parent one" }),
+			worker("Second", { parentSessionId: "Parent two" }),
+		], [], "open");
+
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+		expect(fixtures.getSession.mock.calls.map((call) => call[1])).toEqual(["Parent one", "Parent two"]);
+	});
+
+	it("treats a gone parent as missing without starving later lookups", async () => {
+		fixtures.getSession
+			.mockRejectedValueOnce(new ApiError(410, "Gone"))
+			.mockResolvedValueOnce(worker("Parent two", { status: "terminated", isTerminated: true }));
+		render([
+			worker("First", { parentSessionId: "Parent one" }),
+			worker("Second", { parentSessionId: "Parent two" }),
+		], [], "open");
+
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+		expect(fixtures.getSession.mock.calls.map((call) => call[1])).toEqual(["Parent one", "Parent two"]);
+	});
+
+	it("refreshes an exact ancestor and updates its cached rename", async () => {
+		fixtures.getSession
+			.mockResolvedValueOnce(worker("Parent", { displayName: "Old parent", status: "terminated", isTerminated: true }))
+			.mockResolvedValueOnce(worker("Parent", { displayName: "Refreshed parent", status: "terminated", isTerminated: true }));
+		const child = worker("Child", { parentSessionId: "Parent" });
+		const view = render([child], [], "open");
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+		let parent = view.root.findAllByType("WorkerListRow" as never)
+			.find((row) => row.props.session.id === "Parent")!;
+		expect(parent.props.session.displayName).toBe("Old parent");
+		await act(async () => parent.props.onRename("Renamed parent"));
+		parent = view.root.findAllByType("WorkerListRow" as never)
+			.find((row) => row.props.session.id === "Parent")!;
+		expect(parent.props.session.displayName).toBe("Renamed parent");
+
+		await act(async () => view.root.findByType("FlatList" as never).props.refreshControl.props.onRefresh());
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+		parent = view.root.findAllByType("WorkerListRow" as never)
+			.find((row) => row.props.session.id === "Parent")!;
+		expect(fixtures.getSession).toHaveBeenCalledTimes(2);
+		expect(parent.props.session.displayName).toBe("Refreshed parent");
+	});
+
+	it("lets a refreshed archive row replace an older exact lookup", async () => {
+		fixtures.getSession.mockResolvedValueOnce(worker("Parent", {
+			displayName: "Lookup parent",
+			status: "terminated",
+			isTerminated: true,
+		}));
+		const child = worker("Child", { parentSessionId: "Parent" });
+		const view = render([child], [], "open");
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+		fixtures.archive.rows = [worker("Parent", {
+			displayName: "Archive parent",
+			status: "terminated",
+			isTerminated: true,
+		})];
+		fixtures.archive.total = 1;
+		await act(async () => {
+			view.update(fleetList([child], [], "open"));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+
+		const parent = view.root.findAllByType("WorkerListRow" as never)
+			.find((row) => row.props.session.id === "Parent")!;
+		expect(parent.props.session.displayName).toBe("Archive parent");
+	});
+
 	it("serializes archive restore and opens the restored session", async () => {
 		let finishRestore!: () => void;
 		fixtures.app.restore.mockReturnValueOnce(new Promise<void>((resolve) => { finishRestore = resolve; }));
@@ -336,10 +414,13 @@ describe("FleetTreeList", () => {
 
 		act(() => projectRow.props.onPress());
 		expect(fixtures.setItem).not.toHaveBeenCalled();
-		await act(async () => resolveStored(JSON.stringify({ remembered: true })));
+		await act(async () => resolveStored(JSON.stringify(Object.fromEntries(
+			Array.from({ length: 2_000 }, (_, index) => [`old-${index}`, true]),
+		))));
 
 		const saved = JSON.parse(fixtures.setItem.mock.calls.at(-1)![1]);
-		expect(saved).toMatchObject({ remembered: true });
+		expect(Object.keys(saved)).toHaveLength(2_000);
+		expect(saved["old-0"]).toBeUndefined();
 		expect(Object.values(saved)).toContain(false);
 	});
 });
