@@ -29,7 +29,7 @@ type checkpointDriver struct {
 func (d *checkpointDriver) Reconnect(ctx context.Context, cfg ports.ChatResumeConfig) (ports.ChatConversation, error) {
 	reconnector, ok := d.ChatDriver.(ports.ChatDriverReconnector)
 	if !ok {
-		return nil, ports.ErrChatHostNotRunning
+		return nil, fmt.Errorf("%w: wrapped Claude driver cannot probe an existing host", ports.ErrChatRecoveryInconclusive)
 	}
 	return reconnector.Reconnect(ctx, cfg)
 }

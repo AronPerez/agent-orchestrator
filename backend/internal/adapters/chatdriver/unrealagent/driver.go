@@ -52,7 +52,10 @@ func New(plugin plugin, log *slog.Logger) *Driver {
 	}
 }
 
-var _ ports.ChatDriver = (*Driver)(nil)
+var (
+	_ ports.ChatDriver            = (*Driver)(nil)
+	_ ports.ChatDriverReconnector = (*Driver)(nil)
+)
 
 // Harness returns the domain harness owned by this driver.
 func (*Driver) Harness() domain.AgentHarness { return domain.HarnessUnreal }
@@ -141,6 +144,32 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 	return conv, nil
 }
 
+// Reconnect attaches only to the existing persistent Unreal host. It never
+// prepares or launches a replacement process, so ErrChatHostNotRunning is
+// definitive evidence that the reserved controller no longer consumes intake
+// capacity. Every other probe failure remains inconclusive.
+func (d *Driver) Reconnect(ctx context.Context, cfg ports.ChatResumeConfig) (ports.ChatConversation, error) {
+	if strings.TrimSpace(cfg.ProviderConversationID) == "" {
+		return nil, fmt.Errorf("%w: Unreal Agent conversation id is empty", ports.ErrChatResumeFailed)
+	}
+	if err := validateStart(cfg.WorkspacePath, cfg.Permissions, cfg.ReadOnly, cfg.AdditionalDirectories); err != nil {
+		return nil, err
+	}
+	conv, err := d.connectMode(ctx, providerConfig{
+		AOSessionID: string(cfg.SessionID), ProviderConversationID: cfg.ProviderConversationID,
+		DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
+		Model: strings.TrimSpace(cfg.Model), Effort: normalizeEffort(cfg.Effort),
+		SystemPrompt: cfg.SystemPrompt,
+	}, cfg.Env, cfg.PrepareEnv, cfg.ProviderScopeID, true)
+	if err != nil {
+		if errors.Is(err, ports.ErrChatHostNotRunning) || errors.Is(err, ports.ErrChatRecoveryInconclusive) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: probe persistent Unreal Agent host: %w", ports.ErrChatRecoveryInconclusive, err)
+	}
+	return conv, nil
+}
+
 func validateStart(workspace string, permissions ports.PermissionMode, readOnly bool, additional []string) error {
 	if !filepath.IsAbs(workspace) {
 		return fmt.Errorf("workspace path must be absolute, got %q", workspace)
@@ -191,10 +220,22 @@ func (d *Driver) connect(
 	prepareEnv func(context.Context) (map[string]string, error),
 	providerScopeID string,
 ) (*conversation, error) {
+	return d.connectMode(ctx, cfg, env, prepareEnv, providerScopeID, false)
+}
+
+func (d *Driver) connectMode(
+	ctx context.Context,
+	cfg providerConfig,
+	env map[string]string,
+	prepareEnv func(context.Context) (map[string]string, error),
+	providerScopeID string,
+	reconnectOnly bool,
+) (*conversation, error) {
 	owner, _ := json.Marshal([]string{filepath.Clean(cfg.WorkspacePath), string(domain.HarnessUnreal), providerScopeID})
 	fingerprint := sha256.Sum256(owner)
 	hostConfig := persistenthost.Config{
-		SessionID: cfg.AOSessionID, DataDir: cfg.DataDir, Workdir: cfg.WorkspacePath,
+		ReconnectOnly: reconnectOnly,
+		SessionID:     cfg.AOSessionID, DataDir: cfg.DataDir, Workdir: cfg.WorkspacePath,
 		Protocol: persistenthost.ProtocolUnreal, OwnershipFingerprint: hex.EncodeToString(fingerprint[:]),
 		Prepare: func(prepareCtx context.Context) (persistenthost.PreparedProvider, error) {
 			launchEnv := env
@@ -221,11 +262,17 @@ func (d *Driver) connect(
 	}
 	transport, err := d.connectHost(ctx, hostConfig)
 	if err != nil {
+		if reconnectOnly && errors.Is(err, persistenthost.ErrNotRunning) {
+			return nil, ports.ErrChatHostNotRunning
+		}
 		if errors.Is(err, persistenthost.ErrOwnershipInconclusive) ||
 			errors.Is(err, persistenthost.ErrAttached) ||
 			errors.Is(err, persistenthost.ErrIncompatible) ||
 			errors.Is(err, persistenthost.ErrUnauthorized) {
 			return nil, fmt.Errorf("%w: persistent Unreal Agent host: %w", ports.ErrChatRecoveryInconclusive, err)
+		}
+		if reconnectOnly {
+			return nil, fmt.Errorf("%w: persistent Unreal Agent host probe: %w", ports.ErrChatRecoveryInconclusive, err)
 		}
 		return nil, fmt.Errorf("%w: persistent Unreal Agent host: %w", ports.ErrChatDriverUnavailable, err)
 	}

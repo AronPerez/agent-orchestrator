@@ -556,7 +556,10 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 	resume := driver.Resume
 	if cfg.ReconnectOnly {
 		reconnector, ok := driver.(ports.ChatDriverReconnector)
-		if !ok || cfg.ProviderConversationID == "" {
+		if !ok {
+			return nil, fmt.Errorf("%w: chat driver %s cannot probe an existing host", ports.ErrChatRecoveryInconclusive, cfg.Harness)
+		}
+		if cfg.ProviderConversationID == "" {
 			return nil, ports.ErrChatHostNotRunning
 		}
 		resume = reconnector.Reconnect

@@ -110,3 +110,38 @@ func TestReplayFailureTerminatesFreshHost(t *testing.T) {
 		t.Fatal("replay failure left the fresh host running")
 	}
 }
+
+func TestReconnectOnlyClassifiesUnrealHostOwnership(t *testing.T) {
+	tests := []struct {
+		name    string
+		hostErr error
+		want    error
+	}{
+		{name: "missing host", hostErr: persistenthost.ErrNotRunning, want: ports.ErrChatHostNotRunning},
+		{name: "surviving host ownership inconclusive", hostErr: persistenthost.ErrOwnershipInconclusive, want: ports.ErrChatRecoveryInconclusive},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			driver := New(authPlugin{status: ports.AgentAuthStatusAuthorized}, nil)
+			var gotConfig persistenthost.Config
+			driver.connectHost = func(_ context.Context, cfg persistenthost.Config) (*persistenthost.Transport, error) {
+				gotConfig = cfg
+				return nil, tt.hostErr
+			}
+			_, err := driver.Reconnect(t.Context(), ports.ChatResumeConfig{
+				SessionID: "ao-session", ProviderConversationID: "provider-session",
+				DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+				Permissions: ports.PermissionModeBypassPermissions,
+			})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Reconnect() error = %v, want %v", err, tt.want)
+			}
+			if errors.Is(err, ports.ErrChatHostNotRunning) != errors.Is(tt.want, ports.ErrChatHostNotRunning) {
+				t.Fatalf("Reconnect() definitive absence = %v, want %v", errors.Is(err, ports.ErrChatHostNotRunning), errors.Is(tt.want, ports.ErrChatHostNotRunning))
+			}
+			if !gotConfig.ReconnectOnly {
+				t.Fatal("Reconnect() did not use persistent-host reconnect-only mode")
+			}
+		})
+	}
+}
