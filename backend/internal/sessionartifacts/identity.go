@@ -24,6 +24,7 @@ type Observation struct {
 	// quick holds what the walk's stat reported for each observed path. On
 	// Linux it lacks the birth time, which only fullIdentity reads.
 	quick map[string]domain.FileIdentity
+	pins  map[string]domain.FileIdentity
 	dir   string
 }
 
@@ -35,7 +36,7 @@ func Observe(ctx context.Context, dir string, registered []string) (Observation,
 		return Observation{}, err
 	}
 	observeBundles(dir, files, quick)
-	return Observation{Files: files, quick: quick, dir: dir}, nil
+	return Observation{Files: files, quick: quick, pins: loadPlanApprovalPins(dir), dir: dir}, nil
 }
 
 // observeBundles adds the identity of each bundle directory that holds an
@@ -129,7 +130,7 @@ func (o Observation) Changes(rows []domain.SessionArtifactRecord, now time.Time,
 	}
 	matches := make(map[string]domain.SessionArtifactRecord)
 	for _, path := range candidates {
-		if source, ok := renameSource(sources, full[path]); ok && source.Path != path {
+		if source, ok := renameSource(sources, full[path], o.pins); ok && source.Path != path {
 			matches[path] = source
 		}
 	}
@@ -237,11 +238,11 @@ func addSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, row
 	}
 }
 
-// renameSource uses the exact identity first. A plan-approval row gets one
-// narrow fallback when birth or generation proves the inode is still the same
-// file after an edit. A bare device+inode is never enough because it can be
-// recycled after deletion.
-func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, observed domain.FileIdentity) (domain.SessionArtifactRecord, bool) {
+// renameSource uses the exact identity first. A plan-approval row gets a narrow
+// fallback when birth/generation metadata or its private hard-link pin proves
+// the inode is still the same file after an edit. A bare device+inode is never
+// enough because it can be recycled after deletion.
+func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, observed domain.FileIdentity, pins map[string]domain.FileIdentity) (domain.SessionArtifactRecord, bool) {
 	if source, ok := sources[observed]; ok {
 		return source, true
 	}
@@ -251,6 +252,9 @@ func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, 
 			stored.Ino != 0 && stored.Dev == observed.Dev && stored.Ino == observed.Ino &&
 			stored.Birth == observed.Birth && stored.Generation == observed.Generation &&
 			(stored.Birth != 0 || stored.Generation != 0) {
+			return source, true
+		}
+		if source.Role == domain.SessionArtifactRolePlanApproval && pins[source.ID].SameFile(observed) {
 			return source, true
 		}
 	}
@@ -298,7 +302,7 @@ func (o Observation) Apply(rows []domain.SessionArtifactRecord) []domain.Session
 	for i := range files {
 		row, found := byPath[files[i].Path]
 		if !found {
-			row, _ = renameSource(byFile, o.fullIdentity(files[i].Path))
+			row, _ = renameSource(byFile, o.fullIdentity(files[i].Path), o.pins)
 		}
 		files[i].ID = row.ID
 		files[i].Role = row.Role

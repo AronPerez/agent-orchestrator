@@ -555,6 +555,53 @@ func TestDelivererSerializesPlanApprovalWithChangedAnswer(t *testing.T) {
 	}
 }
 
+func TestDelivererSerializesPlanCallsForTheSameOwner(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	replacement := raisePlanFirstCall(t, fixture, fixture.loose)
+	messenger := &blockingDecisionMessenger{
+		fakeDecisionMessenger: newFakeDecisionMessenger(), block: fixture.loose,
+		started: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	deliverer := newTestDeliverer(fixture.store, messenger, "h_a")
+	deliverer.mutationGate = fixture.service.mutationGate
+	delivered := make(chan error, 1)
+	go func() {
+		_, err := deliverer.RunDue(context.Background())
+		delivered <- err
+	}()
+	<-messenger.started
+
+	answered := make(chan error, 1)
+	go func() {
+		_, err := fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, replacement.ID, AnswerInput{
+			Choice: domain.DecisionChoiceOption, Option: 3,
+		})
+		answered <- err
+	}()
+	answerBlocked := false
+	var answerErr error
+	select {
+	case answerErr = <-answered:
+	case <-time.After(50 * time.Millisecond):
+		answerBlocked = true
+	}
+	close(messenger.release)
+	if answerBlocked {
+		answerErr = <-answered
+	}
+	if deliveryErr := <-delivered; deliveryErr != nil || answerErr != nil {
+		t.Fatalf("deliveryErr=%v answerErr=%v", deliveryErr, answerErr)
+	}
+	record, ok, err := fixture.store.GetSession(context.Background(), fixture.loose)
+	if !answerBlocked || err != nil || !ok || record.PlanFirstState != domain.PlanFirstDeclined {
+		t.Fatalf("answerBlocked=%v state=%q ok=%v err=%v", answerBlocked, record.PlanFirstState, ok, err)
+	}
+}
+
 func TestBlockedPlanDeliveryDoesNotBlockUnrelatedDecisionMutation(t *testing.T) {
 	fixture := newDecisionService(t)
 	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
@@ -645,7 +692,7 @@ func TestDelivererRequiresANoteThenAcceptsTheReplacementPlanCall(t *testing.T) {
 	}
 }
 
-func answeredPlanFirstCall(t *testing.T, fixture decisionServiceFixture, session domain.SessionID, option int, note string) domain.DecisionCall {
+func raisePlanFirstCall(t *testing.T, fixture decisionServiceFixture, session domain.SessionID) domain.DecisionCall {
 	t.Helper()
 	input := validRaiseInput()
 	input.Title = "Approve this plan?"
@@ -659,6 +706,13 @@ func answeredPlanFirstCall(t *testing.T, fixture decisionServiceFixture, session
 	if err != nil {
 		t.Fatal(err)
 	}
+	return call
+}
+
+func answeredPlanFirstCall(t *testing.T, fixture decisionServiceFixture, session domain.SessionID, option int, note string) domain.DecisionCall {
+	t.Helper()
+	call := raisePlanFirstCall(t, fixture, session)
+	var err error
 	call, err = fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, call.ID, AnswerInput{
 		Choice: domain.DecisionChoiceOption, Option: option, Note: note,
 	})

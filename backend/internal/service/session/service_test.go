@@ -69,6 +69,8 @@ func (f *fakeAgentReadiness) RecheckAgent(agentID string) {
 
 type fakeStore struct {
 	artifacts           map[domain.SessionID][]string
+	artifactFiles       map[domain.SessionID]map[string]domain.FileIdentity
+	artifactIDs         map[domain.SessionID]map[string]string
 	artifactRoles       map[domain.SessionID]map[string]domain.SessionArtifactRole
 	cleanupFacts        map[domain.SessionID]domain.SessionCleanupRecord
 	sessions            map[domain.SessionID]domain.SessionRecord
@@ -121,6 +123,8 @@ func newFakeStore() *fakeStore {
 		reviewRuns:     map[domain.SessionID][]domain.CurrentHeadReviewRun{},
 		doneReports:    map[domain.SessionID]domain.SessionDoneReport{},
 		artifactRoles:  map[domain.SessionID]map[string]domain.SessionArtifactRole{},
+		artifactFiles:  map[domain.SessionID]map[string]domain.FileIdentity{},
+		artifactIDs:    map[domain.SessionID]map[string]string{},
 	}
 }
 
@@ -440,6 +444,16 @@ func (f *fakeStore) AddSessionArtifacts(_ context.Context, id domain.SessionID, 
 		if !slices.Contains(f.artifacts[id], path) {
 			f.artifacts[id] = append(f.artifacts[id], path)
 		}
+		if f.artifactFiles[id] == nil {
+			f.artifactFiles[id] = map[string]domain.FileIdentity{}
+		}
+		f.artifactFiles[id][path] = registration.File
+		if f.artifactIDs[id] == nil {
+			f.artifactIDs[id] = map[string]string{}
+		}
+		if f.artifactIDs[id][path] == "" {
+			f.artifactIDs[id][path] = fmt.Sprintf("artifact-%d", len(f.artifactIDs[id])+1)
+		}
 		if registration.Role != "" {
 			if f.artifactRoles[id] == nil {
 				f.artifactRoles[id] = map[string]domain.SessionArtifactRole{}
@@ -459,7 +473,10 @@ func (f *fakeStore) ListSessionArtifactsForSessions(_ context.Context, ids []dom
 			continue
 		}
 		for _, path := range paths {
-			out[id] = append(out[id], domain.SessionArtifactRecord{ID: "artifact:" + path, SessionID: id, Path: path, Role: f.artifactRoles[id][path], RegisteredAt: &registeredAt})
+			out[id] = append(out[id], domain.SessionArtifactRecord{
+				ID: f.artifactIDs[id][path], SessionID: id, Path: path, Role: f.artifactRoles[id][path],
+				File: f.artifactFiles[id][path], RegisteredAt: &registeredAt,
+			})
 		}
 	}
 	return out, nil

@@ -61,6 +61,21 @@ func (s *Service) RegisterArtifacts(ctx context.Context, id domain.SessionID, re
 		s.emitArtifactRegisterFailed(source, domain.ArtifactRegisterSessionNotFound)
 		return ArtifactRegistration{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
 	}
+	if slices.ContainsFunc(registrations, func(registration domain.SessionArtifactRegistration) bool {
+		return registration.Role == domain.SessionArtifactRolePlanApproval
+	}) {
+		rows, err := s.store.ListSessionArtifactsForSessions(ctx, []domain.SessionID{id})
+		if err != nil {
+			return ArtifactRegistration{}, fmt.Errorf("load registered plan approval of %s: %w", id, err)
+		}
+		for _, row := range rows[id] {
+			if row.Role == domain.SessionArtifactRolePlanApproval {
+				if err := sessionartifacts.PinPlanApproval(dir, row); err != nil {
+					return ArtifactRegistration{}, fmt.Errorf("pin registered plan approval of %s: %w", id, err)
+				}
+			}
+		}
+	}
 	files, err := sessionartifacts.ListRegistered(ctx, dir, registered)
 	// Sent before a failed listing returns: the registration itself went through.
 	if knownOK {

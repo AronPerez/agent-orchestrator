@@ -736,7 +736,9 @@ func (c *Controller) SteerOrSend(
 // check and dispatch. A duplicate accepted delivery remains successful even if
 // the controller is busy by the time its caller retries.
 func (c *Controller) SendIfIdle(ctx context.Context, msg ports.ChatUserMessage) (bool, error) {
-	c.sendMu.Lock()
+	if err := c.lockSend(ctx); err != nil {
+		return false, err
+	}
 	defer c.sendMu.Unlock()
 
 	if turn, found, err := sentMessageReceipt(ctx, c.store, c.conversation.ID, msg, false); err != nil {

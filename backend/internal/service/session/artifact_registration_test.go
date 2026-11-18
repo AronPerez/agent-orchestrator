@@ -49,7 +49,7 @@ func TestRegisterArtifactsReportsWhatStaysUnlisted(t *testing.T) {
 }
 
 func TestRegisterArtifactsMarksThePendingPlanApprovalByRole(t *testing.T) {
-	svc, st, _ := registrationFixture(t, "plan.md")
+	svc, st, dir := registrationFixture(t, "plan.md")
 	rec := st.sessions["mer-1"]
 	rec.PlanFirstState = domain.PlanFirstPending
 	st.sessions["mer-1"] = rec
@@ -59,6 +59,22 @@ func TestRegisterArtifactsMarksThePendingPlanApprovalByRole(t *testing.T) {
 	}
 	if got := st.artifactRoles["mer-1"]["plan.md"]; got != domain.SessionArtifactRolePlanApproval {
 		t.Fatalf("plan role = %q, want %q", got, domain.SessionArtifactRolePlanApproval)
+	}
+	rows, err := st.ListSessionArtifactsForSessions(context.Background(), []domain.SessionID{"mer-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := filepath.Join(dir, ".versions", "plan-approval-pins", rows["mer-1"][0].ID)
+	planInfo, err := os.Stat(filepath.Join(dir, "plan.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinInfo, err := os.Stat(pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(planInfo, pinInfo) {
+		t.Fatal("plan approval pin is not a hard link to plan.md")
 	}
 }
 

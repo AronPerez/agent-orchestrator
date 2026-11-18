@@ -160,8 +160,92 @@ func TestObservationApplyKeepsEditedPlanApprovalRoleAcrossRenameWithBirthTime(t 
 	row.Role = ""
 	sources := map[domain.FileIdentity]domain.SessionArtifactRecord{}
 	addSource(sources, row)
-	if matched, ok := renameSource(sources, observed); ok {
+	if matched, ok := renameSource(sources, observed, nil); ok {
 		t.Fatalf("ordinary modified inode matched as rename: %+v", matched)
+	}
+}
+
+func TestObservationApplyKeepsPinnedEditedPlanApprovalRoleWithoutBirthOrGeneration(t *testing.T) {
+	stored := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 13}
+	observed := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 17}
+	row := domain.SessionArtifactRecord{
+		ID: "approval", Path: "plan.md", File: stored, Role: domain.SessionArtifactRolePlanApproval,
+	}
+	observation := Observation{
+		Files: []domain.SessionArtifactFile{{Path: "project-plan.md"}},
+		quick: map[string]domain.FileIdentity{"project-plan.md": observed},
+		pins:  map[string]domain.FileIdentity{"approval": observed},
+		dir:   t.TempDir(),
+	}
+	files := observation.Apply([]domain.SessionArtifactRecord{row})
+	if len(files) != 1 || files[0].ID != row.ID || files[0].Role != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("pinned edited renamed approval artifact = %+v", files)
+	}
+}
+
+func TestObserveLoadsPlanApprovalPin(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.md")
+	if err := os.WriteFile(path, []byte("# Plan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := domain.SessionArtifactRecord{
+		ID: "approval", Path: "plan.md", File: fullIdentity(path, info), Role: domain.SessionArtifactRolePlanApproval,
+	}
+	if err := PinPlanApproval(dir, row); err != nil {
+		t.Fatal(err)
+	}
+	observation, err := Observe(context.Background(), dir, []string{"plan.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, ok := observation.pins[row.ID]
+	if !ok || !pin.SameFile(row.File) {
+		t.Fatalf("loaded pin = %+v, found=%v, want file %+v", pin, ok, row.File)
+	}
+}
+
+func TestPinPlanApprovalRotatesAfterExplicitReplacementRegistration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.md")
+	write := func(body string) domain.FileIdentity {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fullIdentity(path, info)
+	}
+	row := domain.SessionArtifactRecord{
+		ID: "approval", Path: "plan.md", File: write("# First plan"), Role: domain.SessionArtifactRolePlanApproval,
+	}
+	if err := PinPlanApproval(dir, row); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	row.File = write("# Replacement plan")
+	if err := PinPlanApproval(dir, row); err != nil {
+		t.Fatalf("rotate approval pin: %v", err)
+	}
+	planInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinInfo, err := os.Stat(filepath.Join(dir, VersionsDir, planApprovalPinsDir, row.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(planInfo, pinInfo) {
+		t.Fatal("rotated approval pin does not name the replacement plan")
 	}
 }
 
@@ -173,7 +257,7 @@ func TestRenameSourceRejectsRecycledPlanApprovalInodeWithoutBirthOrGeneration(t 
 	sources := map[domain.FileIdentity]domain.SessionArtifactRecord{}
 	addSource(sources, row)
 	observed := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 17}
-	if matched, ok := renameSource(sources, observed); ok {
+	if matched, ok := renameSource(sources, observed, nil); ok {
 		t.Fatalf("recycled inode matched as approval rename: %+v", matched)
 	}
 }

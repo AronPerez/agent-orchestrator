@@ -58,8 +58,8 @@ type Service struct {
 }
 
 // MutationGate serializes standing-answer changes with delivery. The gate is
-// shared by the service and deliverer, but scoped per call so one slow provider
-// cannot block unrelated decisions.
+// shared by the service and deliverer, but scoped per call (or per plan-first
+// owner) so one slow provider cannot block unrelated decisions.
 type MutationGate struct {
 	mu    sync.Mutex
 	calls map[string]*callMutation
@@ -280,15 +280,11 @@ func (s *Service) Get(ctx context.Context, callID string) (Detail, error) {
 
 // Answer records the person's standing answer to an open call.
 func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input AnswerInput) (domain.DecisionCall, error) {
-	unlock, err := s.mutationGate.acquire(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
 	defer unlock()
-	call, err := s.call(ctx, callID)
-	if err != nil {
-		return domain.DecisionCall{}, err
-	}
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
 	}
@@ -307,15 +303,11 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 
 // Dismiss records that the person declined to choose from a pending call.
 func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string) (domain.DecisionCall, error) {
-	unlock, err := s.mutationGate.acquire(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
 	defer unlock()
-	call, err := s.call(ctx, callID)
-	if err != nil {
-		return domain.DecisionCall{}, err
-	}
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
 	}
@@ -365,15 +357,11 @@ func planFirstStateBeforeDelivery(answer domain.DecisionAnsweredPayload) domain.
 
 // RecordOutcome closes an in-progress call with the result of carrying it out.
 func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string, input OutcomeInput) (domain.DecisionCall, error) {
-	unlock, err := s.mutationGate.acquire(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
 	defer unlock()
-	call, err := s.call(ctx, callID)
-	if err != nil {
-		return domain.DecisionCall{}, err
-	}
 	input.ForEntry = strings.TrimSpace(input.ForEntry)
 	if actor.Session != "" && !s.mayClose(call, input.ForEntry, actor.Session) {
 		return domain.DecisionCall{}, notOwner()
@@ -403,15 +391,11 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 
 // Withdraw closes a pending call at the owning session's request.
 func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (domain.DecisionCall, error) {
-	unlock, err := s.mutationGate.acquire(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
 	defer unlock()
-	call, err := s.call(ctx, callID)
-	if err != nil {
-		return domain.DecisionCall{}, err
-	}
 	if !s.owns(call, actor.Session) {
 		return domain.DecisionCall{}, notOwner()
 	}
@@ -423,15 +407,11 @@ func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (dom
 
 // Retire changes whether a completed call still applies.
 func (s *Service) Retire(ctx context.Context, actor Actor, callID string, retired bool) (domain.DecisionCall, error) {
-	unlock, err := s.mutationGate.acquire(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
 	defer unlock()
-	call, err := s.call(ctx, callID)
-	if err != nil {
-		return domain.DecisionCall{}, err
-	}
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
 	}
@@ -524,6 +504,42 @@ func (s *Service) call(ctx context.Context, callID string) (domain.DecisionCall,
 		return domain.DecisionCall{}, apierr.NotFound("DECISION_NOT_FOUND", "Unknown call")
 	}
 	return call, nil
+}
+
+// lockedCall first reads under the ordinary call gate. Plan calls then switch
+// to their owner's shared gate and reload, so replacement calls cannot race an
+// earlier delivery. Ordinary calls keep one read and their independent gate.
+func (s *Service) lockedCall(ctx context.Context, callID string) (domain.DecisionCall, func(), error) {
+	unlock, err := s.mutationGate.acquire(ctx, "call:"+callID)
+	if err != nil {
+		return domain.DecisionCall{}, nil, err
+	}
+	initial, err := s.call(ctx, callID)
+	if err != nil {
+		unlock()
+		return domain.DecisionCall{}, nil, err
+	}
+	if !isPlanFirstCall(initial) {
+		return initial, unlock, nil
+	}
+	unlock()
+	unlock, err = s.mutationGate.acquire(ctx, decisionMutationKey(initial))
+	if err != nil {
+		return domain.DecisionCall{}, nil, err
+	}
+	current, err := s.call(ctx, callID)
+	if err != nil {
+		unlock()
+		return domain.DecisionCall{}, nil, err
+	}
+	return current, unlock, nil
+}
+
+func decisionMutationKey(call domain.DecisionCall) string {
+	if isPlanFirstCall(call) {
+		return "plan:" + string(call.Raised.OwnerSessionID)
+	}
+	return "call:" + call.ID
 }
 
 func (s *Service) append(ctx context.Context, actor Actor, callID string, kind domain.DecisionEntryKind, payload any) (domain.DecisionCall, error) {

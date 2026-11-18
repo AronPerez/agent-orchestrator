@@ -190,7 +190,7 @@ func (d *Deliverer) deliverCurrent(ctx context.Context, call domain.DecisionCall
 	if !isPlanFirstCall(call) {
 		return d.deliver(ctx, call)
 	}
-	unlock, err := d.mutationGate.acquire(ctx, call.ID)
+	unlock, err := d.mutationGate.acquire(ctx, decisionMutationKey(call))
 	if err != nil {
 		d.logFailure(call.ID, "lock current plan answer", err)
 		return true, false

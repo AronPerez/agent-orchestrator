@@ -364,6 +364,24 @@ func (c *Controller) beginOperation() func() {
 	}
 }
 
+func (c *Controller) lockSend(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if c.sendMu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 // ErrNoActiveTurn reports an interrupt with nothing to cancel.
 var ErrNoActiveTurn = errors.New("no active turn")
 
@@ -3443,6 +3461,11 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 	if event.ProviderTurnID != "" {
 		c.turnlessPlanItemID = ""
 	}
+	if providerDeliveryEvidence(event) {
+		if err := c.store.MarkTurnProviderDeliveryAcceptedByProviderID(ctx, c.conversation.ID, event.ProviderTurnID); err != nil {
+			return fmt.Errorf("mark provider-evidenced turn %s accepted: %w", event.ProviderTurnID, err)
+		}
+	}
 
 	switch event.Kind {
 	case ports.ChatEventTurnStarted:
@@ -3503,13 +3526,6 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 		// carries one code the chat can offer a sign-in for, whatever the agent.
 		if failureCode == "" && state == domain.TurnStateFailed && errors.Is(event.Err, ports.ErrChatAuthRequired) {
 			failureCode = domain.ConversationFailureAuthRequired
-		}
-		// Deferred drivers only prove acceptance when the provider successfully
-		// completes session/prompt. Local start and failed completion are not proof.
-		if state == domain.TurnStateCompleted && event.ProviderTurnID != "" {
-			if err := c.store.MarkTurnProviderDeliveryAcceptedByProviderID(ctx, c.conversation.ID, event.ProviderTurnID); err != nil {
-				return fmt.Errorf("mark provider-accepted turn %s accepted: %w", event.ProviderTurnID, err)
-			}
 		}
 		if err := c.store.SettleTurnWithFailureCode(
 			ctx, c.conversation.ID, event.ProviderTurnID, state, message, failureCode, event.UsageLimitResetsAt, now); err != nil {
@@ -3989,6 +4005,23 @@ func settledTurnState(event ports.ChatEvent) domain.TurnState {
 		return domain.TurnStateFailed
 	}
 	return event.TurnState
+}
+
+// providerDeliveryEvidence reports events that can only follow provider
+// acceptance of the prompt. Local deferred setup emits turn/start and
+// controller/error events too, so those are not evidence by themselves.
+func providerDeliveryEvidence(event ports.ChatEvent) bool {
+	if event.ProviderTurnID == "" {
+		return false
+	}
+	switch event.Kind {
+	case ports.ChatEventTurnStarted, ports.ChatEventControllerState, ports.ChatEventError:
+		return false
+	case ports.ChatEventTurnCompleted:
+		return settledTurnState(event) == domain.TurnStateCompleted
+	default:
+		return true
+	}
 }
 
 // reportProviderState covers work the agent runs on its own between AO turns,
