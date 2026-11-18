@@ -31,20 +31,21 @@ func configureUnixWorkspaceProcess(cmd *exec.Cmd) {
 	}
 }
 
-func configureUnixProcessStartGate(cmd *exec.Cmd, fd int) error {
+func configureUnixProcessStartGate(cmd *exec.Cmd, gateFD, cleanupFD int) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	originalPath := cmd.Path
 	originalArgs := append([]string(nil), cmd.Args...)
-	passthroughFiles := len(cmd.ExtraFiles) - 1 // The gate is appended last.
+	passthroughFiles := gateFD - 3
 	cmd.Path = executable
 	cmd.Args = []string{
 		executable,
 		linuxSupervisorArgument,
-		strconv.Itoa(fd),
+		strconv.Itoa(gateFD),
 		strconv.Itoa(passthroughFiles),
+		strconv.Itoa(cleanupFD),
 		originalPath,
 	}
 	cmd.Args = append(cmd.Args, originalArgs...)

@@ -13,7 +13,7 @@ func configureUnixWorkspaceProcess(cmd *exec.Cmd) {
 	aoprocess.ConfigureTreeCancellation(cmd)
 }
 
-func configureUnixProcessStartGate(cmd *exec.Cmd, fd int) error {
+func configureUnixProcessStartGate(cmd *exec.Cmd, fd, _ int) error {
 	original := append([]string{cmd.Path}, cmd.Args[1:]...)
 	if len(cmd.Args) == 3 && cmd.Args[1] == "-c" {
 		// A shell invoked as `sh -c script` exposes its argv[0] as $0. Passing
