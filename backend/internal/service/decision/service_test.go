@@ -203,6 +203,25 @@ func TestListAndGet(t *testing.T) {
 	}
 }
 
+func TestMineIncludesCallsDeliveredToAFallbackSession(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	call, err := fixture.service.Raise(ctx, Actor{Session: fixture.w1}, validRaiseInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err = fixture.service.Answer(ctx, Actor{Surface: domain.RequestSurfaceCLI}, call.ID, AnswerInput{Choice: string(domain.DecisionChoiceOption), Option: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendDeliveredEntry(t, fixture, call, fixture.orch)
+
+	calls, err := fixture.service.List(ctx, Actor{Session: fixture.orch}, ScopeMine)
+	if err != nil || callIDs(calls) != call.ID {
+		t.Fatalf("fallback mine = %q, err=%v; want %q", callIDs(calls), err, call.ID)
+	}
+}
+
 func TestSearchPutsTheSameProjectFirst(t *testing.T) {
 	fixture := newDecisionService(t)
 	ctx := context.Background()

@@ -255,6 +255,62 @@ func TestEmbeddedReportGuidanceDistinguishesDeliverablesFromDiagnostics(t *testi
 	}
 }
 
+func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) {
+	body, err := files.ReadFile("using-ao/commands/decision.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	guidance := strings.Join(strings.Fields(string(body)), " ")
+	for _, want := range []string{
+		"# ao decision",
+		"ao decision search",
+		`--option "<label> :: <what it leads to>"`,
+		"--recommend",
+		"--file",
+		"Never ask the human for a ruling by id.",
+		`"Decision on your call"`,
+		`"Changed decision on your call"`,
+		`"I dismissed your call"`,
+		`"Decision on a call raised by"`,
+		"ao decision outcome <id> --for-answer <answer-entry-id> --text <what-happened>",
+		"ao decision withdraw",
+		"ao decision ls",
+		"ao://decisions/",
+		"Only the human answers, dismisses or retires a call.",
+		"Never put secrets, credentials or personal data in a call.",
+		"ao report --needs-input",
+		"resume the blocked session after it is answered",
+		"explicitly tell the human in your current response",
+		"project worker without an active orchestrator",
+		"ao decision show <call-link>",
+		"must not rely on the report alone",
+		`ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessions blocked by it"`,
+		"If an unanswered match belongs to another project, do not reuse it.",
+	} {
+		if !strings.Contains(guidance, want) {
+			t.Fatalf("decision guidance missing %q", want)
+		}
+	}
+
+	skillBody, err := files.ReadFile("using-ao/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	skill := strings.Join(strings.Fields(string(skillBody)), " ")
+	if !strings.Contains(skill, "| `decision` |") || !strings.Contains(skill, "(commands/decision.md)") {
+		t.Fatal("skill catalog is missing decision guidance")
+	}
+
+	reportBody, err := files.ReadFile("using-ao/commands/report.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := strings.Join(strings.Fields(string(reportBody)), " ")
+	if !strings.Contains(report, "For a choice, raise or reuse one call") || !strings.Contains(report, "resume this session after it is answered") {
+		t.Fatal("report guidance does not route choices to decision calls")
+	}
+}
+
 func TestEmbeddedRenderGuidanceSeparatesRendersFromArtifacts(t *testing.T) {
 	body, err := files.ReadFile("using-ao/commands/render.md")
 	if err != nil {

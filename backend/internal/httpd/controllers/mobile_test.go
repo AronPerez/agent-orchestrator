@@ -107,6 +107,15 @@ func TestCoordinationHandlerCarriesValidatedClientID(t *testing.T) {
 	if bridge.clientID != "" {
 		t.Fatal("invalid client id reached the bridge")
 	}
+	for _, body := range []string{"", `{}`, `{"clientId":""}`} {
+		bridge.clientID = "not-called"
+		if recorder := request(body); recorder.Code != http.StatusBadRequest {
+			t.Fatalf("missing client id body %q status = %d, body=%s", body, recorder.Code, recorder.Body.String())
+		}
+		if bridge.clientID != "not-called" {
+			t.Fatalf("missing client id body %q reached the bridge", body)
+		}
+	}
 }
 
 func TestCoordinationHandlersReturnNonSuccessWhenInterrupted(t *testing.T) {
@@ -124,7 +133,11 @@ func TestCoordinationHandlersReturnNonSuccessWhenInterrupted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			router := chi.NewRouter()
 			router.Method(tc.method, tc.path, tc.handle)
-			req := httptest.NewRequest(tc.method, tc.path, nil)
+			requestBody := ""
+			if tc.method == http.MethodPost {
+				requestBody = `{"clientId":"h_interrupted"}`
+			}
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(requestBody))
 			req.Header.Set("Authorization", "Bearer parent-token")
 			req = req.WithContext(requestscope.WithCredential(req.Context(), credential))
 			recorder := httptest.NewRecorder()

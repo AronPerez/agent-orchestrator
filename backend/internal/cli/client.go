@@ -167,6 +167,10 @@ func (c *commandContext) daemonBase() (string, error) {
 	if c.remote != nil {
 		return c.remote.baseURL, nil
 	}
+	return c.localDaemonBase()
+}
+
+func (c *commandContext) localDaemonBase() (string, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return "", err
@@ -239,6 +243,12 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	// give daemon API calls far more headroom than the 2s status-probe timeout.
 	client := *c.deps.HTTPClient
 	client.Timeout = timeout
+	if c.remote != nil && c.remote.hostID != "" {
+		// The identity probe approved this exact origin. Following even a
+		// same-host redirect could send the coordination bearer to another port
+		// or downgrade an HTTPS target to plaintext.
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 	resp, err := client.Do(req) // #nosec G704 -- request target is the daemon base URL resolved above.
 	if err != nil {
 		return daemonUnavailableError{message: fmt.Sprintf("call daemon: %v", err), cause: err}

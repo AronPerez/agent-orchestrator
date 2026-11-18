@@ -44,10 +44,10 @@ func decisionAnswered(entryID, origin, callID string, option int, writtenAt time
 	}
 }
 
-func decisionDelivered(entryID, origin, callID, forEntry string, writtenAt time.Time) domain.DecisionEntry {
+func decisionDelivered(entryID, origin, callID, forEntry string, session domain.SessionID, writtenAt time.Time) domain.DecisionEntry {
 	return domain.DecisionEntry{
 		ID: entryID, Origin: origin, CallID: callID, Kind: domain.DecisionKindDelivered,
-		Payload:   mustDecisionJSON(domain.DecisionDeliveredPayload{ForEntry: forEntry, Status: domain.DecisionDeliveredSent, SessionID: "w-1"}),
+		Payload:   mustDecisionJSON(domain.DecisionDeliveredPayload{ForEntry: forEntry, Status: domain.DecisionDeliveredSent, SessionID: session}),
 		WrittenAt: writtenAt, AuthorKind: domain.DecisionAuthorSystem,
 	}
 }
@@ -155,7 +155,7 @@ func TestDecisionCallLists(t *testing.T) {
 		appendDecision(t, store, entry, at.Add(time.Duration(i)*time.Second))
 	}
 
-	owner, err := store.ListDecisionCallsByOwner(ctx, "h_a", "w-1", 50)
+	owner, err := store.ListDecisionCallsForSession(ctx, "h_a", "w-1", 50)
 	if err != nil || decisionIDs(owner) != "dec_2,dec_1" {
 		t.Fatalf("owner calls = %q, err=%v", decisionIDs(owner), err)
 	}
@@ -166,6 +166,11 @@ func TestDecisionCallLists(t *testing.T) {
 	pending, err := store.ListDecisionCallsAwaitingDelivery(ctx, "h_a")
 	if err != nil || decisionIDs(pending) != "dec_1" || pending[0].StandingEntryID != "dent_5" {
 		t.Fatalf("pending calls = %q, err=%v", decisionIDs(pending), err)
+	}
+	appendDecision(t, store, decisionDelivered("dent_7", "h_a", "dec_1", "dent_5", "orchestrator", at.Add(6*time.Second)), at.Add(6*time.Second))
+	fallback, err := store.ListDecisionCallsForSession(ctx, "h_a", "orchestrator", 50)
+	if err != nil || decisionIDs(fallback) != "dec_1" {
+		t.Fatalf("fallback-delivered calls = %q, err=%v", decisionIDs(fallback), err)
 	}
 	streams, err := store.ListDecisionStreams(ctx)
 	wantStreams := []domain.DecisionStream{{Origin: "h_a", SessionID: "epic", Name: "Checkout epic"}}
@@ -191,7 +196,7 @@ func TestDecisionDeliveryListKeepsEveryPendingStandingEntry(t *testing.T) {
 		t.Fatalf("pending = %+v", pending)
 	}
 
-	appendDecision(t, store, decisionDelivered("delivered-1", "h_a", "dec_1", "answer-1", at.Add(3*time.Second)), at.Add(3*time.Second))
+	appendDecision(t, store, decisionDelivered("delivered-1", "h_a", "dec_1", "answer-1", "w-1", at.Add(3*time.Second)), at.Add(3*time.Second))
 	pending, err = store.ListDecisionCallsAwaitingDelivery(ctx, "h_a")
 	if err != nil {
 		t.Fatal(err)

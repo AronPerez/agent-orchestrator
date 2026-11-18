@@ -7820,8 +7820,8 @@ export interface components {
             shellTerminal?: components["schemas"]["ShellTerminalResponse"];
         };
         IssueCoordinationTokenRequest: {
-            /** @description Stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client. */
-            clientId?: string;
+            /** @description Required stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client. */
+            clientId: string;
             /** @description Name shown in the host's device list. */
             name?: string;
             /** @description The requesting machine's platform. */

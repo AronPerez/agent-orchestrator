@@ -321,11 +321,16 @@ func newDecisionShowCommand(ctx *commandContext) *cobra.Command {
 			if len(args) != 1 {
 				return usageError{errors.New("usage: ao decision show <id>")}
 			}
-			return nil
+			_, err := decisionIDArg(args[0])
+			return err
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
 			var response decisionDetailAPIResponse
-			if err := ctx.getJSON(cmd.Context(), "decisions/"+url.PathEscape(args[0]), &response); err != nil {
+			if err := ctx.getJSON(cmd.Context(), "decisions/"+url.PathEscape(id), &response); err != nil {
 				return err
 			}
 			if jsonOutput {
@@ -347,6 +352,10 @@ func newDecisionAnswerCommand(ctx *commandContext) *cobra.Command {
 		Short: "Answer a decision call",
 		Args:  decisionIDArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
 			pickSet := cmd.Flags().Changed("pick")
 			if pickSet == other {
 				return usageError{errors.New("usage: choose with --pick <n> or --other")}
@@ -356,10 +365,10 @@ func newDecisionAnswerCommand(ctx *commandContext) *cobra.Command {
 				request.Choice, request.Option = "other", 0
 			}
 			var response decisionCallAPI
-			if err := ctx.postJSON(cmd.Context(), decisionActionPath(args[0], "answer"), request, &response); err != nil {
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "answer"), request, &response); err != nil {
 				return err
 			}
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "Answered %s: %s\n", response.ID, response.ChosenLabel)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Answered %s: %s\n", response.ID, response.ChosenLabel)
 			return err
 		},
 	}
@@ -376,11 +385,15 @@ func newDecisionDismissCommand(ctx *commandContext) *cobra.Command {
 		Short: "Dismiss a decision call without choosing",
 		Args:  decisionIDArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var response decisionCallAPI
-			if err := ctx.postJSON(cmd.Context(), decisionActionPath(args[0], "dismiss"), decisionDismissAPIRequest{Note: note}, &response); err != nil {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
 				return err
 			}
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "Dismissed %s\n", response.ID)
+			var response decisionCallAPI
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "dismiss"), decisionDismissAPIRequest{Note: note}, &response); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Dismissed %s\n", response.ID)
 			return err
 		},
 	}
@@ -395,6 +408,10 @@ func newDecisionOutcomeCommand(ctx *commandContext) *cobra.Command {
 		Short: "Record what happened after a decision",
 		Args:  decisionIDArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
 			if !cmd.Flags().Changed("text") {
 				return usageError{errors.New("usage: --text is required")}
 			}
@@ -402,10 +419,10 @@ func newDecisionOutcomeCommand(ctx *commandContext) *cobra.Command {
 				return err
 			}
 			var response decisionCallAPI
-			if err := ctx.postJSON(cmd.Context(), decisionActionPath(args[0], "outcome"), decisionOutcomeAPIRequest{ForEntry: forEntry, Text: text, Link: link}, &response); err != nil {
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "outcome"), decisionOutcomeAPIRequest{ForEntry: forEntry, Text: text, Link: link}, &response); err != nil {
 				return err
 			}
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "Recorded the outcome of %s\n", response.ID)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Recorded the outcome of %s\n", response.ID)
 			return err
 		},
 	}
@@ -421,14 +438,18 @@ func newDecisionWithdrawCommand(ctx *commandContext) *cobra.Command {
 		Short: "Withdraw a decision call",
 		Args:  decisionIDArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
 			if err := ctx.refuseRemoteDecisionSession("ao decision withdraw"); err != nil {
 				return err
 			}
 			var response decisionCallAPI
-			if err := ctx.postJSON(cmd.Context(), decisionActionPath(args[0], "withdraw"), nil, &response); err != nil {
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "withdraw"), nil, &response); err != nil {
 				return err
 			}
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "Withdrew %s\n", response.ID)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Withdrew %s\n", response.ID)
 			return err
 		},
 	}
@@ -441,15 +462,19 @@ func newDecisionRetireCommand(ctx *commandContext) *cobra.Command {
 		Short: "Mark whether a finished decision still applies",
 		Args:  decisionIDArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
 			var response decisionCallAPI
-			if err := ctx.postJSON(cmd.Context(), decisionActionPath(args[0], "retire"), decisionRetireAPIRequest{Retired: !undo}, &response); err != nil {
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "retire"), decisionRetireAPIRequest{Retired: !undo}, &response); err != nil {
 				return err
 			}
 			message := "no longer applies"
 			if undo {
 				message = "applies again"
 			}
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", response.ID, message)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", response.ID, message)
 			return err
 		},
 	}
@@ -461,7 +486,34 @@ func decisionIDArgs(_ *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return usageError{errors.New("usage: ao decision <command> <id>")}
 	}
-	return nil
+	_, err := decisionIDArg(args[0])
+	return err
+}
+
+func decisionIDArg(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	if parsed.Scheme == "" {
+		return raw, nil
+	}
+	if parsed.Scheme != "ao" || parsed.Host != "decisions" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	escapedID := strings.TrimPrefix(parsed.EscapedPath(), "/")
+	if escapedID == "" || strings.Contains(escapedID, "/") {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	id, err := url.PathUnescape(escapedID)
+	if err != nil || strings.TrimSpace(id) == "" || strings.Contains(id, "/") {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	return id, nil
 }
 
 func decisionActionPath(id, action string) string {

@@ -162,8 +162,65 @@ func TestRuntimeEnvClearsDaemonBrowserRuntimeSecrets(t *testing.T) {
 	}
 }
 
+func TestRuntimeEnvCarriesDesktopRemotesFileToAgent(t *testing.T) {
+	aoRoot := t.TempDir()
+	remotesFile := filepath.Join(aoRoot, "remotes.json")
+	t.Setenv(EnvRemotesFile, remotesFile)
+	manager := &Manager{
+		dataDir:    filepath.Join(aoRoot, "data"),
+		executable: func() (string, error) { return filepath.Join(aoRoot, "data", "bin", "ao"), nil },
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	env := manager.runtimeEnv("mer-1", "mer", "", map[string]string{
+		EnvRemotesFile: filepath.Join(aoRoot, "project-cannot-redirect-remotes.json"),
+	})
+	if got := env[EnvRemotesFile]; got != remotesFile {
+		t.Fatalf("%s = %q, want desktop-carried path %q", EnvRemotesFile, got, remotesFile)
+	}
+}
+
+func TestRuntimeEnvCarriesDesktopCloudAccountMarkerToAgent(t *testing.T) {
+	aoRoot := t.TempDir()
+	marker := filepath.Join(aoRoot, "dev", "cloud_active_user")
+	t.Setenv("AO_CLOUD_ACCOUNT_FILE", marker)
+	manager := &Manager{
+		dataDir:    filepath.Join(aoRoot, "data"),
+		stateDir:   aoRoot,
+		executable: func() (string, error) { return filepath.Join(aoRoot, "data", "bin", "ao"), nil },
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	env := manager.runtimeEnv("mer-1", "mer", "", map[string]string{
+		"AO_CLOUD_ACCOUNT_FILE": filepath.Join(aoRoot, "project-cannot-redirect-marker"),
+	})
+	if got := env["AO_CLOUD_ACCOUNT_FILE"]; got != marker {
+		t.Fatalf("AO_CLOUD_ACCOUNT_FILE = %q, want desktop marker %q", got, marker)
+	}
+}
+
+func TestRuntimeEnvDerivesStandaloneRemotesFileFromStateDir(t *testing.T) {
+	aoRoot := t.TempDir()
+	t.Setenv(EnvRemotesFile, "")
+	manager := &Manager{
+		dataDir:    filepath.Join(aoRoot, "data"),
+		stateDir:   aoRoot,
+		executable: func() (string, error) { return filepath.Join(aoRoot, "data", "bin", "ao"), nil },
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	env := manager.runtimeEnv("mer-1", "mer", "", map[string]string{
+		EnvRemotesFile: filepath.Join(aoRoot, "project-cannot-redirect-remotes.json"),
+	})
+	if got, want := env[EnvRemotesFile], filepath.Join(aoRoot, "remotes.json"); got != want {
+		t.Fatalf("%s = %q, want daemon state path %q", EnvRemotesFile, got, want)
+	}
+}
+
 func TestRuntimeEnvWindowsRemovesCaseVariantsOfProtectedVariables(t *testing.T) {
 	daemonRunFile := filepath.Join(t.TempDir(), "daemon-running.json")
+	daemonRemotesFile := filepath.Join(t.TempDir(), "remotes.json")
+	t.Setenv(EnvRemotesFile, daemonRemotesFile)
 	previous := envKeysCaseInsensitive
 	envKeysCaseInsensitive = true
 	t.Cleanup(func() { envKeysCaseInsensitive = previous })
@@ -181,6 +238,8 @@ func TestRuntimeEnvWindowsRemovesCaseVariantsOfProtectedVariables(t *testing.T) 
 		"aO_Issue_ID":                    "hacked",
 		"Ao_Data_Dir":                    "hacked",
 		"ao_run_file":                    "hacked",
+		"Ao_Remotes_File":                "hacked",
+		"Ao_Cloud_Account_File":          "hacked",
 		"ao_browser_runtime_token":       "runtime-secret",
 		"ao_browser_runtime_token_stdin": "1",
 		"buildMode":                      "production",
@@ -193,6 +252,8 @@ func TestRuntimeEnvWindowsRemovesCaseVariantsOfProtectedVariables(t *testing.T) 
 		"aO_Issue_ID",
 		"Ao_Data_Dir",
 		"ao_run_file",
+		"Ao_Remotes_File",
+		"Ao_Cloud_Account_File",
 		"ao_browser_runtime_token",
 		"ao_browser_runtime_token_stdin",
 	} {
@@ -206,7 +267,7 @@ func TestRuntimeEnvWindowsRemovesCaseVariantsOfProtectedVariables(t *testing.T) 
 	if env[EnvSessionID] != "mer-1" || env[EnvProjectID] != "mer" || env[EnvIssueID] != "issue-9" || env[EnvDataDir] != `C:\ao` {
 		t.Fatalf("protected AO env = %v", env)
 	}
-	if env[EnvRunFile] != daemonRunFile || env[EnvBrowserRuntimeToken] != "" || env[EnvBrowserRuntimeTokenStdin] != "" {
+	if env[EnvRunFile] != daemonRunFile || env[EnvRemotesFile] != daemonRemotesFile || env[EnvBrowserRuntimeToken] != "" || env[EnvBrowserRuntimeTokenStdin] != "" {
 		t.Fatalf("runtime protected env = %v", env)
 	}
 	if env["buildMode"] != "production" {
