@@ -21,7 +21,6 @@ import {
 	isLocalSession,
 	publicAccount,
 	type StoredSession,
-	withAuthMutation,
 	writeAuthStore,
 } from "./cloud-auth";
 
@@ -202,10 +201,8 @@ async function persistLocalSession(
 ): Promise<CloudAccount> {
 	// Any in-flight WorkOS refresh for this data dir is now stale.
 	invalidateAuthOperations(dataDir);
-	return withAuthMutation(dataDir, async () => {
-		await writeAuthStore(dataDir, { session, pkce: null });
-		return publicAccount(session);
-	});
+	await writeAuthStore(dataDir, { session, pkce: null });
+	return publicAccount(session);
 }
 
 // ---------------------------------------------------------------------------

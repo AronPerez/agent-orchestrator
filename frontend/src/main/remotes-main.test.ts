@@ -42,6 +42,7 @@ function registerRemotes(
 		probeCoordination: async () => "valid",
 		authErrorCode: async () => undefined,
 		deviceName: async () => "Test Mac",
+		scheduleCleanupRetry: () => {},
 		...deps,
 		getAccountId: deps.getAccountId ?? (async () => TEST_ACCOUNT),
 	});
@@ -757,6 +758,33 @@ describe("registerRemotesIpc", () => {
 			});
 		});
 
+		it("rechecks host identity before every pending-child revoke during reconnect", async () => {
+			const file = await tempFile();
+			await writeFile(file, JSON.stringify({ remotes: [{
+				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: "old",
+				accountUserId: TEST_ACCOUNT, pendingCoordinationDeviceIds: ["dev_one", "dev_two"],
+			}] }));
+			const identity = vi.fn<NonNullable<RemotesIpcDeps["identity"]>>()
+				.mockResolvedValueOnce("h_workbox")
+				.mockResolvedValueOnce("h_workbox")
+				.mockResolvedValueOnce("h_reassigned");
+			const revokeCoordination = vi.fn<NonNullable<RemotesIpcDeps["revokeCoordination"]>>(async () => "retired");
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({
+				kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId,
+			}));
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry: new RemoteRegistry(proxy()), requireAccount: signedIn,
+				identity, probe: async () => "online", revokeCoordination, issueCoordination,
+			});
+
+			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+
+			expect(revokeCoordination).toHaveBeenCalledExactlyOnceWith(expect.anything(), "dev_one");
+			expect(issueCoordination).not.toHaveBeenCalled();
+			expect((await saved(file))[0]).toMatchObject({ pendingCoordinationDeviceIds: ["dev_two"] });
+		});
+
 		it("preserves an account host credential across repeated sync and connect cycles", async () => {
 			const file = await tempFile();
 			const accountToken = "a".repeat(64);
@@ -951,6 +979,30 @@ describe("registerRemotesIpc", () => {
 			await ipc.invoke("remotes:remove", "http://192.0.2.1:1");
 			expect(await saved(file)).toHaveLength(0);
 			expect(identity).toHaveBeenCalledTimes(3);
+		});
+
+		it("retries local tombstone cleanup while signed out", async () => {
+			const file = await tempFile();
+			await writeFile(file, JSON.stringify({ remotes: [{
+				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: "old",
+				coordinationToken: "aoc_old", coordinationDeviceId: "dev_active",
+			}] }));
+			let online = false;
+			let retry: (() => Promise<void>) | undefined;
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry: new RemoteRegistry(proxy()), requireAccount: signedIn,
+				getAccountId: async () => "", identity: async () => "h_workbox",
+				revokeCoordination: async () => online ? "retired" : "offline",
+				scheduleCleanupRetry: (callback) => { retry = callback; },
+			});
+
+			await ipc.invoke("remotes:remove", "http://192.0.2.1:1");
+			expect(await saved(file)).toEqual([expect.objectContaining({ cleanupOnly: true })]);
+			online = true;
+			expect(retry).toBeTypeOf("function");
+			await retry!();
+			expect(await saved(file)).toHaveLength(0);
 		});
 
 		it("hides an account-pruned host while retaining retryable child cleanup", async () => {

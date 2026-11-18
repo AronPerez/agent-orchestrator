@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 )
@@ -254,6 +255,12 @@ type savedHostIdentity struct {
 	APIVersion int    `json:"apiVersion"`
 }
 
+const coordinationCapabilityAutomationAuthored = "automation-authored"
+
+type coordinationCapabilitiesResponse struct {
+	Capabilities []string `json:"capabilities"`
+}
+
 // selectSavedHost proves the saved address still answers for the saved host ID
 // before placing its credential in commandContext. The identity endpoint is the
 // sole unauthenticated LAN route; no bearer is present on this probe.
@@ -274,7 +281,7 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 }
 
 func (c *commandContext) verifySavedHostTarget(ctx context.Context, target *remoteTarget) error {
-	return c.verifySavedHostTargetAgainst(ctx, target, readLocalHostID())
+	return c.verifySavedHostTargetAgainst(ctx, target, c.localDaemonHostID(ctx))
 }
 
 func (c *commandContext) verifySavedHostTargetAgainst(ctx context.Context, target *remoteTarget, localHostID string) error {
@@ -310,8 +317,9 @@ func (c *commandContext) savedHostRetryArgs() string {
 var activeCloudUserIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type activeCloudAccountMarker struct {
-	UserID     string `json:"userId"`
-	DesktopPID int    `json:"desktopPid"`
+	UserID             string `json:"userId"`
+	DesktopPID         int    `json:"desktopPid"`
+	DesktopStartedAtMS int64  `json:"desktopStartedAtMs"`
 }
 
 // activeCloudAccount reads the desktop auth authority beside the exact remote
@@ -319,7 +327,7 @@ type activeCloudAccountMarker struct {
 // alive, so a stale file after a crash cannot authorize account-owned hosts.
 // Any read, parse, validation, or liveness failure hides those hosts; local
 // pairings (which have no accountUserId) remain usable.
-func (c *commandContext) activeCloudAccount(context.Context) string {
+func (c *commandContext) activeCloudAccount(ctx context.Context) string {
 	markerPath := strings.TrimSpace(os.Getenv(cloudAccountFileEnv))
 	if markerPath == "" {
 		remotesPath, err := remotesFilePath()
@@ -333,13 +341,24 @@ func (c *commandContext) activeCloudAccount(context.Context) string {
 		return ""
 	}
 	var marker activeCloudAccountMarker
-	if json.Unmarshal(raw, &marker) != nil || marker.DesktopPID <= 0 || !activeCloudUserIDPattern.MatchString(marker.UserID) {
+	if json.Unmarshal(raw, &marker) != nil || marker.DesktopPID <= 0 || marker.DesktopStartedAtMS <= 0 || !activeCloudUserIDPattern.MatchString(marker.UserID) {
 		return ""
 	}
 	if c.deps.ProcessAlive == nil || !c.deps.ProcessAlive(marker.DesktopPID) {
 		return ""
 	}
+	startedAt, ok := c.deps.ProcessStartedAt(ctx, marker.DesktopPID)
+	if !ok || absDuration(startedAt.Sub(time.UnixMilli(marker.DesktopStartedAtMS))) > 5*time.Second {
+		return ""
+	}
 	return marker.UserID
+}
+
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func (c *commandContext) probeSavedHostIdentity(ctx context.Context, base string) (savedHostIdentity, error) {
@@ -368,6 +387,95 @@ func (c *commandContext) probeSavedHostIdentity(ctx context.Context, base string
 		return savedHostIdentity{}, fmt.Errorf("remote coordination API version %d is incompatible with version 1", identity.APIVersion)
 	}
 	return identity, nil
+}
+
+// sourceDaemonHostID proves that the daemon selected by AO_RUN_FILE owns the
+// ambient source session and pins all reads to the same endpoint. The final
+// identity read catches a daemon replacement between the first probe and the
+// session lookup, so a host-qualified message never names a different AO
+// installation merely because AO_DATA_DIR points elsewhere.
+func (c *commandContext) sourceDaemonHostID(ctx context.Context, sessionID string) (string, error) {
+	base, err := c.localDaemonBase()
+	if err != nil {
+		return "", fmt.Errorf("source session daemon is unavailable: %w", err)
+	}
+	before, err := c.probeSavedHostIdentity(ctx, base)
+	if err != nil {
+		return "", fmt.Errorf("identify source session daemon: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		base+"/api/v1/sessions/"+url.PathEscape(sessionID), http.NoBody)
+	if err != nil {
+		return "", err
+	}
+	client := *c.deps.HTTPClient
+	client.Timeout = probeTimeout
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req) // #nosec G704 -- base is the loopback daemon selected by the validated run file.
+	if err != nil {
+		return "", fmt.Errorf("verify source session daemon: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("source session %s is not owned by the selected local daemon (HTTP %d)", sessionID, resp.StatusCode)
+	}
+	var body struct {
+		Session struct {
+			ID string `json:"id"`
+		} `json:"session"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return "", fmt.Errorf("decode source session: %w", err)
+	}
+	if body.Session.ID != sessionID {
+		return "", fmt.Errorf("source session daemon returned %q for %q", body.Session.ID, sessionID)
+	}
+	after, err := c.probeSavedHostIdentity(ctx, base)
+	if err != nil {
+		return "", fmt.Errorf("revalidate source session daemon: %w", err)
+	}
+	if after.HostID != before.HostID {
+		return "", errors.New("source session daemon changed while resolving its host identity; retry")
+	}
+	return before.HostID, nil
+}
+
+func (c *commandContext) remoteRelationToSource(ctx context.Context, sessionID string) (sourceHostID string, sameHost bool, err error) {
+	sourceHostID, err = c.sourceDaemonHostID(ctx, sessionID)
+	if err != nil {
+		return "", false, err
+	}
+	destinationHostID := c.remote.hostID
+	if destinationHostID == "" {
+		destination, probeErr := c.probeSavedHostIdentity(ctx, c.remote.baseURL)
+		if probeErr != nil {
+			return "", false, fmt.Errorf("identify destination daemon: %w", probeErr)
+		}
+		destinationHostID = destination.HostID
+	}
+	return sourceHostID, destinationHostID == sourceHostID, nil
+}
+
+func (c *commandContext) requireRemoteCoordinationCapability(ctx context.Context, capability string) error {
+	var response coordinationCapabilitiesResponse
+	if err := c.getJSON(ctx, "coordination/capabilities", &response); err != nil {
+		return fmt.Errorf("destination does not advertise %s support; upgrade Orchestrator on that machine before sending this agent-authored message: %w", capability, err)
+	}
+	for _, available := range response.Capabilities {
+		if available == capability {
+			return nil
+		}
+	}
+	return fmt.Errorf("destination does not support %s; upgrade Orchestrator on that machine before sending this agent-authored message", capability)
+}
+func (c *commandContext) localDaemonHostID(ctx context.Context) string {
+	base, err := c.localDaemonBase()
+	if err == nil {
+		if identity, probeErr := c.probeSavedHostIdentity(ctx, base); probeErr == nil {
+			return identity.HostID
+		}
+	}
+	return readLocalHostID()
 }
 
 // readLocalHostID is best-effort and read-only. A missing local daemon identity

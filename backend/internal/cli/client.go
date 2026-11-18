@@ -159,6 +159,13 @@ func (c *commandContext) daemonBase() (string, error) {
 	if c.remote != nil {
 		return c.remote.baseURL, nil
 	}
+	if c.pinnedBase != "" {
+		return c.pinnedBase, nil
+	}
+	return c.localDaemonBase()
+}
+
+func (c *commandContext) localDaemonBase() (string, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return "", err
@@ -225,6 +232,11 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	}
 	if sideID := os.Getenv("AO_SIDE_CONVERSATION_ID"); sideID != "" && c.remote == nil {
 		req.Header.Set("X-AO-Side-Conversation", sideID)
+	}
+	if c.beforeRequest != nil {
+		if err := c.beforeRequest(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Reuse the injected client's transport (keeps it stubbable in tests) but

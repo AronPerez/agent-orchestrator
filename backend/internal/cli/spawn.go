@@ -226,9 +226,12 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			parentSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
 			parentHostID := ""
 			if ctx.remote != nil && parentSessionID != "" {
-				parentHostID = readLocalHostID()
-				if parentHostID == "" {
-					return errors.New("local host identity is unavailable; open the Orchestrator desktop once before spawning an agent-authored cross-machine session")
+				sourceHostID, sameHost, relationErr := ctx.remoteRelationToSource(cmd.Context(), parentSessionID)
+				if relationErr != nil {
+					return relationErr
+				}
+				if !sameHost {
+					parentHostID = sourceHostID
 				}
 			}
 			req := spawnRequest{

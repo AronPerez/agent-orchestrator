@@ -44,6 +44,14 @@ func decisionAnswered(entryID, origin, callID string, option int, writtenAt time
 	}
 }
 
+func decisionDelivered(entryID, origin, callID, forEntry string, writtenAt time.Time) domain.DecisionEntry {
+	return domain.DecisionEntry{
+		ID: entryID, Origin: origin, CallID: callID, Kind: domain.DecisionKindDelivered,
+		Payload:   mustDecisionJSON(domain.DecisionDeliveredPayload{ForEntry: forEntry, Status: domain.DecisionDeliveredSent, SessionID: "w-1"}),
+		WrittenAt: writtenAt, AuthorKind: domain.DecisionAuthorSystem,
+	}
+}
+
 func mustDecisionJSON(value any) json.RawMessage {
 	raw, err := json.Marshal(value)
 	if err != nil {
@@ -156,13 +164,40 @@ func TestDecisionCallLists(t *testing.T) {
 		t.Fatalf("needs-you calls = %q, err=%v", decisionIDs(needsYou), err)
 	}
 	pending, err := store.ListDecisionCallsAwaitingDelivery(ctx, "h_a")
-	if err != nil || decisionIDs(pending) != "dec_1" {
+	if err != nil || decisionIDs(pending) != "dec_1" || pending[0].StandingEntryID != "dent_5" {
 		t.Fatalf("pending calls = %q, err=%v", decisionIDs(pending), err)
 	}
 	streams, err := store.ListDecisionStreams(ctx)
 	wantStreams := []domain.DecisionStream{{Origin: "h_a", SessionID: "epic", Name: "Checkout epic"}}
 	if err != nil || !reflect.DeepEqual(streams, wantStreams) {
 		t.Fatalf("streams = %+v, err=%v; want %+v", streams, err, wantStreams)
+	}
+}
+
+func TestDecisionDeliveryListKeepsEveryPendingStandingEntry(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_000_000).UTC()
+	appendDecision(t, store, decisionRaised("raised", "h_a", "dec_1", "w-1", "", "", at), at)
+	appendDecision(t, store, decisionAnswered("answer-1", "h_a", "dec_1", 1, at.Add(time.Second)), at.Add(time.Second))
+	appendDecision(t, store, decisionAnswered("answer-2", "h_a", "dec_1", 2, at.Add(2*time.Second)), at.Add(2*time.Second))
+
+	pending, err := store.ListDecisionCallsAwaitingDelivery(ctx, "h_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 || pending[0].StandingEntryID != "answer-1" || pending[0].Option != 1 ||
+		pending[1].StandingEntryID != "answer-2" || pending[1].Option != 2 {
+		t.Fatalf("pending = %+v", pending)
+	}
+
+	appendDecision(t, store, decisionDelivered("delivered-1", "h_a", "dec_1", "answer-1", at.Add(3*time.Second)), at.Add(3*time.Second))
+	pending, err = store.ListDecisionCallsAwaitingDelivery(ctx, "h_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].StandingEntryID != "answer-2" || !pending[0].Redelivery {
+		t.Fatalf("pending after delivery = %+v", pending)
 	}
 }
 

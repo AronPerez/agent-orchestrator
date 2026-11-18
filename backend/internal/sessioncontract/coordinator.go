@@ -291,22 +291,39 @@ func (c *Coordinator) escalate(ctx context.Context, rec domain.SessionRecord, nu
 	return Result{Action: ActionEscalated}, nil
 }
 
+// IsCurrentlyStalled reports whether an earlier escalation still describes
+// the worker's current state. It deliberately re-evaluates live activity, new
+// direction, the configured threshold, and PR ownership instead of treating
+// the durable escalation timestamp as a permanent display flag.
+func IsCurrentlyStalled(rec domain.SessionRecord, project domain.ProjectRecord, prs []domain.PRFacts, now time.Time) bool {
+	if rec.ContractStallEscalatedAt == nil || rec.Kind != domain.KindWorker || rec.IsTerminated ||
+		rec.Goal == "" || rec.TimeboxDeadlineAt == nil || rec.ContractOutcome != domain.SessionContractOutcomeNone {
+		return false
+	}
+	if !now.Before(rec.TimeboxDeadlineAt.UTC()) || rec.Activity.State != domain.ActivityIdle || rec.Activity.LastActivityAt.IsZero() {
+		return false
+	}
+	if receivedDirectionAfter(rec, *rec.ContractStallEscalatedAt) {
+		return false
+	}
+	stallWindow := time.Duration(project.Config.WithDefaults().WorkerContracts.StallMinutes) * time.Minute
+	if now.Sub(rec.Activity.LastActivityAt) < stallWindow {
+		return false
+	}
+	return prStallBlockerFromFacts(prs) == ""
+}
+
 func (c *Coordinator) prStallBlocker(ctx context.Context, id domain.SessionID) (string, error) {
 	prs, err := c.store.ListPRsBySession(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	if len(prs) == 0 {
-		return "", nil
-	}
-	open := 0
-	waiting := false
-	needsWorker := false
+	facts := make([]domain.PRFacts, 0, len(prs))
 	for _, pr := range prs {
 		if pr.Merged || pr.Closed {
+			facts = append(facts, domain.PRFacts{Merged: pr.Merged, Closed: pr.Closed})
 			continue
 		}
-		open++
 		comments, err := c.store.ListPRComments(ctx, pr.URL)
 		if err != nil {
 			return "", err
@@ -318,11 +335,31 @@ func (c *Coordinator) prStallBlocker(ctx context.Context, id domain.SessionID) (
 				break
 			}
 		}
-		if domain.MergeReadinessOf(pr, unresolved).ReadyToMerge() {
+		facts = append(facts, domain.PRFacts{
+			Draft: pr.Draft, Merged: pr.Merged, Closed: pr.Closed, CI: pr.CI,
+			Review: pr.Review, Mergeability: pr.Mergeability, ReviewComments: unresolved,
+		})
+	}
+	return prStallBlockerFromFacts(facts), nil
+}
+
+func prStallBlockerFromFacts(prs []domain.PRFacts) string {
+	open := 0
+	waiting := false
+	needsWorker := false
+	for _, pr := range prs {
+		if pr.Merged || pr.Closed {
+			continue
+		}
+		open++
+		if (domain.MergeReadiness{
+			Draft: pr.Draft, Merged: pr.Merged, Closed: pr.Closed, CI: pr.CI,
+			Review: pr.Review, Mergeability: pr.Mergeability, UnresolvedComments: pr.ReviewComments,
+		}).ReadyToMerge() {
 			continue
 		}
 		actionable := pr.Draft || pr.CI == domain.CIFailing || pr.Review == domain.ReviewChangesRequest ||
-			unresolved || pr.Mergeability == domain.MergeConflicting
+			pr.ReviewComments || pr.Mergeability == domain.MergeConflicting
 		switch {
 		case actionable:
 			needsWorker = true
@@ -333,15 +370,15 @@ func (c *Coordinator) prStallBlocker(ctx context.Context, id domain.SessionID) (
 		}
 	}
 	if open == 0 {
-		return "", nil
+		return ""
 	}
 	if needsWorker {
-		return "", nil
+		return ""
 	}
 	if waiting {
-		return "waiting_on_ci_or_review", nil
+		return "waiting_on_ci_or_review"
 	}
-	return "work_ready", nil
+	return "work_ready"
 }
 
 func receivedDirectionAfter(rec domain.SessionRecord, at time.Time) bool {

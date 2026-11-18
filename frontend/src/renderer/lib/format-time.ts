@@ -3,6 +3,21 @@ import { appI18n, type MessageKey } from "../i18n";
 
 const DAY_MS = 86_400_000;
 
+export function formatContractTimeLeft(
+	deadline: string,
+	now: number | Date = Date.now(),
+): string {
+	const deadlineMs = new Date(deadline).getTime();
+	if (!Number.isFinite(deadlineMs)) return "";
+	const nowMs = now instanceof Date ? now.getTime() : now;
+	const minutes = Math.ceil((deadlineMs - nowMs) / 60_000);
+	if (minutes <= 0) return appI18n.t("session.contract.timeboxElapsed");
+	if (minutes < 60) return appI18n.t("session.contract.minutesLeft", { count: minutes });
+	const hours = Math.ceil(minutes / 60);
+	if (hours < 24) return appI18n.t("session.contract.hoursLeft", { count: hours });
+	return appI18n.t("session.contract.daysLeft", { count: Math.ceil(hours / 24) });
+}
+
 /**
  * `longUnits` counts spans past a month in months and years ("3mo ago",
  * "14y ago") instead of days, for dates that can be years old, such as a

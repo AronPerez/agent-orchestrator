@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,7 +24,21 @@ const (
 func configureSavedHost(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	home := aoHome(t)
-	_ = setConfigEnv(t)
+	cfg := setConfigEnv(t)
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"`+testLocalHostID+`","apiVersion":1}`)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/sessions/"):
+			id := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
+			_, _ = io.WriteString(w, `{"session":{"id":`+strconv.Quote(id)+`}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(local.Close)
+	writeRunFileFor(t, cfg, local)
 	// An isolated desktop uses AO_DATA_DIR/remotes.json. These CLI boundary
 	// tests use the ordinary ~/.ao/remotes.json layout and retain only the
 	// separately isolated AO_RUN_FILE from setConfigEnv.
@@ -32,7 +47,7 @@ func configureSavedHost(t *testing.T, handler http.Handler) *httptest.Server {
 	if err := os.MkdirAll(identityDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(identityDir, "identity.json"), []byte(`{"hostId":"`+testLocalHostID+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(identityDir, "identity.json"), []byte(`{"hostId":"h_wrong_data_dir"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(handler)
@@ -41,6 +56,13 @@ func configureSavedHost(t *testing.T, handler http.Handler) *httptest.Server {
 		Label: testSavedHostLabel, URL: srv.URL, HostID: testSavedHostID, CoordinationToken: testCoordination,
 	})
 	return srv
+}
+
+func writeSavedHostCapabilities(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	requireSavedHostRequest(t, r)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, `{"capabilities":["automation-authored"]}`)
 }
 
 func requireSavedHostRequest(t *testing.T, r *http.Request) {
@@ -171,6 +193,10 @@ func TestSendSavedHostPinsAndNamesEveryWrite(t *testing.T) {
 					writeSavedHostIdentity(t, w, r)
 					return
 				}
+				if r.URL.Path == "/api/v1/coordination/capabilities" {
+					writeSavedHostCapabilities(t, w, r)
+					return
+				}
 				requireSavedHostRequest(t, r)
 				if r.Method != http.MethodPost || r.URL.Path != tc.path {
 					http.NotFound(w, r)
@@ -206,6 +232,7 @@ func TestSendSavedHostPinsAndNamesEveryWrite(t *testing.T) {
 }
 
 func TestSendSavedHostRecoveryKeepsTarget(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "")
 	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/identity" {
 			writeSavedHostIdentity(t, w, r)
@@ -224,7 +251,32 @@ func TestSendSavedHostRecoveryKeepsTarget(t *testing.T) {
 	}
 }
 
-func TestSendSavedHostAgentSourceRequiresLocalHostIdentity(t *testing.T) {
+func TestSendSavedHostRejectsOldDestinationBeforeAgentAuthoredWrite(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "local-source")
+	var writes int
+	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/identity" {
+			writeSavedHostIdentity(t, w, r)
+			return
+		}
+		requireSavedHostRequest(t, r)
+		if r.Method == http.MethodPost {
+			writes++
+		}
+		http.NotFound(w, r)
+	}))
+
+	_, _, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel,
+		"--session", "remote-1", "--message", "continue")
+	if err == nil || !strings.Contains(err.Error(), "automation provenance") {
+		t.Fatalf("err = %v, want unsupported automation provenance", err)
+	}
+	if writes != 0 {
+		t.Fatalf("agent-authored writes = %d, want none", writes)
+	}
+}
+
+func TestSendSavedHostAgentSourceRequiresSelectedDaemon(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "local-source")
 	var authenticatedWrites int
 	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -235,16 +287,92 @@ func TestSendSavedHostAgentSourceRequiresLocalHostIdentity(t *testing.T) {
 		authenticatedWrites++
 		http.NotFound(w, r)
 	}))
-	if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".ao", "data", "mobile", "identity.json")); err != nil {
+	if err := os.Remove(os.Getenv("AO_RUN_FILE")); err != nil {
 		t.Fatal(err)
 	}
 
 	_, _, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel, "--session", "remote-1", "--message", "continue")
-	if err == nil || !strings.Contains(err.Error(), "local host identity is unavailable") {
-		t.Fatalf("err = %v, want missing origin-machine identity error", err)
+	if err == nil || !strings.Contains(err.Error(), "source session daemon") {
+		t.Fatalf("err = %v, want unverifiable source daemon error", err)
 	}
 	if authenticatedWrites != 0 {
 		t.Fatalf("authenticated writes = %d, want none", authenticatedWrites)
+	}
+}
+
+func TestExplicitURLToSelectedDaemonPreservesLocalLineageAndAttribution(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, serverURL string) error
+	}{
+		{
+			name: "spawn",
+			run: func(t *testing.T, serverURL string) error {
+				_, _, err := executeCLI(t, Deps{}, "spawn", "--url", serverURL, "--project", "demo",
+					"--agent", "codex", "--name", "Local child")
+				return err
+			},
+		},
+		{
+			name: "send",
+			run: func(t *testing.T, serverURL string) error {
+				_, _, err := executeCLI(t, Deps{}, "send", "--url", serverURL, "--session", "target",
+					"--message", "continue")
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := setConfigEnv(t)
+			t.Setenv("AO_SESSION_ID", "local-source")
+			t.Setenv("AO_TOKEN", "same-daemon-token")
+			captured := map[string]any{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/identity":
+					_, _ = io.WriteString(w, `{"hostId":"h_selected","apiVersion":1}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/local-source":
+					_, _ = io.WriteString(w, `{"session":{"id":"local-source"}}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
+					_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","kind":"single-repo"}}`)
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/readiness/ensure":
+					_, _ = io.WriteString(w, authorizedAgentsJSON("codex"))
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
+					if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+						t.Fatal(err)
+					}
+					_, _ = io.WriteString(w, `{"session":{"id":"child","status":"idle","displayName":"Local child"}}`)
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/target/send":
+					if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+						t.Fatal(err)
+					}
+					_, _ = io.WriteString(w, `{"ok":true}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			writeRunFileFor(t, cfg, srv)
+
+			if err := tc.run(t, srv.URL); err != nil {
+				t.Fatal(err)
+			}
+			if got := captured["parentSessionId"]; tc.name == "spawn" && got != "local-source" {
+				t.Fatalf("parentSessionId = %v, want local-source", got)
+			}
+			if tc.name == "send" {
+				if got := captured["senderSessionId"]; got != "local-source" {
+					t.Fatalf("senderSessionId = %v, want local-source", got)
+				}
+				if got := captured["automationAuthored"]; got != nil {
+					t.Fatalf("automationAuthored = %v, want omitted for same daemon", got)
+				}
+				if got := captured["message"]; got != "[from local-source] continue" {
+					t.Fatalf("message = %v, want local source attribution", got)
+				}
+			}
+		})
 	}
 }
 

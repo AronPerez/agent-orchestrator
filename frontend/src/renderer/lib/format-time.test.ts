@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { formatTimeCompact, formatTimeTerse } from "./format-time";
+import { formatContractTimeLeft, formatTimeCompact, formatTimeTerse } from "./format-time";
+
+describe("formatContractTimeLeft", () => {
+	const now = new Date("2026-11-17T18:00:00Z");
+
+	it.each([
+		["2026-11-17T18:45:00Z", "45m left"],
+		["2026-11-17T19:01:00Z", "2h left"],
+		["2026-11-18T18:01:00Z", "2d left"],
+		["2026-11-17T17:59:59Z", "Timebox elapsed"],
+		["not-a-date", ""],
+	])("formats %s as %s", (deadline, expected) => {
+		expect(formatContractTimeLeft(deadline, now)).toBe(expected);
+	});
+});
 
 describe("formatTimeTerse", () => {
 	const now = new Date("2026-08-26T12:00:00Z");
