@@ -18,6 +18,7 @@ import (
 type deliveredMessage struct {
 	session domain.SessionID
 	text    string
+	entryID string
 	at      time.Time
 }
 
@@ -27,13 +28,13 @@ type fakeDecisionMessenger struct {
 	errs     map[domain.SessionID]error
 }
 
-func (m *fakeDecisionMessenger) DeliverAsPerson(_ context.Context, id domain.SessionID, message, _ string, at time.Time) error {
+func (m *fakeDecisionMessenger) DeliverAsPerson(_ context.Context, id domain.SessionID, message, deliveryID string, at time.Time) error {
 	m.attempts = append(m.attempts, id)
 	if err := m.errs[id]; err != nil {
 		delete(m.errs, id)
 		return err
 	}
-	m.messages = append(m.messages, deliveredMessage{session: id, text: message, at: at})
+	m.messages = append(m.messages, deliveredMessage{session: id, text: message, entryID: deliveryID, at: at})
 	return nil
 }
 
@@ -423,6 +424,10 @@ func TestDelivererKeepsChangedPlanAnswerForStoppedApprovedWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	record, ok, err := fixture.store.GetSession(context.Background(), fixture.loose)
+	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstDeclined {
+		t.Fatalf("authoritative changed answer state=%q ok=%v err=%v", record.PlanFirstState, ok, err)
+	}
 	messenger.errs[fixture.loose] = fmt.Errorf("%w: worker stopped", ErrSessionEnded)
 	if pending, err := deliverer.RunDue(context.Background()); err != nil || pending != 1 {
 		t.Fatalf("stopped changed answer: pending=%d err=%v", pending, err)
@@ -430,8 +435,8 @@ func TestDelivererKeepsChangedPlanAnswerForStoppedApprovedWorker(t *testing.T) {
 	if got := getDecisionCall(t, fixture, call.ID); got.StandingEntryID != changed.StandingEntryID || got.Delivery != domain.DecisionDeliveryPending {
 		t.Fatalf("changed call=%+v", got)
 	}
-	record, ok, err := fixture.store.GetSession(context.Background(), fixture.loose)
-	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstApproved {
+	record, ok, err = fixture.store.GetSession(context.Background(), fixture.loose)
+	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstDeclined {
 		t.Fatalf("stopped worker state=%q ok=%v err=%v", record.PlanFirstState, ok, err)
 	}
 
@@ -441,6 +446,56 @@ func TestDelivererKeepsChangedPlanAnswerForStoppedApprovedWorker(t *testing.T) {
 	record, ok, err = fixture.store.GetSession(context.Background(), fixture.loose)
 	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstDeclined {
 		t.Fatalf("declined worker state=%q ok=%v err=%v", record.PlanFirstState, ok, err)
+	}
+}
+
+func TestDelivererSkipsSupersededPlanApprovalWhenWorkerResumes(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	approval := answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	messenger := newFakeDecisionMessenger()
+	messenger.errs[fixture.loose] = fmt.Errorf("%w: worker stopped", ErrSessionEnded)
+	deliverer := newTestDeliverer(fixture.store, messenger, "h_a")
+	if pending, err := deliverer.RunDue(context.Background()); err != nil || pending != 1 {
+		t.Fatalf("stopped approval: pending=%d err=%v", pending, err)
+	}
+
+	decline, err := fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, approval.ID, AnswerInput{
+		Choice: domain.DecisionChoiceOption, Option: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(messenger.errs, fixture.loose)
+	if pending, err := deliverer.RunDue(context.Background()); err != nil || pending != 0 {
+		t.Fatalf("resumed delivery: pending=%d err=%v", pending, err)
+	}
+	if len(messenger.messages) != 1 || messenger.messages[0].entryID != decline.StandingEntryID ||
+		!strings.Contains(messenger.messages[0].text, "Do not proceed") {
+		t.Fatalf("delivered messages = %+v, want only current decline %s", messenger.messages, decline.StandingEntryID)
+	}
+	record, ok, err := fixture.store.GetSession(context.Background(), fixture.loose)
+	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstDeclined {
+		t.Fatalf("declined worker state=%q ok=%v err=%v", record.PlanFirstState, ok, err)
+	}
+	entries, err := fixture.store.ListDecisionEntries(context.Background(), approval.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := map[string]string{}
+	for _, entry := range entries {
+		if entry.Kind != domain.DecisionKindDelivered {
+			continue
+		}
+		var payload domain.DecisionDeliveredPayload
+		if json.Unmarshal(entry.Payload, &payload) == nil {
+			statuses[payload.ForEntry] = payload.Status
+		}
+	}
+	if statuses[approval.StandingEntryID] != "superseded" || statuses[decline.StandingEntryID] != domain.DecisionDeliveredSent {
+		t.Fatalf("delivery statuses = %+v", statuses)
 	}
 }
 

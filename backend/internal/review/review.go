@@ -872,6 +872,8 @@ func autoReviewSessionReason(worker domain.SessionRecord, now time.Time) string 
 		return "not_worker"
 	case worker.IsTerminated:
 		return "terminated"
+	case worker.PlanFirstState.BlocksAutomation():
+		return "plan_first_pending"
 	case worker.Activity.State != domain.ActivityIdle:
 		return "not_idle"
 	case worker.Activity.LastActivityAt.IsZero() || now.Sub(worker.Activity.LastActivityAt) < time.Minute:

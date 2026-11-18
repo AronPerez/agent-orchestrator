@@ -141,6 +141,20 @@ func TestObservationApplyKeepsPlanApprovalRoleAcrossRenameBeforePersistence(t *t
 	}
 }
 
+func TestRenameSourceKeepsPlanApprovalRoleWithoutBirthTime(t *testing.T) {
+	id := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 13}
+	row := domain.SessionArtifactRecord{
+		ID: "approval", Path: "plan.md", File: id, Role: domain.SessionArtifactRolePlanApproval,
+	}
+	sources := map[domain.FileIdentity]domain.SessionArtifactRecord{}
+	addSource(sources, row)
+
+	matched, ok := sources[id]
+	if !ok || matched.ID != row.ID || matched.Role != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("rename source = %+v, found=%v", matched, ok)
+	}
+}
+
 // setHistory marks whether the row at path has kept versions.
 func (d *identityDir) setHistory(path string, has bool) {
 	for i := range d.rows {

@@ -112,6 +112,54 @@ func TestConfirmSessionChatTurnRejectsFailureBeforeProviderDispatch(t *testing.T
 	}
 }
 
+func TestSendIfIdleRetriesFailureBeforeProviderDispatch(t *testing.T) {
+	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
+		return &enospcProviderInputStore{Store: st}
+	})
+	ctx := context.Background()
+	msg := ports.ChatUserMessage{
+		Text: "Approved", ClientMessageID: "decision:dent-retry",
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+	}
+
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, syscall.ENOSPC) || sent {
+		t.Fatalf("first SendIfIdle = (%v, %v), want pre-provider ENOSPC", sent, err)
+	}
+	if got := h.conv.sendCallCount(); got != 0 {
+		t.Fatalf("provider calls after failed input write = %d, want 0", got)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || !sent {
+		t.Fatalf("retry SendIfIdle = (%v, %v), want confirmed delivery", sent, err)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || !sent {
+		t.Fatalf("accepted replay = (%v, %v), want idempotent success", sent, err)
+	}
+	if got := h.conv.sendCallCount(); got != 1 {
+		t.Fatalf("provider calls after retry = %d, want 1", got)
+	}
+}
+
+func TestSendIfIdleKeepsAcceptedUnboundDeliveryAmbiguous(t *testing.T) {
+	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
+		return &enospcBindStore{Store: st}
+	})
+	ctx := context.Background()
+	msg := ports.ChatUserMessage{
+		Text: "Approved", ClientMessageID: "decision:dent-ambiguous",
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+	}
+
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, syscall.ENOSPC) || sent {
+		t.Fatalf("first SendIfIdle = (%v, %v), want ambiguous bind failure", sent, err)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, chatsvc.ErrSteerDeliveryUncertain) || sent {
+		t.Fatalf("ambiguous retry = (%v, %v), want blocked delivery", sent, err)
+	}
+	if got := h.conv.sendCallCount(); got != 1 {
+		t.Fatalf("provider calls after ambiguous retry = %d, want 1", got)
+	}
+}
+
 func TestConfirmSessionChatTurnKeepsAcceptedUnboundDeliveryAmbiguous(t *testing.T) {
 	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
 		return &enospcBindStore{Store: st}

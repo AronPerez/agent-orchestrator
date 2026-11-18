@@ -24,6 +24,7 @@ type Store interface {
 	ListSessions(context.Context, domain.ProjectID) ([]domain.SessionRecord, error)
 	GetProject(context.Context, string) (domain.ProjectRecord, bool, error)
 	AppendDecisionEntry(context.Context, domain.DecisionEntry, time.Time) (domain.DecisionEntry, domain.DecisionCall, error)
+	SetSessionPlanFirstState(context.Context, domain.SessionID, domain.PlanFirstState) (bool, error)
 	GetDecisionCall(context.Context, string) (domain.DecisionCall, bool, error)
 	ListDecisionEntries(context.Context, string) ([]domain.DecisionEntry, error)
 	ListDecisionCallsForSession(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
@@ -231,6 +232,9 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	if err := domain.ValidateDecisionAnswer(len(call.Raised.Options), payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
+	if err := s.holdPlanFirstGate(ctx, call, planFirstStateBeforeDelivery(payload)); err != nil {
+		return domain.DecisionCall{}, err
+	}
 	return s.append(ctx, actor, call.ID, domain.DecisionKindAnswered, payload)
 }
 
@@ -252,7 +256,41 @@ func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string)
 	if err := domain.ValidateDecisionNote(note); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
+	if err := s.holdPlanFirstGate(ctx, call, domain.PlanFirstDeclined); err != nil {
+		return domain.DecisionCall{}, err
+	}
 	return s.append(ctx, actor, call.ID, domain.DecisionKindDismissed, domain.DecisionDismissedPayload{Note: note})
+}
+
+// holdPlanFirstGate closes a previously approved gate before the changed
+// ledger entry is appended. If the append then fails, the session stays safely
+// blocked until the person retries instead of implementing a superseded plan.
+func (s *Service) holdPlanFirstGate(ctx context.Context, call domain.DecisionCall, next domain.PlanFirstState) error {
+	if !isPlanFirstCall(call) {
+		return nil
+	}
+	owner, ok, err := s.store.GetSession(ctx, call.Raised.OwnerSessionID)
+	if err != nil {
+		return err
+	}
+	if !ok || !owner.PlanFirstState.Enabled() {
+		return nil
+	}
+	updated, err := s.store.SetSessionPlanFirstState(ctx, owner.ID, next)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return errors.New("plan-first owner session no longer exists")
+	}
+	return nil
+}
+
+func planFirstStateBeforeDelivery(answer domain.DecisionAnsweredPayload) domain.PlanFirstState {
+	if answer.Choice == domain.DecisionChoiceOption && answer.Option == 3 {
+		return domain.PlanFirstDeclined
+	}
+	return domain.PlanFirstPending
 }
 
 // RecordOutcome closes an in-progress call with the result of carrying it out.

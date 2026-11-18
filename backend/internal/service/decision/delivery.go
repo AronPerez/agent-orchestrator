@@ -38,6 +38,7 @@ type DeliveryStore interface {
 	ListSessions(context.Context, domain.ProjectID) ([]domain.SessionRecord, error)
 	SetSessionPlanFirstState(context.Context, domain.SessionID, domain.PlanFirstState) (bool, error)
 	AppendDecisionEntry(context.Context, domain.DecisionEntry, time.Time) (domain.DecisionEntry, domain.DecisionCall, error)
+	GetDecisionCall(context.Context, string) (domain.DecisionCall, bool, error)
 	ListDecisionCallsAwaitingDelivery(context.Context, string) ([]domain.DecisionCall, error)
 }
 
@@ -160,6 +161,33 @@ func (d *Deliverer) RunDue(ctx context.Context) (int, error) {
 			pending++
 			continue
 		}
+		if isPlanFirstCall(call) {
+			current, found, currentErr := d.store.GetDecisionCall(ctx, call.ID)
+			if currentErr != nil || !found {
+				if currentErr == nil {
+					currentErr = errors.New("current decision call no longer exists")
+				}
+				d.logFailure(call.ID, "load current plan answer", currentErr)
+				pending++
+				blocked[call.ID] = true
+				continue
+			}
+			if current.Delivery == domain.DecisionDeliveryPending && !d.holdPlanFirstBeforeDelivery(ctx, current) {
+				pending++
+				blocked[call.ID] = true
+				continue
+			}
+			if current.StandingEntryID != call.StandingEntryID {
+				if !d.record(ctx, call, domain.DecisionDeliveredPayload{
+					ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSuperseded,
+				}) {
+					pending++
+					blocked[call.ID] = true
+				}
+				continue
+			}
+			call = current
+		}
 		if call.StandingKind == domain.DecisionKindAnswered && sentAnswers[call.ID] {
 			call.Redelivery = true
 		}
@@ -173,6 +201,31 @@ func (d *Deliverer) RunDue(ctx context.Context) (int, error) {
 		}
 	}
 	return pending, nil
+}
+
+func (d *Deliverer) holdPlanFirstBeforeDelivery(ctx context.Context, call domain.DecisionCall) bool {
+	owner, found, err := d.store.GetSession(ctx, call.Raised.OwnerSessionID)
+	if err != nil {
+		d.logFailure(call.ID, "load plan-first owner", err)
+		return false
+	}
+	if !found || !owner.PlanFirstState.Enabled() {
+		return true
+	}
+	next := domain.PlanFirstPending
+	if call.StandingKind != domain.DecisionKindAnswered || call.Choice != domain.DecisionChoiceOption || call.Option == 3 {
+		next = domain.PlanFirstDeclined
+	}
+	updated, err := d.store.SetSessionPlanFirstState(ctx, owner.ID, next)
+	if err != nil {
+		d.logFailure(call.ID, "hold plan-first gate", err)
+		return false
+	}
+	if !updated {
+		d.logFailure(call.ID, "hold plan-first gate", errors.New("owner session no longer exists"))
+		return false
+	}
+	return true
 }
 
 // deliver reports whether the entry needs another attempt and whether its

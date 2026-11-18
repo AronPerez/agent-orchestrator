@@ -2866,6 +2866,7 @@ func TestAutoTriggerRevalidatesSessionPolicyUnderLock(t *testing.T) {
 		wantReason string
 	}{
 		{name: "disabled", mutate: func(worker *domain.SessionRecord) { worker.AutoReviewEnabled = false }, wantReason: "disabled"},
+		{name: "plan gate changed", mutate: func(worker *domain.SessionRecord) { worker.PlanFirstState = domain.PlanFirstDeclined }, wantReason: "plan_first_pending"},
 		{name: "active", mutate: func(worker *domain.SessionRecord) { worker.Activity.State = domain.ActivityActive }, wantReason: "not_idle"},
 		{name: "idle threshold reset", mutate: func(worker *domain.SessionRecord) { worker.Activity.LastActivityAt = time.Unix(-59, 0).UTC() }, wantReason: "idle_threshold_not_met"},
 	}

@@ -2187,6 +2187,26 @@ func (q *Queries) ReleaseUntouchedConversationProvider(ctx context.Context, arg 
 	return result.RowsAffected()
 }
 
+const reopenUndispatchedConversationTurn = `-- name: ReopenUndispatchedConversationTurn :execrows
+UPDATE conversation_turns
+SET state = 'queued', error_message = '', failure_code = '',
+    started_at = NULL, completed_at = NULL, usage_limit_resets_at = NULL
+WHERE id = ?
+  AND state IN ('failed', 'cancelled')
+  AND provider_turn_id = ''
+  AND provider_input_text = ''
+`
+
+// Reopen only a turn that durably failed before crossing the provider boundary.
+// An input or provider id makes the outcome ambiguous and must never be retried.
+func (q *Queries) ReopenUndispatchedConversationTurn(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, reopenUndispatchedConversationTurn, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const replaceUntouchedConversationProvider = `-- name: ReplaceUntouchedConversationProvider :execrows
 UPDATE conversation_branches
 SET provider_conversation_id = ?1

@@ -1230,6 +1230,17 @@ UPDATE conversation_turns
 SET provider_input_text = ?
 WHERE id = ? AND state IN ('queued', 'running', 'completed') AND provider_input_text = '';
 
+-- Reopen only a turn that durably failed before crossing the provider boundary.
+-- An input or provider id makes the outcome ambiguous and must never be retried.
+-- name: ReopenUndispatchedConversationTurn :execrows
+UPDATE conversation_turns
+SET state = 'queued', error_message = '', failure_code = '',
+    started_at = NULL, completed_at = NULL, usage_limit_resets_at = NULL
+WHERE id = ?
+  AND state IN ('failed', 'cancelled')
+  AND provider_turn_id = ''
+  AND provider_input_text = '';
+
 -- Stopping the agent stops the queue with it: a brake that starts new work
 -- instead of ending it would be the wrong shape for the button the user pressed.
 -- The cutoff is the moment the user pressed stop, so a message typed after that

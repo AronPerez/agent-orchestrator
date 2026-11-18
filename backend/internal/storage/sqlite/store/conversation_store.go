@@ -1657,6 +1657,18 @@ func (s *Store) RecordProviderInput(ctx context.Context, turnID, text string) er
 	return expectBatchRow("record provider input", turnID, rows, err)
 }
 
+// ReopenUndispatchedTurn makes a proven pre-provider failure dispatchable
+// again. The conditional update keeps ambiguous provider outcomes closed.
+func (s *Store) ReopenUndispatchedTurn(ctx context.Context, turnID string) (bool, error) {
+	q, unlock := s.conversationWriter(ctx)
+	defer unlock()
+	rows, err := q.ReopenUndispatchedConversationTurn(ctx, turnID)
+	if err != nil {
+		return false, fmt.Errorf("reopen undispatched turn %s: %w", turnID, err)
+	}
+	return rows == 1, nil
+}
+
 func expectBatchRow(action, id string, rows int64, err error) error {
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", action, id, err)

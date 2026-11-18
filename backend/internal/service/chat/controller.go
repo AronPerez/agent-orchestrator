@@ -80,6 +80,7 @@ type Store interface {
 	AppendReviewRetryUserMessage(ctx context.Context, conversationID string, session domain.SessionID, reviewID, generation string, msg domain.ConversationMessage, turnID, retryOfTurnID string, now time.Time) (bool, error)
 	MarkTurnDispatching(ctx context.Context, turnID string) error
 	RecordProviderInput(ctx context.Context, turnID, text string) error
+	ReopenUndispatchedTurn(ctx context.Context, turnID string) (bool, error)
 	BindTurnToProvider(ctx context.Context, turnID, providerTurnID string, now time.Time) error
 	SettleTurn(ctx context.Context, conversationID, providerTurnID string, state domain.TurnState, errMessage string, now time.Time) error
 	SettleTurnWithFailureCode(ctx context.Context, conversationID, providerTurnID string, state domain.TurnState, errMessage string, failureCode domain.ConversationFailureCode, usageLimitResetsAt time.Time, now time.Time) error
