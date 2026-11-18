@@ -76,6 +76,9 @@ type SpawnConfig struct {
 	// RequestedOutput is the deliverable the caller asks for. Empty is the ordinary
 	// task flow; artifact adds an artifact-delivery section to the worker prompt.
 	RequestedOutput domain.RequestedOutput
+	// PlanFirst makes a project worker write an artifact plan and wait for a
+	// Decision Ledger approval before implementation.
+	PlanFirst bool
 
 	// Goal and Timebox define an optional worker contract. The manager requires
 	// them together and persists an absolute deadline.

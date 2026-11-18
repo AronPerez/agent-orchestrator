@@ -33,6 +33,7 @@ type taskPromptConfig struct {
 	IssueContext string
 	// BaseBranch is set for a task stacked on another pull request.
 	BaseBranch string
+	PlanFirst  bool
 }
 
 type systemPromptConfig struct {
@@ -67,13 +68,32 @@ type projectRulesConfig struct {
 func buildTaskPrompt(cfg taskPromptConfig) string {
 	prompt := issueTaskPrompt(cfg)
 	base := strings.TrimSpace(cfg.BaseBranch)
-	if base == "" || prompt == "" {
+	if base != "" && prompt != "" {
+		prompt = strings.TrimRight(prompt, "\n") + "\n\n" + fmt.Sprintf(
+			"This task is stacked on another pull request: your branch starts from `%s`. Open your pull request against `%s`, not the default branch, and don't merge either one.",
+			base, base)
+	}
+	if cfg.Role != sessionPromptRoleWorker || !cfg.PlanFirst {
 		return prompt
 	}
-	return strings.TrimRight(prompt, "\n") + "\n\n" + fmt.Sprintf(
-		"This task is stacked on another pull request: your branch starts from `%s`. Open your pull request against `%s`, not the default branch, and don't merge either one.",
-		base, base)
+	if prompt == "" {
+		return planFirstGatePrompt
+	}
+	return strings.TrimRight(prompt, "\n") + "\n\n" + planFirstGatePrompt
 }
+
+const planFirstGatePrompt = `## Plan-first gate
+
+This worker requires a human-approved plan before implementation.
+
+1. Limit initial work to the read-only inspection needed to understand the task. Do not edit repository files, run mutating formatters or generators, implement code, commit, push, open or update a pull request, or take another outward-facing implementation action.
+2. Write a concise Markdown plan to ` + "`plan.md`" + ` in the session artifact directory named in the standing instructions, then run ` + "`ao artifact add plan.md`" + `.
+3. Raise exactly one Decision Ledger call with the registered plan link:
+
+   ` + "`ao decision raise --title \"Approve this plan?\" --context \"Review ao://sessions/$AO_PROJECT_ID/$AO_SESSION_ID/artifacts/plan.md. Choose Approve with changes only with an approval note.\" --option \"Approve :: Start implementation exactly as planned.\" --option \"Approve with changes :: Apply the approval note to the plan, then start implementation.\" --option \"Do not proceed :: Stop without making implementation changes.\" --recommend 1`" + `
+
+4. End the turn while the call is unanswered; do not poll. The ledger will deliver the human's answer to this session.
+5. Only Approve or Approve with changes authorizes implementation. For Approve with changes, apply the approval note and update ` + "`plan.md`" + ` before starting. If that answer has no note, do not guess; raise a replacement call that asks for the missing changes. If the call is dismissed or the answer is Do not proceed, stop without implementation and record the outcome.`
 
 func issueTaskPrompt(cfg taskPromptConfig) string {
 	issueContext := strings.TrimSpace(cfg.IssueContext)

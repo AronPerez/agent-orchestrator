@@ -43,6 +43,7 @@ type spawnOptions struct {
 	claimPR         string
 	noTakeover      bool
 	review          bool
+	planFirst       bool
 	skipAgentCheck  bool
 	trackerProvider string
 }
@@ -66,6 +67,7 @@ type spawnRequest struct {
 	Effort              string `json:"effort,omitempty"`
 	AccountID           string `json:"accountId,omitempty"`
 	RequestedOutput     string `json:"requestedOutput,omitempty"`
+	PlanFirst           bool   `json:"planFirst,omitempty"`
 	DisplayName         string `json:"displayName"`
 	DisplayNameExplicit bool   `json:"displayNameExplicit,omitempty"`
 	// Async publishes a Chat session as starting, with its prompt queued, before
@@ -157,6 +159,12 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			}
 			if opts.output != "" && opts.kind == "orchestrator" {
 				return usageError{fmt.Errorf("--output is supported for worker sessions only")}
+			}
+			if opts.planFirst && opts.kind == "orchestrator" {
+				return usageError{fmt.Errorf("--plan-first is supported for worker sessions only")}
+			}
+			if opts.planFirst && opts.standalone {
+				return usageError{fmt.Errorf("--plan-first requires a registered project")}
 			}
 			if opts.standalone {
 				if opts.kind == "orchestrator" {
@@ -254,6 +262,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				Effort:              strings.TrimSpace(opts.effort),
 				AccountID:           strings.TrimSpace(opts.account),
 				RequestedOutput:     opts.output,
+				PlanFirst:           opts.planFirst,
 				DisplayName:         name,
 				DisplayNameExplicit: true,
 				Async:               !opts.standalone,
@@ -337,6 +346,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.timebox, "timebox", "", "Worker contract time limit as a duration, such as 2h (requires --goal)")
 	f.StringVar(&opts.model, "model", "", "Agent model override for this session only (e.g. sonnet, gpt-5.6-sol); overrides project/role config without changing it")
 	f.StringVar(&opts.output, "output", "", "Deliverable for the session: artifact asks the agent to write a file in its artifact directory instead of opening a PR (default: ordinary task)")
+	f.BoolVar(&opts.planFirst, "plan-first", false, "Require a project worker to get Decision Ledger approval for an artifact plan before implementation")
 	f.StringVar(&opts.account, "account", "", "Claude Code or Codex account id to start on, from ao account ls; empty uses the agent's default account")
 	f.StringVar(&opts.effort, "effort", "", "Reasoning effort override for this session only (e.g. low, medium, high); empty defers to the agent/model default")
 	f.StringVar(&opts.issue, "issue", "", "Issue id to associate with the session")

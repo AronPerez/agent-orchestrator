@@ -231,6 +231,11 @@ daemon validation.
 Standalone spawns require `--agent` because there is no project configuration
 from which to resolve a default harness.
 
+`ao spawn --plan-first` makes a worker in a registered project write and
+register `plan.md`, raise an “Approve this plan?” Decision Ledger call, and wait
+for the answer before implementation. The flag is opt-in and is rejected for
+orchestrator and standalone sessions.
+
 `ao spawn --output artifact` marks a worker whose deliverable is a file rather
 than a pull request. The daemon persists the kind with the session and adds an
 artifact-delivery section to the worker's system prompt, including after

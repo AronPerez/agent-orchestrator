@@ -124,6 +124,7 @@ Important flags include:
 | `--mode chat\|tui` | Select structured Chat or the agent's native terminal UI. |
 | `--branch <name>` | Branch for Git projects. Scratch projects do not support it. |
 | `--prompt <text>` | Initial prompt. |
+| `--plan-first` | Require a project worker to register a plan artifact and get Decision Ledger approval before implementation. |
 | `--standalone` | Projectless worker; requires an explicit agent and excludes project, branch, issue, PR, and orchestrator options. |
 | `--model <model>` | Override the selected provider model for this spawn. |
 | `--tracker-provider github\|gitlab` | Select the issue provider for `--issue`. |
@@ -134,6 +135,8 @@ Important flags include:
 | `--skip-agent-check` | Skip only the CLI-side install/auth preflight. |
 
 Orchestrator chooses a project in this order: `--project`, `AO_PROJECT_ID`, the project for `AO_SESSION_ID`, then the closest registered project containing the current directory. Before spawning, Orchestrator refreshes the selected agent's readiness unless you use `--skip-agent-check`. Readiness is advisory.
+
+`--plan-first` is opt-in and available only for workers in registered projects. The worker writes `plan.md` in its session artifacts, raises “Approve this plan?” in the Decision Ledger, and waits for the answer before making implementation changes.
 
 ### `ao session`
 

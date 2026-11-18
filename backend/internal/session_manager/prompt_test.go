@@ -486,6 +486,36 @@ func TestBuildTaskPromptPreservesExplicitPublishingScope(t *testing.T) {
 	}
 }
 
+func TestBuildTaskPrompt_PlanFirstGate(t *testing.T) {
+	got := buildTaskPrompt(taskPromptConfig{
+		Role:      sessionPromptRoleWorker,
+		Prompt:    "Add search",
+		PlanFirst: true,
+	})
+	if !strings.HasPrefix(got, "Add search\n\n") {
+		t.Fatalf("prompt does not preserve task first:\n%s", got)
+	}
+	for _, want := range []string{
+		"## Plan-first gate",
+		"read-only inspection",
+		"Do not edit repository files",
+		"plan.md",
+		"ao artifact add plan.md",
+		"ao://sessions/$AO_PROJECT_ID/$AO_SESSION_ID/artifacts/plan.md",
+		"ao decision raise",
+		`--title "Approve this plan?"`,
+		"Approve with changes",
+		"Do not proceed",
+		"End the turn while the call is unanswered",
+		"do not poll",
+		"approval note",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan-first prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestBuildSystemPrompt_OrchestratorRoutesOwnedAndExternalReviews(t *testing.T) {
 	got := buildSystemPromptText(systemPromptConfig{
 		Role:    sessionPromptRoleOrchestrator,

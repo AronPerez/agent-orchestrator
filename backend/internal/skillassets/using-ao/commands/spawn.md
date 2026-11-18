@@ -25,6 +25,7 @@ ao spawn [flags]
 | `--name string` | Display name shown in the sidebar (max 100 characters) | Required |
 | `--mode chat\|tui` | Initial session interface; Chat requires harness support (including Grok Build via native ACP) | Daemon default, otherwise Terminal UI |
 | `--output artifact` | Ask the worker for a file in its artifact directory instead of a PR | Ordinary task |
+| `--plan-first` | Require a project worker to register a plan artifact and get Decision Ledger approval before implementation | Disabled; worker sessions in registered projects only |
 | `--review` | Claim the PR to review it, not work on it: turn off automatic CI and review-comment fixing and native auto-review before the claim. Implies `--no-takeover` | Requires `--claim-pr` |
 | `--no-takeover` | Refuse if another active session owns the claimed PR (requires `--claim-pr`) | - |
 | `--project string` | Project id to spawn the session in | Optional when `--standalone` is used; defaults to `AO_PROJECT_ID` or the current repo's registered project |
@@ -53,6 +54,12 @@ Available harnesses: `claude-code`, `codex`, `aider`, `opencode`, `opencode-v2`,
 ```bash
 # Spawn a worker for issue 142 in the agent-orchestrator project
 ao spawn --project agent-orchestrator --issue 142 --name "fix-session-leak" --prompt "Fix the session leak described in issue 142. Branch off upstream/main."
+```
+
+```bash
+# Require plan approval through the Decision Ledger before implementation
+ao spawn --project agent-orchestrator --name "plan-session-leak" --plan-first \
+  --prompt "Fix the session leak described in issue 142."
 ```
 
 ```bash

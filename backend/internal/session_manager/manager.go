@@ -6712,6 +6712,7 @@ func buildPrompt(cfg ports.SpawnConfig) string {
 		IssueID:      string(cfg.IssueID),
 		IssueContext: cfg.IssueContext,
 		BaseBranch:   cfg.BaseBranch,
+		PlanFirst:    cfg.PlanFirst,
 	})
 }
 

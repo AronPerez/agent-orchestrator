@@ -9603,6 +9603,7 @@ export interface components {
             mode?: "chat" | "tui";
             model?: string;
             parentSessionId?: string;
+            planFirst?: boolean;
             projectId?: string;
             prompt?: string;
             /** @enum {string} */
