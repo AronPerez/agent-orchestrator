@@ -61,6 +61,18 @@ func TestDeriveDecisionStreamSurvivesBrokenLineage(t *testing.T) {
 	}
 }
 
+func TestDeriveDecisionStreamStopsAtRemoteParentBoundary(t *testing.T) {
+	sessions := []SessionRecord{
+		{ID: "foreign-parent", Kind: KindWorker},
+		{ID: "remote-child", ParentHostID: "h_other", ParentSessionID: "foreign-parent", Kind: KindWorker},
+	}
+	for _, raiser := range []SessionID{"foreign-parent", "remote-child"} {
+		if got, ok := DeriveDecisionStream(raiser, sessions); ok {
+			t.Fatalf("DeriveDecisionStream(%q) = %q, true; remote lineage must not create a local stream", raiser, got.ID)
+		}
+	}
+}
+
 func TestAssignDecisionStreams(t *testing.T) {
 	streams := []DecisionStream{{Origin: "h_a", SessionID: "epic", Name: "Checkout epic"}}
 	calls := []DecisionCall{

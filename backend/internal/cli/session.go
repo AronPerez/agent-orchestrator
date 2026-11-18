@@ -82,6 +82,7 @@ type sessionDTO struct {
 	RuntimeUnreachable bool   `json:"runtimeUnreachable,omitempty"`
 	Mode               string `json:"mode,omitempty"`
 
+	ParentHostID    string               `json:"parentHostId,omitempty"`
 	ParentSessionID string               `json:"parentSessionId,omitempty"`
 	ArtifactFiles   []sessionArtifactDTO `json:"artifactFiles,omitempty"`
 	// WorkspaceCleanup is the recorded teardown outcome of a terminated
@@ -211,22 +212,24 @@ type claimPRResponse struct {
 }
 
 type sessionListEntry struct {
-	HostID         string          `json:"hostId,omitempty"`
-	HostLabel      string          `json:"hostLabel,omitempty"`
-	ID             string          `json:"id"`
-	ProjectID      string          `json:"projectId"`
-	Role           string          `json:"role"`
-	DisplayName    string          `json:"displayName,omitempty"`
-	Status         string          `json:"status,omitempty"`
-	Activity       string          `json:"activity,omitempty"`
-	IssueID        string          `json:"issueId,omitempty"`
-	Harness        string          `json:"harness,omitempty"`
-	Branch         string          `json:"branch,omitempty"`
-	PRs            []sessionListPR `json:"prs"`
-	IsTerminated   bool            `json:"isTerminated"`
-	LastActivityAt *time.Time      `json:"lastActivityAt,omitempty"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	HostID          string          `json:"hostId,omitempty"`
+	HostLabel       string          `json:"hostLabel,omitempty"`
+	ParentHostID    string          `json:"parentHostId,omitempty"`
+	ParentSessionID string          `json:"parentSessionId,omitempty"`
+	ID              string          `json:"id"`
+	ProjectID       string          `json:"projectId"`
+	Role            string          `json:"role"`
+	DisplayName     string          `json:"displayName,omitempty"`
+	Status          string          `json:"status,omitempty"`
+	Activity        string          `json:"activity,omitempty"`
+	IssueID         string          `json:"issueId,omitempty"`
+	Harness         string          `json:"harness,omitempty"`
+	Branch          string          `json:"branch,omitempty"`
+	PRs             []sessionListPR `json:"prs"`
+	IsTerminated    bool            `json:"isTerminated"`
+	LastActivityAt  *time.Time      `json:"lastActivityAt,omitempty"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
 }
 
 type sessionListPR struct {
@@ -1027,6 +1030,9 @@ func writeAllHostSessionListJSON(cmd *cobra.Command, results []allHostSessionLis
 		for i := range entries {
 			entries[i].HostID = result.HostID
 			entries[i].HostLabel = result.HostLabel
+			if entries[i].ParentSessionID != "" && entries[i].ParentHostID == "" {
+				entries[i].ParentHostID = result.HostID
+			}
 		}
 		out.Data = append(out.Data, entries...)
 	}
@@ -1482,20 +1488,22 @@ func sessionListEntries(sessions []sessionDTO, summaries map[string][]sessionPRS
 			last = &activity
 		}
 		entries = append(entries, sessionListEntry{
-			ID:             sess.ID,
-			ProjectID:      sess.ProjectID,
-			Role:           sessionRole(sess),
-			DisplayName:    sess.DisplayName,
-			Status:         sessionStatusValue(sess),
-			Activity:       sess.Activity.State,
-			IssueID:        sess.IssueID,
-			Harness:        sess.Harness,
-			Branch:         sess.Branch,
-			PRs:            listPRsForSession(sess, summaries[sess.ID]),
-			IsTerminated:   sess.IsTerminated,
-			LastActivityAt: last,
-			CreatedAt:      sess.CreatedAt,
-			UpdatedAt:      sess.UpdatedAt,
+			ParentHostID:    sess.ParentHostID,
+			ParentSessionID: sess.ParentSessionID,
+			ID:              sess.ID,
+			ProjectID:       sess.ProjectID,
+			Role:            sessionRole(sess),
+			DisplayName:     sess.DisplayName,
+			Status:          sessionStatusValue(sess),
+			Activity:        sess.Activity.State,
+			IssueID:         sess.IssueID,
+			Harness:         sess.Harness,
+			Branch:          sess.Branch,
+			PRs:             listPRsForSession(sess, summaries[sess.ID]),
+			IsTerminated:    sess.IsTerminated,
+			LastActivityAt:  last,
+			CreatedAt:       sess.CreatedAt,
+			UpdatedAt:       sess.UpdatedAt,
 		})
 	}
 	return entries

@@ -97,6 +97,59 @@ describe("buildMobileFleetTree", () => {
 		expect(tree[0]!.rollup).toMatchObject({ action: 2, working: 0 });
 	});
 
+	it("does not join a cross-host parent to a colliding local session", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("box")],
+			sessions: [
+				worker("parent", "box", "same"),
+				worker("child", "box", "same", { parentHostId: "mac", parentSessionId: "parent" }),
+			],
+			orchestrators: [],
+			hosts: [{ hostId: "box", name: "Build box", connection: "open" }],
+		});
+
+		const rows = flattenFleetSessions(tree[0]!.machines[0]!.sessions, new Set());
+		expect(rows.map(({ node, depth }) => [node.session.id, depth])).toEqual([
+			["parent", 0],
+			["child", 0],
+		]);
+		expect(rows[1]!.node).toMatchObject({
+			parentUnavailable: true,
+			parentAddress: { machineId: "mac", sessionId: "parent" },
+		});
+	});
+
+	it("preserves a cross-host parent address for an orchestrator child", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("box")],
+			sessions: [worker("parent", "box", "same")],
+			orchestrators: [orchestrator("child", "box", "same", {
+				parentHostId: "mac",
+				parentSessionId: "parent",
+			})],
+			hosts: [{ hostId: "box", name: "Build box", connection: "open" }],
+		});
+
+		const child = flattenFleetSessions(tree[0]!.machines[0]!.sessions, new Set())
+			.find(({ node }) => node.session.id === "child")!.node;
+		expect(child).toMatchObject({
+			parentUnavailable: true,
+			parentAddress: { machineId: "mac", sessionId: "parent" },
+			role: "orchestrator",
+		});
+	});
+
+	it("omits mobile scopes containing only hidden archived sessions", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("mac")],
+			sessions: [worker("archived", "mac", "same", { status: "terminated", isTerminated: true })],
+			orchestrators: [],
+			hosts: [{ hostId: "mac", name: "Mac", connection: "open" }],
+		});
+
+		expect(tree).toEqual([]);
+	});
+
 	it("keeps a disconnected but non-terminal cloud orchestrator live", () => {
 		const tree = buildMobileFleetTree({
 			projects: [project("mac")],

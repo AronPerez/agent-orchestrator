@@ -876,6 +876,7 @@ type Session struct {
 	ContractStallNudgedAt            sql.NullTime
 	ContractStallEscalatedAt         sql.NullTime
 	ContractTimeboxPromptedAt        sql.NullTime
+	ParentHostID                     string
 }
 
 type SessionAgentAccount struct {

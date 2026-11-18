@@ -67,6 +67,8 @@ export type SessionProvisionStep = {
 export type DashboardSession = {
 	id: string;
 	projectId: string;
+	/** The host that owns the parent session when lineage crosses machines. */
+	parentHostId?: string;
 	/** The session that spawned this one, when the daemon still has that lineage. */
 	parentSessionId?: string;
 	/** Opaque daemon runtime handle used only for terminal mux operations. */
@@ -140,6 +142,8 @@ export type DashboardSession = {
 export type OrchestratorLink = {
 	id: string;
 	projectId: string;
+	parentHostId?: string;
+	parentSessionId?: string;
 	/** Opaque daemon runtime handle used only for terminal mux operations. */
 	terminalHandleId?: string;
 	projectName: string;
@@ -257,6 +261,7 @@ type WireSession = {
 	// Absent for a standalone agent session: the daemon marks the field
 	// omitempty and a standalone session has no project to name.
 	projectId?: string;
+	parentHostId?: string;
 	parentSessionId?: string;
 	terminalHandleId?: string;
 	issueId?: string;
@@ -353,6 +358,7 @@ function mapSession(s: WireSession): DashboardSession {
 		// "" rather than undefined: every consumer treats the id as a string, and
 		// `shortLabel(undefined)` threw inside render and took the whole board down.
 		projectId: s.projectId ?? "",
+		parentHostId: s.parentHostId,
 		parentSessionId: s.parentSessionId,
 		terminalHandleId: s.terminalHandleId,
 		status: s.status ?? null,
@@ -395,6 +401,8 @@ function mapOrchestrator(s: WireSession, projectName: string): OrchestratorLink 
 	return {
 		id: s.id,
 		projectId: s.projectId ?? "",
+		parentHostId: s.parentHostId,
+		parentSessionId: s.parentSessionId,
 		terminalHandleId: s.terminalHandleId,
 		projectName,
 		status: s.status ?? null,
