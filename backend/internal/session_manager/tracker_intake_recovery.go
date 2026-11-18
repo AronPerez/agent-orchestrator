@@ -161,20 +161,44 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		defer cancel()
 		return m.checkSessionHealth(recoveryCtx, rec)
 	}
-	if claim.Recovery.DeliveryPossible && found && !rec.IsTerminated && !claim.Recovery.CapacityReleased {
+	if claim.Recovery.DeliveryPossible && found && !claim.Recovery.CapacityReleased &&
+		domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
 		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec)
 	}
 	return m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
 }
 
 func trackerIntakeClaimDefersToSessionHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
-	if !reservation.DeliveryPossible || reservation.CapacityReleased || rec.IsTerminated {
+	if reservation.CapacityReleased || rec.IsTerminated {
 		return false
 	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		return reservation.DeliveryPossible && rec.Activity.State != domain.ActivityExited
+	}
+	if reservation.RelaunchPublished && trackerIntakeRuntimeReservationMatchesSession(rec, reservation) {
 		return rec.Activity.State != domain.ActivityExited
 	}
+	if !reservation.DeliveryPossible {
+		return false
+	}
+	// A reserved replacement generation takes precedence over stale row
+	// metadata left behind by a crash before MarkSpawned. Do not defer that row
+	// to ordinary health, which can inspect only the old runtime owner.
+	if launchID := strings.TrimSpace(reservation.RuntimeLaunchID); launchID != "" {
+		if launchID != strings.TrimSpace(rec.Metadata.RuntimeLaunchID) ||
+			!trackerIntakeHandleReserved(reservation.RuntimeHandleIDs, rec.Metadata.RuntimeHandleID) {
+			return false
+		}
+	}
 	return strings.TrimSpace(rec.Metadata.RuntimeHandleID) != ""
+}
+
+func trackerIntakeRuntimeReservationMatchesSession(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
+	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+	handleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
+	return launchID != "" && handleID != "" &&
+		launchID == strings.TrimSpace(rec.Metadata.RuntimeLaunchID) &&
+		trackerIntakeHandleReserved(reservation.RuntimeHandleIDs, handleID)
 }
 
 func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim, rec domain.SessionRecord) error {
@@ -219,11 +243,12 @@ func (m *Manager) adoptTrackerIntakeRuntime(ctx context.Context, claim domain.Tr
 	if err != nil {
 		return false, fmt.Errorf("recover tracker intake %s: reload claim: %w", claim.SessionID, err)
 	}
-	if !found || !pending || rec.IsTerminated || reservation.CapacityReleased || !reservation.DeliveryPossible ||
+	if !found || !pending || reservation.CapacityReleased || !reservation.DeliveryPossible ||
 		rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID {
 		return false, nil
 	}
-	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || strings.TrimSpace(rec.Metadata.RuntimeHandleID) != "" {
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat ||
+		trackerIntakeRuntimeReservationMatchesSession(rec, reservation) {
 		return false, nil
 	}
 	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
@@ -274,9 +299,9 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 	rec domain.SessionRecord,
 	reservation domain.TrackerIntakeRecoveryReservation,
 ) error {
-	launchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
 	if launchID == "" {
-		launchID = strings.TrimSpace(reservation.RuntimeLaunchID)
+		launchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
 	}
 	handleIDs := append([]string(nil), reservation.RuntimeHandleIDs...)
 	if handleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID); handleID != "" {
@@ -344,9 +369,9 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 		return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
 	}
 
-	launchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
 	if launchID == "" {
-		launchID = strings.TrimSpace(reservation.RuntimeLaunchID)
+		launchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
 	}
 	handleIDs := append([]string(nil), reservation.RuntimeHandleIDs...)
 	if handleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID); handleID != "" {
@@ -500,7 +525,7 @@ func applyTrackerIntakeRecovery(rec domain.SessionRecord, reservation domain.Tra
 	if rec.Metadata.WorkspaceRepoPath == "" {
 		rec.Metadata.WorkspaceRepoPath = reservation.WorkspaceRepoPath
 	}
-	if rec.Metadata.RuntimeLaunchID == "" {
+	if reservation.RuntimeLaunchID != "" {
 		rec.Metadata.RuntimeLaunchID = reservation.RuntimeLaunchID
 	}
 	return rec

@@ -8857,6 +8857,134 @@ func TestResume_SavedPromptRestartErrorRequiresExplicitNoEffectToClearFence(t *t
 	}
 }
 
+func TestRestore_PendingUndeliveredNativeOwnerSurvivesClaimReconciliation(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#120")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task", AgentSessionID: "native-1",
+		},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"old-runtime"},
+		CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+	}
+	rt := &fakeRuntime{createIDs: []string{"new-runtime"}}
+	ws := &fakeWorkspace{}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: ws,
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	result, err := m.RestoreWithMode(ctx, "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Mode != RestoreModeNative {
+		t.Fatalf("restore mode = %q, want native", result.Mode)
+	}
+	reservation := st.trackerIntakeRecovery["mer-1"]
+	if reservation.DeliveryPossible || !reservation.RelaunchPublished {
+		t.Fatalf("restored reservation = %+v, want undelivered published owner", reservation)
+	}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions["mer-1"]
+	if got.IsTerminated || got.Metadata.RuntimeHandleID != "new-runtime" || got.Metadata.RuntimeLaunchID != reservation.RuntimeLaunchID {
+		t.Fatalf("native owner after reconciliation = %+v, want restored runtime preserved", got)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != "mer-1" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("reconciliation changed owner/claim: runtime destroys=%d workspace destroys=%d pending=%q handled=%q",
+			rt.destroyed, ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeAdoptsInterruptedRelaunchGeneration(t *testing.T) {
+	for _, terminated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("terminated=%t", terminated), func(t *testing.T) {
+			m, st, rt, ws := newManager()
+			id := domain.SessionID("interrupted-relaunch")
+			issueID := domain.IssueID("github:acme/mer#121")
+			key := "mer\x00" + string(issueID)
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				IsTerminated: terminated, Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/interrupted-relaunch", Branch: "b", Prompt: "continue the task",
+					RuntimeHandleID: "old-runtime", RuntimeLaunchID: "old-launch",
+				},
+			}
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/interrupted-relaunch", RuntimeLaunchID: "new-launch",
+				RuntimeHandleIDs: []string{"new-runtime"}, DeliveryPossible: true,
+			}
+			rt.aliveByHandle = map[string]bool{"new-runtime": true}
+
+			if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+				t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+			}
+			got := st.sessions[id]
+			if got.IsTerminated || got.Activity.State != domain.ActivityIdle ||
+				got.Metadata.RuntimeHandleID != "new-runtime" || got.Metadata.RuntimeLaunchID != "new-launch" {
+				t.Fatalf("adopted session = %+v, want live reserved generation", got)
+			}
+			if ws.destroyed != 0 || st.trackerIntakePending[key] != id {
+				t.Fatalf("adoption destroyed workspace=%d or settled pending=%q", ws.destroyed, st.trackerIntakePending[key])
+			}
+			if len(rt.fencedRefs) == 0 || rt.fencedRefs[0].Generation != "new-launch" {
+				t.Fatalf("runtime probes = %+v, want reserved generation", rt.fencedRefs)
+			}
+		})
+	}
+}
+
+func TestReconcileTrackerIntakeUndeliveredRelaunchUsesReservedGeneration(t *testing.T) {
+	for _, terminated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("terminated=%t", terminated), func(t *testing.T) {
+			m, st, rt, _ := newManager()
+			id := domain.SessionID("undelivered-relaunch")
+			issueID := domain.IssueID("github:acme/mer#122")
+			key := "mer\x00" + string(issueID)
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				IsTerminated: terminated, Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/undelivered-relaunch", Branch: "b",
+					RuntimeHandleID: "old-runtime", RuntimeLaunchID: "old-launch",
+				},
+			}
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/undelivered-relaunch", RuntimeLaunchID: "new-launch",
+				RuntimeHandleIDs: []string{"new-runtime"},
+			}
+			rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+
+			if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+				t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+			}
+			if len(rt.fencedRefs) == 0 {
+				t.Fatal("reserved runtime was not probed")
+			}
+			for _, ref := range rt.fencedRefs {
+				if ref.Generation != "new-launch" {
+					t.Fatalf("runtime probe = %+v, want reserved generation new-launch", ref)
+				}
+			}
+			if st.trackerIntakePending[key] != "" {
+				t.Fatalf("undelivered stopped claim remained pending: %q", st.trackerIntakePending[key])
+			}
+		})
+	}
+}
+
 func TestRestore_OpenCodeWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) {
 	st := newFakeStore()
 	st.sessions["mer-1"] = domain.SessionRecord{

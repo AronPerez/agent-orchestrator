@@ -208,6 +208,11 @@ type TrackerIntakeRecoveryReservation struct {
 	RuntimeLaunchID         string   `json:"runtimeLaunchId,omitempty"`
 	RuntimeHandleIDs        []string `json:"runtimeHandleIds,omitempty"`
 	ControllerPossible      bool     `json:"controllerPossible,omitempty"`
+	// RelaunchPublished distinguishes a fully completed user restore/resume from
+	// an initial launch that merely published its runtime before after-start
+	// prompt delivery. Recovery preserves the former live owner without claiming
+	// that the tracker task itself crossed the delivery boundary.
+	RelaunchPublished bool `json:"relaunchPublished,omitempty"`
 	// DeliveryPossible means the initial task may already have crossed the
 	// runtime/provider boundary. Recovery must preserve the worker and claim;
 	// cleaning it up and retrying could duplicate arbitrary external effects.

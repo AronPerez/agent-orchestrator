@@ -159,6 +159,12 @@ func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing
 			rec := mkLive("mer-1")
 			rec.Metadata.Prompt = "TASK"
 			rec.Metadata.AgentSessionID = ""
+			if tc.override != nil {
+				rec.IssueID = "github:acme/mer#123"
+				key := "mer\x00" + string(rec.IssueID)
+				st.trackerIntakePending[key] = rec.ID
+				st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{WorkspacePath: rec.Metadata.WorkspacePath}
+			}
 			st.sessions[rec.ID] = rec
 			store := &launchOptionsFakeStore{fakeStore: st, options: domain.AgentLaunchOptions{HandoffNote: tc.savedNote}}
 			lcm := &fakeLCM{store: st}
@@ -172,6 +178,13 @@ func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing
 			}
 			if got := lcm.terminated[rec.ID]; got != tc.ended {
 				t.Fatalf("session ended %d times, want %d", got, tc.ended)
+			}
+			if tc.override != nil {
+				reservation := st.trackerIntakeRecovery[rec.ID]
+				if reservation.DeliveryPossible || st.trackerIntakeHandled["mer\x00"+string(rec.IssueID)] != "" {
+					t.Fatalf("switch handoff changed tracker delivery state: recovery=%+v handled=%q",
+						reservation, st.trackerIntakeHandled["mer\x00"+string(rec.IssueID)])
+				}
 			}
 		})
 	}

@@ -2763,6 +2763,21 @@ func (m *Manager) markTrackerIntakeDeliveryPossible(ctx context.Context, id doma
 	return nil
 }
 
+func (m *Manager) markTrackerIntakeRelaunchPublished(ctx context.Context, id domain.SessionID) error {
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load tracker intake recovery after relaunch: %w", err)
+	}
+	if !pending {
+		return fmt.Errorf("mark tracker intake relaunch published for %s: pending claim is missing", id)
+	}
+	reservation.RelaunchPublished = true
+	if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
+		return fmt.Errorf("mark tracker intake relaunch published for %s: %w", id, err)
+	}
+	return nil
+}
+
 func (m *Manager) markTrackerIntakeCapacityReleased(ctx context.Context, id domain.SessionID) error {
 	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
 	if err != nil {
@@ -4715,7 +4730,7 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 			afterStartPrompt = "" // restore native state without replaying a user turn
 		}
 		var beforePrompt func() error
-		if trackerIntakePending && mode == RestoreModeSavedPrompt {
+		if trackerIntakePending && trackerIntakeSavedPrompt {
 			beforePrompt = markTrackerIntakeDelivery
 		}
 		if err := m.deliverAfterStartPromptWithFence(ctx, agent, launchCfg, handle, rec.ID, afterStartPrompt, beforePrompt); err != nil {
@@ -4734,9 +4749,13 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 	if savedNote {
 		m.clearHandoffNote(ctx, rec.ID)
 	}
-	if trackerIntakePending && trackerIntakeDeliveryPossible {
-		if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
-			return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: commit restored tracker intake claim: %w", operation, rec.ID, err))
+	if trackerIntakePending {
+		if trackerIntakeDeliveryPossible {
+			if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+				return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: commit restored tracker intake claim: %w", operation, rec.ID, err))
+			}
+		} else if err := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: publish restored tracker intake owner: %w", operation, rec.ID, err))
 		}
 	}
 	updated, err := m.getRecord(ctx, rec.ID)
