@@ -352,7 +352,12 @@ func TestSendSavedHostRecoveryKeepsTarget(t *testing.T) {
 
 			_, _, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel, "--session", "remote-1",
 				"--steer", "--client-message-id", "delivery-1", "--message", "correct course")
-			if err == nil || !strings.Contains(err.Error(), "ao send --host h_desk") || !strings.Contains(err.Error(), "--recover-only") {
+			if err == nil {
+				t.Fatal("send succeeded, want recovery command")
+			}
+			errText := recoveryErrorText(t, err.Error())
+			if !recoveryArgumentPresent(errText, "--host", "h_desk") ||
+				!strings.Contains(errText, "--recover-only") {
 				t.Fatalf("err = %v, want host-qualified recovery command", err)
 			}
 		})
@@ -382,8 +387,12 @@ func TestSendRawURLRecoveryKeepsTarget(t *testing.T) {
 
 			_, _, err := executeCLI(t, Deps{}, "send", "--url", srv.URL, "--session", "remote-1",
 				"--steer", "--client-message-id", "delivery-1", "--message", "correct course")
-			if err == nil || !strings.Contains(err.Error(), "--url") || !strings.Contains(err.Error(), srv.URL) ||
-				!strings.Contains(err.Error(), "--recover-only") || strings.Contains(err.Error(), "raw-url-secret") {
+			if err == nil {
+				t.Fatal("send succeeded, want recovery command")
+			}
+			errText := recoveryErrorText(t, err.Error())
+			if !recoveryArgumentPresent(errText, "--url", srv.URL) ||
+				!strings.Contains(errText, "--recover-only") || strings.Contains(errText, "raw-url-secret") {
 				t.Fatalf("err = %v, want URL-qualified credential-free recovery command", err)
 			}
 		})
@@ -779,6 +788,16 @@ func TestWindowsRecoveryCommandEncodesArbitraryArguments(t *testing.T) {
 	}
 }
 
+func TestRecoveryErrorTextDecodesEmbeddedWindowsCommand(t *testing.T) {
+	command := (&commandContext{}).steeringRecoveryCommandForOS("windows", "remote-1", "delivery-1")
+	got := recoveryErrorText(t, "request failed; recover without resending it: "+command)
+	for _, want := range []string{"request failed", "'--session' 'remote-1'", "'--client-message-id' 'delivery-1'"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("recoveryErrorText() = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestPOSIXRecoveryCommandQuotesLeadingEqualsHandle(t *testing.T) {
 	c := &commandContext{remote: &remoteTarget{source: "--host", hostID: testSavedHostID}}
 	command := c.steeringRecoveryCommandForOS("linux", "remote-1", "=git")
@@ -802,6 +821,21 @@ func decodePowerShellCommand(t *testing.T, command string) string {
 		units[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
 	}
 	return string(utf16.Decode(units))
+}
+
+func recoveryErrorText(t *testing.T, text string) string {
+	t.Helper()
+	const prefix = "powershell.exe -NoProfile -EncodedCommand "
+	index := strings.Index(text, prefix)
+	if index < 0 {
+		return text
+	}
+	return text[:index] + decodePowerShellCommand(t, text[index:])
+}
+
+func recoveryArgumentPresent(text, name, value string) bool {
+	return strings.Contains(text, name+" "+value) ||
+		strings.Contains(text, "'"+strings.ReplaceAll(name, "'", "''")+"' '"+strings.ReplaceAll(value, "'", "''")+"'")
 }
 
 func TestSavedHostRejectsUnsafeHostIDBeforeRenderingCommands(t *testing.T) {
