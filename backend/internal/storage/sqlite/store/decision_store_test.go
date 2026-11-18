@@ -314,3 +314,25 @@ func TestDecisionBoardWindow(t *testing.T) {
 		t.Fatalf("board after retire/unretire with a 30-minute window = %q, want only active calls", got)
 	}
 }
+
+func TestDecisionStreamsForSessionsReadOnlyThoseStreams(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_000_000).UTC()
+	appendDecision(t, store, decisionRaised("dent_1", "h_a", "dec_1", "w-1", "epic", "Checkout", at), at)
+	appendDecision(t, store, decisionRaised("dent_2", "h_a", "dec_2", "w-1", "epic", "Checkout epic", at.Add(time.Second)), at.Add(time.Second))
+	appendDecision(t, store, decisionRaised("dent_3", "h_b", "dec_3", "w-9", "epic", "Laptop epic", at.Add(2*time.Second)), at.Add(2*time.Second))
+	appendDecision(t, store, decisionRaised("dent_4", "h_a", "dec_4", "w-2", "other", "Other", at.Add(3*time.Second)), at.Add(3*time.Second))
+
+	streams, err := store.ListDecisionStreamsFor(ctx, []domain.SessionID{"epic", "missing"})
+	want := []domain.DecisionStream{
+		{Origin: "h_a", SessionID: "epic", Name: "Checkout epic"},
+		{Origin: "h_b", SessionID: "epic", Name: "Laptop epic"},
+	}
+	if err != nil || !reflect.DeepEqual(streams, want) {
+		t.Fatalf("streams = %+v, err=%v; want %+v", streams, err, want)
+	}
+	if streams, err := store.ListDecisionStreamsFor(ctx, nil); err != nil || len(streams) != 0 {
+		t.Fatalf("no sessions = %+v, %v", streams, err)
+	}
+}

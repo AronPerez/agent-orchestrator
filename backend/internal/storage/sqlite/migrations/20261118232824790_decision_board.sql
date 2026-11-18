@@ -53,6 +53,9 @@ WHERE state = 'done'
   AND strftime('%s', json_extract(body, '$.outcomeAt')) IS NOT NULL;
 
 CREATE INDEX decision_calls_board ON decision_calls (state, retired, outcome_at, raised_at);
+-- The board names only the streams its own calls belong to; this keeps that
+-- lookup to those streams' calls instead of every call ever raised.
+CREATE INDEX decision_calls_by_stream ON decision_calls (stream_session_id, origin);
 
 -- Decision calls deliberately have no local project/session foreign keys (a
 -- synced call may name a project this machine does not have), so the event
@@ -113,6 +116,7 @@ DELETE FROM change_log WHERE event_type = 'decision_updated';
 DROP TRIGGER IF EXISTS "ao_timestamp_dcf25f187eaeaba0d55e2b707e02a02022b204333c92b997abaf23e52feb2dce_insert";
 DROP TRIGGER IF EXISTS "ao_timestamp_dcf25f187eaeaba0d55e2b707e02a02022b204333c92b997abaf23e52feb2dce_update";
 DROP TRIGGER IF EXISTS "ao_timestamp_dcf25f187eaeaba0d55e2b707e02a02022b204333c92b997abaf23e52feb2dce_delete";
+DROP INDEX IF EXISTS decision_calls_by_stream;
 DROP INDEX IF EXISTS decision_calls_board;
 ALTER TABLE decision_calls DROP COLUMN outcome_at;
 

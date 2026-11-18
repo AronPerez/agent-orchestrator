@@ -8,6 +8,7 @@ package gen
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -384,6 +385,64 @@ func (q *Queries) ListDecisionStreams(ctx context.Context) ([]ListDecisionStream
 	items := []ListDecisionStreamsRow{}
 	for rows.Next() {
 		var i ListDecisionStreamsRow
+		if err := rows.Scan(&i.Origin, &i.StreamSessionID, &i.StreamName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDecisionStreamsForSessions = `-- name: ListDecisionStreamsForSessions :many
+SELECT current.origin, current.stream_session_id, current.stream_name
+FROM decision_calls AS current
+WHERE current.stream_session_id IN (/*SLICE:session_ids*/?)
+  AND current.call_id = (
+      SELECT latest.call_id
+      FROM decision_calls AS latest
+      JOIN decision_entries AS raised
+        ON raised.call_id = latest.call_id AND raised.kind = 'raised'
+      WHERE latest.stream_session_id = current.stream_session_id
+        AND latest.origin = current.origin
+      ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
+      LIMIT 1
+  )
+ORDER BY current.origin, current.stream_session_id
+`
+
+type ListDecisionStreamsForSessionsRow struct {
+	Origin          string
+	StreamSessionID string
+	StreamName      string
+}
+
+// The newest recorded name of each stream led by one of these sessions, on any
+// origin. Uses decision_calls_by_stream, so it reads only those streams' calls.
+func (q *Queries) ListDecisionStreamsForSessions(ctx context.Context, sessionIds []string) ([]ListDecisionStreamsForSessionsRow, error) {
+	query := listDecisionStreamsForSessions
+	var queryParams []interface{}
+	if len(sessionIds) > 0 {
+		for _, v := range sessionIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:session_ids*/?", strings.Repeat(",?", len(sessionIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:session_ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDecisionStreamsForSessionsRow{}
+	for rows.Next() {
+		var i ListDecisionStreamsForSessionsRow
 		if err := rows.Scan(&i.Origin, &i.StreamSessionID, &i.StreamName); err != nil {
 			return nil, err
 		}

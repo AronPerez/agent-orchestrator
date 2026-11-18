@@ -77,6 +77,24 @@ WHERE state IN ('needs_you', 'in_progress')
    OR (state = 'done' AND retired = 0 AND outcome_at >= sqlc.arg(done_since))
 ORDER BY raised_at, call_id;
 
+-- name: ListDecisionStreamsForSessions :many
+-- The newest recorded name of each stream led by one of these sessions, on any
+-- origin. Uses decision_calls_by_stream, so it reads only those streams' calls.
+SELECT current.origin, current.stream_session_id, current.stream_name
+FROM decision_calls AS current
+WHERE current.stream_session_id IN (sqlc.slice('session_ids'))
+  AND current.call_id = (
+      SELECT latest.call_id
+      FROM decision_calls AS latest
+      JOIN decision_entries AS raised
+        ON raised.call_id = latest.call_id AND raised.kind = 'raised'
+      WHERE latest.stream_session_id = current.stream_session_id
+        AND latest.origin = current.origin
+      ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
+      LIMIT 1
+  )
+ORDER BY current.origin, current.stream_session_id;
+
 -- name: ListDecisionEntriesAwaitingDelivery :many
 SELECT pending.*
 FROM decision_entries AS pending

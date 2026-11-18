@@ -2,6 +2,7 @@ package decision
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -109,6 +110,39 @@ func TestDecisionSearchLimit(t *testing.T) {
 		want := min(tc.want, 25)
 		if len(calls) != want {
 			t.Fatalf("Search(limit=%d) returned %d calls, want %d", tc.limit, len(calls), want)
+		}
+	}
+}
+
+// fullHistoryStreamsStore refuses the unbounded stream scan so the board must
+// look up only the streams its own calls name.
+type fullHistoryStreamsStore struct{ Store }
+
+func (fullHistoryStreamsStore) ListDecisionStreams(context.Context) ([]domain.DecisionStream, error) {
+	return nil, errors.New("board read scanned every historical stream")
+}
+
+func TestDecisionBoardLooksUpOnlyItsOwnStreams(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	early, err := fixture.service.Raise(ctx, Actor{Session: fixture.epic}, validRaiseInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.Raise(ctx, Actor{Session: fixture.w1}, validRaiseInput()); err != nil {
+		t.Fatal(err)
+	}
+	board := New(Deps{Store: fullHistoryStreamsStore{fixture.store}, HostID: "h_a", Now: func() time.Time { return time.UnixMilli(1_000_000).Add(time.Hour) }})
+	got, err := board.Board(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Calls) != 2 {
+		t.Fatalf("board = %q, want both calls", callIDs(got.Calls))
+	}
+	for _, call := range got.Calls {
+		if call.Raised.StreamSessionID != fixture.epic || call.Raised.StreamName != "Checkout epic" {
+			t.Fatalf("call %s stream = %q/%q, want the epic stream (early=%s)", call.ID, call.Raised.StreamSessionID, call.Raised.StreamName, early.ID)
 		}
 	}
 }

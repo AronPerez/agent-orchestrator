@@ -30,6 +30,7 @@ type Store interface {
 	ListDecisionCallsByState(context.Context, domain.DecisionCallState, int) ([]domain.DecisionCall, error)
 	ListDecisionCallsForBoard(context.Context, time.Time) ([]domain.DecisionCall, error)
 	ListDecisionStreams(context.Context) ([]domain.DecisionStream, error)
+	ListDecisionStreamsFor(context.Context, []domain.SessionID) ([]domain.DecisionStream, error)
 	SearchDecisionCalls(context.Context, string, domain.ProjectID, bool, int) ([]domain.DecisionCall, error)
 }
 
@@ -373,7 +374,7 @@ func (s *Service) Board(ctx context.Context) (Board, error) {
 	if err != nil {
 		return Board{}, err
 	}
-	calls, err = s.withStreams(ctx, calls)
+	calls, err = s.withOwnStreams(ctx, calls)
 	if err != nil {
 		return Board{}, err
 	}
@@ -427,6 +428,32 @@ func (s *Service) Search(ctx context.Context, actor Actor, query string, limit i
 
 func (s *Service) withStreams(ctx context.Context, calls []domain.DecisionCall) ([]domain.DecisionCall, error) {
 	streams, err := s.store.ListDecisionStreams(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return domain.AssignDecisionStreams(calls, streams), nil
+}
+
+// withOwnStreams is withStreams for a bounded list: it looks up only the
+// streams these calls can belong to (their recorded stream, or the owner for a
+// manager's early call), never the whole history.
+func (s *Service) withOwnStreams(ctx context.Context, calls []domain.DecisionCall) ([]domain.DecisionCall, error) {
+	if len(calls) == 0 {
+		return calls, nil
+	}
+	seen := make(map[domain.SessionID]bool, len(calls))
+	sessions := make([]domain.SessionID, 0, len(calls))
+	for _, call := range calls {
+		session := call.Raised.StreamSessionID
+		if session == "" {
+			session = call.Raised.OwnerSessionID
+		}
+		if session != "" && !seen[session] {
+			seen[session] = true
+			sessions = append(sessions, session)
+		}
+	}
+	streams, err := s.store.ListDecisionStreamsFor(ctx, sessions)
 	if err != nil {
 		return nil, err
 	}

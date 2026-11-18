@@ -134,9 +134,9 @@ VALUES ('worker', 'local', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIME
 	if got := outcomes["dec_open"]; got.Valid {
 		t.Fatalf("open call outcome_at = %#v, want NULL", got)
 	}
-	var boardIndex int
-	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'decision_calls_board'`).Scan(&boardIndex); err != nil || boardIndex != 1 {
-		t.Fatalf("decision_calls_board index = %d, %v", boardIndex, err)
+	var boardIndexes int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN ('decision_calls_board', 'decision_calls_by_stream')`).Scan(&boardIndexes); err != nil || boardIndexes != 2 {
+		t.Fatalf("decision board indexes = %d, %v", boardIndexes, err)
 	}
 
 	// Representative existing writers still emit their own event types.
@@ -197,6 +197,9 @@ WHERE event_type = 'decision_updated' AND json_extract(payload, '$.callId') = ?`
 	}
 	if n := decisionBoardEventCount(t, db, `SELECT count(*) FROM pragma_table_info('decision_calls') WHERE name = 'outcome_at'`); n != 0 {
 		t.Fatal("outcome_at survived rollback")
+	}
+	if n := decisionBoardEventCount(t, db, `SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN ('decision_calls_board', 'decision_calls_by_stream')`); n != 0 {
+		t.Fatalf("decision board indexes after rollback = %d", n)
 	}
 	if _, err := db.Exec(`INSERT INTO change_log (project_id, event_type, payload) VALUES ('local', 'decision_updated', '{}')`); err == nil {
 		t.Fatal("change_log accepted decision_updated after rollback")
