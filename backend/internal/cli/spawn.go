@@ -166,6 +166,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			if opts.planFirst && opts.standalone {
 				return usageError{fmt.Errorf("--plan-first requires a registered project")}
 			}
+			if opts.planFirst && strings.TrimSpace(opts.prompt) == "" && strings.TrimSpace(opts.issue) == "" {
+				return usageError{fmt.Errorf("--plan-first requires --prompt or --issue")}
+			}
 			if opts.standalone {
 				if opts.kind == "orchestrator" {
 					return usageError{fmt.Errorf("standalone sessions must be workers")}

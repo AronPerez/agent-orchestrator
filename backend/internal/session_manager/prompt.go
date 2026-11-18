@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 type sessionPromptRole string
@@ -90,7 +92,7 @@ This worker requires a human-approved plan before implementation.
 2. Write a concise Markdown plan to ` + "`plan.md`" + ` in the session artifact directory named in the standing instructions, then run ` + "`ao artifact add plan.md`" + `.
 3. Raise exactly one Decision Ledger call with the registered plan link:
 
-   ` + "`ao decision raise --title \"Approve this plan?\" --context \"Review ao://sessions/$AO_PROJECT_ID/$AO_SESSION_ID/artifacts/plan.md. Choose Approve with changes only with an approval note.\" --option \"Approve :: Start implementation exactly as planned.\" --option \"Approve with changes :: Apply the approval note to the plan, then start implementation.\" --option \"Do not proceed :: Stop without making implementation changes.\" --recommend 1`" + `
+   ` + "`ao decision raise --title \"Approve this plan?\" --context \"Review ao://sessions/$AO_PROJECT_ID/$AO_SESSION_ID/artifacts/plan.md. Choose Approve with changes only with an approval note.\" --option \"Approve :: Start implementation exactly as planned.\" --option \"Approve with changes :: Apply the approval note to the plan, then start implementation.\" --option \"Do not proceed :: Stop without making implementation changes.\" --recommend 1 --ref \"" + domain.PlanFirstDecisionReference + "\"`" + `
 
 4. End the turn while the call is unanswered; do not poll. The ledger will deliver the human's answer to this session.
 5. Only Approve or Approve with changes authorizes implementation. For Approve with changes, apply the approval note and update ` + "`plan.md`" + ` before starting. If that answer has no note, do not guess; raise a replacement call that asks for the missing changes. If the call is dismissed or the answer is Do not proceed, stop without implementation and record the outcome.`

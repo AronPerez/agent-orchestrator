@@ -664,12 +664,20 @@ func TestSpawnPlanFirstSetsPlanFirst(t *testing.T) {
 	writeRunFileFor(t, cfg, srv)
 
 	_, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
-		"spawn", "--project", "demo", "--agent", "codex", "--name", "Plan first", "--plan-first", "--skip-agent-check")
+		"spawn", "--project", "demo", "--agent", "codex", "--name", "Plan first", "--prompt", "Add search", "--plan-first", "--skip-agent-check")
 	if err != nil {
 		t.Fatalf("spawn failed: %v stderr=%s", err, errOut)
 	}
 	if req["planFirst"] != true {
 		t.Fatalf("planFirst = %#v, want true; request=%#v", req["planFirst"], req)
+	}
+}
+
+func TestSpawnPlanFirstRequiresATask(t *testing.T) {
+	_, _, err := executeCLI(t, Deps{},
+		"spawn", "--project", "demo", "--agent", "codex", "--name", "Plan first", "--plan-first", "--skip-agent-check")
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "requires --prompt or --issue") {
+		t.Fatalf("err=%v exit=%d, want task-required usage error", err, ExitCode(err))
 	}
 }
 

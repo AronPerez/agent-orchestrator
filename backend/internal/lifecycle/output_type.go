@@ -60,7 +60,7 @@ func (m *Manager) ReconcileSessionOutputType(ctx context.Context, id domain.Sess
 	if err != nil {
 		return err
 	}
-	next := sessionartifacts.DeriveOutputType(len(prs), len(artifacts))
+	next := sessionartifacts.DeriveOutputType(len(prs), sessionartifacts.DeliverableCount(artifacts, rec.PlanFirstState.Enabled()))
 	if next == rec.OutputType && !backfilled {
 		return nil
 	}

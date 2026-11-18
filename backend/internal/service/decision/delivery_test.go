@@ -355,6 +355,84 @@ func TestDelivererFallsBackOnlyAfterTheMessengerConfirmsExit(t *testing.T) {
 	}
 }
 
+func TestDelivererKeepsPlanApprovalPendingWhileWorkerIsStopped(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	call := answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	messenger := newFakeDecisionMessenger()
+	messenger.errs[fixture.loose] = fmt.Errorf("%w: worker stopped", ErrSessionEnded)
+	deliverer := newTestDeliverer(fixture.store, messenger, "h_a")
+
+	pending, err := deliverer.RunDue(context.Background())
+	if err != nil || pending != 1 || len(messenger.messages) != 0 || getDecisionCall(t, fixture, call.ID).Delivery != domain.DecisionDeliveryPending {
+		t.Fatalf("stopped worker pending=%d messages=%+v err=%v", pending, messenger.messages, err)
+	}
+	record, ok, err := fixture.store.GetSession(context.Background(), fixture.loose)
+	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstPending {
+		t.Fatalf("stopped worker state=%q ok=%v err=%v", record.PlanFirstState, ok, err)
+	}
+
+	pending, err = deliverer.RunDue(context.Background())
+	if err != nil || pending != 0 || len(messenger.messages) != 1 || messenger.messages[0].session != fixture.loose {
+		t.Fatalf("resumed worker pending=%d messages=%+v err=%v", pending, messenger.messages, err)
+	}
+	record, ok, err = fixture.store.GetSession(context.Background(), fixture.loose)
+	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstApproved {
+		t.Fatalf("approved worker state=%q ok=%v err=%v", record.PlanFirstState, ok, err)
+	}
+}
+
+func TestDelivererRequiresANoteToApprovePlanWithChanges(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.w1, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	answeredPlanFirstCall(t, fixture, fixture.w1, 2, "")
+	messenger := newFakeDecisionMessenger()
+	deliverer := newTestDeliverer(fixture.store, messenger, "h_a")
+	if pending, err := deliverer.RunDue(context.Background()); err != nil || pending != 0 {
+		t.Fatalf("deliver missing-note answer: pending=%d err=%v", pending, err)
+	}
+	record, ok, err := fixture.store.GetSession(context.Background(), fixture.w1)
+	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstPending {
+		t.Fatalf("missing-note state=%q ok=%v err=%v", record.PlanFirstState, ok, err)
+	}
+
+	second := answeredPlanFirstCall(t, fixture, fixture.w1, 2, "Keep the existing API shape.")
+	if pending, err := deliverer.RunDue(context.Background()); err != nil || pending != 0 {
+		t.Fatalf("deliver noted answer: pending=%d err=%v", pending, err)
+	}
+	record, ok, err = fixture.store.GetSession(context.Background(), fixture.w1)
+	if err != nil || !ok || record.PlanFirstState != domain.PlanFirstApproved {
+		t.Fatalf("noted state=%q ok=%v err=%v second=%s", record.PlanFirstState, ok, err, second.ID)
+	}
+}
+
+func answeredPlanFirstCall(t *testing.T, fixture decisionServiceFixture, session domain.SessionID, option int, note string) domain.DecisionCall {
+	t.Helper()
+	input := validRaiseInput()
+	input.Title = "Approve this plan?"
+	input.Reference = domain.PlanFirstDecisionReference
+	input.Options = []domain.DecisionOption{
+		{Label: "Approve", Consequence: "Start implementation exactly as planned.", Recommended: true},
+		{Label: "Approve with changes", Consequence: "Apply the approval note, then start implementation."},
+		{Label: "Do not proceed", Consequence: "Stop without implementation changes."},
+	}
+	call, err := fixture.service.Raise(context.Background(), Actor{Session: session}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err = fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, call.ID, AnswerInput{
+		Choice: domain.DecisionChoiceOption, Option: option, Note: note,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return call
+}
+
 func TestFallbackRecipientCanRecordOutcomeWhileDeliveryIsInFlight(t *testing.T) {
 	fixture := newDecisionService(t)
 	call := answeredCall(t, fixture, fixture.w1)

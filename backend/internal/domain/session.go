@@ -86,6 +86,27 @@ const (
 	SessionOutputPRAndArtifact SessionOutputType = "pr_artifact"
 )
 
+// PlanFirstState is the durable state of a worker's opt-in plan approval gate.
+// Empty means the session was not spawned with the gate.
+type PlanFirstState string
+
+// PlanFirstPending, PlanFirstApproved, and PlanFirstDeclined are the durable
+// outcomes that keep or release automatic work for a gated session.
+const (
+	PlanFirstPending  PlanFirstState = "pending"
+	PlanFirstApproved PlanFirstState = "approved"
+	PlanFirstDeclined PlanFirstState = "declined"
+)
+
+// Enabled reports whether this session was spawned with the plan-first gate.
+func (s PlanFirstState) Enabled() bool { return s != "" }
+
+// BlocksAutomation reports whether automatic implementation nudges must wait.
+// Unknown non-empty values fail closed instead of bypassing the gate.
+func (s PlanFirstState) BlocksAutomation() bool {
+	return s != "" && s != PlanFirstApproved
+}
+
 // RequestedOutput is the deliverable a spawn asks for. Empty is the ordinary
 // task flow; it does not change derived status or the Kanban column.
 type RequestedOutput string
@@ -486,6 +507,7 @@ type SessionRecord struct {
 	TerminateOnPRMerge bool              `json:"terminateOnPrMerge"`
 	AutoInjectReview   bool              `json:"autoInjectReview"`
 	AutoInjectCI       bool              `json:"autoInjectCI"`
+	PlanFirstState     PlanFirstState    `json:"-"`
 	OutputType         SessionOutputType `json:"outputType" enum:"none,pr,artifact,pr_artifact"`
 	// RequestedOutput is the deliverable requested at spawn. It is fixed after
 	// insertion so restore and agent switching rebuild the same worker prompt.

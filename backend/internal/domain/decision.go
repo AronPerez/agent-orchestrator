@@ -27,6 +27,9 @@ const (
 	MaxDecisionReference   = 64
 	MaxDecisionNote        = 1000
 	MaxDecisionOutcome     = 300
+	// PlanFirstDecisionReference identifies the one ledger call that can release
+	// a session's plan-first implementation gate.
+	PlanFirstDecisionReference = "plan-first"
 )
 
 // DecisionEntryKind identifies one fact appended to the decision ledger.

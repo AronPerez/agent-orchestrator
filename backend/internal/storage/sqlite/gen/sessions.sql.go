@@ -242,7 +242,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, reviewer_agent_config, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    artifact_dir, session_output_type,
+    artifact_dir, session_output_type, plan_first_state,
     latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
@@ -298,6 +298,7 @@ type GetSessionRow struct {
 	BrowserCapabilityVerifier        string
 	ArtifactDir                      string
 	SessionOutputType                string
+	PlanFirstState                   string
 	LatestUserPrompt                 string
 	LatestUserPromptAt               sql.NullTime
 	LatestInteractionAt              sql.NullTime
@@ -391,6 +392,7 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.BrowserCapabilityVerifier,
 		&i.ArtifactDir,
 		&i.SessionOutputType,
+		&i.PlanFirstState,
 		&i.LatestUserPrompt,
 		&i.LatestUserPromptAt,
 		&i.LatestInteractionAt,
@@ -451,7 +453,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, reviewer_agent_config, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    artifact_dir, session_output_type,
+    artifact_dir, session_output_type, plan_first_state,
     latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
@@ -507,6 +509,7 @@ type GetSessionByAutomationRunIDRow struct {
 	BrowserCapabilityVerifier        string
 	ArtifactDir                      string
 	SessionOutputType                string
+	PlanFirstState                   string
 	LatestUserPrompt                 string
 	LatestUserPromptAt               sql.NullTime
 	LatestInteractionAt              sql.NullTime
@@ -600,6 +603,7 @@ func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRun
 		&i.BrowserCapabilityVerifier,
 		&i.ArtifactDir,
 		&i.SessionOutputType,
+		&i.PlanFirstState,
 		&i.LatestUserPrompt,
 		&i.LatestUserPromptAt,
 		&i.LatestInteractionAt,
@@ -673,14 +677,14 @@ INSERT INTO sessions (
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
-    artifact_dir, session_output_type,
+    artifact_dir, session_output_type, plan_first_state,
     session_mode, provider_conversation_id, controller_generation, model, effort, session_permissions,
     requested_output, goal, timebox_deadline_at, contract_outcome,
     created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
     provision_state, provision_error, is_task_preparation, automation_run_id, automation_launch_completed,
     client_request_id, client_request_hash, parent_session_id, import_source, display_name_explicit
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -734,6 +738,7 @@ type InsertSessionParams struct {
 	BrowserCapabilityVerifier        string
 	ArtifactDir                      string
 	SessionOutputType                string
+	PlanFirstState                   string
 	SessionMode                      domain.SessionMode
 	ProviderConversationID           string
 	ControllerGeneration             string
@@ -807,6 +812,7 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.BrowserCapabilityVerifier,
 		arg.ArtifactDir,
 		arg.SessionOutputType,
+		arg.PlanFirstState,
 		arg.SessionMode,
 		arg.ProviderConversationID,
 		arg.ControllerGeneration,
@@ -846,7 +852,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, reviewer_agent_config, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    artifact_dir, session_output_type,
+    artifact_dir, session_output_type, plan_first_state,
     latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
@@ -902,6 +908,7 @@ type ListAllSessionsRow struct {
 	BrowserCapabilityVerifier        string
 	ArtifactDir                      string
 	SessionOutputType                string
+	PlanFirstState                   string
 	LatestUserPrompt                 string
 	LatestUserPromptAt               sql.NullTime
 	LatestInteractionAt              sql.NullTime
@@ -1001,6 +1008,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.BrowserCapabilityVerifier,
 			&i.ArtifactDir,
 			&i.SessionOutputType,
+			&i.PlanFirstState,
 			&i.LatestUserPrompt,
 			&i.LatestUserPromptAt,
 			&i.LatestInteractionAt,
@@ -1163,7 +1171,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, reviewer_agent_config, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    artifact_dir, session_output_type,
+    artifact_dir, session_output_type, plan_first_state,
     latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
@@ -1219,6 +1227,7 @@ type ListSessionsByProjectRow struct {
 	BrowserCapabilityVerifier        string
 	ArtifactDir                      string
 	SessionOutputType                string
+	PlanFirstState                   string
 	LatestUserPrompt                 string
 	LatestUserPromptAt               sql.NullTime
 	LatestInteractionAt              sql.NullTime
@@ -1318,6 +1327,7 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.P
 			&i.BrowserCapabilityVerifier,
 			&i.ArtifactDir,
 			&i.SessionOutputType,
+			&i.PlanFirstState,
 			&i.LatestUserPrompt,
 			&i.LatestUserPromptAt,
 			&i.LatestInteractionAt,
@@ -1581,12 +1591,13 @@ UPDATE sessions SET
     updated_at = ?19,
     auto_inject_review = ?20,
     auto_inject_ci = ?21,
-    provision_state = ?22,
+    plan_first_state = ?22,
+    provision_state = ?23,
     provision_error = '',
-    client_request_id = ?23,
-    client_request_hash = ?24,
+    client_request_id = ?24,
+    client_request_hash = ?25,
     is_task_preparation = 0
-WHERE id = ?25 AND is_task_preparation = 1
+WHERE id = ?26 AND is_task_preparation = 1
 `
 
 type PromoteTaskPreparationParams struct {
@@ -1611,6 +1622,7 @@ type PromoteTaskPreparationParams struct {
 	UpdatedAt           time.Time
 	AutoInjectReview    bool
 	AutoInjectCI        bool
+	PlanFirstState      string
 	ProvisionState      domain.SessionProvisionState
 	ClientRequestID     string
 	ClientRequestHash   string
@@ -1642,6 +1654,7 @@ func (q *Queries) PromoteTaskPreparation(ctx context.Context, arg PromoteTaskPre
 		arg.UpdatedAt,
 		arg.AutoInjectReview,
 		arg.AutoInjectCI,
+		arg.PlanFirstState,
 		arg.ProvisionState,
 		arg.ClientRequestID,
 		arg.ClientRequestHash,
@@ -2107,6 +2120,27 @@ func (q *Queries) SetSessionPinned(ctx context.Context, arg SetSessionPinnedPara
 		arg.UpdatedAt,
 		arg.ID,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setSessionPlanFirstState = `-- name: SetSessionPlanFirstState :execrows
+UPDATE sessions
+SET plan_first_state = ?1
+WHERE id = ?2
+`
+
+type SetSessionPlanFirstStateParams struct {
+	PlanFirstState string
+	ID             domain.SessionID
+}
+
+// Narrow gate transition: generic session updates deliberately leave this
+// durable approval fact untouched.
+func (q *Queries) SetSessionPlanFirstState(ctx context.Context, arg SetSessionPlanFirstStateParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setSessionPlanFirstState, arg.PlanFirstState, arg.ID)
 	if err != nil {
 		return 0, err
 	}

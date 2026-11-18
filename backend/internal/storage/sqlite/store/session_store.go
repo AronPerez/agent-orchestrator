@@ -328,6 +328,7 @@ func (s *Store) PromoteTaskPreparation(ctx context.Context, id domain.SessionID,
 		UpdatedAt:           rec.UpdatedAt,
 		AutoInjectReview:    rec.AutoInjectReview,
 		AutoInjectCI:        rec.AutoInjectCI,
+		PlanFirstState:      string(rec.PlanFirstState),
 		ProvisionState:      rec.ProvisionState.WithDefault(),
 		ClientRequestID:     rec.ClientRequestID,
 		ClientRequestHash:   rec.ClientRequestHash,
@@ -514,6 +515,22 @@ func (s *Store) UpdateSessionArtifactOutput(ctx context.Context, id domain.Sessi
 	})
 	if err != nil {
 		return false, fmt.Errorf("update session artifact output for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionPlanFirstState transitions only the durable plan-approval gate.
+// Generic session writes intentionally omit this column so stale lifecycle
+// snapshots cannot put an approved worker back behind the gate.
+func (s *Store) SetSessionPlanFirstState(ctx context.Context, id domain.SessionID, state domain.PlanFirstState) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionPlanFirstState(ctx, gen.SetSessionPlanFirstStateParams{
+		PlanFirstState: string(state),
+		ID:             id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set session %s plan-first state: %w", id, err)
 	}
 	return rows > 0, nil
 }
@@ -1308,6 +1325,7 @@ func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 		TerminateOnPRMerge:        row.TerminateOnPRMerge,
 		AutoInjectReview:          row.AutoInjectReview,
 		AutoInjectCI:              row.AutoInjectCI,
+		PlanFirstState:            domain.PlanFirstState(row.PlanFirstState),
 		OutputType:                normalizeSessionOutputType(domain.SessionOutputType(row.SessionOutputType)),
 		Goal:                      row.Goal,
 		TimeboxDeadlineAt:         nullTimeToTimePtr(row.TimeboxDeadlineAt),
@@ -1475,6 +1493,7 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		TerminateOnPRMerge:               rec.TerminateOnPRMerge,
 		AutoInjectReview:                 rec.AutoInjectReview,
 		AutoInjectCI:                     rec.AutoInjectCI,
+		PlanFirstState:                   string(rec.PlanFirstState),
 		CleanupGeneration:                rec.CleanupGeneration,
 		BrowserCapabilityVerifier:        rec.Metadata.BrowserCapabilityVerifier,
 		ArtifactDir:                      rec.Metadata.ArtifactDir,

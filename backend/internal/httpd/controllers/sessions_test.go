@@ -2065,6 +2065,17 @@ func TestSessionsAPI_SpawnRejectsPlanFirstForUnsupportedSessions(t *testing.T) {
 	}
 }
 
+func TestSessionsAPI_SpawnRejectsPlanFirstWithoutATask(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions",
+		`{"projectId":"ao","kind":"worker","harness":"codex","planFirst":true}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_PLAN_FIRST")
+	if svc.lastSpawn.PlanFirst {
+		t.Fatalf("rejected request reached the service: %#v", svc.lastSpawn)
+	}
+}
+
 func TestSessionsAPI_SpawnAndDelegatePassWorkerContract(t *testing.T) {
 	svc := newFakeSessionService()
 	srv := newSessionTestServer(t, svc)

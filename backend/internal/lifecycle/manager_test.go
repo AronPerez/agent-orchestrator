@@ -2500,6 +2500,39 @@ func TestPRObservation_CIFailingNudgesAgentWithLogs(t *testing.T) {
 	}
 }
 
+func TestPRObservation_HoldsClaimedPRNudgesUntilPlanApproval(t *testing.T) {
+	m, st, msg := newManager()
+	rec := working("mer-1")
+	rec.PlanFirstState = domain.PlanFirstPending
+	st.sessions[rec.ID] = rec
+	st.prs[rec.ID] = []domain.PullRequest{{URL: "pr1"}}
+	st.comments["pr1"] = []domain.PullRequestComment{{
+		ID: "review-1", Author: "reviewer", Body: "fix this", AutoInjectReview: true,
+	}}
+	o := ports.PRObservation{
+		Fetched: true, URL: "pr1", CI: domain.CIFailing,
+		Checks: []ports.PRCheckObservation{{Name: "build", CommitHash: "c1", Status: domain.PRCheckFailed, LogTail: "boom"}},
+		Review: domain.ReviewChangesRequest,
+	}
+
+	if err := m.ApplyPRObservation(ctx, rec.ID, o); err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.msgs) != 0 || len(st.signatures) != 0 {
+		t.Fatalf("unapproved plan consumed PR nudges: messages=%v signatures=%v", msg.msgs, st.signatures)
+	}
+
+	rec = st.sessions[rec.ID]
+	rec.PlanFirstState = domain.PlanFirstApproved
+	st.sessions[rec.ID] = rec
+	if err := m.ApplyPRObservation(ctx, rec.ID, o); err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.msgs) != 2 || !strings.Contains(msg.msgs[0], "boom") || !strings.Contains(msg.msgs[1], "fix this") {
+		t.Fatalf("approved plan did not release CI and review nudges: %v", msg.msgs)
+	}
+}
+
 func TestPRObservation_CancelledChecksDoNotNudge(t *testing.T) {
 	m, st, msg := newManager()
 	st.sessions["mer-1"] = working("mer-1")

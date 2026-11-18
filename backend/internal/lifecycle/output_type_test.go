@@ -44,6 +44,39 @@ func TestReconcileSessionOutputType_ArtifactFilesPersistArtifactOutput(t *testin
 	}
 }
 
+func TestReconcileSessionOutputType_PlanFirstPlanIsNotADeliverable(t *testing.T) {
+	for _, state := range []domain.PlanFirstState{domain.PlanFirstPending, domain.PlanFirstApproved} {
+		t.Run(string(state), func(t *testing.T) {
+			m, st, _ := newManager()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "plan.md"), []byte("# Plan"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			st.sessions["mer-1"] = domain.SessionRecord{
+				ID: "mer-1", PlanFirstState: state,
+				Metadata: domain.SessionMetadata{ArtifactDir: dir},
+			}
+
+			if err := m.ReconcileSessionOutputType(ctx, "mer-1"); err != nil {
+				t.Fatal(err)
+			}
+			if got := st.sessions["mer-1"].OutputType; got != domain.SessionOutputNone {
+				t.Fatalf("plan-only outputType = %q, want %q", got, domain.SessionOutputNone)
+			}
+
+			if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte("# Report"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.ReconcileSessionOutputType(ctx, "mer-1"); err != nil {
+				t.Fatal(err)
+			}
+			if got := st.sessions["mer-1"].OutputType; got != domain.SessionOutputArtifact {
+				t.Fatalf("deliverable outputType = %q, want %q", got, domain.SessionOutputArtifact)
+			}
+		})
+	}
+}
+
 func TestReconcileSessionOutputType_PRAndArtifactFilesCombine(t *testing.T) {
 	m, st, _ := newManager()
 	dir := t.TempDir()

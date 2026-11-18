@@ -6616,7 +6616,15 @@ func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now t
 		AutoReviewEnabled: projectConfig.AutoReview,
 		AutoInjectReview:  true,
 		AutoInjectCI:      true,
+		PlanFirstState:    planFirstState(cfg.PlanFirst),
 	}
+}
+
+func planFirstState(enabled bool) domain.PlanFirstState {
+	if enabled {
+		return domain.PlanFirstPending
+	}
+	return ""
 }
 
 func validateSpawnContract(cfg ports.SpawnConfig) error {

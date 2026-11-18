@@ -441,3 +441,17 @@ func DeriveOutputType(prCount, artifactFileCount int) domain.SessionOutputType {
 		return domain.SessionOutputNone
 	}
 }
+
+// DeliverableCount counts files that advance a session's delivery lifecycle.
+// A plan-first worker's registered root plan is approval evidence, not task
+// output; it remains listed and readable while being excluded from this count.
+func DeliverableCount(files []domain.SessionArtifactFile, planFirst bool) int {
+	count := 0
+	for _, file := range files {
+		if planFirst && file.Path == "plan.md" {
+			continue
+		}
+		count++
+	}
+	return count
+}

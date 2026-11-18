@@ -1932,11 +1932,12 @@ func (s *Service) toSessionWithFactsCached(ctx context.Context, rec domain.Sessi
 		artifactFiles = nil
 	}
 	s.shareLinks.Apply(rec.ID, artifactFiles)
-	if backfilledArtifactDir || (len(artifactFiles) > 0) != rec.OutputType.HasArtifact() {
+	deliverableArtifacts := sessionartifacts.DeliverableCount(artifactFiles, rec.PlanFirstState.Enabled())
+	if backfilledArtifactDir || (deliverableArtifacts > 0) != rec.OutputType.HasArtifact() {
 		// Reflect the repair in this response's OutputType too, not just
 		// future ones: the persisted write below lands asynchronously
 		// relative to this read.
-		rec.OutputType = sessionartifacts.DeriveOutputType(len(prs), len(artifactFiles))
+		rec.OutputType = sessionartifacts.DeriveOutputType(len(prs), deliverableArtifacts)
 		if s.outputTypeReconciler != nil {
 			if err := s.outputTypeReconciler.ReconcileSessionOutputType(ctx, rec.ID); err != nil && s.logger != nil {
 				s.logger.Warn("reconcile output type on read", "session", rec.ID, "err", err)

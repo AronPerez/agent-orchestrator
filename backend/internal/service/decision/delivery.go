@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type FallbackOutcomeAuthorizer interface {
 type DeliveryStore interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
 	ListSessions(context.Context, domain.ProjectID) ([]domain.SessionRecord, error)
+	SetSessionPlanFirstState(context.Context, domain.SessionID, domain.PlanFirstState) (bool, error)
 	AppendDecisionEntry(context.Context, domain.DecisionEntry, time.Time) (domain.DecisionEntry, domain.DecisionCall, error)
 	ListDecisionCallsAwaitingDelivery(context.Context, string) ([]domain.DecisionCall, error)
 }
@@ -186,11 +188,20 @@ func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) (bool
 		err = d.messenger.DeliverAsPerson(ctx, owner.ID, DeliveryMessage(call, false), d.now().UTC())
 		switch {
 		case err == nil:
+			if !d.applyPlanFirstAnswer(ctx, owner, call) {
+				return true, true
+			}
 			return !d.record(ctx, call, domain.DecisionDeliveredPayload{
 				ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSent,
 				SessionID: owner.ID, SessionName: sessionName(owner),
 			}), true
 		case errors.Is(err, ErrSessionEnded):
+			// A stopped plan-first worker is resumable. Keep the answer pending
+			// instead of delivering it elsewhere (or recording no_session), so
+			// the worker receives the approval after it resumes.
+			if owner.PlanFirstState.BlocksAutomation() && isPlanFirstCall(call) {
+				return true, false
+			}
 			ended = true
 		default:
 			d.logFailure(call.ID, "send to owner", err)
@@ -201,6 +212,38 @@ func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) (bool
 		return true, false
 	}
 	return d.deliverFallback(ctx, call)
+}
+
+func (d *Deliverer) applyPlanFirstAnswer(ctx context.Context, owner domain.SessionRecord, call domain.DecisionCall) bool {
+	if !owner.PlanFirstState.Enabled() || !isPlanFirstCall(call) {
+		return true
+	}
+	next := domain.PlanFirstDeclined
+	if call.StandingKind == domain.DecisionKindAnswered && call.Choice == domain.DecisionChoiceOption &&
+		(call.Option == 1 || (call.Option == 2 && strings.TrimSpace(call.Note) != "")) {
+		next = domain.PlanFirstApproved
+	} else if call.StandingKind == domain.DecisionKindAnswered && call.Choice == domain.DecisionChoiceOption && call.Option == 2 {
+		next = domain.PlanFirstPending
+	}
+	updated, err := d.store.SetSessionPlanFirstState(ctx, owner.ID, next)
+	if err != nil {
+		d.logFailure(call.ID, "update plan-first gate", err)
+		return false
+	}
+	if !updated {
+		d.logFailure(call.ID, "update plan-first gate", errors.New("owner session no longer exists"))
+		return false
+	}
+	return true
+}
+
+func isPlanFirstCall(call domain.DecisionCall) bool {
+	if call.Raised.Reference != domain.PlanFirstDecisionReference || call.Raised.Title != "Approve this plan?" || len(call.Raised.Options) != 3 {
+		return false
+	}
+	return call.Raised.Options[0].Label == "Approve" &&
+		call.Raised.Options[1].Label == "Approve with changes" &&
+		call.Raised.Options[2].Label == "Do not proceed"
 }
 
 func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCall) (bool, bool) {

@@ -504,6 +504,7 @@ func TestBuildTaskPrompt_PlanFirstGate(t *testing.T) {
 		"ao://sessions/$AO_PROJECT_ID/$AO_SESSION_ID/artifacts/plan.md",
 		"ao decision raise",
 		`--title "Approve this plan?"`,
+		`--ref "plan-first"`,
 		"Approve with changes",
 		"Do not proceed",
 		"End the turn while the call is unanswered",

@@ -400,6 +400,10 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_PLAN_FIRST", "planFirst is supported only for worker sessions in registered projects", nil)
 		return
 	}
+	if in.PlanFirst && strings.TrimSpace(in.Prompt) == "" && strings.TrimSpace(string(in.IssueID)) == "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_PLAN_FIRST", "planFirst requires a prompt or issueId", nil)
+		return
+	}
 	goal, timebox, err := validateWorkerContract(in.Goal, in.TimeboxSeconds, in.Kind, in.ProjectID)
 	if err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_WORKER_CONTRACT", err.Error(), nil)

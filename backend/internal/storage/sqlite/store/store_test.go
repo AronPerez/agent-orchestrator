@@ -59,6 +59,49 @@ func TestSessionCreateAllowsFakeHarness(t *testing.T) {
 	}
 }
 
+func TestSessionPlanFirstStateRoundTripsAndTransitionsNarrowly(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec := sampleRecord("mer")
+	rec.PlanFirstState = domain.PlanFirstPending
+	created, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.PlanFirstState != domain.PlanFirstPending {
+		t.Fatalf("created state = %q", created.PlanFirstState)
+	}
+	if updated, err := s.SetSessionPlanFirstState(ctx, created.ID, domain.PlanFirstApproved); err != nil || !updated {
+		t.Fatalf("transition: updated=%v err=%v", updated, err)
+	}
+	got, ok, err := s.GetSession(ctx, created.ID)
+	if err != nil || !ok || got.PlanFirstState != domain.PlanFirstApproved {
+		t.Fatalf("persisted state=%q ok=%v err=%v", got.PlanFirstState, ok, err)
+	}
+}
+
+func TestPromoteTaskPreparationPersistsPlanFirstState(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	prepared := sampleRecord("mer")
+	prepared.IsTaskPreparation = true
+	prepared, err := s.CreateSession(ctx, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := sampleRecord("mer")
+	visible.PlanFirstState = domain.PlanFirstPending
+	if promoted, err := s.PromoteTaskPreparation(ctx, prepared.ID, visible); err != nil || !promoted {
+		t.Fatalf("promote: promoted=%v err=%v", promoted, err)
+	}
+	got, ok, err := s.GetSession(ctx, prepared.ID)
+	if err != nil || !ok || got.PlanFirstState != domain.PlanFirstPending {
+		t.Fatalf("promoted state=%q ok=%v err=%v", got.PlanFirstState, ok, err)
+	}
+}
+
 func TestSubagentFactsPersistWithActivityProjection(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
