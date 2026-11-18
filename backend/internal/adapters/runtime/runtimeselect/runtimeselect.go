@@ -19,6 +19,7 @@ import (
 // layer can open a Stream against the selected runtime.
 type Runtime interface {
 	ports.Runtime // Create, Destroy, IsAlive
+	ports.RuntimeLaunchCandidateProvider
 	ports.RuntimeChildInspector
 	ports.RuntimeProcessRootInspector
 	ports.FencedRuntimeProber

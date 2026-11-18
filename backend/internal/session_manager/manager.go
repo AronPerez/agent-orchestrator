@@ -371,6 +371,9 @@ type Store interface {
 	CreateTrackerIntakeSession(ctx context.Context, rec domain.SessionRecord, limits domain.AutomatedSessionLimits) (domain.SessionRecord, error)
 	CommitTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
 	ReconcileTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
+	ReserveTrackerIntakeRecovery(ctx context.Context, id domain.SessionID, reservation domain.TrackerIntakeRecoveryReservation) error
+	GetPendingTrackerIntakeRecovery(ctx context.Context, id domain.SessionID) (domain.TrackerIntakeRecoveryReservation, bool, error)
+	ReleaseTrackerIntakeSession(ctx context.Context, id domain.SessionID) error
 	CreateAutomationSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error)
 	CreateClientRequestSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error)
 	GetSessionByClientRequestID(ctx context.Context, id string) (domain.SessionRecord, bool, error)
@@ -1589,6 +1592,12 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false, false)
 		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrWorkspaceProvision, err)
 	}
+	if cfg.TrackerIntakeLimits != nil {
+		if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspace(ws)); err != nil {
+			m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false, false)
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+	}
 
 	// CLI agents receive the prompt as text and cannot consume inline binary
 	// data, so any pasted/dropped images are written into the worktree and
@@ -1783,25 +1792,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: %w", id, err)
 	}
 	defer releaseCodexAdmission()
-	started := BeginSpawnStep(ctx, SpawnStepAgentStart)
-	handle, err := m.runtime.Create(ctx, ports.RuntimeConfig{
-		SessionID:     id,
-		WorkspacePath: ws.Path,
-		Argv:          argv,
-		Env:           env,
-	})
-	started(err)
-	if err != nil {
-		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true, false)
-		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrRuntimeCreate, agentlaunch.RedactError(err, project.Config.Env))
-	}
-
 	metadata := domain.SessionMetadata{
 		Permissions:               rec.Metadata.Permissions,
 		Branch:                    ws.Branch,
 		WorkspacePath:             ws.Path,
 		WorkspaceRepoPath:         ws.RepoPath,
-		RuntimeHandleID:           handle.ID,
 		RuntimeLaunchID:           launchID,
 		Prompt:                    prompt,
 		LatestUserPrompt:          prompt,
@@ -1820,6 +1815,38 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	if projectKind == domain.ProjectKindSingleRepo {
 		metadata.DiffBaseSHA, metadata.DiffBaseRef = resolveSpawnDiffBase(ctx, ws.Path, ws.BaseRef)
 	}
+	runtimeCfg := ports.RuntimeConfig{
+		SessionID:     id,
+		WorkspacePath: ws.Path,
+		Argv:          argv,
+		Env:           env,
+	}
+	if cfg.TrackerIntakeLimits != nil {
+		if err := m.reserveTrackerIntakeRuntime(ctx, id, ws, launchID, runtimeCfg); err != nil {
+			m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true, false)
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+	}
+	started := BeginSpawnStep(ctx, SpawnStepAgentStart)
+	handle, err := m.runtime.Create(ctx, runtimeCfg)
+	started(err)
+	if err != nil {
+		if cfg.TrackerIntakeLimits != nil {
+			if possibleHandle, unresolved := unresolvedRuntimeCreateEffect(err); unresolved {
+				metadata.RuntimeHandleID = possibleHandle.ID
+				if persistErr := m.preserveUncertainTrackerIntakeRuntime(ctx, rec, metadata); persistErr != nil {
+					err = errors.Join(err, persistErr)
+				}
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrRuntimeCreate, agentlaunch.RedactError(err, project.Config.Env))
+			}
+			if clearErr := m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspace(ws)); clearErr != nil {
+				err = errors.Join(err, clearErr)
+			}
+		}
+		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true, false)
+		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrRuntimeCreate, agentlaunch.RedactError(err, project.Config.Env))
+	}
+	metadata.RuntimeHandleID = handle.ID
 	if cfg.AutomationRunID != nil {
 		rec.Metadata = metadata
 		rec.UpdatedAt = m.clock()
@@ -1832,14 +1859,48 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	}
 	if err := m.lcm.MarkSpawned(ctx, id, metadata); err != nil {
 		runtimeDestroyed := m.destroySpawnRuntimeAfterFailure(ctx, handle)
-		m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, rec, ws, workspaceProject, runtimeDestroyed)
+		if cfg.TrackerIntakeLimits != nil && !runtimeDestroyed {
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+		workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, rec, ws, workspaceProject, runtimeDestroyed)
+		if cfg.TrackerIntakeLimits != nil {
+			if !workspaceDestroyed {
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+			}
+			if confirmErr := m.confirmTrackerIntakeCleanup(ctx, id); confirmErr != nil {
+				err = errors.Join(err, confirmErr)
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+			}
+			m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
+			if releaseErr := m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id); releaseErr != nil {
+				err = errors.Join(err, releaseErr)
+			}
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
 		m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
 		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
 	}
 	if delivery == ports.PromptDeliveryAfterStart {
 		if err := m.deliverAfterStartPrompt(ctx, agent, launchCfg, handle, id, afterStartPrompt); err != nil {
 			runtimeDestroyed := m.destroySpawnRuntimeAfterFailure(ctx, handle)
+			if cfg.TrackerIntakeLimits != nil && !runtimeDestroyed {
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
+			}
 			workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, rec, ws, workspaceProject, runtimeDestroyed)
+			if cfg.TrackerIntakeLimits != nil {
+				if !workspaceDestroyed {
+					return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
+				}
+				if confirmErr := m.confirmTrackerIntakeCleanup(ctx, id); confirmErr != nil {
+					err = errors.Join(err, confirmErr)
+					return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
+				}
+				m.markSpawnFailedTerminatedAfterFailure(ctx, id, true)
+				if releaseErr := m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id); releaseErr != nil {
+					err = errors.Join(err, releaseErr)
+				}
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
+			}
 			m.markSpawnFailedTerminatedAfterFailure(ctx, id, runtimeDestroyed && workspaceDestroyed)
 			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
 		}
@@ -2541,6 +2602,96 @@ func (m *Manager) destroySpawnRuntimeAfterFailure(ctx context.Context, handle po
 	cleanupCtx, cancel := spawnRollbackContext(ctx)
 	defer cancel()
 	return m.runtime.Destroy(cleanupCtx, handle) == nil
+}
+
+func unresolvedRuntimeCreateEffect(err error) (ports.RuntimeHandle, bool) {
+	var effect ports.RuntimeEffectError
+	if !errors.As(err, &effect) || effect.EffectOutcome() == ports.RuntimeEffectNone ||
+		effect.CleanupOutcome() == ports.RuntimeCleanupSucceeded {
+		return ports.RuntimeHandle{}, false
+	}
+	return effect.PossibleHandle(), true
+}
+
+func (m *Manager) reserveTrackerIntakeRuntime(
+	ctx context.Context,
+	id domain.SessionID,
+	ws ports.WorkspaceInfo,
+	launchID string,
+	cfg ports.RuntimeConfig,
+) error {
+	provider, ok := m.runtime.(ports.RuntimeLaunchCandidateProvider)
+	if !ok {
+		return errors.New("runtime does not expose stable launch candidates")
+	}
+	handles, err := provider.LaunchCandidates(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve runtime launch candidates: %w", err)
+	}
+	seen := make(map[string]struct{}, len(handles))
+	ids := make([]string, 0, len(handles))
+	for _, handle := range handles {
+		handleID := strings.TrimSpace(handle.ID)
+		if handleID == "" {
+			continue
+		}
+		if _, exists := seen[handleID]; exists {
+			continue
+		}
+		seen[handleID] = struct{}{}
+		ids = append(ids, handleID)
+	}
+	if len(ids) == 0 {
+		return errors.New("runtime returned no stable launch candidates")
+	}
+	reservation := trackerIntakeRecoveryForWorkspace(ws)
+	reservation.RuntimeLaunchID = strings.TrimSpace(launchID)
+	reservation.RuntimeHandleIDs = ids
+	if reservation.RuntimeLaunchID == "" {
+		return errors.New("runtime launch generation is empty")
+	}
+	return m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation)
+}
+
+func (m *Manager) releaseTrackerIntakeAfterConfirmedCleanup(ctx context.Context, id domain.SessionID) error {
+	cleanupCtx, cancel := spawnRollbackContext(ctx)
+	defer cancel()
+	if err := m.store.ReleaseTrackerIntakeSession(cleanupCtx, id); err != nil {
+		return fmt.Errorf("release tracker intake claim after confirmed cleanup: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) confirmTrackerIntakeCleanup(ctx context.Context, id domain.SessionID) error {
+	cleanupCtx, cancel := spawnRollbackContext(ctx)
+	defer cancel()
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(cleanupCtx, id)
+	if err != nil {
+		return fmt.Errorf("load tracker intake recovery before cleanup confirmation: %w", err)
+	}
+	if !pending {
+		return fmt.Errorf("confirm tracker intake cleanup for %s: pending claim is missing", id)
+	}
+	reservation.CleanupConfirmed = true
+	if err := m.store.ReserveTrackerIntakeRecovery(cleanupCtx, id, reservation); err != nil {
+		return fmt.Errorf("confirm tracker intake cleanup for %s: %w", id, err)
+	}
+	return nil
+}
+
+func (m *Manager) preserveUncertainTrackerIntakeRuntime(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	metadata domain.SessionMetadata,
+) error {
+	cleanupCtx, cancel := spawnRollbackContext(ctx)
+	defer cancel()
+	rec.Metadata = metadata
+	rec.UpdatedAt = m.clock()
+	if err := m.store.UpdateSession(cleanupCtx, rec); err != nil {
+		return fmt.Errorf("preserve uncertain tracker intake runtime %s: %w", rec.ID, err)
+	}
+	return nil
 }
 
 func (m *Manager) rollbackSpawnSeedRowAfterFailure(ctx context.Context, id domain.SessionID) {

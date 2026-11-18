@@ -37,14 +37,23 @@ WHERE project_id = ?
   AND trim(issue_id) <> ''
   AND is_terminated = FALSE;
 
--- name: HasLiveSessionForTrackerIssue :one
-SELECT EXISTS(
-    SELECT 1
-    FROM sessions
-    WHERE project_id = ?
-      AND issue_id = ?
-      AND is_terminated = FALSE
-) AS active;
+-- name: ListLiveTrackerIssueReferences :many
+SELECT issue_id
+FROM sessions
+WHERE project_id = ?
+  AND issue_id IS NOT NULL
+  AND trim(issue_id) <> ''
+  AND is_terminated = FALSE;
+
+-- name: SetPendingTrackerIntakeRecovery :execrows
+UPDATE tracker_intake_handled
+SET recovery_state = ?
+WHERE session_id = ? AND state = 'pending';
+
+-- name: GetPendingTrackerIntakeRecovery :one
+SELECT recovery_state
+FROM tracker_intake_handled
+WHERE session_id = ? AND state = 'pending';
 
 -- name: InsertTrackerIntakeClaim :exec
 INSERT INTO tracker_intake_handled (project_id, issue_id, session_id, state, recorded_at)

@@ -93,6 +93,15 @@ type Runtime interface {
 	IsAlive(ctx context.Context, handle RuntimeHandle) (bool, error)
 }
 
+// RuntimeLaunchCandidateProvider returns every opaque handle Create may make
+// externally observable for cfg. The set must be deterministic across daemon
+// restarts and must be computed without creating or reserving a runtime. A
+// caller persists it before Create so an interrupted launch can probe every
+// possible backend generation without guessing how handles are encoded.
+type RuntimeLaunchCandidateProvider interface {
+	LaunchCandidates(cfg RuntimeConfig) ([]RuntimeHandle, error)
+}
+
 // RuntimeChildInspector distinguishes running terminal children from a runtime
 // retained only to serve scrollback. False with no error confirms all children
 // have exited (or the runtime is absent); inconclusive probes must return errors.

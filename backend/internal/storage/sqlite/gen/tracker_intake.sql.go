@@ -60,6 +60,19 @@ func (q *Queries) DeletePendingTrackerIntakeClaim(ctx context.Context, sessionID
 	return result.RowsAffected()
 }
 
+const getPendingTrackerIntakeRecovery = `-- name: GetPendingTrackerIntakeRecovery :one
+SELECT recovery_state
+FROM tracker_intake_handled
+WHERE session_id = ? AND state = 'pending'
+`
+
+func (q *Queries) GetPendingTrackerIntakeRecovery(ctx context.Context, sessionID string) (string, error) {
+	row := q.db.QueryRowContext(ctx, getPendingTrackerIntakeRecovery, sessionID)
+	var recovery_state string
+	err := row.Scan(&recovery_state)
+	return recovery_state, err
+}
+
 const getTrackerIntakeClaim = `-- name: GetTrackerIntakeClaim :one
 SELECT project_id, issue_id, session_id, state, recorded_at
 FROM tracker_intake_handled
@@ -71,9 +84,17 @@ type GetTrackerIntakeClaimParams struct {
 	IssueID   string
 }
 
-func (q *Queries) GetTrackerIntakeClaim(ctx context.Context, arg GetTrackerIntakeClaimParams) (TrackerIntakeHandled, error) {
+type GetTrackerIntakeClaimRow struct {
+	ProjectID  string
+	IssueID    string
+	SessionID  string
+	State      string
+	RecordedAt time.Time
+}
+
+func (q *Queries) GetTrackerIntakeClaim(ctx context.Context, arg GetTrackerIntakeClaimParams) (GetTrackerIntakeClaimRow, error) {
 	row := q.db.QueryRowContext(ctx, getTrackerIntakeClaim, arg.ProjectID, arg.IssueID)
-	var i TrackerIntakeHandled
+	var i GetTrackerIntakeClaimRow
 	err := row.Scan(
 		&i.ProjectID,
 		&i.IssueID,
@@ -90,9 +111,17 @@ FROM tracker_intake_handled
 WHERE session_id = ?
 `
 
-func (q *Queries) GetTrackerIntakeClaimBySession(ctx context.Context, sessionID string) (TrackerIntakeHandled, error) {
+type GetTrackerIntakeClaimBySessionRow struct {
+	ProjectID  string
+	IssueID    string
+	SessionID  string
+	State      string
+	RecordedAt time.Time
+}
+
+func (q *Queries) GetTrackerIntakeClaimBySession(ctx context.Context, sessionID string) (GetTrackerIntakeClaimBySessionRow, error) {
 	row := q.db.QueryRowContext(ctx, getTrackerIntakeClaimBySession, sessionID)
-	var i TrackerIntakeHandled
+	var i GetTrackerIntakeClaimBySessionRow
 	err := row.Scan(
 		&i.ProjectID,
 		&i.IssueID,
@@ -101,28 +130,6 @@ func (q *Queries) GetTrackerIntakeClaimBySession(ctx context.Context, sessionID 
 		&i.RecordedAt,
 	)
 	return i, err
-}
-
-const hasLiveSessionForTrackerIssue = `-- name: HasLiveSessionForTrackerIssue :one
-SELECT EXISTS(
-    SELECT 1
-    FROM sessions
-    WHERE project_id = ?
-      AND issue_id = ?
-      AND is_terminated = FALSE
-) AS active
-`
-
-type HasLiveSessionForTrackerIssueParams struct {
-	ProjectID *domain.ProjectID
-	IssueID   domain.IssueID
-}
-
-func (q *Queries) HasLiveSessionForTrackerIssue(ctx context.Context, arg HasLiveSessionForTrackerIssueParams) (bool, error) {
-	row := q.db.QueryRowContext(ctx, hasLiveSessionForTrackerIssue, arg.ProjectID, arg.IssueID)
-	var active bool
-	err := row.Scan(&active)
-	return active, err
 }
 
 const insertTrackerIntakeClaim = `-- name: InsertTrackerIntakeClaim :exec
@@ -147,6 +154,38 @@ func (q *Queries) InsertTrackerIntakeClaim(ctx context.Context, arg InsertTracke
 	return err
 }
 
+const listLiveTrackerIssueReferences = `-- name: ListLiveTrackerIssueReferences :many
+SELECT issue_id
+FROM sessions
+WHERE project_id = ?
+  AND issue_id IS NOT NULL
+  AND trim(issue_id) <> ''
+  AND is_terminated = FALSE
+`
+
+func (q *Queries) ListLiveTrackerIssueReferences(ctx context.Context, projectID *domain.ProjectID) ([]domain.IssueID, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveTrackerIssueReferences, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []domain.IssueID{}
+	for rows.Next() {
+		var issue_id domain.IssueID
+		if err := rows.Scan(&issue_id); err != nil {
+			return nil, err
+		}
+		items = append(items, issue_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingTrackerIntakeClaims = `-- name: ListPendingTrackerIntakeClaims :many
 SELECT project_id, issue_id, session_id, state, recorded_at
 FROM tracker_intake_handled
@@ -154,15 +193,23 @@ WHERE project_id = ? AND state = 'pending'
 ORDER BY recorded_at, issue_id
 `
 
-func (q *Queries) ListPendingTrackerIntakeClaims(ctx context.Context, projectID string) ([]TrackerIntakeHandled, error) {
+type ListPendingTrackerIntakeClaimsRow struct {
+	ProjectID  string
+	IssueID    string
+	SessionID  string
+	State      string
+	RecordedAt time.Time
+}
+
+func (q *Queries) ListPendingTrackerIntakeClaims(ctx context.Context, projectID string) ([]ListPendingTrackerIntakeClaimsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listPendingTrackerIntakeClaims, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []TrackerIntakeHandled{}
+	items := []ListPendingTrackerIntakeClaimsRow{}
 	for rows.Next() {
-		var i TrackerIntakeHandled
+		var i ListPendingTrackerIntakeClaimsRow
 		if err := rows.Scan(
 			&i.ProjectID,
 			&i.IssueID,
@@ -250,4 +297,23 @@ func (q *Queries) RecordTrackerIntakeHandled(ctx context.Context, arg RecordTrac
 		arg.RecordedAt,
 	)
 	return err
+}
+
+const setPendingTrackerIntakeRecovery = `-- name: SetPendingTrackerIntakeRecovery :execrows
+UPDATE tracker_intake_handled
+SET recovery_state = ?
+WHERE session_id = ? AND state = 'pending'
+`
+
+type SetPendingTrackerIntakeRecoveryParams struct {
+	RecoveryState string
+	SessionID     string
+}
+
+func (q *Queries) SetPendingTrackerIntakeRecovery(ctx context.Context, arg SetPendingTrackerIntakeRecoveryParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setPendingTrackerIntakeRecovery, arg.RecoveryState, arg.SessionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

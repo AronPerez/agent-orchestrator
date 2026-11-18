@@ -98,6 +98,83 @@ func TestStartupHealthUnavailableRuntimeProbePreservesSession(t *testing.T) {
 	}
 }
 
+func TestStartupHealthPendingTrackerChatStopsPossibleControllerBeforeRetry(t *testing.T) {
+	m, st, _, _ := newManager()
+	chat := &recordingLauncher{}
+	m.chat = chat
+	rec := domain.SessionRecord{
+		ID: "mer-chat-intake", ProjectID: "mer", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+	}
+	st.sessions[rec.ID] = rec
+	key := "mer\x00github:acme/mer#44"
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch:             "ao/mer-chat-intake/root",
+		WorkspacePath:      "/ws/mer-chat-intake",
+		WorkspaceRepoPath:  "/ws/mer-chat-intake",
+		ControllerPossible: true,
+	}
+
+	if err := m.checkSessionHealth(context.Background(), rec); err != nil {
+		t.Fatalf("checkSessionHealth(): %v", err)
+	}
+	if len(chat.stopped) != 1 || chat.stopped[0] != rec.ID {
+		t.Fatalf("stopped controllers = %v, want %s", chat.stopped, rec.ID)
+	}
+	if got := st.trackerIntakePending[key]; got != "" {
+		t.Fatalf("pending claim after confirmed controller stop = %q, want released", got)
+	}
+	if got := st.trackerIntakeHandled[key]; got != "" {
+		t.Fatalf("controller metadata inferred prompt delivery: handled=%q", got)
+	}
+}
+
+type failingStopChatLauncher struct {
+	*recordingLauncher
+	err error
+}
+
+func (l *failingStopChatLauncher) StopChat(_ context.Context, id domain.SessionID) error {
+	l.stopped = append(l.stopped, id)
+	return l.err
+}
+
+func TestStartupHealthPendingTrackerChatPreservesClaimWhenControllerStopIsUnconfirmed(t *testing.T) {
+	m, st, _, ws := newManager()
+	stopErr := errors.New("controller owner unavailable")
+	chat := &failingStopChatLauncher{recordingLauncher: &recordingLauncher{}, err: stopErr}
+	m.chat = chat
+	rec := domain.SessionRecord{
+		ID: "mer-chat-intake", ProjectID: "mer", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+	}
+	st.sessions[rec.ID] = rec
+	key := "mer\x00github:acme/mer#45"
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch:             "ao/mer-chat-intake/root",
+		WorkspacePath:      "/ws/mer-chat-intake",
+		WorkspaceRepoPath:  "/ws/mer-chat-intake",
+		ControllerPossible: true,
+	}
+
+	if err := m.checkSessionHealth(context.Background(), rec); !errors.Is(err, stopErr) {
+		t.Fatalf("checkSessionHealth() error = %v, want controller stop failure", err)
+	}
+	if got := st.trackerIntakePending[key]; got != rec.ID {
+		t.Fatalf("pending claim after unconfirmed controller stop = %q, want %q", got, rec.ID)
+	}
+	if stored := st.sessions[rec.ID]; stored.IsTerminated {
+		t.Fatalf("unconfirmed controller session was terminated: %+v", stored)
+	}
+	if ws.destroyed != 0 {
+		t.Fatalf("workspace cleanup calls = %d, want none while controller may be alive", ws.destroyed)
+	}
+}
+
 // flakyStartupLauncher fails reattach attempts until failures runs out, then
 // reports a live controller the way a successful reconnect does.
 type flakyStartupLauncher struct {

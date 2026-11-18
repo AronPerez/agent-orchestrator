@@ -29,6 +29,19 @@ type routedBackend interface {
 	ports.SupervisedProcessRecordInspector
 }
 
+type routedRuntimeEffectFailure struct {
+	err     error
+	handle  ports.RuntimeHandle
+	effect  ports.RuntimeEffectOutcome
+	cleanup ports.RuntimeCleanupOutcome
+}
+
+func (e routedRuntimeEffectFailure) Error() string                               { return e.err.Error() }
+func (e routedRuntimeEffectFailure) Unwrap() error                               { return e.err }
+func (e routedRuntimeEffectFailure) PossibleHandle() ports.RuntimeHandle         { return e.handle }
+func (e routedRuntimeEffectFailure) EffectOutcome() ports.RuntimeEffectOutcome   { return e.effect }
+func (e routedRuntimeEffectFailure) CleanupOutcome() ports.RuntimeCleanupOutcome { return e.cleanup }
+
 type hybridRuntime struct {
 	legacy   routedBackend
 	direct   routedBackend
@@ -37,6 +50,7 @@ type hybridRuntime struct {
 }
 
 var _ Runtime = (*hybridRuntime)(nil)
+var _ ports.RuntimeLaunchCandidateProvider = (*hybridRuntime)(nil)
 var _ ports.RuntimeRestarter = (*hybridRuntime)(nil)
 var _ ports.StyledTerminalOutputReader = (*hybridRuntime)(nil)
 var _ ports.SupervisedProcessInspector = (*hybridRuntime)(nil)
@@ -63,18 +77,74 @@ func (r *hybridRuntime) Create(ctx context.Context, cfg ports.RuntimeConfig) (po
 		handle.ID = directHandlePrefix + handle.ID
 		return handle, nil
 	}
+	if effect, unresolved := unresolvedRuntimeEffect(err); unresolved {
+		handle := effect.PossibleHandle()
+		if handle.ID != "" {
+			handle.ID = directHandlePrefix + handle.ID
+		}
+		return ports.RuntimeHandle{}, routedRuntimeEffectFailure{
+			err: err, handle: handle, effect: effect.EffectOutcome(), cleanup: effect.CleanupOutcome(),
+		}
+	}
 	r.log.Warn(r.platform+" direct PTY host unavailable; falling back to tmux",
 		"session_id", cfg.SessionID,
 		"err", err,
 	)
 	fallback, fallbackErr := r.legacy.Create(ctx, cfg)
 	if fallbackErr != nil {
-		return ports.RuntimeHandle{}, errors.Join(
+		joined := errors.Join(
 			fmt.Errorf("%s direct PTY host: %w", r.platform, err),
 			fmt.Errorf("%s tmux fallback: %w", r.platform, fallbackErr),
 		)
+		if effect, unresolved := unresolvedRuntimeEffect(fallbackErr); unresolved {
+			return ports.RuntimeHandle{}, routedRuntimeEffectFailure{
+				err: joined, handle: effect.PossibleHandle(), effect: effect.EffectOutcome(), cleanup: effect.CleanupOutcome(),
+			}
+		}
+		return ports.RuntimeHandle{}, joined
 	}
 	return fallback, nil
+}
+
+func unresolvedRuntimeEffect(err error) (ports.RuntimeEffectError, bool) {
+	var effect ports.RuntimeEffectError
+	if !errors.As(err, &effect) || effect.EffectOutcome() == ports.RuntimeEffectNone ||
+		effect.CleanupOutcome() == ports.RuntimeCleanupSucceeded {
+		return nil, false
+	}
+	return effect, true
+}
+
+// LaunchCandidates combines both versioned direct-host and legacy tmux
+// handles. Create may definitively fail over from the first backend to the
+// second, so recovery must fence both after a daemon interruption.
+func (r *hybridRuntime) LaunchCandidates(cfg ports.RuntimeConfig) ([]ports.RuntimeHandle, error) {
+	direct, err := r.direct.LaunchCandidates(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("%s direct PTY host launch candidates: %w", r.platform, err)
+	}
+	legacy, err := r.legacy.LaunchCandidates(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("%s tmux launch candidates: %w", r.platform, err)
+	}
+	handles := make([]ports.RuntimeHandle, 0, len(direct)+len(legacy))
+	seen := make(map[string]struct{}, len(direct)+len(legacy))
+	for _, handle := range direct {
+		handle.ID = directHandlePrefix + handle.ID
+		if _, ok := seen[handle.ID]; ok {
+			continue
+		}
+		seen[handle.ID] = struct{}{}
+		handles = append(handles, handle)
+	}
+	for _, handle := range legacy {
+		if _, ok := seen[handle.ID]; ok {
+			continue
+		}
+		seen[handle.ID] = struct{}{}
+		handles = append(handles, handle)
+	}
+	return handles, nil
 }
 
 func (r *hybridRuntime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error {

@@ -7,6 +7,10 @@ CREATE TABLE tracker_intake_handled (
     -- erase proof that this still-open tracker item was already delivered.
     session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
     state TEXT NOT NULL CHECK (state IN ('pending', 'handled')),
+    -- Pending launches checkpoint workspace/controller ownership here before
+    -- any external process can start. Handled rows retain it only as audit
+    -- evidence; normal reads do not expose it.
+    recovery_state TEXT NOT NULL DEFAULT '{}',
     -- For pending rows this is claim time; promotion replaces it with the
     -- launch-completion time exposed as HandledAt by the read model.
     recorded_at TIMESTAMP NOT NULL,

@@ -30,6 +30,13 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 		}
 		rec = current
 	}
+	intakeRecovery, pendingIntake, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+	if err != nil {
+		return fmt.Errorf("check session %s: tracker intake claim: %w", rec.ID, err)
+	}
+	if pendingIntake {
+		return m.reconcileInterruptedTrackerIntake(ctx, rec, intakeRecovery)
+	}
 	// Preserve cleanup of interrupted spawns that never committed a workspace.
 	// Their client request IDs must remain retryable after a daemon crash.
 	if rec.Metadata.WorkspacePath == "" ||

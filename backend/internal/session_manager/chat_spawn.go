@@ -285,6 +285,14 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		controllerCommitted bool
 		completionErr       error
 	)
+	if in.cfg.TrackerIntakeLimits != nil {
+		reservation := trackerIntakeRecoveryForWorkspace(in.workspace)
+		reservation.ControllerPossible = true
+		if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
+			m.rollbackSeedSpawnWorkspace(ctx, in.record, in.workspace, in.workspaceProject, false, in.promptQueued)
+			return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+	}
 	_, err = m.chat.StartChat(ctx, ChatStart{
 		SessionID:               id,
 		ProviderConversationID:  providerConversationID,
@@ -351,14 +359,39 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	})
 	if err != nil {
 		if completionErr != nil || controllerCommitted {
-			m.stopChatAfterSpawnFailure(ctx, id)
+			controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
+			if in.cfg.TrackerIntakeLimits != nil && !controllerStopped {
+				if completionErr != nil {
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, completionErr)
+				}
+				return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, agentlaunch.RedactError(err, in.project.Config.Env))
+			}
 			workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
+			if in.cfg.TrackerIntakeLimits != nil && !workspaceDestroyed {
+				if completionErr != nil {
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, completionErr)
+				}
+				return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, agentlaunch.RedactError(err, in.project.Config.Env))
+			}
+			if in.cfg.TrackerIntakeLimits != nil {
+				if confirmErr := m.confirmTrackerIntakeCleanup(ctx, id); confirmErr != nil {
+					if completionErr != nil {
+						return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, errors.Join(completionErr, confirmErr))
+					}
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, errors.Join(agentlaunch.RedactError(err, in.project.Config.Env), confirmErr))
+				}
+			}
 			if in.promptQueued {
 				if workspaceDestroyed {
 					m.clearProvisionedWorkspace(ctx, id, in.workspace.Path)
 				}
 			} else {
 				m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
+			}
+			if in.cfg.TrackerIntakeLimits != nil {
+				if releaseErr := m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id); releaseErr != nil {
+					completionErr = errors.Join(completionErr, releaseErr)
+				}
 			}
 			if completionErr != nil {
 				return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, completionErr)
@@ -369,6 +402,11 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		// runtime was never touched, hence runtimeDestroyed=false.
 		if providerConversationID != "" {
 			m.discardForkConversation(ctx, in.cfg.Harness, providerConversationID, in.workspace.Path, env)
+		}
+		if in.cfg.TrackerIntakeLimits != nil {
+			if reserveErr := m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspace(in.workspace)); reserveErr != nil {
+				m.logger.Warn("spawn rollback: clear possible chat controller reservation", "sessionID", id, "error", reserveErr)
+			}
 		}
 		m.rollbackSeedSpawnWorkspace(ctx, in.record, in.workspace, in.workspaceProject, false, in.promptQueued)
 		return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, agentlaunch.RedactError(err, in.project.Config.Env))
@@ -385,9 +423,26 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	// provider either accepts the turn or reports why.
 	if in.prompt != "" && !in.promptQueued {
 		if _, err := m.chat.StartChatTurn(ctx, id, in.prompt); err != nil {
-			m.stopChatAfterSpawnFailure(ctx, id)
-			m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
+			controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
+			if in.cfg.TrackerIntakeLimits != nil && !controllerStopped {
+				return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
+			}
+			workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
+			if in.cfg.TrackerIntakeLimits != nil && !workspaceDestroyed {
+				return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
+			}
+			if in.cfg.TrackerIntakeLimits != nil {
+				if confirmErr := m.confirmTrackerIntakeCleanup(ctx, id); confirmErr != nil {
+					err = errors.Join(err, confirmErr)
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
+				}
+			}
 			m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
+			if in.cfg.TrackerIntakeLimits != nil {
+				if releaseErr := m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id); releaseErr != nil {
+					err = errors.Join(err, releaseErr)
+				}
+			}
 			return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
 		}
 	}
@@ -429,22 +484,24 @@ func (m *Manager) aoMCPServers(ctx context.Context, harness domain.AgentHarness,
 	}}
 }
 
-func (m *Manager) stopChatAfterSpawnFailure(ctx context.Context, id domain.SessionID) {
+func (m *Manager) stopChatAfterSpawnFailure(ctx context.Context, id domain.SessionID) bool {
 	cleanupCtx, cancel := spawnRollbackContext(ctx)
 	defer cancel()
-	m.stopChatBestEffort(cleanupCtx, id)
+	return m.stopChatBestEffort(cleanupCtx, id)
 }
 
 // stopChatBestEffort closes a controller during rollback. A failure here is
 // logged rather than returned: the spawn is already failing, and the caller's
 // error is the one worth surfacing.
-func (m *Manager) stopChatBestEffort(ctx context.Context, id domain.SessionID) {
+func (m *Manager) stopChatBestEffort(ctx context.Context, id domain.SessionID) bool {
 	if m.chat == nil {
-		return
+		return true
 	}
 	if err := m.chat.StopChat(ctx, id); err != nil {
 		m.logger.Warn("spawn rollback: close chat controller", "sessionID", id, "error", err)
+		return false
 	}
+	return true
 }
 
 // sendChat routes an outbound message into a chat session's conversation.

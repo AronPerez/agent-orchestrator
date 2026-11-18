@@ -83,6 +83,7 @@ type Runtime struct {
 }
 
 var _ ports.Runtime = (*Runtime)(nil)
+var _ ports.RuntimeLaunchCandidateProvider = (*Runtime)(nil)
 var _ ports.FencedRuntimeProber = (*Runtime)(nil)
 var _ ports.Attacher = (*Runtime)(nil)
 
@@ -434,6 +435,16 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 	}
 	created = true
 	return handle, nil
+}
+
+// LaunchCandidates returns the stable tmux session handle without touching the
+// tmux server. Session Manager persists it before Create for crash recovery.
+func (r *Runtime) LaunchCandidates(cfg ports.RuntimeConfig) ([]ports.RuntimeHandle, error) {
+	id, err := tmuxSessionName(cfg.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	return []ports.RuntimeHandle{{ID: id}}, nil
 }
 
 func (r *Runtime) failedCreatedRuntime(handle ports.RuntimeHandle, cause error) error {

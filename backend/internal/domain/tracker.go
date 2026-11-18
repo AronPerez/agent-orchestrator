@@ -189,3 +189,17 @@ type TrackerIntakeHandledRecord struct {
 	SessionID SessionID
 	HandledAt time.Time
 }
+
+// TrackerIntakeRecoveryReservation is the durable fence written before an
+// unattended launch can create an external controller. It keeps the workspace
+// and every opaque runtime identity needed to settle an interrupted launch
+// without starting a second worker for the same tracker item.
+type TrackerIntakeRecoveryReservation struct {
+	Branch             string   `json:"branch,omitempty"`
+	WorkspacePath      string   `json:"workspacePath,omitempty"`
+	WorkspaceRepoPath  string   `json:"workspaceRepoPath,omitempty"`
+	RuntimeLaunchID    string   `json:"runtimeLaunchId,omitempty"`
+	RuntimeHandleIDs   []string `json:"runtimeHandleIds,omitempty"`
+	ControllerPossible bool     `json:"controllerPossible,omitempty"`
+	CleanupConfirmed   bool     `json:"cleanupConfirmed,omitempty"`
+}
