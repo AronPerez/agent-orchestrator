@@ -170,10 +170,10 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 			return domain.DecisionCall{}, err
 		}
 		payload.ProjectName = string(session.ProjectID)
-		if found && project.DisplayName != "" {
-			payload.ProjectName = project.DisplayName
-		}
 		if found {
+			if project.DisplayName != "" {
+				payload.ProjectName = project.DisplayName
+			}
 			autonomy = project.Config.Autonomy
 		}
 		sessions, err := s.store.ListSessions(ctx, session.ProjectID)
@@ -232,7 +232,7 @@ func checkRaisePolicy(p domain.DecisionRaisedPayload) error {
 }
 
 func policyRule(rule, message string) error {
-	return apierr.Invalid("DECISION_INVALID", message, map[string]any{"rule": rule})
+	return invalidDecision(&domain.DecisionRuleError{Rule: rule, Message: message})
 }
 
 // KindPolicy is one decision kind and whether a project reserves it.
@@ -253,14 +253,10 @@ type Policy struct {
 // for the named project when the person asks.
 func (s *Service) Kinds(ctx context.Context, actor Actor, projectID domain.ProjectID) (Policy, error) {
 	if actor.Session != "" {
-		session, ok, err := s.store.GetSession(ctx, actor.Session)
-		if err != nil {
+		var err error
+		if projectID, _, err = s.actorProject(ctx, actor); err != nil {
 			return Policy{}, err
 		}
-		if !ok {
-			return Policy{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
-		}
-		projectID = session.ProjectID
 	} else if projectID == "" {
 		return Policy{}, apierr.Invalid("DECISION_PROJECT_REQUIRED", "Name the project with --project.", nil)
 	}

@@ -21733,8 +21733,8 @@ components:
         title:
           type: string
         urgency:
-          description: Effective urgency. Calls raised before urgency existed can
-            wait.
+          description: Effective urgency. This daemon always sets it; treat it as
+            can_wait when absent, as from an older daemon.
           enum:
           - blocking
           - can_wait
@@ -21754,7 +21754,6 @@ components:
       - ownerSessionName
       - raisedAt
       - retired
-      - urgency
       type: object
     DecisionDetailResponse:
       properties:

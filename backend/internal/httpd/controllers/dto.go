@@ -145,7 +145,7 @@ type DecisionCallResponse struct {
 	DeliveredToName   string                  `json:"deliveredToName,omitempty"`
 	DeliveredFallback bool                    `json:"deliveredFallback,omitempty"`
 	ChangedAfterClose bool                    `json:"changedAfterClose,omitempty"`
-	Urgency           string                  `json:"urgency" enum:"blocking,can_wait" description:"Effective urgency. Calls raised before urgency existed can wait."`
+	Urgency           string                  `json:"urgency,omitempty" enum:"blocking,can_wait" description:"Effective urgency. This daemon always sets it; treat it as can_wait when absent, as from an older daemon."`
 	Kind              string                  `json:"kind,omitempty"`
 	KindLabel         string                  `json:"kindLabel,omitempty"`
 	Reserved          bool                    `json:"reserved,omitempty" description:"The project reserved this kind for the person when the call was raised."`

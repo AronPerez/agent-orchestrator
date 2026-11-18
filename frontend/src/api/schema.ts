@@ -7496,10 +7496,10 @@ export interface components {
             streamSessionId?: string;
             title: string;
             /**
-             * @description Effective urgency. Calls raised before urgency existed can wait.
+             * @description Effective urgency. This daemon always sets it; treat it as can_wait when absent, as from an older daemon.
              * @enum {string}
              */
-            urgency: "blocking" | "can_wait";
+            urgency?: "blocking" | "can_wait";
         };
         DecisionDetailResponse: {
             call: components["schemas"]["DecisionCallResponse"];
