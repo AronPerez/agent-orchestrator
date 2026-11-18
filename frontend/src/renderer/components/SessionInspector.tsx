@@ -451,7 +451,7 @@ const SummaryView = memo(function SummaryView({
 			.filter((candidate) => candidate.isTerminated !== true && !candidate.needsResume)
 			.map(({ id, workspacePublished }) => ({ id, workspacePublished }))
 		: undefined;
-	const overlaps = useProjectOverlaps(collisionProjectId, { hostId, liveSessions: overlapLiveSessions });
+	const overlaps = useProjectOverlaps(collisionProjectId, { enabled: inspectorVisible, hostId, liveSessions: overlapLiveSessions });
 	const collision = projectOverlapForSession(overlaps.data, session.id);
 	const collisionScanState = projectOverlapScanState(overlaps);
 	const collisionNames = new Map(collisionSessions.map((candidate) => [candidate.id, candidate.title]));

@@ -536,6 +536,48 @@ describe("SessionInspector tabs", () => {
 		));
 	});
 
+	it("stops collision updates while closed and refreshes when reopened", async () => {
+		const respond = commonGetsResponder();
+		getMock.mockImplementation(async (path: string) => path === "/api/v1/projects/{id}/overlaps"
+			? {
+				data: {
+					projectId: "ws-1", overlaps: [], truncatedSessionIds: [],
+					unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+				},
+			}
+			: respond(path));
+		const unsubscribe = vi.fn();
+		projectOverlapSubscribeMock.mockReturnValue(unsubscribe);
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "API cleanup" });
+		function VisibilityHarness() {
+			const [visible, setVisible] = useState(true);
+			return (
+				<>
+					<button type="button" onClick={() => setVisible((value) => !value)}>Toggle inspector</button>
+					<SessionInspector isInspectorVisible={visible} session={current} />
+				</>
+			);
+		}
+		renderWithQuery(
+			<VisibilityHarness />,
+			[{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }],
+		);
+
+		await waitFor(() => expect(projectOverlapSubscribeMock).toHaveBeenCalledTimes(1));
+		await userEvent.click(screen.getByRole("button", { name: "Toggle inspector" }));
+		await waitFor(() => expect(unsubscribe).toHaveBeenCalledTimes(1));
+
+		getMock.mockClear();
+		projectOverlapSubscribeMock.mockClear();
+		await userEvent.click(screen.getByRole("button", { name: "Toggle inspector" }));
+		await waitFor(() => expect(getMock).toHaveBeenCalledWith(
+			"/api/v1/projects/{id}/overlaps",
+			expect.anything(),
+		));
+		await waitFor(() => expect(projectOverlapSubscribeMock).toHaveBeenCalledTimes(1));
+	});
+
 	it("catches up when the live session set shrinks during the initial overlap read", async () => {
 		const respond = commonGetsResponder();
 		let resolveInitial!: (value: { data: unknown }) => void;
