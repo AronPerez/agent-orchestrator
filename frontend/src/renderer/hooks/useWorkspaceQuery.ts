@@ -77,6 +77,7 @@ function toSessionDoneReport(report: components["schemas"]["SessionDoneReportRes
 	if (!report) return undefined;
 	return {
 		id: report.id,
+		...(report.superseded ? { superseded: true } : {}),
 		...(report.verification
 			? {
 					verification: {
@@ -84,6 +85,8 @@ function toSessionDoneReport(report: components["schemas"]["SessionDoneReportRes
 						evidence: report.verification.evidence,
 						startedAt: report.verification.startedAt,
 						completedAt: report.verification.completedAt,
+						...(report.verification.workspaceRevision ? { workspaceRevision: report.verification.workspaceRevision } : {}),
+						...(report.verification.interactionAt ? { interactionAt: report.verification.interactionAt } : {}),
 					},
 				}
 			: {}),

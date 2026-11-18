@@ -2503,6 +2503,8 @@ describe("SessionInspector verification", () => {
       <SessionInspector
         onOpenArtifact={onOpenArtifact}
         session={session([], {
+          branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1" },
+          lastInteractionAt: "2026-06-14T23:59:00Z",
           latestDoneReport: {
             id: "done-1",
             verification: {
@@ -2510,6 +2512,8 @@ describe("SessionInspector verification", () => {
               evidence: "verification/done-1.txt",
               startedAt: "2026-06-15T00:00:00Z",
               completedAt: "2026-06-15T00:01:00Z",
+              workspaceRevision: "head-1",
+              interactionAt: "2026-06-14T23:59:00Z",
             },
           },
         })}

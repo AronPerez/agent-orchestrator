@@ -98,9 +98,14 @@ func reportVerificationResponse(verification *domain.ReportVerification) *Report
 	if verification == nil {
 		return nil
 	}
-	return &ReportVerificationResponse{
+	response := &ReportVerificationResponse{
 		State: string(verification.State), Evidence: verification.Evidence,
 		StartedAt: verification.StartedAt, CompletedAt: verification.CompletedAt,
-		OutputTail: verification.OutputTail,
+		WorkspaceRevision: verification.WorkspaceRevision, OutputTail: verification.OutputTail,
 	}
+	if !verification.InteractionAt.IsZero() {
+		interactionAt := verification.InteractionAt
+		response.InteractionAt = &interactionAt
+	}
+	return response
 }

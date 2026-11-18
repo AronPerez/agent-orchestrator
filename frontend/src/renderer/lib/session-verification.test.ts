@@ -59,11 +59,14 @@ describe("sessionVerificationPresentation", () => {
 			state: "unverified", reasons: [],
 		});
 		expect(sessionVerificationPresentation(session({
+			branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1" },
+			lastInteractionAt: "2026-11-17T11:59:00Z",
 			latestDoneReport: {
 				id: "done-1",
 				verification: {
 					state: "passed", evidence: "verification/done-1.txt",
 					startedAt: "2026-11-17T12:00:00Z", completedAt: "2026-11-17T12:01:00Z",
+					workspaceRevision: "head-1", interactionAt: "2026-11-17T11:59:00Z",
 				},
 			},
 		}))).toEqual({ state: "verified", evidence: "verification/done-1.txt", reasons: [] });
@@ -75,6 +78,40 @@ describe("sessionVerificationPresentation", () => {
 					startedAt: "2026-11-17T12:00:00Z", completedAt: "2026-11-17T12:01:00Z",
 				},
 			},
+		}))).toEqual({ state: "unverified", evidence: "verification/done-1.txt", reasons: [] });
+	});
+
+	it("invalidates a passing verification when the branch head changes", () => {
+		expect(sessionVerificationPresentation(session({
+			branchState: { commits: 2, unpushed: 1, behind: 0, head: "head-2" },
+			lastInteractionAt: "2026-11-17T11:59:00Z",
+			latestDoneReport: {
+				id: "done-1",
+				verification: {
+					state: "passed", evidence: "verification/done-1.txt",
+					startedAt: "2026-11-17T12:00:00Z", completedAt: "2026-11-17T12:01:00Z",
+					workspaceRevision: "head-1", interactionAt: "2026-11-17T11:59:00Z",
+				},
+			},
+		}))).toEqual({ state: "unverified", evidence: "verification/done-1.txt", reasons: [] });
+	});
+
+	it("invalidates a passing verification after resumed work or a later report", () => {
+		const verified = {
+			state: "passed" as const, evidence: "verification/done-1.txt",
+			startedAt: "2026-11-17T12:00:00Z", completedAt: "2026-11-17T12:01:00Z",
+			workspaceRevision: "head-1", interactionAt: "2026-11-17T11:59:00Z",
+		};
+		const base = {
+			branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1" },
+			latestDoneReport: { id: "done-1", verification: verified },
+		};
+		expect(sessionVerificationPresentation(session({
+			...base, lastInteractionAt: "2026-11-17T12:05:00Z",
+		}))).toEqual({ state: "unverified", evidence: "verification/done-1.txt", reasons: [] });
+		expect(sessionVerificationPresentation(session({
+			...base, lastInteractionAt: "2026-11-17T11:59:00Z",
+			latestDoneReport: { ...base.latestDoneReport, superseded: true },
 		}))).toEqual({ state: "unverified", evidence: "verification/done-1.txt", reasons: [] });
 	});
 

@@ -43,7 +43,21 @@ export function sessionVerificationPresentation(session: WorkspaceSession): Sess
 		return { state: "tampering_suspected", ...(evidence ? { evidence } : {}), reasons };
 	}
 	if (!session.latestDoneReport) return undefined;
-	if (session.latestDoneReport.verification?.state === "passed") {
+	const verification = session.latestDoneReport.verification;
+	const interactionAt = verification?.interactionAt ? Date.parse(verification.interactionAt) : Number.NaN;
+	const currentInteractionAt = Math.max(
+		session.lastInteractionAt ? Date.parse(session.lastInteractionAt) : 0,
+		session.lastUserMessageAt ? Date.parse(session.lastUserMessageAt) : 0,
+	);
+	const snapshotIsCurrent = Boolean(
+		verification?.workspaceRevision &&
+		session.branchState?.head === verification.workspaceRevision &&
+		Number.isFinite(interactionAt) &&
+		Number.isFinite(currentInteractionAt) &&
+		currentInteractionAt <= interactionAt &&
+		!session.latestDoneReport.superseded,
+	);
+	if (verification?.state === "passed" && snapshotIsCurrent) {
 		return { state: "verified", ...(evidence ? { evidence } : {}), reasons };
 	}
 	return { state: "unverified", ...(evidence ? { evidence } : {}), reasons };

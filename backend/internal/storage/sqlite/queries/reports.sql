@@ -2,18 +2,20 @@
 INSERT INTO reports (
     id, session_id, project_id, state, note, message, created_at, available_at,
     settlement_deadline, repeat_count, verification_state, verification_evidence,
-    verification_started_at, verification_completed_at
+    verification_started_at, verification_completed_at, verification_workspace_revision,
+    verification_interaction_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: CreateReportIfAbsent :one
 INSERT INTO reports (
     id, session_id, project_id, state, note, message, created_at, available_at,
     settlement_deadline, repeat_count, verification_state, verification_evidence,
-    verification_started_at, verification_completed_at
+    verification_started_at, verification_completed_at, verification_workspace_revision,
+    verification_interaction_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
 RETURNING *;
 
@@ -44,7 +46,18 @@ SELECT
     r.verification_state,
     r.verification_evidence,
     r.verification_started_at,
-    r.verification_completed_at
+    r.verification_completed_at,
+    r.verification_workspace_revision,
+    r.verification_interaction_at,
+    EXISTS (
+        SELECT 1
+        FROM reports later
+        WHERE later.session_id = r.session_id
+          AND (
+              later.created_at > r.created_at
+              OR (later.created_at = r.created_at AND later.id > r.id)
+          )
+    ) AS superseded
 FROM reports r
 JOIN wanted_session ON wanted_session.session_id = r.session_id
 WHERE r.state = 'done'

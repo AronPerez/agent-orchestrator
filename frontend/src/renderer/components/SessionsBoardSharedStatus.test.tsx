@@ -99,6 +99,8 @@ describe("sharing from a board card", () => {
 			onOpenArtifact,
 			session: {
 				...session,
+				branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1" },
+				lastInteractionAt: "2026-11-17T11:59:00Z",
 				latestDoneReport: {
 					id: "done-1",
 					verification: {
@@ -106,6 +108,8 @@ describe("sharing from a board card", () => {
 						evidence: "verification/done-1.txt",
 						startedAt: "2026-11-17T12:00:00Z",
 						completedAt: "2026-11-17T12:01:00Z",
+						workspaceRevision: "head-1",
+						interactionAt: "2026-11-17T11:59:00Z",
 					},
 				},
 			},

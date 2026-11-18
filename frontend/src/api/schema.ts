@@ -8560,11 +8560,14 @@ export interface components {
             /** Format: date-time */
             completedAt: string;
             evidence: string;
+            /** Format: date-time */
+            interactionAt?: null | string;
             outputTail?: string;
             /** Format: date-time */
             startedAt: string;
             /** @enum {string} */
             state: "passed" | "failed";
+            workspaceRevision?: string;
         };
         ResolveCommentsResponse: {
             ok: boolean;
@@ -8797,6 +8800,7 @@ export interface components {
         };
         SessionDoneReportResponse: {
             id: string;
+            superseded?: boolean;
             verification?: components["schemas"]["ReportVerificationResponse"];
         };
         SessionHistoryResponse: {

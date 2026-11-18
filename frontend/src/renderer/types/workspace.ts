@@ -72,11 +72,14 @@ export type PullRequestFacts = {
 
 export type SessionDoneReport = {
 	id: string;
+	superseded?: boolean;
 	verification?: {
 		state: "passed" | "failed";
 		evidence: string;
 		startedAt: string;
 		completedAt: string;
+		workspaceRevision?: string;
+		interactionAt?: string;
 	};
 };
 

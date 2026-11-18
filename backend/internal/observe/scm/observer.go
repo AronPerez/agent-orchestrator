@@ -52,6 +52,9 @@ const (
 	// next poll retries it. It only cuts work that honors cancellation; a wake
 	// or a teardown runs on its own budget. Merged and closed PRs are exempt.
 	DefaultLifecycleTimeout = 30 * time.Second
+	// DefaultTamperRetryInterval bounds retries for a local diff assessment
+	// that could not run yet, independently of provider ETag changes.
+	DefaultTamperRetryInterval = time.Minute
 )
 
 // identityKey builds the cache key for a per-provider, per-host identity.
@@ -211,6 +214,8 @@ type ObserverCache struct {
 	// cursor - overlap; the cursor advances only after successful persistence
 	//
 	LastSyncCursor map[string]time.Time
+	// TamperRetryAt maps a head-bound local assessment key to its next attempt.
+	TamperRetryAt map[string]time.Time
 	// repoOrder tracks FIFO eviction order for RepoPRListETag.
 	repoOrder []string
 	// commitOrder tracks FIFO eviction order for CommitChecksETag.
@@ -219,6 +224,8 @@ type ObserverCache struct {
 	lastReviewPollOrder []string
 	// reviewFailedOrder tracks FIFO eviction order for ReviewRefreshFailed.
 	reviewFailedOrder []string
+	// tamperRetryOrder tracks FIFO eviction order for TamperRetryAt.
+	tamperRetryOrder []string
 	// max is the maximum number of entries each cache map retains.
 	max int
 }
@@ -234,6 +241,7 @@ func newCache(maxEntries int) ObserverCache {
 		ReviewRefreshFailed: map[string]bool{},
 		LastPRFetchAt:       map[string]time.Time{},
 		LastSyncCursor:      map[string]time.Time{},
+		TamperRetryAt:       map[string]time.Time{},
 		max:                 maxEntries,
 	}
 }
@@ -291,12 +299,14 @@ type Observer struct {
 	trigger chan struct{}
 	// lifecycleTimeout bounds each lifecycle notification.
 	lifecycleTimeout time.Duration
+	// assessTamper performs the local, exact-revision diff assessment.
+	assessTamper func(context.Context, string, string, string, time.Time) (domain.PRTamperAssessment, error)
 }
 
 // New constructs an Observer with default cadence/cache settings for zero
 // values in cfg.
 func New(provider Provider, store Store, lifecycle Lifecycle, cfg Config) *Observer {
-	o := &Observer{provider: provider, store: store, lifecycle: lifecycle, tick: cfg.Tick, reviewInterval: cfg.ReviewInterval, clock: cfg.Clock, logger: cfg.Logger, scopedIdentityResolver: cfg.ScopedIdentityResolver, Cache: newCache(cfg.CacheMax), rateLimitUntil: map[string]time.Time{}, branchStates: cfg.BranchStates, lifecycleTimeout: DefaultLifecycleTimeout, forcedReviews: map[string]bool{}, forcedSessions: map[domain.SessionID]bool{}, sessionRefreshDebounce: 500 * time.Millisecond, trigger: make(chan struct{}, 1)}
+	o := &Observer{provider: provider, store: store, lifecycle: lifecycle, tick: cfg.Tick, reviewInterval: cfg.ReviewInterval, clock: cfg.Clock, logger: cfg.Logger, scopedIdentityResolver: cfg.ScopedIdentityResolver, Cache: newCache(cfg.CacheMax), rateLimitUntil: map[string]time.Time{}, branchStates: cfg.BranchStates, lifecycleTimeout: DefaultLifecycleTimeout, forcedReviews: map[string]bool{}, forcedSessions: map[domain.SessionID]bool{}, sessionRefreshDebounce: 500 * time.Millisecond, trigger: make(chan struct{}, 1), assessTamper: verification.AssessPullRequestTampering}
 	if o.tick <= 0 {
 		o.tick = DefaultTickInterval
 	}
@@ -488,6 +498,7 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 	if err != nil {
 		return err
 	}
+	o.retryTamperAssessments(ctx, subjects, now)
 	if len(sessionRepos) == 0 {
 		return nil
 	}
@@ -1934,26 +1945,79 @@ func (o *Observer) prepareForPersistence(obs ports.SCMObservation, local domain.
 	return obs
 }
 
+func (o *Observer) retryTamperAssessments(ctx context.Context, subjects map[string]*subject, now time.Time) {
+	keys := make([]string, 0, len(subjects))
+	for key := range subjects {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if ctx.Err() != nil {
+			return
+		}
+		subj := subjects[key]
+		assessment, backfilled := o.tamperAssessment(ctx, subj.session, subj.known, subj.known, now)
+		if !backfilled {
+			continue
+		}
+		updated := subj.known
+		updated.Tamper = assessment
+		if err := o.store.WriteSCMObservation(ctx, updated, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+			o.scheduleTamperRetry(subj.session, updated, updated, now)
+			o.logger.Warn("scm observer: PR tamper retry write failed", "session", subj.session.ID, "pr", updated.URL, "err", err)
+			continue
+		}
+		subj.known = updated
+	}
+}
+
 func (o *Observer) tamperAssessment(ctx context.Context, session domain.SessionRecord, pr, local domain.PullRequest, now time.Time) (*domain.PRTamperAssessment, bool) {
 	if pr.HeadSHA != "" && pr.HeadSHA == local.HeadSHA && pr.BaseSHA != "" && pr.BaseSHA == local.BaseSHA && local.Tamper != nil && local.Tamper.HeadSHA == pr.HeadSHA {
 		return local.Tamper, false
 	}
-	workspacePath := strings.TrimSpace(session.Metadata.WorkspaceRepoPath)
-	if workspacePath == "" {
-		workspacePath = strings.TrimSpace(session.Metadata.WorkspacePath)
-	}
-	baseSHA := firstNonEmpty(pr.BaseSHA, local.BaseSHA)
-	if workspacePath == "" || baseSHA == "" || pr.HeadSHA == "" {
+	workspacePath, baseSHA, headSHA, retryKey, ok := tamperAssessmentInputs(session, pr, local)
+	if !ok {
 		return nil, false
 	}
-	assessment, err := verification.AssessPullRequestTampering(ctx, workspacePath, baseSHA, pr.HeadSHA, now)
+	if retryAt := o.Cache.TamperRetryAt[retryKey]; !retryAt.IsZero() && now.Before(retryAt) {
+		return nil, false
+	}
+	assess := o.assessTamper
+	if assess == nil {
+		assess = verification.AssessPullRequestTampering
+	}
+	assessment, err := assess(ctx, workspacePath, baseSHA, headSHA, now)
 	if err != nil {
+		o.cacheSetTime(o.Cache.TamperRetryAt, &o.Cache.tamperRetryOrder, retryKey, now.Add(DefaultTamperRetryInterval))
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			o.logger.Debug("scm observer: PR tamper assessment unavailable", "session", session.ID, "pr", pr.URL, "head", pr.HeadSHA, "err", err)
+			o.logger.Debug("scm observer: PR tamper assessment unavailable", "session", session.ID, "pr", pr.URL, "head", headSHA, "err", err)
 		}
 		return nil, false
 	}
+	cacheDelete(o.Cache.TamperRetryAt, &o.Cache.tamperRetryOrder, retryKey)
 	return &assessment, true
+}
+
+func (o *Observer) scheduleTamperRetry(session domain.SessionRecord, pr, local domain.PullRequest, now time.Time) {
+	_, _, _, retryKey, ok := tamperAssessmentInputs(session, pr, local)
+	if ok {
+		o.cacheSetTime(o.Cache.TamperRetryAt, &o.Cache.tamperRetryOrder, retryKey, now.Add(DefaultTamperRetryInterval))
+	}
+}
+
+func tamperAssessmentInputs(session domain.SessionRecord, pr, local domain.PullRequest) (workspacePath, baseSHA, headSHA, retryKey string, ok bool) {
+	workspacePath = strings.TrimSpace(session.Metadata.WorkspaceRepoPath)
+	if workspacePath == "" {
+		workspacePath = strings.TrimSpace(session.Metadata.WorkspacePath)
+	}
+	baseSHA = firstNonEmpty(pr.BaseSHA, local.BaseSHA)
+	headSHA = firstNonEmpty(pr.HeadSHA, local.HeadSHA)
+	if workspacePath == "" || baseSHA == "" || headSHA == "" {
+		return "", "", "", "", false
+	}
+	identity := firstNonEmpty(pr.URL, pr.HTMLURL, local.URL, local.HTMLURL, strconv.Itoa(pr.Number), strconv.Itoa(local.Number))
+	retryKey = string(session.ID) + "\x00" + identity + "\x00" + baseSHA + "\x00" + headSHA
+	return workspacePath, baseSHA, headSHA, retryKey, true
 }
 
 func domainFromObservation(sessionID domain.SessionID, sessionRecord domain.SessionRecord, obs ports.SCMObservation, local domain.PullRequest, opts persistenceOptions, now time.Time) (domain.PullRequest, []domain.PullRequestCheck, []domain.PullRequestReview, []domain.PullRequestReviewThread, []domain.PullRequestComment) {

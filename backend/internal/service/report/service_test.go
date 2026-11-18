@@ -141,6 +141,38 @@ func TestCreateDonePersistsVerificationEvidenceAndReturnsFailureOnce(t *testing.
 	}
 }
 
+func TestCreateDoneBindsPassingVerificationToRevisionAndInteraction(t *testing.T) {
+	dataDir := t.TempDir()
+	verifiedAt := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	interactionAt := verifiedAt.Add(-time.Minute)
+	verifier := &fakeVerifier{results: []verification.Result{{Passed: true, StartedAt: verifiedAt, CompletedAt: verifiedAt.Add(time.Second)}}, errs: []error{nil}}
+	st := &fakeStore{
+		ok: true, projectOK: true,
+		session: domain.SessionRecord{
+			ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao", LatestInteractionAt: interactionAt},
+		},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"go test ./..."}}},
+	}
+	svc := New(Deps{
+		Store: st, Verifier: verifier, EvidenceArtifacts: &fakeEvidenceArtifacts{}, DataDir: dataDir,
+		NewID: func() string { return "rpt_1" }, Now: func() time.Time { return verifiedAt },
+		WorkspaceRevision: func(_ context.Context, path string) (string, error) {
+			if path != "/work/ao" {
+				t.Fatalf("workspace path = %q", path)
+			}
+			return "head-1", nil
+		},
+	})
+	report, err := svc.Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Verification == nil || report.Verification.WorkspaceRevision != "head-1" || !report.Verification.InteractionAt.Equal(interactionAt) {
+		t.Fatalf("verification snapshot = %+v", report.Verification)
+	}
+}
+
 func TestCreateDoneRerunsVerificationAndPassSettlesContract(t *testing.T) {
 	dataDir := t.TempDir()
 	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)

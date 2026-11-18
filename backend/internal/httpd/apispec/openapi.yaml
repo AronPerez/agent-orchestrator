@@ -24577,6 +24577,11 @@ components:
           type: string
         evidence:
           type: string
+        interactionAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         outputTail:
           type: string
         startedAt:
@@ -24586,6 +24591,8 @@ components:
           enum:
           - passed
           - failed
+          type: string
+        workspaceRevision:
           type: string
       required:
       - state
@@ -25188,6 +25195,8 @@ components:
       properties:
         id:
           type: string
+        superseded:
+          type: boolean
         verification:
           $ref: '#/components/schemas/ReportVerificationResponse'
       required:

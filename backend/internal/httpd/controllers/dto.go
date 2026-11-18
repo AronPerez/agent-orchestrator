@@ -210,11 +210,13 @@ type CreateReportResponse struct {
 // report. OutputTail is populated only by report creation; Evidence remains the
 // durable session-artifact reference on read projections.
 type ReportVerificationResponse struct {
-	State       string    `json:"state" enum:"passed,failed"`
-	Evidence    string    `json:"evidence"`
-	StartedAt   time.Time `json:"startedAt"`
-	CompletedAt time.Time `json:"completedAt"`
-	OutputTail  string    `json:"outputTail,omitempty"`
+	State             string     `json:"state" enum:"passed,failed"`
+	Evidence          string     `json:"evidence"`
+	StartedAt         time.Time  `json:"startedAt"`
+	CompletedAt       time.Time  `json:"completedAt"`
+	WorkspaceRevision string     `json:"workspaceRevision,omitempty"`
+	InteractionAt     *time.Time `json:"interactionAt,omitempty"`
+	OutputTail        string     `json:"outputTail,omitempty"`
 }
 
 // ReportOutputResponse is one ordered output reference in the read projection.
@@ -804,6 +806,7 @@ type SessionView struct {
 type SessionDoneReportResponse struct {
 	ID           string                      `json:"id"`
 	Verification *ReportVerificationResponse `json:"verification,omitempty"`
+	Superseded   bool                        `json:"superseded,omitempty"`
 }
 
 // SessionArtifactView is one inferred file artifact for a session.

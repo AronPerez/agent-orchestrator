@@ -35,7 +35,7 @@ var testCasePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^\s*it\s+["'(]`),
 }
 
-var skipMarkers = []string{"t.Skip(", ".skip(", "xit(", "@pytest.mark.skip", "#[ignore]"}
+var skipMarkers = []string{"t.Skip(", "t.Skipf(", "t.SkipNow(", ".skip(", "xit(", "@pytest.mark.skip", "#[ignore]"}
 
 // AssessPullRequestTampering computes the deterministic advisory signals for
 // one exact local base...head range. It never consults the mutable worktree.
@@ -55,8 +55,8 @@ func AssessPullRequestTampering(ctx context.Context, workspacePath, baseSHA, hea
 	if err != nil {
 		return domain.PRTamperAssessment{}, err
 	}
-	deleted, err := tamperGitOutput(analysisCtx, workspacePath, tamperNamesLimit,
-		"diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=D", "-z", revision, "--")
+	removed, err := tamperGitOutput(analysisCtx, workspacePath, tamperNamesLimit,
+		"diff", "--no-ext-diff", "--no-textconv", "--name-status", "--find-renames", "--diff-filter=DR", "-z", revision, "--")
 	if err != nil {
 		return domain.PRTamperAssessment{}, err
 	}
@@ -65,7 +65,7 @@ func AssessPullRequestTampering(ctx context.Context, workspacePath, baseSHA, hea
 	if err != nil {
 		return domain.PRTamperAssessment{}, err
 	}
-	return assessPullRequestDiff(headSHA, assessedAt, nullSeparatedPaths(changed), nullSeparatedPaths(deleted), patch), nil
+	return assessPullRequestDiff(headSHA, assessedAt, nullSeparatedPaths(changed), removedTestPaths(removed), patch), nil
 }
 
 func tamperGitOutput(ctx context.Context, workspacePath string, limit int, args ...string) ([]byte, error) {
@@ -120,6 +120,35 @@ func nullSeparatedPaths(output []byte) []string {
 		}
 	}
 	return paths
+}
+
+func removedTestPaths(output []byte) []string {
+	parts := bytes.Split(bytes.TrimSuffix(output, []byte{0}), []byte{0})
+	removed := make([]string, 0, len(parts)/2)
+	for i := 0; i < len(parts); {
+		status := string(parts[i])
+		i++
+		switch {
+		case status == "D" && i < len(parts):
+			path := filepath.ToSlash(string(parts[i]))
+			i++
+			if isTestFile(path) {
+				removed = append(removed, path)
+			}
+		case strings.HasPrefix(status, "R") && i+1 < len(parts):
+			oldPath := filepath.ToSlash(string(parts[i]))
+			newPath := filepath.ToSlash(string(parts[i+1]))
+			i += 2
+			if isTestFile(oldPath) && !isTestFile(newPath) {
+				removed = append(removed, oldPath)
+			}
+		default:
+			// Ignore a truncated or unexpected record. Git is invoked with a
+			// deletion/rename-only filter, so supported output is handled above.
+			return removed
+		}
+	}
+	return removed
 }
 
 func assessPullRequestDiff(headSHA string, assessedAt time.Time, changedPaths, deletedPaths []string, patch []byte) domain.PRTamperAssessment {

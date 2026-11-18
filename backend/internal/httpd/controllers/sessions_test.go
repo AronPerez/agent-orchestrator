@@ -5543,8 +5543,9 @@ func TestSessionsAPI_ExposesLatestDoneVerificationAndPRTamperFact(t *testing.T) 
 		ID: "done-1",
 		Verification: &domain.ReportVerification{
 			State: domain.ReportVerificationPassed, Evidence: "verification/done-1.txt",
-			StartedAt: at, CompletedAt: at.Add(time.Second),
+			StartedAt: at, CompletedAt: at.Add(time.Second), WorkspaceRevision: "head-1", InteractionAt: at.Add(-time.Minute),
 		},
+		Superseded: true,
 	}
 	session.PRs = []domain.PRFacts{{
 		URL: "https://github.com/o/r/pull/1", Number: 1, CI: domain.CIPassing,
@@ -5561,9 +5562,12 @@ func TestSessionsAPI_ExposesLatestDoneVerificationAndPRTamperFact(t *testing.T) 
 		Session struct {
 			LatestDoneReport struct {
 				ID           string `json:"id"`
+				Superseded   bool   `json:"superseded"`
 				Verification struct {
-					State    string `json:"state"`
-					Evidence string `json:"evidence"`
+					State             string    `json:"state"`
+					Evidence          string    `json:"evidence"`
+					WorkspaceRevision string    `json:"workspaceRevision"`
+					InteractionAt     time.Time `json:"interactionAt"`
 				} `json:"verification"`
 			} `json:"latestDoneReport"`
 			PRs []struct {
@@ -5575,7 +5579,7 @@ func TestSessionsAPI_ExposesLatestDoneVerificationAndPRTamperFact(t *testing.T) 
 		} `json:"session"`
 	}
 	mustJSON(t, body, &response)
-	if response.Session.LatestDoneReport.ID != "done-1" || response.Session.LatestDoneReport.Verification.State != "passed" || response.Session.LatestDoneReport.Verification.Evidence != "verification/done-1.txt" {
+	if response.Session.LatestDoneReport.ID != "done-1" || !response.Session.LatestDoneReport.Superseded || response.Session.LatestDoneReport.Verification.State != "passed" || response.Session.LatestDoneReport.Verification.Evidence != "verification/done-1.txt" || response.Session.LatestDoneReport.Verification.WorkspaceRevision != "head-1" || !response.Session.LatestDoneReport.Verification.InteractionAt.Equal(at.Add(-time.Minute)) {
 		t.Fatalf("latest done report = %+v", response.Session.LatestDoneReport)
 	}
 	if len(response.Session.PRs) != 1 || response.Session.PRs[0].Tamper.HeadSHA != "head-1" || response.Session.PRs[0].Tamper.SkipMarkersAdded != 2 {

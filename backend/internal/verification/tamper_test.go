@@ -49,6 +49,21 @@ func TestAssessPullRequestDiffFlagsApprovedTamperSignals(t *testing.T) {
 	}
 }
 
+func TestAssessPullRequestDiffRecognizesAllGoSkipCalls(t *testing.T) {
+	assessment := assessPullRequestDiff("head-2", time.Unix(1, 0).UTC(), []string{"widget_test.go"}, nil, []byte(`diff --git a/widget_test.go b/widget_test.go
+--- a/widget_test.go
++++ b/widget_test.go
+@@ -1 +1,3 @@
+ func TestWidget(t *testing.T) {
++t.Skipf("later: %s", reason)
++t.SkipNow()
+ }
+`))
+	if assessment.SkipMarkersAdded != 2 {
+		t.Fatalf("skip markers = %d, want 2", assessment.SkipMarkersAdded)
+	}
+}
+
 func TestAssessPullRequestDiffIgnoresCleanSourceChanges(t *testing.T) {
 	assessment := assessPullRequestDiff(
 		"head-2",
@@ -95,6 +110,29 @@ func TestAssessPullRequestTamperingReadsExactGitRange(t *testing.T) {
 	}
 	if assessment.HeadSHA != head || assessment.TestFilesDeleted != 1 || assessment.TestCasesRemoved != 3 || assessment.TestCasesAdded != 1 || assessment.SkipMarkersAdded != 1 || !assessment.CIWorkflowEdited {
 		t.Fatalf("assessment = %+v", assessment)
+	}
+}
+
+func TestAssessPullRequestTamperingTreatsTestRenameOutOfDiscoveryAsDeletion(t *testing.T) {
+	repo := t.TempDir()
+	runTestGit(t, repo, "init")
+	runTestGit(t, repo, "config", "user.name", "AO Test")
+	runTestGit(t, repo, "config", "user.email", "ao@example.test")
+	runTestGit(t, repo, "config", "commit.gpgsign", "false")
+	writeTestFile(t, repo, "widget.test.ts", "test('widget', () => expect(true).toBe(true));\n")
+	runTestGit(t, repo, "add", ".")
+	runTestGit(t, repo, "commit", "-m", "base")
+	base := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+	runTestGit(t, repo, "mv", "widget.test.ts", "widget.ts")
+	runTestGit(t, repo, "commit", "-m", "head")
+	head := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+
+	assessment, err := AssessPullRequestTampering(context.Background(), repo, base, head, time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assessment.TestFilesDeleted != 1 {
+		t.Fatalf("assessment = %+v, want renamed test counted as deleted", assessment)
 	}
 }
 

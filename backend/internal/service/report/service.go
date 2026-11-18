@@ -15,6 +15,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/verification"
 )
@@ -67,6 +68,7 @@ type Service struct {
 	verifier          Verifier
 	evidenceArtifacts EvidenceArtifacts
 	dataDir           string
+	workspaceRevision func(context.Context, string) (string, error)
 }
 
 // Deps configures a Service. Artifacts is optional.
@@ -79,6 +81,7 @@ type Deps struct {
 	Verifier          Verifier
 	EvidenceArtifacts EvidenceArtifacts
 	DataDir           string
+	WorkspaceRevision func(context.Context, string) (string, error)
 }
 
 // New constructs a report Service.
@@ -89,9 +92,13 @@ func New(d Deps) *Service {
 	if d.NewID == nil {
 		d.NewID = func() string { return "rpt_" + uuid.NewString() }
 	}
+	if d.WorkspaceRevision == nil {
+		d.WorkspaceRevision = gitWorkspaceRevision
+	}
 	return &Service{
 		store: d.Store, now: d.Now, newID: d.NewID, onCreated: d.OnCreated, artifacts: d.Artifacts,
 		verifier: d.Verifier, evidenceArtifacts: d.EvidenceArtifacts, dataDir: d.DataDir,
+		workspaceRevision: d.WorkspaceRevision,
 	}
 }
 
@@ -256,6 +263,11 @@ func (s *Service) verifyDone(ctx context.Context, reportID string, session domai
 		return nil, nil, errors.New("report: verification artifact registrar is required")
 	}
 
+	interactionAt := session.Metadata.LatestUserPromptAt
+	if session.Metadata.LatestInteractionAt.After(interactionAt) {
+		interactionAt = session.Metadata.LatestInteractionAt
+	}
+	revisionBefore, _ := s.workspaceRevision(ctx, session.Metadata.WorkspacePath)
 	startedAt := s.now().UTC()
 	result, runErr := s.verifier.Run(ctx, verification.Request{
 		ProjectID: session.ProjectID, WorkspacePath: session.Metadata.WorkspacePath,
@@ -269,6 +281,11 @@ func (s *Service) verifyDone(ctx context.Context, reportID string, session domai
 	}
 	if result.CompletedAt.IsZero() {
 		result.CompletedAt = s.now().UTC()
+	}
+	revisionAfter, _ := s.workspaceRevision(ctx, session.Metadata.WorkspacePath)
+	workspaceRevision := ""
+	if revisionBefore != "" && revisionBefore == revisionAfter {
+		workspaceRevision = revisionAfter
 	}
 	verificationState := domain.ReportVerificationFailed
 	if result.Passed && runErr == nil {
@@ -296,8 +313,27 @@ func (s *Service) verifyDone(ctx context.Context, reportID string, session domai
 	}
 	return &domain.ReportVerification{
 		State: verificationState, Evidence: reference, StartedAt: result.StartedAt,
-		CompletedAt: result.CompletedAt, OutputTail: outputTail,
+		CompletedAt: result.CompletedAt, WorkspaceRevision: workspaceRevision,
+		InteractionAt: interactionAt, OutputTail: outputTail,
 	}, cleanup, nil
+}
+
+func gitWorkspaceRevision(ctx context.Context, workspacePath string) (string, error) {
+	workspacePath = strings.TrimSpace(workspacePath)
+	if workspacePath == "" {
+		return "", errors.New("report: workspace path is required for revision capture")
+	}
+	cmd := aoprocess.CommandContext(ctx, "git", "-C", workspacePath, "rev-parse", "--verify", "HEAD")
+	aoprocess.ConfigureTreeCancellation(cmd)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("report: read workspace revision: %w", err)
+	}
+	revision := strings.TrimSpace(string(output))
+	if revision == "" {
+		return "", errors.New("report: workspace revision is empty")
+	}
+	return revision, nil
 }
 
 func hasVerificationCommands(commands []string) bool {

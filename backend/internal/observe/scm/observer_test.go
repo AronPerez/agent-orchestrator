@@ -1641,6 +1641,62 @@ func TestPoll_BackfillsHeadBoundTamperEvidenceWithoutSemanticChange(t *testing.T
 	}
 }
 
+func TestPoll_RetriesUnavailableTamperAssessmentWithoutProviderChange(t *testing.T) {
+	store := testStoreWithSession()
+	store.sessions[0].Metadata.WorkspaceRepoPath = "/workspace"
+	local := knownPR(1)
+	local.BaseSHA = "base-1"
+	local.HeadSHA = "head-1"
+	store.prs["p-1"] = []domain.PullRequest{local}
+	provider := &fakeProvider{
+		repoGuards:  map[string]ports.SCMGuardResult{prKey(testRepo, 0): {ETag: "repo", NotModified: true}},
+		checkGuards: map[string]ports.SCMGuardResult{commitKey(testRepo, local.HeadSHA): {ETag: "checks", NotModified: true}},
+	}
+	now := time.Unix(100, 0).UTC()
+	observer := newTestObserver(store, provider, &fakeLifecycle{}, now)
+	observer.clock = func() time.Time { return now }
+	observer.Cache.RepoPRListETag[prKey(testRepo, 0)] = "repo"
+	observer.Cache.CommitChecksETag[commitKey(testRepo, local.HeadSHA)] = "checks"
+	observer.Cache.LastSyncCursor[prKey(testRepo, 0)] = now
+	observer.Cache.LastPRFetchAt[keyForTrackedPR(local, testRepo)] = now
+
+	attempts := 0
+	observer.assessTamper = func(context.Context, string, string, string, time.Time) (domain.PRTamperAssessment, error) {
+		attempts++
+		if attempts == 1 {
+			return domain.PRTamperAssessment{}, errors.New("base commit unavailable")
+		}
+		return domain.PRTamperAssessment{HeadSHA: local.HeadSHA, SkipMarkersAdded: 1, AssessedAt: now}, nil
+	}
+
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 || len(store.writes) != 0 || len(provider.fetchBatches) != 0 {
+		t.Fatalf("first poll: attempts=%d writes=%d fetches=%d", attempts, len(store.writes), len(provider.fetchBatches))
+	}
+
+	now = now.Add(DefaultTamperRetryInterval / 2)
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 || len(store.writes) != 0 || len(provider.fetchBatches) != 0 {
+		t.Fatalf("early retry: attempts=%d writes=%d fetches=%d", attempts, len(store.writes), len(provider.fetchBatches))
+	}
+
+	now = now.Add(DefaultTamperRetryInterval)
+	if err := observer.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || len(store.writes) != 1 || len(provider.fetchBatches) != 0 {
+		t.Fatalf("due retry: attempts=%d writes=%d fetches=%d", attempts, len(store.writes), len(provider.fetchBatches))
+	}
+	written := store.writes[0]
+	if written.reviewMode != ports.ReviewWritePreserve || written.pr.Tamper == nil || written.pr.Tamper.HeadSHA != local.HeadSHA || written.pr.Tamper.SkipMarkersAdded != 1 {
+		t.Fatalf("retry write = %+v", written)
+	}
+}
+
 func TestTamperAssessmentDoesNotReuseEvidenceWhenBaseChanges(t *testing.T) {
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	local := domain.PullRequest{

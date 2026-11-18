@@ -3205,6 +3205,7 @@ func sessionView(r *http.Request, s domain.Session) SessionView {
 			}
 			return &SessionDoneReportResponse{
 				ID: s.LatestDoneReport.ID, Verification: reportVerificationResponse(s.LatestDoneReport.Verification),
+				Superseded: s.LatestDoneReport.Superseded,
 			}
 		}(),
 	}
