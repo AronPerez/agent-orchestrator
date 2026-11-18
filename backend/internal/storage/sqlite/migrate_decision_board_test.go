@@ -32,6 +32,28 @@ func decisionBoardTriggerNames(t *testing.T, db *sql.DB) []string {
 	return names
 }
 
+func decisionBoardOutcomes(t *testing.T, db *sql.DB) map[string]sql.NullString {
+	t.Helper()
+	rows, err := db.Query(`SELECT call_id, outcome_at FROM decision_calls`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	outcomes := map[string]sql.NullString{}
+	for rows.Next() {
+		var id string
+		var at sql.NullString
+		if err := rows.Scan(&id, &at); err != nil {
+			t.Fatal(err)
+		}
+		outcomes[id] = at
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return outcomes
+}
+
 func decisionBoardEventCount(t *testing.T, db *sql.DB, query string, args ...any) int {
 	t.Helper()
 	var count int
@@ -102,20 +124,7 @@ VALUES ('worker', 'local', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIME
 		}
 	}
 
-	outcomes := map[string]sql.NullString{}
-	rows, err := db.Query(`SELECT call_id, outcome_at FROM decision_calls`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
-		var id string
-		var at sql.NullString
-		if err := rows.Scan(&id, &at); err != nil {
-			t.Fatal(err)
-		}
-		outcomes[id] = at
-	}
-	_ = rows.Close()
+	outcomes := decisionBoardOutcomes(t, db)
 	if got := outcomes["dec_done_utc"]; !got.Valid || got.String != "2026-11-10 09:08:07.123456789 +0000 UTC" {
 		t.Fatalf("utc outcome_at = %#v", got)
 	}
