@@ -255,6 +255,89 @@ func envWithLaunchToken(env []string, token string) []string {
 	return append(clean, launchIDEnv+"="+token)
 }
 
+// retirePriorBootHostOwnership removes ownership files only when every durable
+// launch record proves that its host belonged to an earlier machine boot.
+func retirePriorBootHostOwnership(dataDir, sessionID string) error {
+	dir, err := hostDir(dataDir, sessionID)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: inspect prior-boot chat host ownership: %w", ErrOwnershipInconclusive, err)
+	}
+	currentBootID, _ := currentBootIdentity()
+	if currentBootID == "" {
+		return nil
+	}
+	tokens := make(map[string]struct{})
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, launchIntentPrefix) {
+			continue
+		}
+		token := strings.TrimPrefix(name, launchIntentPrefix)
+		switch {
+		case strings.HasSuffix(token, launchReadySuffix):
+			token = strings.TrimSuffix(token, launchReadySuffix)
+		case strings.HasSuffix(token, launchIntentSuffix):
+			token = strings.TrimSuffix(token, launchIntentSuffix)
+		default:
+			continue
+		}
+		if validLaunchToken(token) {
+			tokens[token] = struct{}{}
+		}
+	}
+	if len(tokens) == 0 {
+		return nil
+	}
+	stalePIDs := make(map[int]struct{}, len(tokens))
+	for token := range tokens {
+		ready, readyErr := readLaunchReady(dataDir, sessionID, token)
+		if readyErr != nil {
+			return fmt.Errorf("%w: inspect prior-boot chat host readiness: %w", ErrOwnershipInconclusive, readyErr)
+		}
+		if !priorBootIdentity(ready.BootID, currentBootID) {
+			return nil
+		}
+		stalePIDs[ready.HostPID] = struct{}{}
+	}
+	if d, readErr := readDescriptorOnce(dataDir, sessionID); readErr == nil {
+		if _, ok := stalePIDs[d.PID]; !ok {
+			return nil
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return fmt.Errorf("%w: inspect prior-boot chat host descriptor: %w", ErrOwnershipInconclusive, readErr)
+	}
+	lock, _ := lockPath(dataDir, sessionID)
+	if b, readErr := os.ReadFile(lock); readErr == nil { //nolint:gosec // AO-owned path derived from validated session id.
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(b)))
+		if parseErr != nil {
+			return fmt.Errorf("%w: invalid prior-boot chat host lock", ErrOwnershipInconclusive)
+		}
+		if _, ok := stalePIDs[pid]; !ok {
+			return nil
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return fmt.Errorf("%w: inspect prior-boot chat host lock: %w", ErrOwnershipInconclusive, readErr)
+	}
+	descriptor, _ := descriptorPath(dataDir, sessionID)
+	if err := os.Remove(descriptor); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("retire prior-boot chat host descriptor: %w", err)
+	}
+	if err := os.Remove(lock); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("retire prior-boot chat host lock: %w", err)
+	}
+	for token := range tokens {
+		clearLaunchIntent(dataDir, sessionID, token)
+	}
+	return nil
+}
+
 func probeUnpublishedHost(dataDir, sessionID string) error {
 	dir, err := hostDir(dataDir, sessionID)
 	if err != nil {

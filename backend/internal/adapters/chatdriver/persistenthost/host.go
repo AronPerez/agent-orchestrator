@@ -206,6 +206,9 @@ func lockPath(dataDir, sessionID string) (string, error) {
 }
 
 func acquireHostLock(dataDir, sessionID string) (func(), error) {
+	if err := retirePriorBootHostOwnership(dataDir, sessionID); err != nil {
+		return nil, err
+	}
 	dir, err := hostDir(dataDir, sessionID)
 	if err != nil {
 		return nil, err
@@ -327,6 +330,9 @@ func validateDescriptor(cfg Config, d Descriptor) error {
 // ConnectOrStart attaches to an existing compatible host or starts one with the
 // current AO executable. Failed/incompatible probes never terminate that host.
 func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
+	if err := retirePriorBootHostOwnership(cfg.DataDir, cfg.SessionID); err != nil {
+		return nil, err
+	}
 	if d, err := readDescriptor(cfg.DataDir, cfg.SessionID); err == nil {
 		if err := validateDescriptor(cfg, d); err != nil && processalive.Alive(d.PID) {
 			return nil, err
@@ -598,6 +604,9 @@ func readShutdownDescriptor(ctx context.Context, dataDir, sessionID string) (Des
 }
 
 func shutdown(ctx context.Context, dataDir, sessionID string, quick bool) error {
+	if err := retirePriorBootHostOwnership(dataDir, sessionID); err != nil {
+		return err
+	}
 	d, err := readShutdownDescriptor(ctx, dataDir, sessionID)
 	if errors.Is(err, os.ErrNotExist) {
 		return probeUnpublishedHost(dataDir, sessionID)

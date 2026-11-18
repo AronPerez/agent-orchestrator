@@ -1110,6 +1110,96 @@ func TestLaunchProbeClearsReadinessFromPriorBoot(t *testing.T) {
 	}
 }
 
+func TestPriorBootOwnershipIgnoresReusedDescriptorAndLockPID(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, string, string) error
+	}{
+		{
+			name: "reconnect",
+			run: func(ctx context.Context, dataDir, sessionID string) error {
+				_, err := ConnectOrStart(ctx, Config{
+					SessionID: sessionID, DataDir: dataDir, Workdir: t.TempDir(), ReconnectOnly: true,
+				})
+				return err
+			},
+		},
+		{name: "shutdown", run: Shutdown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			sessionID := "prior-boot-" + tt.name
+			writePriorBootReusedPIDOwnership(t, dataDir, sessionID)
+
+			err := tt.run(context.Background(), dataDir, sessionID)
+			if tt.name == "reconnect" {
+				if !errors.Is(err, ErrNotRunning) {
+					t.Fatalf("reconnect error = %v, want ErrNotRunning", err)
+				}
+			} else if err != nil {
+				t.Fatalf("shutdown error = %v, want nil", err)
+			}
+
+			for _, name := range []string{"host.json", "host.lock"} {
+				if _, statErr := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, name)); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("%s remains after prior-boot recovery: %v", name, statErr)
+				}
+			}
+		})
+	}
+}
+
+func writePriorBootReusedPIDOwnership(t *testing.T, dataDir, sessionID string) {
+	t.Helper()
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootID, err := currentBootIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootSource, _, ok := strings.Cut(bootID, ":")
+	if !ok {
+		t.Fatalf("boot identity = %q, want source:value", bootID)
+	}
+	readyPath, err := launchReadyPath(dataDir, sessionID, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(launchReady{
+		Token: token, HostPID: os.Getpid(), BootID: bootSource + ":prior-boot",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomicLaunchFile(readyPath, b); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockPath(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lock, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDescriptor(dataDir, Descriptor{
+		Version: ProtocolVersion, SessionID: sessionID, Address: address,
+		Token: "prior-boot", PID: os.Getpid(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLaunchIDEnvironmentPreservesInheritanceAndStaysOutOfProvider(t *testing.T) {
 	const inheritedKey = "AO_CHAT_HOST_INHERITED_TEST"
 	t.Setenv(inheritedKey, "present")
