@@ -31,6 +31,7 @@ type launchIntent struct {
 type launchReady struct {
 	Token   string `json:"token"`
 	HostPID int    `json:"hostPid"`
+	BootID  string `json:"bootId,omitempty"`
 }
 
 func validLaunchToken(token string) bool {
@@ -94,11 +95,15 @@ func publishLaunchReady(dataDir, sessionID, token string, hostPID int) error {
 	if intent.Token != token || intent.ParentPID != os.Getpid() || hostPID <= 0 {
 		return errors.New("chat host launch intent ownership changed")
 	}
+	bootID, err := currentBootIdentity()
+	if err != nil {
+		return fmt.Errorf("read system boot identity: %w", err)
+	}
 	path, err := launchReadyPath(dataDir, sessionID, token)
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(launchReady{Token: token, HostPID: hostPID})
+	b, err := json.Marshal(launchReady{Token: token, HostPID: hostPID, BootID: bootID})
 	if err != nil {
 		return err
 	}
@@ -305,12 +310,31 @@ func probeUnpublishedHost(dataDir, sessionID string) error {
 }
 
 func probeLaunchToken(dataDir, sessionID, token string) error {
-	return probeLaunchTokenWithExitProbe(dataDir, sessionID, token, processalive.Exited)
+	return probeLaunchTokenWithProbes(
+		dataDir, sessionID, token,
+		processalive.Exited,
+		currentBootIdentity,
+		providerTreeDiesWithHost(),
+	)
 }
 
 func probeLaunchTokenWithExitProbe(
 	dataDir, sessionID, token string,
 	exited func(int) bool,
+) error {
+	return probeLaunchTokenWithProbes(
+		dataDir, sessionID, token,
+		exited,
+		currentBootIdentity,
+		providerTreeDiesWithHost(),
+	)
+}
+
+func probeLaunchTokenWithProbes(
+	dataDir, sessionID, token string,
+	exited func(int) bool,
+	bootIdentity func() (string, error),
+	providerTreeDies bool,
 ) error {
 	intent, intentErr := readLaunchIntent(dataDir, sessionID, token)
 	ready, readyErr := readLaunchReady(dataDir, sessionID, token)
@@ -321,7 +345,10 @@ func probeLaunchTokenWithExitProbe(
 		return fmt.Errorf("%w: read chat host launch readiness: %w", ErrOwnershipInconclusive, readyErr)
 	}
 	if readyErr == nil {
-		return admittedHostOwnershipError(ready.HostPID, exited)
+		return settleAdmittedHostOwnership(
+			dataDir, sessionID, token, ready,
+			exited, bootIdentity, providerTreeDies,
+		)
 	}
 	if intentErr == nil {
 		if !exited(intent.ParentPID) {
@@ -332,7 +359,10 @@ func probeLaunchTokenWithExitProbe(
 		// first read and the exit observation still fences the admitted child.
 		ready, readyErr = readLaunchReady(dataDir, sessionID, token)
 		if readyErr == nil {
-			return admittedHostOwnershipError(ready.HostPID, exited)
+			return settleAdmittedHostOwnership(
+				dataDir, sessionID, token, ready,
+				exited, bootIdentity, providerTreeDies,
+			)
 		}
 		if !errors.Is(readyErr, os.ErrNotExist) {
 			return fmt.Errorf("%w: re-read chat host launch readiness: %w", ErrOwnershipInconclusive, readyErr)
@@ -342,12 +372,58 @@ func probeLaunchTokenWithExitProbe(
 	return nil
 }
 
-func admittedHostOwnershipError(hostPID int, exited func(int) bool) error {
-	if exited(hostPID) {
-		// The host can die after starting its Unix provider process group but
-		// before publishing host.json. Only the host can prove orderly provider
-		// teardown by clearing this readiness record; host exit alone is not proof.
-		return fmt.Errorf("%w: admitted chat host %d exited without proving provider-tree cleanup", ErrOwnershipInconclusive, hostPID)
+func settleAdmittedHostOwnership(
+	dataDir, sessionID, token string,
+	ready launchReady,
+	exited func(int) bool,
+	bootIdentity func() (string, error),
+	providerTreeDies bool,
+) error {
+	if err := admittedHostOwnershipError(ready, exited, bootIdentity, providerTreeDies); err != nil {
+		return err
 	}
-	return fmt.Errorf("%w: unpublished chat host process %d is not proven absent", ErrOwnershipInconclusive, hostPID)
+	clearLaunchIntent(dataDir, sessionID, token)
+	return nil
+}
+
+func admittedHostOwnershipError(
+	ready launchReady,
+	exited func(int) bool,
+	bootIdentity func() (string, error),
+	providerTreeDies bool,
+) error {
+	currentBootID, bootErr := bootIdentity()
+	if bootErr == nil && priorBootIdentity(ready.BootID, currentBootID) {
+		// Neither a host nor its provider tree can survive an OS reboot. Check
+		// this before the PID probe because the old host PID may already have
+		// been reused by an unrelated process on the new boot.
+		return nil
+	}
+	if !exited(ready.HostPID) {
+		return fmt.Errorf("%w: unpublished chat host process %d is not proven absent", ErrOwnershipInconclusive, ready.HostPID)
+	}
+	if providerTreeDies {
+		// Windows puts the provider tree in a kill-on-close Job Object owned by
+		// the host. A conclusively exited host therefore proves tree absence.
+		return nil
+	}
+	if ready.BootID == "" {
+		return fmt.Errorf("%w: admitted chat host %d exited with no durable boot identity", ErrOwnershipInconclusive, ready.HostPID)
+	}
+	if bootErr != nil {
+		return fmt.Errorf("%w: verify boot identity after admitted chat host %d exited: %w", ErrOwnershipInconclusive, ready.HostPID, bootErr)
+	}
+	// The host can die after starting its Unix provider process group. On the
+	// same boot, only orderly host teardown can prove provider-tree cleanup by
+	// clearing the readiness record.
+	return fmt.Errorf("%w: admitted chat host %d exited on the current boot without proving provider-tree cleanup", ErrOwnershipInconclusive, ready.HostPID)
+}
+
+func priorBootIdentity(stored, current string) bool {
+	storedSource, storedValue, storedOK := strings.Cut(stored, ":")
+	currentSource, currentValue, currentOK := strings.Cut(current, ":")
+	return storedOK && currentOK &&
+		storedSource == currentSource &&
+		storedValue != "" && currentValue != "" &&
+		stored != current
 }

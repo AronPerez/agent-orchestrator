@@ -1074,6 +1074,42 @@ func TestLaunchProbeRechecksReadinessAfterLauncherExit(t *testing.T) {
 	}
 }
 
+func TestLaunchProbeClearsReadinessFromPriorBoot(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "prior-boot"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	if err := publishLaunchReady(dataDir, sessionID, token, 2147483647); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := readLaunchReady(dataDir, sessionID, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.BootID == "" {
+		t.Fatal("launch readiness omitted boot identity")
+	}
+
+	err = probeLaunchTokenWithProbes(
+		dataDir, sessionID, token,
+		func(int) bool { return true },
+		func() (string, error) { return ready.BootID + "-next", nil },
+		false,
+	)
+	if err != nil {
+		t.Fatalf("probe prior-boot readiness: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prior-boot readiness remains: %v", err)
+	}
+	if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prior-boot intent remains: %v", err)
+	}
+}
+
 func TestLaunchIDEnvironmentPreservesInheritanceAndStaysOutOfProvider(t *testing.T) {
 	const inheritedKey = "AO_CHAT_HOST_INHERITED_TEST"
 	t.Setenv(inheritedKey, "present")
