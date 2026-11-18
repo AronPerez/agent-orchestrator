@@ -55,6 +55,9 @@ func runLinuxSupervisor(gateFD, cleanupFD, passthroughFiles int, path string, ar
 	if cleanupStatus == nil {
 		return linuxSupervisorFailureCode, errors.New("open verification cleanup status")
 	}
+	// ExtraFiles arrive with close-on-exec cleared. The supervisor owns this
+	// writer; project code must neither retain it nor forge cleanup success.
+	unix.CloseOnExec(cleanupFD)
 	cleanupComplete := true
 	defer func() {
 		if cleanupComplete {
