@@ -706,6 +706,9 @@ func TestDesktopRetiredBindingHoldsWithoutTheDaemon(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, boundUserFile)); err != nil {
 		t.Fatal(err)
 	}
+	if id, known := running.CloudUserBinding(); id != "" || known {
+		t.Fatalf("running daemon account binding after desktop sign-out = %q, %v; want unknown", id, known)
+	}
 
 	cliStarted, err := NewIdentity(dir)
 	if err != nil {
@@ -720,5 +723,26 @@ func TestDesktopRetiredBindingHoldsWithoutTheDaemon(t *testing.T) {
 	}
 	if got := running.Snapshot().DistinctID(); got != "anon_rotated_by_desktop" {
 		t.Fatalf("running daemon distinct ID after the hand-off = %q, want the desktop's rotated ID", got)
+	}
+}
+
+func TestCloudUserBindingFailsClosedWhenDurableMarkerIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	ident, err := NewIdentity(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ident.SetCloudUserID(context.Background(), "user_A"); err != nil {
+		t.Fatal(err)
+	}
+	boundPath := filepath.Join(dir, boundUserFile)
+	if err := os.Remove(boundPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(boundPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if id, known := ident.CloudUserBinding(); id != "" || known {
+		t.Fatalf("account binding with unreadable marker = %q, %v; want unknown", id, known)
 	}
 }

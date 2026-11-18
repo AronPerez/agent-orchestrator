@@ -90,6 +90,13 @@ type TelemetryIdentityStore interface {
 	SetGitHubLogin(login string)
 }
 
+// CloudUserBindingSource exposes the desktop's persisted Cloud-account binding
+// for local authorization decisions. It is independent of telemetry opt-out;
+// callers must never use it for event export or expose it on a LAN route.
+type CloudUserBindingSource interface {
+	CloudUserBinding() (id string, known bool)
+}
+
 // InstallMilestones claims install-lifetime "firsts" durably (marker files in
 // the data dir), so a "first" telemetry flag fires once per install instead of
 // whenever a table happens to be empty. known is false when the marker could

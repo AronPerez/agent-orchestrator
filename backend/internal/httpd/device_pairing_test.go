@@ -218,7 +218,7 @@ func TestOnlyACodeOrThePasswordPairs(t *testing.T) {
 func TestCoordinationTokenIsLimitedToAgentCoordinationRoutes(t *testing.T) {
 	h := newPairingHost(t)
 	status, issued := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", "secret12", map[string]string{
-		"name": "desk agent", "platform": "darwin",
+		"name": "desk agent", "platform": "darwin", "clientId": "h_desk",
 	})
 	token, _ := issued["token"].(string)
 	if status != http.StatusOK || issued["hostId"] != "h_test" || issued["scope"] != mobilebridge.DeviceScopeAgentCoordination || !strings.HasPrefix(token, mobilebridge.CoordinationTokenPrefix) {
@@ -395,12 +395,15 @@ func (s coordinationSessionService) Get(context.Context, domain.SessionID) (doma
 
 func TestCoordinationSessionResponsesHideSetupOutput(t *testing.T) {
 	const setupSecret = "literal-setup-output-secret"
+	const previewSecret = "https://user:password@example.test/?token=preview-secret"
 	session := domain.Session{SessionRecord: domain.SessionRecord{
 		ID: "s1", ProjectID: "p1", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
 		ProvisionState: domain.SessionProvisionFailed, ProvisionError: setupSecret,
+		Metadata: domain.SessionMetadata{PreviewURL: previewSecret},
 	}}
 	spawnErr := error(apierr.Conflict("WORKSPACE_PROVISION_FAILED", setupSecret, nil))
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logOutput bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logOutput, nil))
 	router := NewRouterWithControl(config.Config{}, log, nil, APIDeps{
 		Sessions: coordinationSessionService{
 			session: session, spawnErr: func() error { return spawnErr },
@@ -431,11 +434,14 @@ func TestCoordinationSessionResponsesHideSetupOutput(t *testing.T) {
 	if status != http.StatusConflict || spawn["code"] != "WORKSPACE_PROVISION_FAILED" || strings.Contains(string(spawnJSON), setupSecret) {
 		t.Fatalf("scoped spawn failure leaked setup output: status=%d body=%s", status, spawnJSON)
 	}
+	if !strings.Contains(logOutput.String(), setupSecret) {
+		t.Errorf("host log omitted redacted setup diagnostic: %s", logOutput.String())
+	}
 	for _, path := range []string{"/api/v1/sessions", "/api/v1/sessions/s1"} {
 		status, scoped := host.remote(http.MethodGet, path, token, nil)
 		raw, _ := json.Marshal(scoped)
-		if status != http.StatusOK || strings.Contains(string(raw), setupSecret) {
-			t.Fatalf("scoped %s leaked setup output: status=%d body=%s", path, status, raw)
+		if status != http.StatusOK || strings.Contains(string(raw), setupSecret) || strings.Contains(string(raw), previewSecret) {
+			t.Fatalf("scoped %s leaked session secret: status=%d body=%s", path, status, raw)
 		}
 	}
 
@@ -466,7 +472,7 @@ func TestCoordinationSessionResponsesHideSetupOutput(t *testing.T) {
 
 	status, fullSession := host.remote(http.MethodGet, "/api/v1/sessions/s1", "secret12", nil)
 	fullSessionJSON, _ := json.Marshal(fullSession)
-	if status != http.StatusOK || !strings.Contains(string(fullSessionJSON), setupSecret) {
+	if status != http.StatusOK || !strings.Contains(string(fullSessionJSON), setupSecret) || !strings.Contains(string(fullSessionJSON), previewSecret) {
 		t.Fatalf("full session response was redacted: status=%d body=%s", status, fullSessionJSON)
 	}
 }
@@ -474,7 +480,7 @@ func TestCoordinationSessionResponsesHideSetupOutput(t *testing.T) {
 func TestOnlyFullCredentialsIssueCoordinationTokens(t *testing.T) {
 	h := newPairingHost(t)
 	fullID, full := h.pair("secret12", "Laptop")
-	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, nil)
+	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, map[string]string{"clientId": "h_full_device"})
 	coordination, _ := body["token"].(string)
 	if status != http.StatusOK || coordination == "" {
 		t.Fatalf("full device token: status=%d body=%v", status, body)
@@ -487,7 +493,7 @@ func TestOnlyFullCredentialsIssueCoordinationTokens(t *testing.T) {
 	}
 	_, accountBody := h.remote(http.MethodPost, "/api/v1/remote-host/account-token", full, nil)
 	account, _ := accountBody["token"].(string)
-	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", account, nil); status != http.StatusOK || body["token"] == "" {
+	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", account, map[string]string{"clientId": "h_account"}); status != http.StatusOK || body["token"] == "" {
 		t.Fatalf("account credential: status=%d body=%v", status, body)
 	}
 	accountCoordination, _ := body["token"].(string)
@@ -505,7 +511,7 @@ func TestOnlyFullCredentialsIssueCoordinationTokens(t *testing.T) {
 func TestOnlyFullCredentialsRevokeCoordinationTokens(t *testing.T) {
 	h := newPairingHost(t)
 	fullID, full := h.pair("secret12", "Laptop")
-	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, nil)
+	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, map[string]string{"clientId": "h_revoke"})
 	coordinationID, _ := body["deviceId"].(string)
 	coordination, _ := body["token"].(string)
 	if status != http.StatusOK || coordinationID == "" || coordination == "" {
@@ -697,7 +703,7 @@ func TestRemovingADeviceRevokesItAlone(t *testing.T) {
 func TestAPhoneThatForgetsTheHostLosesItsToken(t *testing.T) {
 	h := newPairingHost(t)
 	phoneID, phone := h.pair(h.code(), "Phone")
-	status, issued := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", phone, nil)
+	status, issued := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", phone, map[string]string{"clientId": "h_phone"})
 	child, _ := issued["token"].(string)
 	if status != http.StatusOK || child == "" {
 		t.Fatalf("issue child: status=%d body=%v", status, issued)

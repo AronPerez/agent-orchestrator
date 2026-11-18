@@ -1,20 +1,55 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { IncompatibleRemoteVersionError, pairDevice, probeRemote, readAuthErrorCode, readRemoteIdentity, type PairDeviceResult, type RemoteHealth } from "./remote-request";
-import { findRemote, removeSavedRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
+import {
+	IncompatibleRemoteVersionError,
+	issueCoordinationToken,
+	pairDevice,
+	probeCoordinationToken,
+	probeRemote,
+	readAuthErrorCode,
+	readRemoteIdentity,
+	revokeCoordinationToken,
+	type CoordinationTokenHealth,
+	type CoordinationTokenRevokeResult,
+	type CoordinationTokenResult,
+	type PairDeviceResult,
+	type RemoteHealth,
+} from "./remote-request";
+import { findRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
 import type { RemoteRegistry } from "./remote-registry";
-import { ACCOUNT_TOKEN, DEVICE_TOKEN_PREFIX, addRemote, holdsAccountToken, holdsPairingPassword, readRemotes, updateRemote, type RemoteChanges, type RemoteEntry } from "./remotes-store";
+import { ACCOUNT_TOKEN, DEVICE_TOKEN_PREFIX, addRemote, holdsAccountToken, holdsPairingPassword, queueRemoteCleanup, readRemotes, removeCleanupRemote, updateRemote, type RemoteChanges, type RemoteEntry } from "./remotes-store";
 import { ExpectedIpcError } from "./main-error-capture";
 
 // An isolated desktop run must not read or write the real user's credentials.
 // Without an override, keep the existing ~/.ao location.
-export function remotesFilePath(): string {
-	return path.join(process.env.AO_DATA_DIR?.trim() || path.join(os.homedir(), ".ao"), "remotes.json");
+export function remotesFilePath(env: NodeJS.ProcessEnv = process.env, homeDir = os.homedir(), cwd = process.cwd()): string {
+	return path.resolve(cwd, env.AO_DATA_DIR?.trim() || path.join(homeDir, ".ao"), "remotes.json");
+}
+
+/** Carry the desktop-owned host store and its exact Cloud authority through the daemon to spawned agents. */
+export function remotesDaemonEnvironment(
+	env: NodeJS.ProcessEnv = process.env,
+	homeDir = os.homedir(),
+	cwd = process.cwd(),
+	cloudAuthDir?: string,
+): { AO_REMOTES_FILE: string; AO_CLOUD_ACCOUNT_FILE: string } {
+	const remotesFile = remotesFilePath(env, homeDir, cwd);
+	const authDir = cloudAuthDir ? path.resolve(cwd, cloudAuthDir) : path.dirname(remotesFile);
+	return {
+		AO_REMOTES_FILE: remotesFile,
+		AO_CLOUD_ACCOUNT_FILE: path.join(authDir, "cloud_active_user"),
+	};
 }
 
 type RunFile = (file: string, args: string[], options: { timeout: number }) => Promise<{ stdout: string }>;
+
+function scheduleRemotesCleanupRetry(retry: () => Promise<void>): void {
+	const timer = setInterval(() => { void retry().catch(() => undefined); }, 30_000);
+	timer.unref?.();
+}
 
 /** The name other devices list this machine under: macOS's Computer Name
  * ("Dhruv’s Mac mini"), else the host name without its mDNS suffix. */
@@ -55,8 +90,13 @@ export type RemotesIpcDeps = {
 	probe?: (entry: RemoteEntry) => Promise<RemoteHealth>;
 	identity?: (entry: Pick<RemoteEntry, "url">) => Promise<string>;
 	pair?: (entry: Pick<RemoteEntry, "url" | "hostId">, secret: string, device: { name: string; platform: string }) => Promise<PairDeviceResult>;
+	issueCoordination?: (entry: Pick<RemoteEntry, "url" | "hostId" | "password">, device: { name: string; platform: string; clientId: string }) => Promise<CoordinationTokenResult>;
+	probeCoordination?: (entry: Pick<RemoteEntry, "url" | "hostId" | "coordinationToken">) => Promise<CoordinationTokenHealth>;
+	revokeCoordination?: (entry: Pick<RemoteEntry, "url" | "hostId" | "password">, deviceId: string) => Promise<CoordinationTokenRevokeResult>;
 	authErrorCode?: (entry: RemoteEntry) => Promise<string | undefined>;
 	deviceName?: () => Promise<string>;
+	/** Main-process retry loop for hidden cleanup tombstones. */
+	scheduleCleanupRetry?: (retry: () => Promise<void>) => void;
 };
 
 class LocalIdentityUnavailableError extends Error {
@@ -74,7 +114,11 @@ export function registerRemotesIpc(
 	ipcMain: IpcMainLike,
 	{
 		file, registry, requireAccount, getAccountId, localIdentity, cloudRequest, accountDirectoryTimeoutMs = 10_000,
-		probe = probeRemote, identity = readRemoteIdentity, pair = pairDevice, authErrorCode = readAuthErrorCode, deviceName = computerName,
+		probe = probeRemote, identity = readRemoteIdentity, pair = pairDevice,
+		issueCoordination = issueCoordinationToken, probeCoordination = probeCoordinationToken,
+		revokeCoordination = revokeCoordinationToken,
+		authErrorCode = readAuthErrorCode, deviceName = computerName,
+		scheduleCleanupRetry = scheduleRemotesCleanupRetry,
 	}: RemotesIpcDeps,
 ): void {
 	const disconnect = (url: string) => registry.disconnect(url);
@@ -140,6 +184,171 @@ export function registerRemotesIpc(
 			unsaved.delete(unsavedKey(account, typed.hostId));
 		}
 	};
+	type UnsavedCoordination = { token: string; deviceId: string; parentHash: string };
+	const unsavedCoordination = new Map<string, UnsavedCoordination>();
+	const credentialFingerprint = (credential: string) => createHash("sha256").update(credential).digest("hex");
+	const coordinationKey = (entry: RemoteEntry) => entry.hostId ?? entry.url;
+	const coordinationChanges = (candidate: UnsavedCoordination, pendingCoordinationDeviceIds: string[] = []): RemoteChanges => ({
+		coordinationToken: candidate.token,
+		coordinationDeviceId: candidate.deviceId,
+		coordinationParentHash: candidate.parentHash,
+		pendingCoordinationDeviceIds,
+	});
+	const verifiedRevoke = async (entry: RemoteEntry, deviceID: string, localHostId: string, account: string): Promise<CoordinationTokenRevokeResult> => {
+		if (!entry.hostId || (entry.accountUserId && entry.accountUserId !== account)) throw new Error("Host does not belong to this account.");
+		const actual = await identity(entry);
+		refuseSelf(actual, localHostId);
+		if (actual !== entry.hostId) throw new Error(`remote host identity changed for ${entry.url}; connection refused`);
+		await checkConnectionContext(localHostId, account);
+		const retired = await revokeCoordination(entry, deviceID);
+		await checkConnectionContext(localHostId, account);
+		return retired;
+	};
+	const ensureCoordinationCredential = async (entry: RemoteEntry, localHostId: string, account: string): Promise<RemoteEntry> => {
+		const parentHash = credentialFingerprint(entry.password);
+		const key = coordinationKey(entry);
+		const unsavedCandidate = unsavedCoordination.get(key);
+		if (unsavedCandidate) {
+			if (unsavedCandidate.parentHash !== parentHash) {
+				let retired: CoordinationTokenRevokeResult;
+				try { retired = await verifiedRevoke(entry, unsavedCandidate.deviceId, localHostId, account); }
+				catch { return entry; }
+				if (retired !== "retired") return entry;
+				unsavedCoordination.delete(key);
+			} else {
+			let health: CoordinationTokenHealth;
+			try { health = await probeCoordination({ ...entry, coordinationToken: unsavedCandidate.token }); }
+			catch { return entry; }
+			if (health === "valid" || health === "revoked") {
+				try {
+					const saved = await updateRemote(file, entry.url, coordinationChanges(unsavedCandidate));
+					unsavedCoordination.delete(key);
+					return saved;
+				} catch {
+					return entry;
+				}
+			}
+			if (health === "offline") return entry;
+			let retired: CoordinationTokenRevokeResult;
+			try { retired = await verifiedRevoke(entry, unsavedCandidate.deviceId, localHostId, account); }
+			catch { return entry; }
+			if (retired !== "retired") return entry;
+			unsavedCoordination.delete(key);
+			}
+		}
+
+		let current = entry;
+		if (current.coordinationToken && current.coordinationParentHash && current.coordinationParentHash !== parentHash) {
+			const pending = [...new Set([...(current.pendingCoordinationDeviceIds ?? []), ...(current.coordinationDeviceId ? [current.coordinationDeviceId] : [])])];
+			try {
+				current = await updateRemote(file, current.url, {
+					coordinationToken: "", coordinationDeviceId: "", coordinationParentHash: "",
+					pendingCoordinationDeviceIds: pending,
+				});
+			} catch {
+				return current;
+			}
+		}
+		for (const deviceId of current.pendingCoordinationDeviceIds ?? []) {
+			let retired: CoordinationTokenRevokeResult;
+			try { retired = await verifiedRevoke(current, deviceId, localHostId, account); }
+			catch { return current; }
+			if (retired !== "retired") return current;
+			const remaining = (current.pendingCoordinationDeviceIds ?? []).filter((candidate) => candidate !== deviceId);
+			try {
+				current = await updateRemote(file, current.url, { pendingCoordinationDeviceIds: remaining });
+			} catch {
+				return current;
+			}
+		}
+
+		if (current.coordinationToken) {
+			let health: CoordinationTokenHealth;
+			try { health = await probeCoordination(current); }
+			catch { return current; }
+			if (health === "valid" && !current.coordinationParentHash) {
+				try { return await updateRemote(file, current.url, { coordinationParentHash: parentHash }); }
+				catch { return current; }
+			}
+			if (health !== "invalid") return current;
+			// Without the issued device ID, replacing an invalid legacy token would
+			// leak a row the client can never retire. Keep desktop access on the full
+			// credential and wait for an explicit re-pair instead.
+			if (!current.coordinationDeviceId) return current;
+			let retired: CoordinationTokenRevokeResult;
+			try { retired = await verifiedRevoke(current, current.coordinationDeviceId, localHostId, account); }
+			catch { return current; }
+			if (retired !== "retired") return current;
+			try {
+				current = await updateRemote(file, current.url, {
+					coordinationToken: "", coordinationDeviceId: "", coordinationParentHash: "",
+				});
+			} catch {
+				return current;
+			}
+		}
+		let issued: CoordinationTokenResult;
+		try {
+			issued = await issueCoordination(current, { name: await deviceName(), platform: process.platform, clientId: localHostId });
+		} catch {
+			// This credential exists for headless CLI coordination. An older host,
+			// transient failure, or display-name lookup must not break desktop use.
+			return entry;
+		}
+		if (issued.kind !== "issued") return current;
+		const candidate = { token: issued.token, deviceId: issued.deviceId, parentHash };
+		const retireOrRemember = async () => {
+			let retired: CoordinationTokenRevokeResult = "offline";
+			try { retired = await verifiedRevoke(current, candidate.deviceId, localHostId, account); }
+			catch { /* keep the candidate for reuse below */ }
+			if (retired !== "retired") unsavedCoordination.set(key, candidate);
+		};
+		try {
+			await checkConnectionContext(localHostId, account);
+		} catch (error) {
+			await retireOrRemember();
+			throw error;
+		}
+		try {
+			const saved = await updateRemote(file, current.url, coordinationChanges(candidate));
+			unsavedCoordination.delete(key);
+			return saved;
+		} catch {
+			await retireOrRemember();
+			return current;
+		}
+	};
+	const retireCoordinationChildren = async (entry: RemoteEntry, account: string): Promise<boolean> => {
+		if (entry.coordinationToken && !entry.coordinationDeviceId) return false;
+		const deviceIDs = [...new Set([
+			...(entry.pendingCoordinationDeviceIds ?? []),
+			...(entry.coordinationDeviceId ? [entry.coordinationDeviceId] : []),
+		])];
+		if (deviceIDs.length === 0) return true;
+		if (!entry.hostId || (entry.accountUserId && entry.accountUserId !== account)) return false;
+		let localHostId: string;
+		try {
+			localHostId = await requireLocalIdentity();
+		} catch {
+			return false;
+		}
+		for (const deviceID of deviceIDs) {
+			let retired: CoordinationTokenRevokeResult;
+			try {
+				retired = await verifiedRevoke(entry, deviceID, localHostId, account);
+			}
+			catch { return false; }
+			if (retired !== "retired") return false;
+		}
+		return true;
+	};
+	const hideAndRetire = async (entry: RemoteEntry, account: string, extraDeviceIDs: string[] = []): Promise<void> => {
+		const cleanup = await queueRemoteCleanup(file, entry.url, entry.hostId, extraDeviceIDs);
+		if (!cleanup) return;
+		if (await retireCoordinationChildren(cleanup, account)) {
+			await removeCleanupRemote(file, cleanup.url, cleanup.hostId);
+		}
+	};
 	// Keep edits and connects ordered so an update cannot leave a stale proxy.
 	// ponytail: one queue includes network probes; split by host if five-host setup is too slow.
 	let pending: Promise<void> = Promise.resolve();
@@ -158,8 +367,17 @@ export function registerRemotesIpc(
 		const account = await getAccountId();
 		const entries = await readRemotes(file);
 		// Local pairings have no account owner; account-scoped credentials stay isolated.
-		return entries.filter((item) => !item.accountUserId || item.accountUserId === account);
+		return entries.filter((item) => !item.cleanupOnly && (!item.accountUserId || item.accountUserId === account));
 	};
+	const retryCleanupRecords = async (account: string) => {
+		for (const cleanup of (await readRemotes(file)).filter((entry) => entry.cleanupOnly
+			&& (!entry.accountUserId || entry.accountUserId === account))) {
+			if (await retireCoordinationChildren(cleanup, account)) {
+				await removeCleanupRemote(file, cleanup.url, cleanup.hostId);
+			}
+		}
+	};
+	scheduleCleanupRetry(() => ordered(async () => retryCleanupRecords(await getAccountId())));
 
 	ipcMain.handle("remotes:list", () => ordered(async () => {
 		const localHostId = await localIdentity();
@@ -199,7 +417,7 @@ export function registerRemotesIpc(
 		const account = await getAccountId();
 		if (!(await owned()).some((entry) => entry.url === url)) throw new ExpectedIpcError("Host does not belong to this account.");
 		const editable: RemoteChanges = { label: changes.label, url: changes.url, password: changes.password };
-		const current = (await readRemotes(file)).find((entry) => entry.url === url);
+		const current = (await readRemotes(file)).find((entry) => !entry.cleanupOnly && entry.url === url);
 		if (editable.password !== undefined && current) {
 			const typed: RemoteEntry = { ...current, url: editable.url ?? url, password: editable.password, fallbackPassword: undefined, sealedFallbackPassword: undefined };
 			const localHostId = await requireLocalIdentity();
@@ -224,8 +442,17 @@ export function registerRemotesIpc(
 		return updateSavedRemote(file, url, editable, disconnect, (entry) => checkedProbe(entry, account));
 	}));
 	ipcMain.handle("remotes:remove", async (_event, url: string) => ordered(async () => {
-		if (!(await owned()).some((entry) => entry.url === url)) throw new Error("Host does not belong to this account.");
-		return removeSavedRemote(file, url, disconnect);
+		const account = await getAccountId();
+		const entries = (await readRemotes(file)).filter((candidate) => candidate.url === url
+			&& (!candidate.accountUserId || candidate.accountUserId === account));
+		const entry = entries.find((candidate) => !candidate.cleanupOnly)
+			?? entries.find((candidate) => candidate.cleanupOnly);
+		if (!entry) throw new Error("Host does not belong to this account.");
+		await disconnect(url);
+		const key = coordinationKey(entry);
+		const unsavedCandidate = unsavedCoordination.get(key);
+		await hideAndRetire(entry, account, unsavedCandidate ? [unsavedCandidate.deviceId] : []);
+		if (unsavedCandidate) unsavedCoordination.delete(key);
 	}));
 	ipcMain.handle("remotes:connect", async (_event, url: string, hostId?: string) => ordered(async () => {
 		const account = await getAccountId();
@@ -266,6 +493,8 @@ export function registerRemotesIpc(
 				current = await updateRemote(file, url, { password: paired.entry.password, fallbackPassword: paired.entry.fallbackPassword });
 			}
 		}
+		current = await ensureCoordinationCredential(current, localHostId, account);
+		await checkConnectionContext(localHostId, account);
 		return registry.connect(current);
 	}));
 	// AO Cloud calls run outside the ordered queue: a slow answer must not hold
@@ -289,15 +518,36 @@ export function registerRemotesIpc(
 	};
 	const importAccountHost = async (account: string, host: AccountHost) => {
 		if (!host.hostId || !ACCOUNT_TOKEN.test(host.token ?? "")) throw new ExpectedIpcError("Invalid account host credential.");
-		const local = (await readRemotes(file)).find((entry) => entry.hostId === host.hostId);
+		const local = (await readRemotes(file)).find((entry) => !entry.cleanupOnly && entry.hostId === host.hostId);
 		// Keep the original password on the machine that performed pairing; a
 		// Cloud refresh must not replace it with the narrower account token. A
 		// password this launch cannot decrypt is kept the same way.
-		if (local && (!local.accountUserId || local.sealedPassword || (local.password && !holdsAccountToken(local)))) {
+		if (local && (!local.accountUserId || (local.sealedPassword && !local.accountToken) || (local.password && !holdsAccountToken(local)))) {
 			if (local.label !== host.label || local.url !== host.url) await updateRemote(file, local.url, { label: host.label, url: host.url });
 			return;
 		}
-		await addRemote(file, { hostId: host.hostId, label: host.label, url: host.url, password: host.token, accountUserId: account });
+		if (local?.accountUserId === account) {
+			if (local.sealedPassword && local.accountToken) {
+				if (!local.coordinationToken || local.coordinationParentHash === credentialFingerprint(host.token)) {
+					if (local.label !== host.label || local.url !== host.url) await updateRemote(file, local.url, { label: host.label, url: host.url });
+					return;
+				}
+				const pending = [...new Set([...(local.pendingCoordinationDeviceIds ?? []), ...(local.coordinationDeviceId ? [local.coordinationDeviceId] : [])])];
+				await updateRemote(file, local.url, {
+					label: host.label, url: host.url,
+					coordinationToken: "", coordinationDeviceId: "", coordinationParentHash: "",
+					pendingCoordinationDeviceIds: pending,
+				});
+				return;
+			}
+			await updateRemote(file, local.url, {
+				label: host.label, url: host.url, password: host.token, accountUserId: account,
+			});
+			return;
+		}
+		await addRemote(file, {
+			hostId: host.hostId, label: host.label, url: host.url, password: host.token, accountUserId: account,
+		});
 	};
 	// Syncs read the directory at the same time. One that started before an
 	// already applied one holds an older listing and writes nothing.
@@ -312,13 +562,15 @@ export function registerRemotesIpc(
 			const account = await accountID();
 			if (account !== expectedAccountId) throw new ExpectedIpcError("Account changed during host sync.");
 			appliedSync = sync;
+			await retryCleanupRecords(account);
 			for (const host of hosts) await importAccountHost(account, host);
 			const current = new Set(hosts.map((host) => host.hostId));
 			for (const entry of await owned()) {
 				// Only account-imported credentials are directory-managed. A machine
 				// paired here with its original password remains a local pairing.
 				if (entry.hostId && entry.accountUserId === account && !current.has(entry.hostId) && holdsAccountToken(entry)) {
-					await removeSavedRemote(file, entry.url, disconnect);
+					await disconnect(entry.url);
+					await hideAndRetire(entry, account);
 				}
 			}
 		});
@@ -329,7 +581,7 @@ export function registerRemotesIpc(
 		const { hostKeys } = await accountHosts<{ hostKeys?: boolean }>("GET", "", { timeoutMs: accountDirectoryTimeoutMs });
 		const issued = await ordered(async () => {
 			const account = await accountID();
-			const entry = (await readRemotes(file)).find((saved) => saved.url === url && (!saved.accountUserId || saved.accountUserId === account));
+			const entry = (await readRemotes(file)).find((saved) => !saved.cleanupOnly && saved.url === url && (!saved.accountUserId || saved.accountUserId === account));
 			if (!entry?.hostId) throw new ExpectedIpcError("Pair this host before linking it to your account.");
 			const localHostId = await requireLocalIdentity();
 			refuseSelf(entry.hostId, localHostId);

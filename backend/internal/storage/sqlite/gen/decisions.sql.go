@@ -93,103 +93,6 @@ func (q *Queries) GetDecisionCall(ctx context.Context, callID string) (DecisionC
 	return i, err
 }
 
-const listDecisionCallsAwaitingDelivery = `-- name: ListDecisionCallsAwaitingDelivery :many
-SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text
-FROM decision_calls
-WHERE origin = ? AND delivery = 'pending'
-ORDER BY raised_at, call_id
-`
-
-func (q *Queries) ListDecisionCallsAwaitingDelivery(ctx context.Context, origin string) ([]DecisionCall, error) {
-	rows, err := q.db.QueryContext(ctx, listDecisionCallsAwaitingDelivery, origin)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []DecisionCall{}
-	for rows.Next() {
-		var i DecisionCall
-		if err := rows.Scan(
-			&i.CallID,
-			&i.Origin,
-			&i.ProjectID,
-			&i.StreamSessionID,
-			&i.StreamName,
-			&i.OwnerSessionID,
-			&i.State,
-			&i.Delivery,
-			&i.Retired,
-			&i.RaisedAt,
-			&i.LastWall,
-			&i.LastCounter,
-			&i.Body,
-			&i.SearchText,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listDecisionCallsByOwner = `-- name: ListDecisionCallsByOwner :many
-SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text
-FROM decision_calls
-WHERE origin = ? AND owner_session_id = ?
-ORDER BY raised_at DESC, call_id DESC
-LIMIT ?
-`
-
-type ListDecisionCallsByOwnerParams struct {
-	Origin         string
-	OwnerSessionID string
-	Limit          int64
-}
-
-func (q *Queries) ListDecisionCallsByOwner(ctx context.Context, arg ListDecisionCallsByOwnerParams) ([]DecisionCall, error) {
-	rows, err := q.db.QueryContext(ctx, listDecisionCallsByOwner, arg.Origin, arg.OwnerSessionID, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []DecisionCall{}
-	for rows.Next() {
-		var i DecisionCall
-		if err := rows.Scan(
-			&i.CallID,
-			&i.Origin,
-			&i.ProjectID,
-			&i.StreamSessionID,
-			&i.StreamName,
-			&i.OwnerSessionID,
-			&i.State,
-			&i.Delivery,
-			&i.Retired,
-			&i.RaisedAt,
-			&i.LastWall,
-			&i.LastCounter,
-			&i.Body,
-			&i.SearchText,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listDecisionCallsByState = `-- name: ListDecisionCallsByState :many
 SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text
 FROM decision_calls
@@ -241,6 +144,62 @@ func (q *Queries) ListDecisionCallsByState(ctx context.Context, arg ListDecision
 	return items, nil
 }
 
+const listDecisionCallsForSession = `-- name: ListDecisionCallsForSession :many
+SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text
+FROM decision_calls
+WHERE origin = ?1
+  AND (
+    owner_session_id = ?2
+    OR json_extract(body, '$.deliveredTo') = ?2
+  )
+ORDER BY raised_at DESC, call_id DESC
+LIMIT ?3
+`
+
+type ListDecisionCallsForSessionParams struct {
+	Origin      string
+	SessionID   string
+	ResultLimit int64
+}
+
+func (q *Queries) ListDecisionCallsForSession(ctx context.Context, arg ListDecisionCallsForSessionParams) ([]DecisionCall, error) {
+	rows, err := q.db.QueryContext(ctx, listDecisionCallsForSession, arg.Origin, arg.SessionID, arg.ResultLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DecisionCall{}
+	for rows.Next() {
+		var i DecisionCall
+		if err := rows.Scan(
+			&i.CallID,
+			&i.Origin,
+			&i.ProjectID,
+			&i.StreamSessionID,
+			&i.StreamName,
+			&i.OwnerSessionID,
+			&i.State,
+			&i.Delivery,
+			&i.Retired,
+			&i.RaisedAt,
+			&i.LastWall,
+			&i.LastCounter,
+			&i.Body,
+			&i.SearchText,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDecisionEntries = `-- name: ListDecisionEntries :many
 SELECT id, origin, origin_seq, stamp_wall, stamp_counter, call_id, kind, payload, written_at, author_kind, author_surface, author_session
 FROM decision_entries
@@ -250,6 +209,62 @@ ORDER BY stamp_wall, stamp_counter, origin, id
 
 func (q *Queries) ListDecisionEntries(ctx context.Context, callID string) ([]DecisionEntry, error) {
 	rows, err := q.db.QueryContext(ctx, listDecisionEntries, callID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DecisionEntry{}
+	for rows.Next() {
+		var i DecisionEntry
+		if err := rows.Scan(
+			&i.ID,
+			&i.Origin,
+			&i.OriginSeq,
+			&i.StampWall,
+			&i.StampCounter,
+			&i.CallID,
+			&i.Kind,
+			&i.Payload,
+			&i.WrittenAt,
+			&i.AuthorKind,
+			&i.AuthorSurface,
+			&i.AuthorSession,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDecisionEntriesAwaitingDelivery = `-- name: ListDecisionEntriesAwaitingDelivery :many
+SELECT pending.id, pending.origin, pending.origin_seq, pending.stamp_wall, pending.stamp_counter, pending.call_id, pending.kind, pending.payload, pending.written_at, pending.author_kind, pending.author_surface, pending.author_session
+FROM decision_entries AS pending
+JOIN decision_calls AS calls ON calls.call_id = pending.call_id
+WHERE calls.origin = ?
+  AND pending.kind IN ('answered', 'dismissed')
+  AND NOT EXISTS (
+      SELECT 1
+      FROM decision_entries AS delivered
+      WHERE delivered.call_id = pending.call_id
+        AND delivered.kind = 'delivered'
+        AND CASE
+            WHEN json_valid(delivered.payload)
+            THEN json_extract(delivered.payload, '$.forEntry') = pending.id
+            ELSE 0
+        END
+  )
+ORDER BY pending.stamp_wall, pending.stamp_counter, pending.origin, pending.id
+`
+
+func (q *Queries) ListDecisionEntriesAwaitingDelivery(ctx context.Context, origin string) ([]DecisionEntry, error) {
+	rows, err := q.db.QueryContext(ctx, listDecisionEntriesAwaitingDelivery, origin)
 	if err != nil {
 		return nil, err
 	}

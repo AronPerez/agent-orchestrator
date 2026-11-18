@@ -25,6 +25,7 @@ import type { KanbanColumn, SessionActivity, SessionStatus } from "./session-mod
 import { branchTopic } from "./formatting";
 import { UserAvatar } from "./UserAvatar";
 import { cn } from "./utils";
+import { useMinuteClock } from "./use-minute-clock";
 
 export type BoardSessionPresentation = {
 	activity?: SessionActivity;
@@ -73,6 +74,10 @@ export type BoardSessionPresentation = {
 	trackerIssueId?: string;
 	updatedAt: string;
 	lastUserMessageAt?: string;
+	goal?: string;
+	timeboxDeadlineAt?: string;
+	contractOutcome?: "met" | "blocked" | "limit_hit";
+	contractStalled?: boolean;
 };
 
 export type BoardSessionStatusPresentation = {
@@ -240,6 +245,7 @@ export type SessionCardViewProps = {
 		formatTime: (timestamp: string) => string;
 		intakeIssue: (id: string) => string;
 		pr: BoardPullRequestLabels;
+		timeLeft?: (deadline: string, now: number) => string;
 		updatedAt: (timestamp: string) => string;
 	};
 	onOpen?: () => void;
@@ -269,11 +275,13 @@ export function getBoardSessionStatusLabel(
 		? translate("session.statusChecking")
 		: session.statusReadiness === "unavailable"
 			? translate("session.statusUnavailable")
-			: (session.statusPresentation?.label ??
-				session.prMix?.lead ??
-				(session.displayStatus
-					? getDisplayStatusLabel(session.displayStatus, translate)
-					: getSessionStatusView(session.status, translate).label));
+			: session.contractStalled
+				? translate("session.contractStalled")
+				: (session.statusPresentation?.label ??
+					session.prMix?.lead ??
+					(session.displayStatus
+						? getDisplayStatusLabel(session.displayStatus, translate)
+						: getSessionStatusView(session.status, translate).label));
 }
 
 export function SessionCardView({
@@ -301,6 +309,7 @@ export function SessionCardView({
 	translate,
 	usage,
 }: SessionCardViewProps) {
+	const contractNow = useMinuteClock(Boolean(!compact && session.timeboxDeadlineAt && !session.contractOutcome));
 	const badge = getSessionStatusView(session.status, translate);
 	const statusPresentation = session.statusPresentation;
 	const needsAttention = boardSessionNeedsAttention(session);
@@ -321,6 +330,10 @@ export function SessionCardView({
 	const topic = branchTopic(branch);
 	const showBranch = Boolean(branchLabel) || (branch !== "" && !sameLabel(topic, session.title) && !sameLabel(topic, session.id));
 	const renderedStatusLabel = getBoardSessionStatusLabel(session, translate);
+	const contractGoal = session.goal?.trim();
+	const contractTimeLeft = session.timeboxDeadlineAt && !session.contractOutcome
+		? labels.timeLeft?.(session.timeboxDeadlineAt, contractNow)
+		: undefined;
 	const statusDetail =
 		session.statusReadiness !== "checking" && session.statusReadiness !== "unavailable" && !statusPresentation
 			? session.prMix?.detail
@@ -485,6 +498,19 @@ export function SessionCardView({
 						{branchRow}
 					</div>
 				) : null}
+				{!compact && (contractGoal || contractTimeLeft) ? (
+					<div
+						className="mt-1.5 flex min-w-0 items-center gap-2 text-2xs text-muted-foreground"
+						data-testid="session-contract"
+					>
+						{contractGoal ? (
+							<span className="min-w-0 flex-1 truncate" title={contractGoal}>{contractGoal}</span>
+						) : null}
+						{contractTimeLeft ? (
+							<span className="shrink-0 tabular-nums">{contractTimeLeft}</span>
+						) : null}
+					</div>
+				) : null}
 				{compact && pullRequestProgressLabel ? (
 					<div
 						className="mt-1 min-w-0 truncate text-2xs text-muted-foreground"
@@ -539,6 +565,7 @@ export function SessionCardView({
 
 function boardSessionNeedsAttention(session: BoardSessionPresentation): boolean {
 	if (session.statusReadiness && session.statusReadiness !== "ready") return false;
+	if (session.contractStalled) return true;
 	if (session.statusPresentation) return false;
 	switch (session.displayStatus) {
 		case "Blocked":

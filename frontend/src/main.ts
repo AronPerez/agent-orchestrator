@@ -281,7 +281,7 @@ import {
 import { buildLinuxAppMenuTemplate, buildMacAppMenuTemplate, buildWindowsAppMenuTemplate, coerceAppMenuAvailability, type AppMenuCommands } from "./main/menu";
 import { ancestorRepositorySetupWarning, resolveCheckedOutBranch, scanImportFolder } from "./main/import-folder-scan";
 import { parseOpenFolderPathArg } from "./main/open-folder-arg";
-import { registerRemotesIpc, remotesFilePath } from "./main/remotes-main";
+import { registerRemotesIpc, remotesDaemonEnvironment, remotesFilePath } from "./main/remotes-main";
 import { sealSavedPasswords, setPasswordCipher } from "./main/remotes-store";
 import { createLocalHostIdentity } from "./main/remote-request";
 import { RemoteRegistry } from "./main/remote-registry";
@@ -1934,6 +1934,7 @@ function daemonEnv(forceKeep = keepDaemonAlive(process.env)): NodeJS.ProcessEnv 
 	const ownerTag = {
 		AO_OWNER,
 		AO_DATA_DIR: desktopDataDir,
+		...remotesDaemonEnvironment(process.env, os.homedir(), desktopLaunchWorkingDirectory, cloudDataDir()),
 		AO_APP_RUN_ID: appRunId,
         ...(process.platform === "darwin" ? { AO_WAKE_HELPER: app.isPackaged
             ? path.join(process.resourcesPath, "wake-helper", "ao-wake")

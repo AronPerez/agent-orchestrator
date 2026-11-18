@@ -72,6 +72,30 @@ type RaiseDecisionRequest struct {
 	Reference string                  `json:"reference,omitempty" maxLength:"64"`
 }
 
+// AnswerDecisionRequest records an offered option or a person-authored alternative.
+type AnswerDecisionRequest struct {
+	Choice string `json:"choice" enum:"option,other"`
+	Option int    `json:"option,omitempty"`
+	Note   string `json:"note,omitempty" maxLength:"1000"`
+}
+
+// DismissDecisionRequest records why the person declined to choose.
+type DismissDecisionRequest struct {
+	Note string `json:"note,omitempty" maxLength:"1000"`
+}
+
+// DecisionOutcomeRequest records the result of carrying out a decision.
+type DecisionOutcomeRequest struct {
+	ForEntry string `json:"forEntry,omitempty" description:"Immutable answer entry being carried out. Required for session-authored outcomes."`
+	Text     string `json:"text" maxLength:"300"`
+	Link     string `json:"link,omitempty"`
+}
+
+// RetireDecisionRequest changes whether a completed call still applies.
+type RetireDecisionRequest struct {
+	Retired bool `json:"retired"`
+}
+
 // DecisionCallResponse is the current projection of one decision call.
 type DecisionCallResponse struct {
 	ID                string                  `json:"id"`
@@ -98,6 +122,7 @@ type DecisionCallResponse struct {
 	Note              string                  `json:"note,omitempty"`
 	AnsweredAt        *time.Time              `json:"answeredAt,omitempty"`
 	AnswerSurface     string                  `json:"answerSurface,omitempty"`
+	StandingEntryID   string                  `json:"standingEntryId,omitempty"`
 	Outcome           string                  `json:"outcome,omitempty"`
 	OutcomeLink       string                  `json:"outcomeLink,omitempty"`
 	OutcomeAt         *time.Time              `json:"outcomeAt,omitempty"`
@@ -138,6 +163,7 @@ type DecisionEntryResponse struct {
 	Choice        string    `json:"choice,omitempty"`
 	Option        int       `json:"option,omitempty"`
 	Note          string    `json:"note,omitempty"`
+	ForEntry      string    `json:"forEntry,omitempty"`
 	Text          string    `json:"text,omitempty"`
 	Link          string    `json:"link,omitempty"`
 	Status        string    `json:"status,omitempty"`
@@ -3442,11 +3468,12 @@ type PairDeviceResponse struct {
 }
 
 // IssueCoordinationTokenRequest names the local agent client that will hold a
-// limited remote-host credential. Both fields are display metadata only.
+// limited remote-host credential. Name and platform are display metadata;
+// ClientID is required so retries reconcile a response lost after persistence.
 type IssueCoordinationTokenRequest struct {
 	Name     string `json:"name,omitempty" description:"Name shown in the host's device list."`
 	Platform string `json:"platform,omitempty" description:"The requesting machine's platform."`
-	ClientID string `json:"clientId,omitempty" description:"Stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client."`
+	ClientID string `json:"clientId" description:"Required stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client."`
 }
 
 // CoordinationDeviceIDParam identifies a previously issued coordination token.

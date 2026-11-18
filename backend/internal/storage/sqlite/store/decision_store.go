@@ -104,13 +104,14 @@ func (s *Store) ListDecisionEntries(ctx context.Context, callID string) ([]domai
 	return decisionEntriesFromGen(rows), nil
 }
 
-// ListDecisionCallsByOwner returns one session's calls on one machine, newest first.
-func (s *Store) ListDecisionCallsByOwner(ctx context.Context, origin string, owner domain.SessionID, limit int) ([]domain.DecisionCall, error) {
-	rows, err := s.qr.ListDecisionCallsByOwner(ctx, gen.ListDecisionCallsByOwnerParams{
-		Origin: origin, OwnerSessionID: string(owner), Limit: int64(limit),
+// ListDecisionCallsForSession returns calls owned by or delivered to one local
+// session, newest first.
+func (s *Store) ListDecisionCallsForSession(ctx context.Context, origin string, session domain.SessionID, limit int) ([]domain.DecisionCall, error) {
+	rows, err := s.qr.ListDecisionCallsForSession(ctx, gen.ListDecisionCallsForSessionParams{
+		Origin: origin, SessionID: string(session), ResultLimit: int64(limit),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list decision calls by owner: %w", err)
+		return nil, fmt.Errorf("list decision calls for session: %w", err)
 	}
 	return decisionCallsFromGen(rows)
 }
@@ -126,13 +127,34 @@ func (s *Store) ListDecisionCallsByState(ctx context.Context, state domain.Decis
 	return decisionCallsFromGen(rows)
 }
 
-// ListDecisionCallsAwaitingDelivery returns pending calls raised on origin.
+// ListDecisionCallsAwaitingDelivery returns one ledger snapshot for every
+// undelivered answer or dismissal raised on origin.
 func (s *Store) ListDecisionCallsAwaitingDelivery(ctx context.Context, origin string) ([]domain.DecisionCall, error) {
-	rows, err := s.qr.ListDecisionCallsAwaitingDelivery(ctx, origin)
+	rows, err := s.qr.ListDecisionEntriesAwaitingDelivery(ctx, origin)
 	if err != nil {
 		return nil, fmt.Errorf("list decisions awaiting delivery: %w", err)
 	}
-	return decisionCallsFromGen(rows)
+	calls := make([]domain.DecisionCall, 0, len(rows))
+	for _, row := range rows {
+		pending := decisionEntryFromGen(row)
+		entryRows, err := s.qr.ListDecisionEntries(ctx, pending.CallID)
+		if err != nil {
+			return nil, fmt.Errorf("list decision entries for pending delivery %s: %w", pending.ID, err)
+		}
+		entries := make([]domain.DecisionEntry, 0, len(entryRows))
+		for _, entryRow := range entryRows {
+			entry := decisionEntryFromGen(entryRow)
+			if entry.Kind == domain.DecisionKindDelivered || domain.CompareDecisionEntries(entry, pending) <= 0 {
+				entries = append(entries, entry)
+			}
+		}
+		call, ok := domain.ReduceDecisionCall(entries)
+		if !ok || call.StandingEntryID != pending.ID {
+			return nil, fmt.Errorf("reduce pending decision delivery %s", pending.ID)
+		}
+		calls = append(calls, call)
+	}
+	return calls, nil
 }
 
 // ListDecisionStreams returns the newest recorded name for every stream.

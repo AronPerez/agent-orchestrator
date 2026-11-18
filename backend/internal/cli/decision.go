@@ -58,6 +58,7 @@ type decisionCallAPI struct {
 	Note              string              `json:"note,omitempty"`
 	AnsweredAt        *time.Time          `json:"answeredAt,omitempty"`
 	AnswerSurface     string              `json:"answerSurface,omitempty"`
+	StandingEntryID   string              `json:"standingEntryId,omitempty"`
 	Outcome           string              `json:"outcome,omitempty"`
 	OutcomeLink       string              `json:"outcomeLink,omitempty"`
 	OutcomeAt         *time.Time          `json:"outcomeAt,omitempty"`
@@ -80,6 +81,7 @@ type decisionEntryAPI struct {
 	Choice        string    `json:"choice,omitempty"`
 	Option        int       `json:"option,omitempty"`
 	Note          string    `json:"note,omitempty"`
+	ForEntry      string    `json:"forEntry,omitempty"`
 	Text          string    `json:"text,omitempty"`
 	Link          string    `json:"link,omitempty"`
 	Status        string    `json:"status,omitempty"`
@@ -98,6 +100,26 @@ type decisionDetailAPIResponse struct {
 	History []decisionEntryAPI `json:"history"`
 }
 
+type decisionAnswerAPIRequest struct {
+	Choice string `json:"choice"`
+	Option int    `json:"option,omitempty"`
+	Note   string `json:"note,omitempty"`
+}
+
+type decisionDismissAPIRequest struct {
+	Note string `json:"note,omitempty"`
+}
+
+type decisionOutcomeAPIRequest struct {
+	ForEntry string `json:"forEntry,omitempty"`
+	Text     string `json:"text"`
+	Link     string `json:"link,omitempty"`
+}
+
+type decisionRetireAPIRequest struct {
+	Retired bool `json:"retired"`
+}
+
 type decisionRaiseOptions struct {
 	title, context, file, reference string
 	options, links                  []string
@@ -112,6 +134,11 @@ func newDecisionCommand(ctx *commandContext) *cobra.Command {
 		newDecisionSearchCommand(ctx),
 		newDecisionListCommand(ctx),
 		newDecisionShowCommand(ctx),
+		newDecisionAnswerCommand(ctx),
+		newDecisionDismissCommand(ctx),
+		newDecisionOutcomeCommand(ctx),
+		newDecisionWithdrawCommand(ctx),
+		newDecisionRetireCommand(ctx),
 	)
 	return cmd
 }
@@ -294,11 +321,16 @@ func newDecisionShowCommand(ctx *commandContext) *cobra.Command {
 			if len(args) != 1 {
 				return usageError{errors.New("usage: ao decision show <id>")}
 			}
-			return nil
+			_, err := decisionIDArg(args[0])
+			return err
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
 			var response decisionDetailAPIResponse
-			if err := ctx.getJSON(cmd.Context(), "decisions/"+url.PathEscape(args[0]), &response); err != nil {
+			if err := ctx.getJSON(cmd.Context(), "decisions/"+url.PathEscape(id), &response); err != nil {
 				return err
 			}
 			if jsonOutput {
@@ -309,6 +341,183 @@ func newDecisionShowCommand(ctx *commandContext) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON")
 	return cmd
+}
+
+func newDecisionAnswerCommand(ctx *commandContext) *cobra.Command {
+	var pick int
+	var other bool
+	var note string
+	cmd := &cobra.Command{
+		Use:   "answer <id>",
+		Short: "Answer a decision call",
+		Args:  decisionIDArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
+			pickSet := cmd.Flags().Changed("pick")
+			if pickSet == other {
+				return usageError{errors.New("usage: choose with --pick <n> or --other")}
+			}
+			request := decisionAnswerAPIRequest{Choice: "option", Option: pick, Note: note}
+			if other {
+				request.Choice, request.Option = "other", 0
+			}
+			var response decisionCallAPI
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "answer"), request, &response); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Answered %s: %s\n", response.ID, response.ChosenLabel)
+			return err
+		},
+	}
+	cmd.Flags().IntVar(&pick, "pick", 0, "Position of the option to choose")
+	cmd.Flags().BoolVar(&other, "other", false, "Choose something outside the listed options")
+	cmd.Flags().StringVar(&note, "note", "", "Optional note for the owning session")
+	return cmd
+}
+
+func newDecisionDismissCommand(ctx *commandContext) *cobra.Command {
+	var note string
+	cmd := &cobra.Command{
+		Use:   "dismiss <id>",
+		Short: "Dismiss a decision call without choosing",
+		Args:  decisionIDArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
+			var response decisionCallAPI
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "dismiss"), decisionDismissAPIRequest{Note: note}, &response); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Dismissed %s\n", response.ID)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&note, "note", "", "Optional reason for dismissing the call")
+	return cmd
+}
+
+func newDecisionOutcomeCommand(ctx *commandContext) *cobra.Command {
+	var text, link, forEntry string
+	cmd := &cobra.Command{
+		Use:   "outcome <id>",
+		Short: "Record what happened after a decision",
+		Args:  decisionIDArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
+			if !cmd.Flags().Changed("text") {
+				return usageError{errors.New("usage: --text is required")}
+			}
+			if err := ctx.refuseRemoteDecisionSession("ao decision outcome"); err != nil {
+				return err
+			}
+			var response decisionCallAPI
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "outcome"), decisionOutcomeAPIRequest{ForEntry: forEntry, Text: text, Link: link}, &response); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Recorded the outcome of %s\n", response.ID)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&text, "text", "", "One-line outcome")
+	cmd.Flags().StringVar(&link, "link", "", "Optional supporting URL")
+	cmd.Flags().StringVar(&forEntry, "for-answer", "", "Answer entry named by the delivered instruction")
+	return cmd
+}
+
+func newDecisionWithdrawCommand(ctx *commandContext) *cobra.Command {
+	return &cobra.Command{
+		Use:   "withdraw <id>",
+		Short: "Withdraw a decision call",
+		Args:  decisionIDArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
+			if err := ctx.refuseRemoteDecisionSession("ao decision withdraw"); err != nil {
+				return err
+			}
+			var response decisionCallAPI
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "withdraw"), nil, &response); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Withdrew %s\n", response.ID)
+			return err
+		},
+	}
+}
+
+func newDecisionRetireCommand(ctx *commandContext) *cobra.Command {
+	var undo bool
+	cmd := &cobra.Command{
+		Use:   "retire <id>",
+		Short: "Mark whether a finished decision still applies",
+		Args:  decisionIDArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
+			var response decisionCallAPI
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "retire"), decisionRetireAPIRequest{Retired: !undo}, &response); err != nil {
+				return err
+			}
+			message := "no longer applies"
+			if undo {
+				message = "applies again"
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", response.ID, message)
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&undo, "undo", false, "Mark the decision as applying again")
+	return cmd
+}
+
+func decisionIDArgs(_ *cobra.Command, args []string) error {
+	if len(args) != 1 {
+		return usageError{errors.New("usage: ao decision <command> <id>")}
+	}
+	_, err := decisionIDArg(args[0])
+	return err
+}
+
+func decisionIDArg(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	if parsed.Scheme == "" {
+		return raw, nil
+	}
+	if parsed.Scheme != "ao" || parsed.Host != "decisions" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	escapedID := strings.TrimPrefix(parsed.EscapedPath(), "/")
+	if escapedID == "" || strings.Contains(escapedID, "/") {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	id, err := url.PathUnescape(escapedID)
+	if err != nil || strings.TrimSpace(id) == "" || strings.Contains(id, "/") {
+		return "", usageError{errors.New("use a valid decision ID or ao://decisions/ link")}
+	}
+	return id, nil
+}
+
+func decisionActionPath(id, action string) string {
+	return "decisions/" + url.PathEscape(id) + "/" + action
 }
 
 func writeDecisionCalls(w io.Writer, calls []decisionCallAPI, empty string, outcomeOwed bool) error {
@@ -360,7 +569,7 @@ func writeDecisionCall(w io.Writer, call decisionCallAPI, outcomeOwed bool) erro
 		}
 	}
 	if outcomeOwed && call.State == "in_progress" {
-		_, err := fmt.Fprintf(w, "  Outcome owed: ao decision outcome %s --text \"<what happened>\"\n", call.ID)
+		_, err := fmt.Fprintf(w, "  Outcome owed: ao decision outcome %s --for-answer %s --text \"<what happened>\"\n", call.ID, call.StandingEntryID)
 		return err
 	}
 	return nil

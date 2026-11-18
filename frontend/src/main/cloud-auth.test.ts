@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -73,8 +73,13 @@ import {
   resolveCloudAuthRedirect,
   showCloudSignInFailure,
   signOutCloud,
+  withAuthMutation,
   writeAuthStore,
 } from "./cloud-auth";
+
+const activeCloudAccountPath = (dataDir: string) => path.join(dataDir, "cloud_active_user");
+const activeCloudAccount = async (dataDir: string) =>
+  JSON.parse(await readFile(activeCloudAccountPath(dataDir), "utf8")) as { userId: string; desktopPid: number; desktopStartedAtMs?: number };
 
 describe("native WorkOS authentication", () => {
   let dataDir: string;
@@ -153,6 +158,89 @@ describe("native WorkOS authentication", () => {
     await expect(handleCloudDeepLink(callback, dataDir)).resolves.toEqual({ account: first?.account });
     expect(mocks.authenticateWithCode).toHaveBeenCalledTimes(1);
     expect(mocks.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it("replaces the durable active-account marker when the stored account changes directly", async () => {
+    await beginCloudSignIn(dataDir);
+    await handleCloudDeepLink("ao-app://callback?code=code_123&state=state_123", dataDir);
+    await expect(activeCloudAccount(dataDir)).resolves.toMatchObject({ userId: "user_123", desktopPid: process.pid, desktopStartedAtMs: expect.any(Number) });
+
+    const store = await readAuthStore(dataDir);
+    if (!store.session) throw new Error("expected a stored session");
+    await writeAuthStore(dataDir, {
+      ...store,
+      session: { ...store.session, user: { ...store.session.user, id: "user_456" } },
+    });
+
+    await expect(activeCloudAccount(dataDir)).resolves.toMatchObject({ userId: "user_456", desktopPid: process.pid, desktopStartedAtMs: expect.any(Number) });
+  });
+
+  it("retires the active-account marker when the stored session cannot be decoded", async () => {
+    await beginCloudSignIn(dataDir);
+    await handleCloudDeepLink("ao-app://callback?code=code_123&state=state_123", dataDir);
+    await writeFile(path.join(dataDir, "cloud-auth.bin"), "not an encrypted auth store");
+
+    await expect(readAuthStore(dataDir)).resolves.toEqual({ session: null, pkce: null });
+    await expect(readFile(activeCloudAccountPath(dataDir), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("republishes the current desktop marker when a stored session is restored", async () => {
+    await beginCloudSignIn(dataDir);
+    await handleCloudDeepLink("ao-app://callback?code=code_123&state=state_123", dataDir);
+    await rm(activeCloudAccountPath(dataDir), { force: true });
+
+    await expect(readAuthStore(dataDir)).resolves.toMatchObject({ session: { user: { id: "user_123" } } });
+    await expect(activeCloudAccount(dataDir)).resolves.toMatchObject({ userId: "user_123", desktopPid: process.pid, desktopStartedAtMs: expect.any(Number) });
+  });
+
+  it("binds the active-account marker to this desktop process instance", async () => {
+    await beginCloudSignIn(dataDir);
+    await handleCloudDeepLink("ao-app://callback?code=code_123&state=state_123", dataDir);
+
+    const marker = await activeCloudAccount(dataDir);
+    expect(marker.desktopStartedAtMs).toBeTypeOf("number");
+    expect(Math.abs(marker.desktopStartedAtMs! - (Date.now() - process.uptime() * 1000))).toBeLessThan(2_000);
+  });
+
+  it("serializes a restored-session read with sign-out", async () => {
+    await beginCloudSignIn(dataDir);
+    await handleCloudDeepLink("ao-app://callback?code=code_123&state=state_123", dataDir);
+    let release!: () => void;
+    const held = withAuthMutation(dataDir, () => new Promise<void>((resolve) => { release = resolve; }));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+
+    let readSettled = false;
+    const read = getCloudSession(dataDir).finally(() => { readSettled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(readSettled).toBe(false);
+    const signedOut = signOutCloud(dataDir);
+
+    release();
+    await Promise.all([held, read, signedOut]);
+    await expect(readFile(activeCloudAccountPath(dataDir), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("serializes a restored-session read with an account replacement", async () => {
+    await beginCloudSignIn(dataDir);
+    await handleCloudDeepLink("ao-app://callback?code=code_123&state=state_123", dataDir);
+    const store = await readAuthStore(dataDir);
+    if (!store.session) throw new Error("expected a stored session");
+    let release!: () => void;
+    const held = withAuthMutation(dataDir, () => new Promise<void>((resolve) => { release = resolve; }));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+
+    let readSettled = false;
+    const read = getCloudSession(dataDir).finally(() => { readSettled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(readSettled).toBe(false);
+    const replaced = writeAuthStore(dataDir, {
+      ...store,
+      session: { ...store.session, user: { ...store.session.user, id: "user_456" } },
+    });
+
+    release();
+    await Promise.all([held, read, replaced]);
+    await expect(activeCloudAccount(dataDir)).resolves.toMatchObject({ userId: "user_456" });
   });
 
   it("exchanges a callback once when the OS delivers it concurrently", async () => {
@@ -604,6 +692,7 @@ describe("native WorkOS authentication", () => {
 
     await expect(getCloudSession(dataDir)).resolves.toBeNull();
     await expect(getCloudSession(dataDir)).resolves.toBeNull();
+    await expect(readFile(activeCloudAccountPath(dataDir), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect(mocks.authenticateWithRefreshToken).toHaveBeenCalledOnce();
     expect(mocks.notifyRenderers).toHaveBeenCalledWith(null);
   });

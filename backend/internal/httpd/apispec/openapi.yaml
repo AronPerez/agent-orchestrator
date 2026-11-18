@@ -3904,6 +3904,314 @@ paths:
       summary: Get one decision call and its history
       tags:
       - decisions
+  /api/v1/decisions/{id}/answer:
+    post:
+      operationId: answerDecision
+      parameters:
+      - description: Call identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Call identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerDecisionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionCallResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Answer a decision call
+      tags:
+      - decisions
+  /api/v1/decisions/{id}/dismiss:
+    post:
+      operationId: dismissDecision
+      parameters:
+      - description: Call identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Call identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DismissDecisionRequest'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionCallResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Dismiss a decision call
+      tags:
+      - decisions
+  /api/v1/decisions/{id}/outcome:
+    post:
+      operationId: recordDecisionOutcome
+      parameters:
+      - description: Call identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Call identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionOutcomeRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionCallResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Record the outcome of a decision call
+      tags:
+      - decisions
+  /api/v1/decisions/{id}/retire:
+    post:
+      operationId: retireDecision
+      parameters:
+      - description: Call identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Call identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetireDecisionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionCallResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Change whether a completed decision call still applies
+      tags:
+      - decisions
+  /api/v1/decisions/{id}/withdraw:
+    post:
+      operationId: withdrawDecision
+      parameters:
+      - description: Call identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Call identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionCallResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Withdraw a decision call
+      tags:
+      - decisions
   /api/v1/desktop/sessions/{sessionId}/artifacts:
     get:
       operationId: getDesktopSessionArtifacts
@@ -17186,6 +17494,21 @@ components:
       - liveSessions
       - level
       type: object
+    AnswerDecisionRequest:
+      properties:
+        choice:
+          enum:
+          - option
+          - other
+          type: string
+        note:
+          maxLength: 1000
+          type: string
+        option:
+          type: integer
+      required:
+      - choice
+      type: object
     AppMemoryResponse:
       properties:
         cpuMeasured:
@@ -19727,6 +20050,8 @@ components:
           type:
           - "null"
           - string
+        contractStalled:
+          type: boolean
         contractTimeboxPromptedAt:
           format: date-time
           type:
@@ -19968,6 +20293,7 @@ components:
       - createdAt
       - updatedAt
       - isPinned
+      - contractStalled
       - workspacePublished
       - statusReadiness
       - chatProviderPreserved
@@ -21270,6 +21596,8 @@ components:
           type: string
         retired:
           type: boolean
+        standingEntryId:
+          type: string
         state:
           enum:
           - needs_you
@@ -21330,6 +21658,8 @@ components:
           type: string
         fallback:
           type: boolean
+        forEntry:
+          type: string
         hostId:
           type: string
         id:
@@ -21389,6 +21719,20 @@ components:
       required:
       - label
       - consequence
+      type: object
+    DecisionOutcomeRequest:
+      properties:
+        forEntry:
+          description: Immutable answer entry being carried out. Required for session-authored
+            outcomes.
+          type: string
+        link:
+          type: string
+        text:
+          maxLength: 300
+          type: string
+      required:
+      - text
       type: object
     DegradedProject:
       properties:
@@ -21617,6 +21961,12 @@ components:
           $ref: '#/components/schemas/DevImportProjectsReport'
       required:
       - report
+      type: object
+    DismissDecisionRequest:
+      properties:
+        note:
+          maxLength: 1000
+          type: string
       type: object
     DomainActivity:
       properties:
@@ -22332,8 +22682,8 @@ components:
     IssueCoordinationTokenRequest:
       properties:
         clientId:
-          description: Stable opaque ID of the requesting AO installation; retries
-            replace an unseen prior token for this client.
+          description: Required stable opaque ID of the requesting AO installation;
+            retries replace an unseen prior token for this client.
           type: string
         name:
           description: Name shown in the host's device list.
@@ -22341,6 +22691,8 @@ components:
         platform:
           description: The requesting machine's platform.
           type: string
+      required:
+      - clientId
       type: object
     KillReviewResponse:
       properties:
@@ -24335,6 +24687,13 @@ components:
       - sessionId
       - resumeMode
       - session
+      type: object
+    RetireDecisionRequest:
+      properties:
+        retired:
+          type: boolean
+      required:
+      - retired
       type: object
     RetryTurnResponse:
       properties:
