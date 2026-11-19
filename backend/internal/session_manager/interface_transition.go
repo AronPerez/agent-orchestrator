@@ -1411,8 +1411,8 @@ func (m *Manager) stopSourceController(ctx context.Context, rec domain.SessionRe
 }
 
 // stopSourceControllerConclusive makes one retry because both shipped runtime
-// teardown and Chat stop are idempotent. An exact TUI ownership probe can turn
-// a failed teardown into a conclusive success when that launch did in fact exit.
+// teardown and Chat stop are idempotent. A dead TUI workload is not enough: the
+// terminal host must be destroyed before another controller can reuse its ID.
 // Chat Service retains a controller whose event stream has not stopped, so its
 // retry waits for the same process rather than losing the only handle to it.
 func (m *Manager) stopSourceControllerConclusive(rec domain.SessionRecord) error {
@@ -1425,22 +1425,6 @@ func (m *Manager) stopSourceControllerConclusive(rec domain.SessionRecord) error
 			return nil
 		}
 		failures = append(failures, err)
-		if domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
-			probeCtx, probeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			probe := m.runtime.ProbeFencedRuntime(probeCtx, ports.FencedRuntimeRef{
-				Handle: runtimeHandle(rec.Metadata), SessionID: rec.ID,
-				Generation:     strings.TrimSpace(rec.Metadata.RuntimeLaunchID),
-				NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
-			})
-			probeCancel()
-			if probe.Liveness == ports.FencedDead {
-				return nil
-			}
-			if probe.Liveness == ports.FencedUnknown {
-				failures = append(failures, fmt.Errorf("verify terminal controller stopped (%s): %w",
-					probe.Reason, ports.ErrRuntimeProbeInconclusive))
-			}
-		}
 	}
 	return fmt.Errorf("could not prove the source controller stopped after retry: %w", errors.Join(failures...))
 }

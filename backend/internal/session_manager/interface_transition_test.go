@@ -1271,7 +1271,7 @@ func TestInterfaceTransitionRollbackClearsStaleTUIRuntimeBeforeRestore(t *testin
 	if runtime.created != 1 {
 		t.Fatalf("restored runtime create count = %d, want 1", runtime.created)
 	}
-	wantLog := "[stop:tui:runtime-1 start:chat stop:chat stop:tui:runtime-1 start:tui]"
+	wantLog := "[stop:tui:runtime-1 stop:tui:runtime-1 start:chat stop:chat stop:tui:runtime-1 start:tui]"
 	if got := fmt.Sprint(*log); got != wantLog {
 		t.Fatalf("controller order = %s, want %s", got, wantLog)
 	}
@@ -3278,7 +3278,7 @@ func TestInterfaceTransitionDoesNotStartTargetWhenSourceStopRemainsAmbiguous(t *
 	}
 }
 
-func TestInterfaceTransitionDoesNotReleaseTrackerIntakeWhenDestroyFailsAndExactProbeIsUnknown(t *testing.T) {
+func TestInterfaceTransitionDoesNotReleaseTrackerIntakeWhenDestroyFails(t *testing.T) {
 	manager, store, runtime, chat, _ := newTransitionManager(t, domain.SessionModeTUI)
 	rec := store.sessions["session-1"]
 	rec.IssueID = "github:acme/repo#uncertain-stop"
@@ -3311,8 +3311,8 @@ func TestInterfaceTransitionDoesNotReleaseTrackerIntakeWhenDestroyFailsAndExactP
 	if chat.start.SessionID != "" {
 		t.Fatalf("target Chat controller started for %s", chat.start.SessionID)
 	}
-	if len(runtime.fencedRefs) != 2 {
-		t.Fatalf("exact source probes = %+v, want one after each failed destroy", runtime.fencedRefs)
+	if len(runtime.fencedRefs) != 0 {
+		t.Fatalf("workload probes cannot prove terminal teardown: %+v", runtime.fencedRefs)
 	}
 }
 

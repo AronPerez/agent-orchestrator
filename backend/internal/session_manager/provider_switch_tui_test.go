@@ -251,7 +251,7 @@ func TestSwitchTUIProviderRetainsPublishedRuntimeStop(t *testing.T) {
 	}
 }
 
-func TestSwitchTUIProviderDoesNotReleaseTrackerIntakeWhenDestroyFailsAndExactProbeIsUnknown(t *testing.T) {
+func TestSwitchTUIProviderDoesNotReleaseTrackerIntakeWhenDestroyFailsEvenIfExactWorkloadIsDead(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
 	rec := mkLive("mer-1")
@@ -269,9 +269,9 @@ func TestSwitchTUIProviderDoesNotReleaseTrackerIntakeWhenDestroyFailsAndExactPro
 	}
 	runtime := &fakeRuntime{
 		destroyErr:    errors.New("pty-host still alive"),
-		aliveByHandle: map[string]bool{rec.Metadata.RuntimeHandleID: false},
+		aliveByHandle: map[string]bool{rec.Metadata.RuntimeHandleID: true},
 		fencedResults: map[string]ports.FencedProbeResult{
-			rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent},
 		},
 	}
 	m := New(Deps{
@@ -293,8 +293,8 @@ func TestSwitchTUIProviderDoesNotReleaseTrackerIntakeWhenDestroyFailsAndExactPro
 	if runtime.created != 0 {
 		t.Fatalf("started target runtime while source ownership remained unresolved: %d", runtime.created)
 	}
-	if len(runtime.fencedRefs) != 2 {
-		t.Fatalf("exact source probes = %+v, want one after each failed destroy", runtime.fencedRefs)
+	if len(runtime.fencedRefs) != 0 {
+		t.Fatalf("dead workload probes cannot prove terminal teardown: %+v", runtime.fencedRefs)
 	}
 }
 
