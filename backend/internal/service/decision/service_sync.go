@@ -48,12 +48,18 @@ func (s *Service) ApplySyncedEntries(ctx context.Context, peerHostID string, ent
 		owners = append(owners, owner)
 	}
 	slices.Sort(owners) // a fixed order, so two pages never wait on each other
+	unlocks := make([]func(), 0, len(owners))
+	defer func() {
+		for _, unlock := range unlocks {
+			unlock()
+		}
+	}()
 	for _, owner := range owners {
 		unlock, err := s.mutationGate.acquire(ctx, planFirstMutationKey(owner))
 		if err != nil {
 			return domain.DecisionApplyResult{}, err
 		}
-		defer unlock()
+		unlocks = append(unlocks, unlock)
 	}
 	for _, owner := range owners {
 		if err := s.closePlanGate(ctx, holds[owner]); err != nil {
