@@ -8,6 +8,7 @@ import type { DecisionCall } from "../lib/decision-inbox";
 const { getMock, navigateMock } = vi.hoisted(() => ({ getMock: vi.fn(), navigateMock: vi.fn() }));
 vi.mock("../lib/host-clients", () => ({ clientForSessionHost: () => ({ GET: getMock }) }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigateMock }));
+vi.mock("../hooks/useDecisionSessionTarget", () => ({ useDecisionSessionTarget: () => ({ kind: "checking" }) }));
 vi.mock("./PageTopbar", () => ({
 	PageTopbar: ({ lead, actions }: { lead?: ReactNode; actions?: ReactNode }) => <header>{lead}{actions}</header>,
 	PageTopbarTitle: ({ children }: { children: ReactNode }) => <h1>{children}</h1>,

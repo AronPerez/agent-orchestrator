@@ -1,13 +1,16 @@
-import type { KeyboardEvent, ReactNode } from "react";
+import { useId, type KeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { Check, TriangleAlert } from "@/components/app-icons";
 import { useDecisionDetail } from "../hooks/useDecisionInbox";
+import { useDecisionSessionTarget } from "../hooks/useDecisionSessionTarget";
+import { useNavigateToSession } from "../lib/navigate-to-session";
 import { apiErrorRequestId } from "../lib/api-client";
 import type { DecisionCall, DecisionHistoryEntry } from "../lib/decision-inbox";
 import { openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { formatTimeCompact } from "../lib/format-time";
 import { cn } from "../lib/utils";
+import { DecisionCallActions, decisionAcceptsAnswer } from "./DecisionCallActions";
 import { decisionOwner, decisionPlace } from "./DecisionLinkPreviewCard";
 import { DecisionStateDot, decisionStateLabel } from "./DecisionStateLabel";
 import { Button } from "./ui/button";
@@ -147,7 +150,7 @@ function DecisionCallDetail({ call, history }: { call: DecisionCall; history: De
 					))}
 				</section>
 			) : null}
-			<ul aria-label={t("decisions.options")} className="overflow-hidden rounded-lg bg-card">
+			{decisionAcceptsAnswer(call) ? null : <ul aria-label={t("decisions.options")} className="overflow-hidden rounded-lg bg-card">
 				{call.options.map((option, index) => {
 					const chosen = call.choice === "option" && call.option === index + 1;
 					return (
@@ -167,8 +170,9 @@ function DecisionCallDetail({ call, history }: { call: DecisionCall; history: De
 						</li>
 					);
 				})}
-			</ul>
-			{call.note ? <p className="whitespace-pre-wrap break-words border-l-2 border-border pl-3 text-sm text-muted-foreground">{call.note}</p> : null}
+			</ul>}
+			{call.note && !decisionAcceptsAnswer(call) ? <p className="whitespace-pre-wrap break-words border-l-2 border-border pl-3 text-sm text-muted-foreground">{call.note}</p> : null}
+			<DecisionCallActions call={call} extraActions={<OpenSessionButton call={call} />} />
 			{call.outcome ? (
 				<section aria-label={t("decisions.outcome")} className="text-sm">
 					<p className="font-medium text-foreground">{call.outcome}</p>
@@ -191,6 +195,43 @@ function DecisionCallDetail({ call, history }: { call: DecisionCall; history: De
 				</ol>
 			</section>
 		</div>
+	);
+}
+
+/**
+ * Opens the call's owning session on the machine that raised it, or says why
+ * it cannot. A finished session opens to its existing view; nothing restarts it.
+ */
+function OpenSessionButton({ call }: { call: DecisionCall }) {
+	const { t } = useTranslation();
+	const reasonId = useId();
+	const target = useDecisionSessionTarget(call);
+	const navigateToSession = useNavigateToSession();
+	const reason = target.kind === "checking"
+		? t("decisions.sessionChecking")
+		: target.kind === "offline"
+			? t("decisions.sessionOffline", { machine: target.machine })
+			: target.kind === "missing"
+				? t("decisions.sessionMissing")
+				: target.kind === "error"
+					? t("decisions.sessionCheckFailed")
+					: undefined;
+	return (
+		<>
+			<Button
+				type="button"
+				variant="secondary"
+				size="sm"
+				disabled={target.kind !== "open"}
+				aria-describedby={reason ? reasonId : undefined}
+				onClick={() => {
+					if (target.kind === "open") navigateToSession(target.projectId, target.sessionId, target.host);
+				}}
+			>
+				{t("decisions.openSession")}
+			</Button>
+			{reason ? <span id={reasonId} className="text-caption text-muted-foreground">{reason}</span> : null}
+		</>
 	);
 }
 
