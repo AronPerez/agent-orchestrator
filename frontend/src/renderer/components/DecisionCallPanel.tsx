@@ -1,7 +1,7 @@
 import { useId, type KeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { Check, TriangleAlert } from "@/components/app-icons";
+import { Check, ShieldAlert, TriangleAlert } from "@/components/app-icons";
 import { useDecisionDetail } from "../hooks/useDecisionInbox";
 import { useDecisionSessionTarget } from "../hooks/useDecisionSessionTarget";
 import { useNavigateToSession } from "../lib/navigate-to-session";
@@ -168,7 +168,8 @@ function DecisionCallDetail({ call, history }: { call: DecisionCall; history: De
 					))}
 				</section>
 			) : null}
-			{decisionAcceptsAnswer(call) ? null : <ul aria-label={t("decisions.options")} className="overflow-hidden rounded-lg bg-card">
+			{call.decided ? <DecidedDetails call={call} exactTime={exactTime} /> : null}
+			{decisionAcceptsAnswer(call) || call.options.length === 0 ? null : <ul aria-label={t("decisions.options")} className="overflow-hidden rounded-lg bg-card">
 				{call.options.map((option, index) => {
 					const chosen = call.choice === "option" && call.option === index + 1;
 					return (
@@ -253,6 +254,47 @@ function OpenSessionButton({ call }: { call: DecisionCall }) {
 	);
 }
 
+/**
+ * What a decision made for the person carries: how to undo and check it,
+ * whether the session confirmed it acted, and why it was outside policy.
+ */
+function DecidedDetails({ call, exactTime }: { call: DecisionCall; exactTime: (iso: string) => string }) {
+	const { t } = useTranslation();
+	const decided = call.decided!;
+	const outsidePolicy = decided.outsidePolicy === "autonomy_not_on"
+		? t("decisions.outsidePolicy.autonomyNotOn")
+		: decided.outsidePolicy === "kind_reserved"
+			? t("decisions.outsidePolicy.kindReserved")
+			: undefined;
+	return (
+		<section className="flex flex-col gap-2 text-sm">
+			{outsidePolicy ? (
+				<p className="flex items-start gap-1.5 text-caption text-status-in-review">
+					<ShieldAlert aria-hidden="true" className="mt-px size-3.5 shrink-0" />
+					{outsidePolicy}
+				</p>
+			) : null}
+			<dl className="flex flex-col gap-2">
+				<div>
+					<dt className="text-caption text-muted-foreground">{t("decisions.undoLabel")}</dt>
+					<dd className="whitespace-pre-wrap break-words text-foreground">{decided.undo}</dd>
+				</div>
+				{decided.verify ? (
+					<div>
+						<dt className="text-caption text-muted-foreground">{t("decisions.verifyLabel")}</dt>
+						<dd className="whitespace-pre-wrap break-words text-foreground">{decided.verify}</dd>
+					</div>
+				) : null}
+			</dl>
+			<p className="text-caption text-muted-foreground">
+				{decided.carriedOut
+					? <span title={decided.carriedOutAt ? exactTime(decided.carriedOutAt) : undefined}>{t("decisions.carriedOutAt", { time: decided.carriedOutAt ? formatTimeCompact(decided.carriedOutAt) : "" }).trim()}</span>
+					: t("decisions.notCarriedOutYet")}
+			</p>
+		</section>
+	);
+}
+
 /** What one history entry recorded, in the page's words. Reduction stays in the daemon. */
 function historyWhat(item: DecisionHistoryEntry, call: DecisionCall, t: TFunction): string {
 	switch (item.kind) {
@@ -270,6 +312,9 @@ function historyWhat(item: DecisionHistoryEntry, call: DecisionCall, t: TFunctio
 		case "outcome": return t("decisions.history.outcome", { text: item.text ?? "" });
 		case "withdrawn": return t("decisions.history.withdrawn");
 		case "retired": return t(item.retired ? "decisions.history.retired" : "decisions.history.unretired");
+		case "decided": return t("decisions.history.decided", { text: item.text ?? call.title });
+		case "overruled": return t("decisions.history.overruled");
+		case "carried_out": return t("decisions.history.carriedOut");
 		default: return t("decisions.history.unknown", { kind: item.kind });
 	}
 }

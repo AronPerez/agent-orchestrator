@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { ChevronRight, TriangleAlert } from "@/components/app-icons";
+import { ChevronRight, ShieldAlert, TriangleAlert } from "@/components/app-icons";
 import {
 	DECISION_LANES,
 	initialDecisionFocusId,
@@ -30,8 +30,12 @@ export type DecisionsBoardProps = {
 
 // Narrow pane: three lane columns, each stream's name as a header row above
 // them. From @3xl the name moves into its own leading column.
-const GRID_CLASS =
-	"grid min-w-[33rem] grid-cols-[repeat(3,minmax(11rem,1fr))] @3xl:min-w-[45rem] @3xl:grid-cols-[minmax(7rem,10rem)_repeat(3,minmax(11rem,1fr))]";
+// Literal class strings for three or four lanes (the Decided for you lane
+// shows only while decisions stand), so Tailwind can see both.
+const GRID_CLASS = {
+	3: "grid min-w-[33rem] grid-cols-[repeat(3,minmax(11rem,1fr))] @3xl:min-w-[45rem] @3xl:grid-cols-[minmax(7rem,10rem)_repeat(3,minmax(11rem,1fr))]",
+	4: "grid min-w-[44rem] grid-cols-[repeat(4,minmax(11rem,1fr))] @3xl:min-w-[56rem] @3xl:grid-cols-[minmax(7rem,10rem)_repeat(4,minmax(11rem,1fr))]",
+} as const;
 
 function laneLabel(lane: DecisionLane, t: TFunction) {
 	return decisionStateLabel(lane, t);
@@ -108,7 +112,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 			<p id={hintId} className="sr-only">{t("decisions.keyboardHint")}</p>
 			<div
 				ref={gridRef}
-				className={GRID_CLASS}
+				className={GRID_CLASS[model.lanes.length === 4 ? 4 : 3]}
 				aria-label={t("decisions.boardLabel")}
 				aria-describedby={hintId}
 				role="group"
@@ -120,7 +124,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 			>
 				<div aria-hidden="true" className="hidden border-b border-border @3xl:block" />
 				<ul aria-label={t("decisions.statesLabel")} className="contents">
-					{DECISION_LANES.map((lane) => (
+					{model.lanes.map((lane) => (
 						<li
 							key={lane}
 							className="flex min-w-0 items-center gap-1.5 border-b border-l border-border px-2.5 py-2 text-caption font-medium text-foreground"
@@ -139,6 +143,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 						band={band}
 						collapsed={collapsed.has(band.key)}
 						onToggle={() => toggleBand(band.key)}
+						lanes={model.lanes}
 						selectedId={selectedId}
 						tabStop={tabStop}
 						onSelect={onSelect}
@@ -152,6 +157,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 
 function DecisionBand({
 	band,
+	lanes,
 	collapsed,
 	onToggle,
 	selectedId,
@@ -160,6 +166,7 @@ function DecisionBand({
 	now,
 }: {
 	band: DecisionProjectBand;
+	lanes: readonly DecisionLane[];
 	collapsed: boolean;
 	onToggle: () => void;
 	selectedId?: string;
@@ -194,13 +201,13 @@ function DecisionBand({
 				</Pressable>
 			</div>
 			{collapsed ? null : band.rows.map((row) => (
-				<DecisionRow key={row.key} row={row} selectedId={selectedId} tabStop={tabStop} onSelect={onSelect} now={now} />
+				<DecisionRow key={row.key} row={row} lanes={lanes} selectedId={selectedId} tabStop={tabStop} onSelect={onSelect} now={now} />
 			))}
 		</section>
 	);
 }
 
-function DecisionRow({ row, selectedId, tabStop, onSelect, now }: { row: DecisionStreamRow; selectedId?: string; tabStop?: string; onSelect: (callId: string) => void; now: number }) {
+function DecisionRow({ row, lanes, selectedId, tabStop, onSelect, now }: { row: DecisionStreamRow; lanes: readonly DecisionLane[]; selectedId?: string; tabStop?: string; onSelect: (callId: string) => void; now: number }) {
 	const { t } = useTranslation();
 	const name = row.projectWide
 		? t("decisions.projectWide")
@@ -217,7 +224,7 @@ function DecisionRow({ row, selectedId, tabStop, onSelect, now }: { row: Decisio
 			>
 				{row.projectWide ? <span className="sr-only">{name}</span> : <span className="line-clamp-3 break-words" title={name}>{name}</span>}
 			</div>
-			{DECISION_LANES.map((lane) => (
+			{lanes.map((lane) => (
 				<ul
 					key={lane}
 					aria-label={decisionStateLabel(lane, t)}
@@ -258,6 +265,12 @@ function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: Decisi
 						title={card.status.kind === "outcome" ? status : undefined}
 					>
 						{status}
+					</span>
+				) : null}
+				{card.outsidePolicy ? (
+					<span className="ml-auto inline-flex shrink-0 items-center text-status-in-review" title={t("decisions.outsidePolicyShort")}>
+						<ShieldAlert aria-hidden="true" className="size-3" />
+						<span className="sr-only">{t("decisions.outsidePolicyShort")}</span>
 					</span>
 				) : null}
 				{card.changedAfterClose ? (

@@ -36,7 +36,7 @@ describe("buildDecisionBoard", () => {
 	it("is empty for an empty ledger", () => {
 		const board = buildDecisionBoard([]);
 		expect(board.bands).toEqual([]);
-		expect(board.totals).toEqual({ needs_you: 0, in_progress: 0, done: 0 });
+		expect(board.totals).toEqual({ needs_you: 0, decided: 0, in_progress: 0, done: 0 });
 		expect(board.cardById.size).toBe(0);
 		expect(board.topology).toEqual([]);
 	});
@@ -57,9 +57,9 @@ describe("buildDecisionBoard", () => {
 		expect(shop.rows[0].projectWide).toBe(true);
 		expect(shop.rows[1]).toMatchObject({ name: "Checkout", origin: "h_a", projectWide: false });
 		expect(shop.rows[2]).toMatchObject({ name: "Checkout", origin: "h_b" });
-		expect(shop.counts).toEqual({ needs_you: 3, in_progress: 0, done: 0 });
-		expect(board.bands[1].counts).toEqual({ needs_you: 0, in_progress: 0, done: 1 });
-		expect(board.totals).toEqual({ needs_you: 3, in_progress: 0, done: 1 });
+		expect(shop.counts).toEqual({ needs_you: 3, decided: 0, in_progress: 0, done: 0 });
+		expect(board.bands[1].counts).toEqual({ needs_you: 0, decided: 0, in_progress: 0, done: 1 });
+		expect(board.totals).toEqual({ needs_you: 3, decided: 0, in_progress: 0, done: 1 });
 	});
 
 	it("keeps calls without a recorded project in one No project band", () => {
@@ -188,8 +188,8 @@ describe("buildDecisionBoard", () => {
 			call({ id: "s1", projectId: "p", projectName: "P", streamSessionId: "s", streamName: "S" }),
 		]);
 		expect(board.topology).toEqual([
-			{ bandKey: "p", rowKey: "@project", lanes: { needs_you: ["n1"], in_progress: ["i1"], done: [] } },
-			{ bandKey: "p", rowKey: "h_a:s", lanes: { needs_you: ["s1"], in_progress: [], done: [] } },
+			{ bandKey: "p", rowKey: "@project", lanes: { needs_you: ["n1"], decided: [], in_progress: ["i1"], done: [] } },
+			{ bandKey: "p", rowKey: "h_a:s", lanes: { needs_you: ["s1"], decided: [], in_progress: [], done: [] } },
 		]);
 		expect(board.cardById.get("s1")).toMatchObject({ bandKey: "p", rowKey: "h_a:s" });
 	});
@@ -212,9 +212,9 @@ describe("buildDecisionBoard", () => {
 describe("keyboard topology", () => {
 	// Two bands; row r2 has an empty In progress lane.
 	const topology: DecisionTopologyRow[] = [
-		{ bandKey: "a", rowKey: "r1", lanes: { needs_you: ["n1", "n2"], in_progress: ["i1"], done: ["d1", "d2", "d3"] } },
-		{ bandKey: "a", rowKey: "r2", lanes: { needs_you: ["n3"], in_progress: [], done: ["d4"] } },
-		{ bandKey: "b", rowKey: "r3", lanes: { needs_you: [], in_progress: ["i2"], done: [] } },
+		{ bandKey: "a", rowKey: "r1", lanes: { decided: [], needs_you: ["n1", "n2"], in_progress: ["i1"], done: ["d1", "d2", "d3"] } },
+		{ bandKey: "a", rowKey: "r2", lanes: { decided: [], needs_you: ["n3"], in_progress: [], done: ["d4"] } },
+		{ bandKey: "b", rowKey: "r3", lanes: { decided: [], needs_you: [], in_progress: ["i2"], done: [] } },
 	];
 
 	it("moves up and down within a lane across rows and bands, stopping at the ends", () => {
@@ -239,18 +239,59 @@ describe("keyboard topology", () => {
 	it("starts at the selected card, else the first Needs you card, else the first card", () => {
 		expect(initialDecisionFocusId(topology, "d4")).toBe("d4");
 		expect(initialDecisionFocusId(topology, "gone")).toBe("n1");
-		expect(initialDecisionFocusId([{ bandKey: "b", rowKey: "r", lanes: { needs_you: [], in_progress: [], done: ["d9"] } }], undefined)).toBe("d9");
+		expect(initialDecisionFocusId([{ bandKey: "b", rowKey: "r", lanes: { decided: [], needs_you: [], in_progress: [], done: ["d9"] } }], undefined)).toBe("d9");
 		expect(initialDecisionFocusId([], undefined)).toBeUndefined();
 	});
 
 	it("chooses where focus goes when its card leaves: next in lane, then previous, then first", () => {
 		const after: DecisionTopologyRow[] = [
-			{ bandKey: "a", rowKey: "r1", lanes: { needs_you: ["n2"], in_progress: ["i1"], done: ["d1", "d3"] } },
+			{ bandKey: "a", rowKey: "r1", lanes: { decided: [], needs_you: ["n2"], in_progress: ["i1"], done: ["d1", "d3"] } },
 		];
 		expect(replacementDecisionFocusId(topology, "d2", after)).toBe("d3");
 		expect(replacementDecisionFocusId(topology, "n1", after)).toBe("n2");
 		expect(replacementDecisionFocusId(topology, "d4", after)).toBe("d3");
 		expect(replacementDecisionFocusId(topology, "i2", [])).toBeUndefined();
-		expect(replacementDecisionFocusId(topology, "n3", [{ bandKey: "z", rowKey: "z", lanes: { needs_you: [], in_progress: ["x"], done: [] } }])).toBe("x");
+		expect(replacementDecisionFocusId(topology, "n3", [{ bandKey: "z", rowKey: "z", lanes: { decided: [], needs_you: [], in_progress: ["x"], done: [] } }])).toBe("x");
+	});
+});
+
+describe("decisions made for the person", () => {
+	const decided = (id: string, raisedAt: string, detail: Partial<NonNullable<DecisionCall["decided"]>> = {}) => call({
+		id, state: "decided", stateLabel: "Decided for you", raisedAt, options: [],
+		decided: { undo: "Reopen it", carriedOut: false, ...detail },
+	});
+
+	it("puts standing decisions in their own lane, newest first, only when there are some", () => {
+		expect(buildDecisionBoard([call({ id: "need" })]).lanes).toEqual(["needs_you", "in_progress", "done"]);
+		const board = buildDecisionBoard([
+			call({ id: "need" }),
+			decided("old", "2026-11-18T08:00:00Z"),
+			decided("new", "2026-11-18T11:00:00Z"),
+		]);
+		expect(board.lanes).toEqual(["needs_you", "decided", "in_progress", "done"]);
+		expect(board.totals).toMatchObject({ needs_you: 1, decided: 2 });
+		expect(board.bands[0].rows[0].lanes.decided.map((card) => card.id)).toEqual(["new", "old"]);
+		expect(board.bands[0].needsYouCount).toBe(1);
+	});
+
+	it("says whether the session confirmed it acted, and flags a decision outside policy", () => {
+		const board = buildDecisionBoard([
+			decided("pending", "2026-11-18T08:00:00Z", { outsidePolicy: "kind_reserved" }),
+			decided("done", "2026-11-18T09:00:00Z", { carriedOut: true, carriedOutAt: "2026-11-18T09:05:00Z" }),
+		]);
+		const card = (id: string) => board.cardById.get(id)!.card;
+		expect(card("pending")).toMatchObject({
+			lane: "decided",
+			secondary: { kind: "who", machine: "mac-mini" },
+			status: { kind: "decided", carriedOut: false },
+			outsidePolicy: "kind_reserved",
+		});
+		expect(card("done")).toMatchObject({ status: { kind: "decided", carriedOut: true }, outsidePolicy: undefined });
+	});
+
+	it("moves across the decided lane with the arrow keys", () => {
+		const board = buildDecisionBoard([call({ id: "need" }), decided("dec", "2026-11-18T08:00:00Z"), call({ id: "prog", state: "in_progress", answeredAt: "2026-11-18T09:00:00Z" })]);
+		expect(moveDecisionFocus(board.topology, "need", "right")).toBe("dec");
+		expect(moveDecisionFocus(board.topology, "dec", "right")).toBe("prog");
 	});
 });

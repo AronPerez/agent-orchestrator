@@ -382,4 +382,69 @@ describe("DecisionCallPanel", () => {
 		expect(within(alert).getByRole("button", { name: "Retry" })).toBeInTheDocument();
 		expect(screen.getByRole("heading", { level: 2, name: call.title })).toBeInTheDocument();
 	}, 10_000);
+
+	describe("decided for you", () => {
+		const decidedCall: DecisionCall = {
+			...call,
+			state: "decided",
+			stateLabel: "Decided for you",
+			title: "Closed the duplicate pull request #12",
+			context: "It repeated #9 exactly.",
+			options: [],
+			choice: undefined,
+			option: undefined,
+			chosenLabel: undefined,
+			delivery: undefined,
+			changedAfterClose: false,
+			decided: { undo: "Reopen #12; its branch is kept.", verify: "#12 shows as closed.", carriedOut: false, outsidePolicy: "autonomy_not_on" },
+		};
+		const decidedHistory: DecisionHistoryEntry[] = [
+			entry({ id: "d1", kind: "decided", authorKind: "session", authorSession: "w-5512", text: "Closed the duplicate pull request #12", writtenAt: at(1) }),
+			entry({ id: "d2", kind: "carried_out", authorKind: "session", authorSession: "w-5512", writtenAt: at(2) }),
+			entry({ id: "d3", kind: "overruled", note: "Keep #12 open", authorSurface: "desktop", writtenAt: at(3) }),
+		];
+
+		it("shows how to undo and verify it, whether it was carried out, and why it is outside policy", async () => {
+			serve(decidedCall, decidedHistory);
+			renderPanel();
+			expect(await screen.findByRole("heading", { level: 2, name: decidedCall.title })).toBeInTheDocument();
+			expect(screen.getByText("Decided for you")).toBeInTheDocument();
+			expect(screen.getByText("Reopen #12; its branch is kept.")).toBeInTheDocument();
+			expect(screen.getByText("#12 shows as closed.")).toBeInTheDocument();
+			expect(screen.getByText("Not confirmed as carried out yet")).toBeInTheDocument();
+			expect(screen.getByText("Recorded while autonomy was not on for this project")).toBeInTheDocument();
+			expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+			expect(screen.queryByRole("list", { name: "Options" })).not.toBeInTheDocument();
+		});
+
+		it("names a reserved kind and a confirmed carry-out", async () => {
+			serve({ ...decidedCall, decided: { ...decidedCall.decided!, outsidePolicy: "kind_reserved", carriedOut: true, carriedOutAt: "2026-11-18T10:05:00Z" } }, decidedHistory);
+			renderPanel();
+			expect(await screen.findByText("Recorded for a kind this project reserves for you")).toBeInTheDocument();
+			expect(screen.getByText(/^Carried out \S/)).toBeInTheDocument();
+		});
+
+		it("overrules only with a note saying what to do instead", async () => {
+			serve(decidedCall, decidedHistory);
+			renderPanel();
+			await userEvent.click(await screen.findByRole("button", { name: "Overrule" }));
+			expect(postMock).not.toHaveBeenCalled();
+			expect(screen.getByLabelText("What to do instead")).toHaveAccessibleDescription("Say what to do instead.");
+			await userEvent.type(screen.getByLabelText("What to do instead"), "Keep #12 open");
+			await userEvent.click(screen.getByRole("button", { name: "Overrule" }));
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/overrule", { params: { path: { id: "dec_1" } }, body: { note: "Keep #12 open" } });
+		});
+
+		it("tells its history", async () => {
+			serve(decidedCall, decidedHistory);
+			renderPanel();
+			const list = await screen.findByRole("list", { name: "History" });
+			expect([...list.querySelectorAll("[data-slot='history-what']")].map((node) => node.textContent)).toEqual([
+				"Decided for you: Closed the duplicate pull request #12",
+				"Carried out",
+				"Overruled",
+			]);
+			expect(within(list).getByText("Keep #12 open")).toBeInTheDocument();
+		});
+	});
 });

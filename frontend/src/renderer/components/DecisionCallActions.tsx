@@ -67,6 +67,15 @@ export function DecisionCallActions({ call, extraActions }: { call: DecisionCall
 						action.mutate({ kind: "dismiss", callId: call.id, note });
 					}}
 				/>
+			) : call.state === "decided" ? (
+				<OverruleForm
+					busy={busy}
+					extraActions={extraActions}
+					onOverrule={(note) => {
+						reset();
+						action.mutate({ kind: "overrule", callId: call.id, note });
+					}}
+				/>
 			) : extraActions ? <div className="flex flex-wrap items-center gap-2">{extraActions}</div> : null}
 			{call.state === "in_progress" ? (
 				<OutcomeForm
@@ -272,6 +281,49 @@ function OutcomeForm({ busy, onRecord }: { busy: boolean; onRecord: (text: strin
 				<Button type="submit" variant="secondary" size="sm" disabled={busy} aria-busy={busy || undefined}>
 					{t("decisions.recordOutcome")}
 				</Button>
+			</div>
+		</form>
+	);
+}
+
+/** Overruling a decision made for the person needs a note saying what to do instead. */
+function OverruleForm({ busy, extraActions, onOverrule }: { busy: boolean; extraActions?: ReactNode; onOverrule: (note: string) => void }) {
+	const { t } = useTranslation();
+	const id = useId();
+	const [note, setNote] = useState("");
+	const [missing, setMissing] = useState(false);
+	const submit = (event: FormEvent) => {
+		event.preventDefault();
+		if (busy) return;
+		if (!note.trim()) {
+			setMissing(true);
+			return;
+		}
+		onOverrule(note);
+	};
+	return (
+		<form noValidate onSubmit={submit} className="flex flex-col gap-2">
+			<div className="flex flex-col gap-1.5">
+				<Label htmlFor={`${id}-note`}>{t("decisions.overruleLabel")}</Label>
+				<Textarea
+					id={`${id}-note`}
+					value={note}
+					maxLength={1000}
+					disabled={busy}
+					aria-invalid={missing || undefined}
+					aria-describedby={missing ? `${id}-error` : undefined}
+					onChange={(event) => {
+						setNote(event.target.value);
+						if (event.target.value.trim()) setMissing(false);
+					}}
+				/>
+				{missing ? <p id={`${id}-error`} className="text-caption text-destructive">{t("decisions.noteRequired")}</p> : null}
+			</div>
+			<div className="flex flex-wrap items-center gap-2">
+				<Button type="submit" variant="primary" size="sm" disabled={busy} aria-busy={busy || undefined}>
+					{t("decisions.overrule")}
+				</Button>
+				{extraActions}
 			</div>
 		</form>
 	);

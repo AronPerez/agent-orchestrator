@@ -170,19 +170,22 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 	);
 }
 
+// The skeleton draws the three lanes every board has.
+const SKELETON_LANES = DECISION_LANES.filter((lane) => lane !== "decided");
+
 /** Placeholder cells on the board's own grid, so loading does not reflow. */
 function DecisionsBoardSkeleton({ label }: { label: string }) {
 	return (
 		<div role="status" aria-label={label} className="@container">
 			<div className="grid grid-cols-[repeat(3,minmax(11rem,1fr))] @3xl:grid-cols-[minmax(7rem,10rem)_repeat(3,minmax(11rem,1fr))]">
 				<div className="hidden border-b border-border @3xl:block" />
-				{DECISION_LANES.map((lane) => (
+				{SKELETON_LANES.map((lane) => (
 					<div key={lane} className="border-b border-l border-border px-2.5 py-2"><Skeleton className="h-3 w-20" /></div>
 				))}
 				{[0, 1].map((row) => (
 					<div key={row} className="contents">
 						<div className="hidden border-b border-border px-3 py-2 @3xl:block"><Skeleton className="h-3 w-16" /></div>
-						{DECISION_LANES.map((lane) => (
+						{SKELETON_LANES.map((lane) => (
 							<div key={lane} className="min-h-14 border-b border-l border-border p-1.5">
 								{row === 0 ? <Skeleton className="h-11 w-full rounded-md" /> : null}
 							</div>

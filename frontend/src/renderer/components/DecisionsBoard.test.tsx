@@ -182,4 +182,39 @@ describe("DecisionsBoard", () => {
 			expect(onSelect).toHaveBeenCalledWith("need");
 		});
 	});
+
+	describe("decided for you", () => {
+		const decided = (id: string, detail: Partial<NonNullable<DecisionCall["decided"]>> = {}) => call({
+			id, state: "decided", stateLabel: "Decided for you", raisedAt: "2026-11-18T10:00:00Z",
+			decided: { undo: "Reopen it", carriedOut: false, ...detail },
+		});
+
+		it("adds the Decided for you lane only while decisions stand", () => {
+			const { rerender, onSelect } = renderBoard();
+			expect(within(screen.getByRole("list", { name: "Decision states" })).getAllByRole("listitem")).toHaveLength(3);
+			rerender(<DecisionsBoard model={buildDecisionBoard([...calls, decided("dec_a")])} now={NOW} onSelect={onSelect} />);
+			expect(within(screen.getByRole("list", { name: "Decision states" })).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+				"Needs you2",
+				"Decided for you1",
+				"In progress3",
+				"Done1Last 7 days",
+			]);
+		});
+
+		it("says whether a decision was carried out and flags one outside policy", () => {
+			render(<DecisionsBoard
+				model={buildDecisionBoard([decided("dec_a", { outsidePolicy: "kind_reserved" }), decided("dec_b", { carriedOut: true, carriedOutAt: "2026-11-18T10:05:00Z" })])}
+				now={NOW}
+				onSelect={vi.fn()}
+			/>);
+			const pending = screen.getByRole("button", { name: /^Question dec_a/ });
+			expect(pending).toHaveTextContent("mac-mini · worker 5512");
+			expect(pending).toHaveTextContent("Not confirmed yet");
+			expect(within(pending).getByText("Recorded outside this project's policy")).toBeInTheDocument();
+			const confirmed = screen.getByRole("button", { name: /^Question dec_b/ });
+			expect(confirmed).toHaveTextContent("Carried out");
+			expect(within(confirmed).queryByText("Recorded outside this project's policy")).not.toBeInTheDocument();
+			expect(screen.getByText("Not confirmed yet")).not.toHaveClass("text-status-needs-you");
+		});
+	});
 });

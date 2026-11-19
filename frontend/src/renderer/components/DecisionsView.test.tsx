@@ -298,4 +298,12 @@ describe("DecisionsView", () => {
 			expect(screen.getByRole("button", { name: /^Question dec_1/ })).toBeInTheDocument();
 		}, 10_000);
 	});
+
+	it("shows standing decisions instead of an empty ledger", async () => {
+		answer(board([call({ id: "dec_decided", state: "decided", stateLabel: "Decided for you", decided: { undo: "Undo it", carriedOut: true } })]));
+		renderView(<DecisionsView />);
+		expect(await screen.findByRole("button", { name: /^Question dec_decided/ })).toBeInTheDocument();
+		expect(screen.queryByRole("heading", { name: "No decisions yet" })).not.toBeInTheDocument();
+		expect(screen.getByRole("status", { name: "Nothing needs you" })).toBeInTheDocument();
+	});
 });
