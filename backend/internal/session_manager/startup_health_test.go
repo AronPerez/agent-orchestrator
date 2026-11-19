@@ -109,6 +109,7 @@ func TestTrackerIntakeClaimReconciliationStopsPossibleChatControllerBeforeRetry(
 	m.runBackground = func(work func()) { work() }
 	rec := domain.SessionRecord{
 		ID: "mer-chat-intake", ProjectID: "mer", Kind: domain.KindWorker,
+		IssueID: "github:acme/mer#44",
 		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
 		Activity: domain.Activity{State: domain.ActivityIdle},
 	}

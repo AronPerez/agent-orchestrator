@@ -5332,6 +5332,17 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 		if rec.IsTerminated || rec.IsTaskPreparation || rec.HibernatedAt != nil || rec.ProvisionState.WithDefault() != domain.SessionProvisionReady {
 			continue
 		}
+		reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+		if err != nil {
+			m.logger.Warn("reconcile: tracker intake claim lookup failed, skipping live pass", "sessionID", rec.ID, "error", err)
+			continue
+		}
+		if pending && !trackerIntakeClaimNeedsStartupHealth(rec, reservation) {
+			// The per-claim job owns terminal and interrupted-Chat recovery. Letting
+			// the generic live pass reserve the same operation fence can starve that
+			// job for the entire startup sweep without doing any useful health work.
+			continue
+		}
 		candidates = append(candidates, rec)
 		ids = append(ids, rec.ID)
 	}

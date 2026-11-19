@@ -99,6 +99,22 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		// surviving Chat controller and settle the delivery claim.
 		return nil
 	}
+	if !found {
+		rec = domain.SessionRecord{
+			ID: claim.SessionID, ProjectID: claim.ProjectID, IssueID: claim.IssueID,
+			Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		}
+		if reservation.ControllerPossible {
+			rec.Mode = domain.SessionModeChat
+		}
+	}
+	if trackerIntakeRuntimeFenceProbeable(rec, reservation) {
+		// Runtime probes may block on an unavailable backend. Probe before taking
+		// the session-operation fence, then acquire it and revalidate the durable
+		// generation before publishing or cleaning anything up. This lets an
+		// explicit Kill win while recovery is observing a stale owner.
+		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec)
+	}
 
 	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
 		return fmt.Errorf("recover tracker intake %s: reserve reconciliation: %w", claim.SessionID, err)
@@ -194,12 +210,32 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		defer cancel()
 		return m.checkSessionHealth(recoveryCtx, rec)
 	}
-	if found && !claim.Recovery.CapacityReleased &&
-		domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat &&
-		(claim.Recovery.DeliveryPossible || claim.Recovery.RelaunchPublished) {
-		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec)
-	}
 	return m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
+}
+
+func trackerIntakeRuntimeFenceProbeable(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
+	return domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat &&
+		!reservation.CapacityReleased &&
+		(reservation.DeliveryPossible || reservation.RelaunchPublished) &&
+		strings.TrimSpace(reservation.RuntimeLaunchID) != "" &&
+		len(uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)) != 0
+}
+
+func trackerIntakeRuntimeFenceMatches(left, right domain.TrackerIntakeRecoveryReservation) bool {
+	if strings.TrimSpace(left.RuntimeLaunchID) != strings.TrimSpace(right.RuntimeLaunchID) {
+		return false
+	}
+	leftHandles := uniqueTrackerIntakeHandles(left.RuntimeHandleIDs)
+	rightHandles := uniqueTrackerIntakeHandles(right.RuntimeHandleIDs)
+	if len(leftHandles) != len(rightHandles) {
+		return false
+	}
+	for _, handle := range leftHandles {
+		if !trackerIntakeHandleReserved(rightHandles, handle) {
+			return false
+		}
+	}
+	return true
 }
 
 func trackerIntakeClaimDefersToSessionHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
@@ -231,6 +267,13 @@ func trackerIntakeClaimDefersToSessionHealth(rec domain.SessionRecord, reservati
 		}
 	}
 	return strings.TrimSpace(rec.Metadata.RuntimeHandleID) != ""
+}
+
+func trackerIntakeClaimNeedsStartupHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
+	if rec.IsTerminated || reservation.CapacityReleased || domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
+		return false
+	}
+	return reservation.DeliveryPossible || trackerIntakeChatReservationMatchesSession(rec, reservation)
 }
 
 func trackerIntakeRuntimeReservationMatchesSession(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
@@ -272,9 +315,37 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim d
 	if len(alive) > 1 {
 		return fmt.Errorf("recover tracker intake %s: multiple reserved runtimes remain alive", rec.ID)
 	}
+	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
+		return fmt.Errorf("recover tracker intake %s: reserve reconciliation: %w", claim.SessionID, err)
+	}
+	defer m.endAgentOperation(claim.SessionID, agentOperationReconcile)
+
+	current, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
+	if err != nil {
+		return fmt.Errorf("recover tracker intake %s: reload claim after runtime probe: %w", claim.SessionID, err)
+	}
+	if !pending || current.CapacityReleased ||
+		(!current.DeliveryPossible && !current.RelaunchPublished) ||
+		!trackerIntakeRuntimeFenceMatches(reservation, current) {
+		return nil
+	}
+	currentRec, found, err := m.store.GetSession(ctx, claim.SessionID)
+	if err != nil {
+		return fmt.Errorf("recover tracker intake %s: reload session after runtime probe: %w", claim.SessionID, err)
+	}
+	if found && (currentRec.ProjectID != claim.ProjectID || currentRec.IssueID != claim.IssueID) {
+		return nil
+	}
+	claim.Recovery = current
 	if len(alive) == 1 {
-		_, err := m.adoptTrackerIntakeRuntime(ctx, claim, alive[0])
+		_, err = m.adoptTrackerIntakeRuntime(ctx, claim, alive[0])
 		return err
+	}
+	// Every reserved candidate for this exact generation is absent. Persist the
+	// stopped-generation proof before workspace cleanup so the cleanup path does
+	// not probe the same owner again and unrelated issues can use the freed slot.
+	if err := m.markTrackerIntakeCapacityReleased(ctx, claim.SessionID); err != nil {
+		return fmt.Errorf("recover tracker intake %s: release stopped runtime capacity: %w", claim.SessionID, err)
 	}
 	settled, err := m.settleExitedTrackerIntakeRuntime(ctx, claim)
 	if err != nil || settled {

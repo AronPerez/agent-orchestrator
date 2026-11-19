@@ -874,6 +874,7 @@ type fakeRuntime struct {
 	destroyedIDs     []string
 	fencedResult     ports.FencedProbeResult
 	fencedResults    map[string]ports.FencedProbeResult
+	fencedMu         sync.Mutex
 	fencedRefs       []ports.FencedRuntimeRef
 	onFencedProbe    func(ports.FencedRuntimeRef, ports.FencedProbeResult)
 	launchCandidates []ports.RuntimeHandle
@@ -1080,7 +1081,9 @@ func (r *fakeRuntime) IsExactSupervisedProcessAlive(ctx context.Context, handle 
 	return r.IsSupervisedProcessAlive(ctx, handle, ref)
 }
 func (r *fakeRuntime) ProbeFencedRuntime(ctx context.Context, ref ports.FencedRuntimeRef) ports.FencedProbeResult {
+	r.fencedMu.Lock()
 	r.fencedRefs = append(r.fencedRefs, ref)
+	r.fencedMu.Unlock()
 	if result, ok := r.fencedResults[ref.Handle.ID]; ok {
 		if r.onFencedProbe != nil {
 			r.onFencedProbe(ref, result)
@@ -3295,7 +3298,7 @@ func TestReconcileTrackerIntakeClaimsAdoptsReservedRuntime(t *testing.T) {
 	if st.trackerIntakePending[key] != id {
 		t.Fatal("adoption released no-replay claim")
 	}
-	if len(rt.fencedRefs) != 0 || rt.destroyed != 0 || ws.destroyed != 0 {
+	if len(rt.fencedRefs) != 1 || rt.destroyed != 0 || ws.destroyed != 0 {
 		t.Fatalf("live possible delivery was torn down: probes=%v runtime=%d workspace=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
 	}
 }
@@ -3583,10 +3586,14 @@ func TestKillTrackerIntakeConfirmedWorkspaceRunsCleanupHook(t *testing.T) {
 	rec.IssueID = "github:acme/mer#1112"
 	rec.Metadata.WorkspacePath = workspace
 	rec.Metadata.WorkspaceRepoPath = "/repo/mer"
+	rec.Metadata.RuntimeLaunchID = "launch-1112"
 	st.sessions[rec.ID] = rec
 	key := "mer\x00" + string(rec.IssueID)
 	st.trackerIntakePending[key] = rec.ID
-	st.trackerIntakeRecovery[rec.ID] = trackerIntakeRecoveryForWorkspace(workspaceInfo(rec))
+	reservation := trackerIntakeRecoveryForWorkspace(workspaceInfo(rec))
+	reservation.RuntimeLaunchID = rec.Metadata.RuntimeLaunchID
+	reservation.RuntimeHandleIDs = []string{rec.Metadata.RuntimeHandleID}
+	st.trackerIntakeRecovery[rec.ID] = reservation
 
 	freed, err := m.Kill(context.Background(), rec.ID)
 	if err != nil || !freed {
