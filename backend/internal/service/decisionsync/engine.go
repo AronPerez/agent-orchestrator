@@ -64,7 +64,7 @@ func (e *Engine) Sync(ctx context.Context, expectedPeer string, remote Remote) (
 	if err != nil {
 		return out, err
 	}
-	peerHeads, err := e.push(ctx, remote, peer, &out)
+	peerHeads, err := e.push(ctx, expectedPeer, remote, peer, &out)
 	if err != nil {
 		return out, err
 	}
@@ -150,12 +150,21 @@ func (e *Engine) pull(ctx context.Context, peerID string, remote Remote, out *Ou
 
 // push sends pages the peer lacks until it holds everything this ledger
 // serves, or a page makes no progress.
-func (e *Engine) push(ctx context.Context, remote Remote, last ExchangeResponse, out *Outcome) (domain.DecisionHeads, error) {
+func (e *Engine) push(ctx context.Context, peerID string, remote Remote, last ExchangeResponse, out *Outcome) (domain.DecisionHeads, error) {
 	peerHave, peerHeads := last.Have, last.Heads
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// Compare the peer's heads before each page: an origin is pushed from
+		// peerHave[o]+1, which builds on the peer's entry at peerHave[o], so
+		// that entry must be this ledger's too. A fork found here quarantines
+		// the origin, and the page below leaves it out.
+		conflicts, err := e.deps.Ledger.CheckDecisionHeads(ctx, peerID, peerHeads, e.deps.Now())
+		if err != nil {
+			return nil, err
+		}
+		out.Conflicts = append(out.Conflicts, conflicts...)
 		entries, _, err := e.deps.Ledger.ListDecisionEntriesAfter(ctx, skipStopped(peerHave, peerHeads),
 			e.deps.PageEntries, domain.MaxDecisionSyncPageBytes)
 		if err != nil {

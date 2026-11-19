@@ -225,3 +225,75 @@ func TestEngineSyncDetectsForkAtEqualSequence(t *testing.T) {
 		t.Fatalf("outcome conflicts = %+v, b conflicts = %+v; want one each and not in sync", out.Conflicts, b.ledger.Conflicts())
 	}
 }
+
+// hookLedger runs before once, just before the first page read: an append the
+// server makes while an exchange is in flight.
+type hookLedger struct {
+	*ledgertest.MemLedger
+	before func()
+}
+
+func (h *hookLedger) ListDecisionEntriesAfter(ctx context.Context, have domain.DecisionVector, n, b int) ([]domain.DecisionEntry, bool, error) {
+	if h.before != nil {
+		hook := h.before
+		h.before = nil
+		hook()
+	}
+	return h.MemLedger.ListDecisionEntriesAfter(ctx, have, n, b)
+}
+
+func TestExchangeDetectsForkAppendedDuringExchange(t *testing.T) {
+	// x is the origin and serves; c holds x:1..2 and a forked x:3 it got from
+	// a copy of x's data directory.
+	x := ledgertest.NewMemLedger("h_x")
+	x.Append(ledgertest.Future("dec_1"), t0)
+	x.Append(ledgertest.Future("dec_1"), t0.Add(time.Second))
+	twin := ledgertest.NewMemLedger("h_x")
+	if _, err := twin.ApplyDecisionEntries(context.Background(), "h_copy", x.Entries(), t0); err != nil {
+		t.Fatal(err)
+	}
+	twin.Append(ledgertest.Future("dec_1"), t0.Add(2*time.Second))
+	c := newMachine("h_c", fixedNow(t0))
+	if _, err := c.ledger.ApplyDecisionEntries(context.Background(), "h_twin", twin.Entries(), t0); err != nil {
+		t.Fatal(err)
+	}
+
+	var ownX4 domain.DecisionEntry
+	server := decisionsync.NewServer(decisionsync.ServerDeps{
+		HostID: "h_x", Now: fixedNow(t0),
+		Ledger: &hookLedger{MemLedger: x, before: func() {
+			x.Append(ledgertest.Future("dec_1"), t0.Add(3*time.Second))
+			ownX4 = x.Append(ledgertest.Future("dec_1"), t0.Add(4*time.Second))
+		}},
+	})
+	if _, err := c.engine.Sync(context.Background(), "h_x", &ledgertest.DirectRemote{Server: server, CallerID: "h_c"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range c.ledger.Entries() {
+		if e.ID == ownX4.ID {
+			t.Fatal("c applied x:4 on top of its forked x:3")
+		}
+	}
+	if got := x.Conflicts(); len(got) != 1 || got[0].Origin != "h_x" || got[0].OriginSeq != 3 {
+		t.Fatalf("server conflicts = %+v, want one at h_x:3", got)
+	}
+}
+
+func TestConflictedOriginIsNotServedBelowTheDetectedSequence(t *testing.T) {
+	// Two copies of x forked at 3 and ran on to 10 and 20: comparing heads
+	// finds the fork at 10, but 3..9 already differ, so none of x is served.
+	b := newMachine("h_b", fixedNow(t0))
+	if _, err := b.ledger.ApplyDecisionEntries(context.Background(), "h_x", ledgertest.ReceivedRun("h_x", 1, 10, "dec_1"), t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ledger.CheckDecisionHeads(context.Background(), "h_twin", domain.DecisionHeads{"h_x": {Seq: 10, ID: "dent_twin_10"}}, t0); err != nil {
+		t.Fatal(err)
+	}
+	empty := newMachine("h_e", fixedNow(t0))
+	empty.syncWith(t, b)
+	for _, e := range empty.ledger.Entries() {
+		if e.Origin == "h_x" {
+			t.Fatalf("empty peer received %s:%d from a quarantined origin", e.Origin, e.OriginSeq)
+		}
+	}
+}

@@ -87,7 +87,7 @@ func RunApplyConformance(t *testing.T, newLedger func(t *testing.T, hostID strin
 
 	t.Run("StoresVerbatim", func(t *testing.T) {
 		l := newLedger(t, "h_self")
-		payload := `{"note":"<&> é é","zz":{"b":1,  "a":[1,2.50]},"unknown":true}`
+		payload := `{"note":"<&> é \u00e9","zz":{"b":1,  "a":[1,2.50]},"unknown":true}`
 		e := Received("h_b", 1, "dec_1", "future_kind", payload)
 		e.Stamp = domain.DecisionStamp{WallMS: 1234, Counter: 7}
 		if res := apply(t, l, "h_b", []domain.DecisionEntry{e}); res.Applied != 1 {
@@ -261,7 +261,7 @@ func RunApplyConformance(t *testing.T, newLedger func(t *testing.T, hostID strin
 		for _, e := range page {
 			got = append(got, fmt.Sprintf("%s:%d", e.Origin, e.OriginSeq))
 		}
-		if strings.Join(got, ",") != "h_a:1,h_a:2,h_b:1,h_b:2" {
+		if strings.Join(got, ",") != "h_b:1,h_b:2" {
 			t.Fatalf("page = %v", got)
 		}
 	})

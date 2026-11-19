@@ -165,10 +165,14 @@ func LowestDecisionSyncConflicts(conflicts []DecisionSyncConflict) map[string]in
 }
 
 // PageDecisionEntries is the sync page reader shared by every ledger. vector
-// is the ledger's own, stoppedAt its lowest conflicted sequence per origin, and
-// have what the other side holds. read returns up to limit entries of origin
-// with after < seq < before, in sequence order. See ListDecisionEntriesAfter
-// on the store for the paging rules.
+// is the ledger's own, stoppedAt its conflicted origins (with their lowest
+// conflicted sequence), and have what the other side holds. read returns up to
+// limit entries of origin with after < seq < before, in sequence order. See
+// ListDecisionEntriesAfter on the store for the paging rules.
+//
+// A conflicted origin is not served at all. The recorded sequence is only
+// where the fork was noticed: two copies that forked at 3 and compared heads
+// at 10 already differ from 3 on, so nothing of that origin can be vouched for.
 func PageDecisionEntries(vector DecisionVector, stoppedAt map[string]int64, have DecisionVector, maxEntries, maxBytes int,
 	read func(origin string, after, before int64, limit int) ([]DecisionEntry, error)) ([]DecisionEntry, bool, error) {
 	origins := make([]string, 0, len(vector))
@@ -179,11 +183,10 @@ func PageDecisionEntries(vector DecisionVector, stoppedAt map[string]int64, have
 	var page []DecisionEntry
 	bytes := 0
 	for _, origin := range origins {
-		highest, before := vector[origin], int64(math.MaxInt64)
-		if low, ok := stoppedAt[origin]; ok {
-			before = low
-			highest = min(highest, low-1)
+		if _, quarantined := stoppedAt[origin]; quarantined {
+			continue
 		}
+		highest, before := vector[origin], int64(math.MaxInt64)
 		after := have[origin]
 		if highest <= after {
 			continue
