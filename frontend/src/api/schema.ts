@@ -1563,6 +1563,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decisions/kinds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List decision kinds and which ones a project reserves */
+        get: operations["listDecisionKinds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decisions/observe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Report how often sessions predicted the person's answers in observe mode */
+        get: operations["observeDecisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/desktop/sessions/{sessionId}/artifacts": {
         parameters: {
             query?: never;
@@ -6037,6 +6071,11 @@ export interface components {
             /** @enum {string} */
             status: "pending" | "spawning" | "running" | "completed" | "failed";
         };
+        AutonomyConfig: {
+            /** @enum {string} */
+            mode?: "off" | "observe";
+            reserved?: string[];
+        };
         AwakeApplication: {
             id: string;
             identity: string;
@@ -7430,6 +7469,11 @@ export interface components {
             answerSurface?: string;
             /** Format: date-time */
             answeredAt?: null | string;
+            /**
+             * @description The project's autonomy mode when the call was raised.
+             * @enum {string}
+             */
+            autonomyMode?: "off" | "observe";
             changedAfterClose?: boolean;
             /** @enum {string} */
             choice?: "option" | "other";
@@ -7442,6 +7486,8 @@ export interface components {
             delivery?: "pending" | "sent" | "no_session";
             hostId: string;
             id: string;
+            kind?: string;
+            kindLabel?: string;
             link: string;
             links: components["schemas"]["DecisionLinkPayload"][];
             machineLabel: string;
@@ -7454,11 +7500,15 @@ export interface components {
             outcomeLink?: string;
             ownerSessionId: string;
             ownerSessionName: string;
+            prediction?: components["schemas"]["DecisionPredictionPayload"];
+            predictionAgreed?: null | boolean;
             projectId?: string;
             projectName?: string;
             /** Format: date-time */
             raisedAt: string;
             reference?: string;
+            /** @description The project reserved this kind for the person when the call was raised. */
+            reserved?: boolean;
             retired: boolean;
             standingEntryId?: string;
             /** @enum {string} */
@@ -7467,6 +7517,11 @@ export interface components {
             streamName?: string;
             streamSessionId?: string;
             title: string;
+            /**
+             * @description Effective urgency. This daemon always sets it; treat it as can_wait when absent, as from an older daemon.
+             * @enum {string}
+             */
+            urgency?: "blocking" | "can_wait";
         };
         DecisionDetailResponse: {
             call: components["schemas"]["DecisionCallResponse"];
@@ -7494,9 +7549,38 @@ export interface components {
             /** Format: date-time */
             writtenAt: string;
         };
+        DecisionKindResponse: {
+            id: string;
+            label: string;
+            reserved: boolean;
+            reservedByDefault: boolean;
+        };
+        DecisionKindsResponse: {
+            kinds: components["schemas"]["DecisionKindResponse"][];
+            /** @enum {string} */
+            mode: "off" | "observe";
+            projectId?: string;
+        };
         DecisionLinkPayload: {
             label: string;
             url: string;
+        };
+        DecisionObserveResponse: {
+            /** @enum {string} */
+            mode: "off" | "observe";
+            projectId?: string;
+            rows: components["schemas"]["DecisionObserveRowResponse"][];
+        };
+        DecisionObserveRowResponse: {
+            agreed: number;
+            /** @description Calls with both a prediction and the person's answer. */
+            answered: number;
+            /** @description Calls of this kind that were not withdrawn. */
+            calls: number;
+            differed: number;
+            kind: string;
+            label: string;
+            reserved: boolean;
         };
         DecisionOptionPayload: {
             consequence: string;
@@ -7508,6 +7592,13 @@ export interface components {
             forEntry?: string;
             link?: string;
             text: string;
+        };
+        DecisionPredictionPayload: {
+            /** @description Label of the predicted option. Set in responses only. */
+            label?: string;
+            option: number;
+            undo: string;
+            why: string;
         };
         DegradedProject: {
             id: string;
@@ -8333,6 +8424,7 @@ export interface components {
             agentRules?: string;
             agentRulesFile?: string;
             autoReview?: boolean;
+            autonomy?: components["schemas"]["AutonomyConfig"];
             canonicalRepoURL?: string;
             collisionRadar?: components["schemas"]["CollisionRadarConfig"];
             containerReap?: components["schemas"]["ContainerReapConfig"];
@@ -8470,10 +8562,18 @@ export interface components {
         };
         RaiseDecisionRequest: {
             context: string;
+            /** @description Decision kind id from GET /api/v1/decisions/kinds. Required when the project is in observe mode. */
+            kind?: string;
             links?: components["schemas"]["DecisionLinkPayload"][];
             options: components["schemas"]["DecisionOptionPayload"][];
+            prediction?: components["schemas"]["DecisionPredictionPayload"];
             reference?: string;
             title: string;
+            /**
+             * @description How soon the person is needed. Blocking means all of the session's remaining work depends on the answer. Defaults to can_wait.
+             * @enum {string}
+             */
+            urgency?: "blocking" | "can_wait";
         };
         RecordAgentSignInResponse: {
             releasedKey?: string;
@@ -15818,6 +15918,124 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listDecisionKinds: {
+        parameters: {
+            query?: {
+                /** @description Project id. Required from the person's surfaces; a calling session always gets its own project. */
+                project?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionKindsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    observeDecisions: {
+        parameters: {
+            query?: {
+                /** @description Project id. Required from the person's surfaces; a calling session always gets its own project. */
+                project?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionObserveResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

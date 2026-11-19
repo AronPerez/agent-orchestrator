@@ -7,7 +7,9 @@ import type { ProjectSettingsSaveState, ProjectSettingsSection as SettingsSectio
 import { deriveRepoHost, deriveRepoPath, IntakeFields, intakeNeedsRule } from "./IntakeFields";
 import { ProductExternalLink } from "./ProductExternalLink";
 import { AgentModelField, ProjectAutoReviewToggle, ProjectCoAuthorCommitsToggle, ProjectWorkersRequestReviewToggle } from "./settings/ProjectAgentRoleControls";
+import { ProjectAutonomyControls } from "./settings/ProjectAutonomyControls";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
+import type { AutonomyMode, DecisionKindOption } from "../lib/project-autonomy";
 import { Button } from "./ui/button";
 
 export type ProjectSettingsDraft = {
@@ -35,6 +37,10 @@ export type ProjectSettingsDraft = {
 	workersRequestReview?: boolean;
 	/** Cloud-only: agent commits name the AO GitHub App as a co-author. */
 	coAuthorCommits?: boolean;
+	/** Local-only: how much the project's sessions decide on their own. */
+	autonomyMode?: AutonomyMode;
+	/** Local-only: kinds the person keeps; undefined keeps the defaults. */
+	reservedKinds?: string[];
 	intakeEnabled: boolean;
 	intakeRepo: string;
 	intakeAssignee: string;
@@ -81,7 +87,7 @@ const roleFields: Record<ProjectSettingsRole, RoleFields> = {
 
 // Both persistence adapters render this page. Drafts, validation, autosave and
 // common controls live here so a UI change applies to local and Cloud projects.
-export function ProjectSettingsEditor({ initialValues, section, capabilities, details, workspaceRepos, repository, renderAgent, defaultReviewer = () => "", modelScope, modelHostId, cloudOrgId, reviewerWarning, autoReviewDescription, intakeDescription, save, onSaveState, saveUnchanged = false, disabled = false, generalExtra }: {
+export function ProjectSettingsEditor({ initialValues, section, capabilities, details, workspaceRepos, repository, renderAgent, defaultReviewer = () => "", modelScope, modelHostId, cloudOrgId, reviewerWarning, autoReviewDescription, intakeDescription, save, onSaveState, saveUnchanged = false, disabled = false, generalExtra, decisionKinds }: {
 	initialValues: ProjectSettingsDraft;
 	section: SettingsSection;
 	capabilities: Capabilities;
@@ -104,6 +110,8 @@ export function ProjectSettingsEditor({ initialValues, section, capabilities, de
 	saveUnchanged?: boolean;
 	/** Read-only sections appended to the General page (e.g. a Cloud project's Coder template). */
 	generalExtra?: ReactNode;
+	/** The daemon's decision kinds. Present only when it supports autonomy levels. */
+	decisionKinds?: DecisionKindOption[];
 	/** Pauses autosave and submit, e.g. while the owning host is offline. */
 	disabled?: boolean;
 }) {
@@ -203,6 +211,7 @@ export function ProjectSettingsEditor({ initialValues, section, capabilities, de
 						{capabilities.workersRequestReview && <ProjectWorkersRequestReviewToggle checked={draft.workersRequestReview ?? false} onCheckedChange={(workersRequestReview) => patch({ workersRequestReview })} />}
 						{capabilities.coAuthorCommits && <ProjectCoAuthorCommitsToggle checked={draft.coAuthorCommits ?? true} onCheckedChange={(coAuthorCommits) => patch({ coAuthorCommits })} />}
 					</ProjectSettingsSection>
+					{decisionKinds && <ProjectAutonomyControls draft={{ autonomyMode: draft.autonomyMode ?? "off", reservedKinds: draft.reservedKinds }} kinds={decisionKinds} onChange={(next) => patch(next)} />}
 				</>}
 				{generalExtra}
 			</> : <>
