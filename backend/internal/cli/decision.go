@@ -667,7 +667,9 @@ func outsidePolicyNote(id string, decided *decisionDecidedAPI) string {
 	default:
 		return ""
 	}
-	return fmt.Sprintf("Kept, but %s. Do not carry it out: close this record with ao decision outcome %s --text \"Not carried out: policy changed\" and raise a call instead. If you already acted, tell the person.", why, id)
+	return fmt.Sprintf("Kept, but %s.\n"+
+		"If you have not acted yet, do not: close this record with ao decision outcome %s --text \"Not carried out: policy changed\" and raise a call instead.\n"+
+		"If you already acted, do not close it: confirm with ao decision carried-out %s and tell the person, so they can overrule it.", why, id, id)
 }
 
 func newDecisionCarriedOutCommand(ctx *commandContext) *cobra.Command {

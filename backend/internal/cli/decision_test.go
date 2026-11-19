@@ -694,8 +694,18 @@ func TestDecisionDecideWarnsWhenOutsidePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "Recorded dec_3") || !strings.Contains(out, "this kind of decision is now reserved for the person. Do not carry it out") || strings.Contains(out, "Now carry it out") {
-		t.Fatalf("out = %q", out)
+	for _, want := range []string{
+		"Recorded dec_3",
+		"Kept, but this kind of decision is now reserved for the person.",
+		"If you have not acted yet, do not: close this record with ao decision outcome dec_3 --text \"Not carried out: policy changed\" and raise a call instead.",
+		"If you already acted, do not close it: confirm with ao decision carried-out dec_3 and tell the person, so they can overrule it.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("out missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Now carry it out") {
+		t.Fatalf("an outside-policy record must not be carried out: %q", out)
 	}
 }
 

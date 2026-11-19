@@ -114,9 +114,11 @@ carried out": check whether each happened, then confirm or close it.
 `--undo` is required: write it so the human could follow it without you.
 `--verify` is optional. `other` is always reserved. If the project left
 mode `on`, or reserved the kind, after you started, the record is still kept
-so the human can see it, and the command says so: do not carry it out, close the
-record with `ao decision outcome <id> --text "Not carried out: policy changed"`,
-and raise a call instead. When you are unsure
+so the human can see it, and the command says so. If you have not acted yet, do
+not: close the record with `ao decision outcome <id> --text "Not carried out:
+policy changed"` and raise a call instead. If you already acted, do not close
+it: confirm with `ao decision carried-out <id>` and tell the human, so they can
+overrule it. When you are unsure
 which kind applies, or whether it can be undone, raise a call instead.
 
 The human sees the decision on the Decisions page under Decided for you, or
