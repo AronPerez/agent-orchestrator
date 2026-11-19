@@ -46,9 +46,11 @@ const board = (calls: DecisionCall[]) => ({
 	},
 });
 
-function answer(result: unknown) {
-	getMock.mockImplementation((path: string) => {
+function answer(result: unknown, details: Record<string, DecisionCall> = {}) {
+	getMock.mockImplementation((path: string, request?: { params?: { path?: { id?: string } } }) => {
 		if (path === "/api/v1/decisions/board") return Promise.resolve(result);
+		const found = details[request?.params?.path?.id ?? ""];
+		if (found) return Promise.resolve({ data: { call: found, history: [] }, response: { status: 200 } });
 		return Promise.resolve({ error: { code: "DECISION_NOT_FOUND", message: "Unknown decision" }, response: { status: 404 } });
 	});
 }
@@ -126,5 +128,38 @@ describe("DecisionsView", () => {
 		renderView(<><SidebarCount /><DecisionsView /></>);
 		expect(await screen.findByText("count 1")).toBeInTheDocument();
 		await waitFor(() => expect(boardFetches()).toBe(1));
+	});
+
+	it("opens the selected call beside the board in a resizable panel", async () => {
+		const selected = call({ id: "dec_1" });
+		answer(board([selected]), { dec_1: selected });
+		renderView(<DecisionsView callId="dec_1" />);
+		const panel = await screen.findByRole("complementary", { name: "Decision" });
+		expect(await within(panel).findByRole("heading", { level: 2, name: "Question dec_1" })).toBeInTheDocument();
+		expect(screen.getByRole("separator")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /^Question dec_1/ })).toHaveAttribute("aria-current", "true");
+	});
+
+	it("opens a call that is no longer on the board by its id", async () => {
+		const old = call({ id: "dec_old", state: "done", outcome: "Shipped", outcomeAt: "2026-10-01T10:00:00Z" });
+		answer(board([call({ id: "dec_1" })]), { dec_old: old });
+		renderView(<DecisionsView callId="dec_old" />);
+		expect(await screen.findByRole("heading", { level: 2, name: "Question dec_old" })).toBeInTheDocument();
+	});
+
+	it("closes the panel by clearing the selected call", async () => {
+		const selected = call({ id: "dec_1" });
+		answer(board([selected]), { dec_1: selected });
+		renderView(<DecisionsView callId="dec_1" />);
+		await userEvent.click(await screen.findByRole("button", { name: "Close decision" }));
+		expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: {} });
+	});
+
+	it("shows no panel without a selected call", async () => {
+		answer(board([call({ id: "dec_1" })]));
+		renderView(<DecisionsView />);
+		await screen.findByRole("button", { name: /^Question dec_1/ });
+		expect(screen.queryByRole("complementary", { name: "Decision" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("separator")).not.toBeInTheDocument();
 	});
 });

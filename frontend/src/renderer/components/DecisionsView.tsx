@@ -6,9 +6,11 @@ import { ListChecks } from "@/components/app-icons";
 import { useDecisionBoard } from "../hooks/useDecisionInbox";
 import { apiErrorRequestId } from "../lib/api-client";
 import { buildDecisionBoard, DECISION_LANES } from "../lib/decision-board";
+import { DecisionCallPanel } from "./DecisionCallPanel";
 import { DecisionsBoard } from "./DecisionsBoard";
 import { PageTopbar, PageTopbarTitle } from "./PageTopbar";
 import { Button } from "./ui/button";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "./ui/resizable";
 import { Skeleton } from "./ui/skeleton";
 
 export type DecisionsViewProps = {
@@ -28,6 +30,16 @@ export function DecisionsView({ callId }: DecisionsViewProps) {
 	const selectCall = useCallback((id: string) => {
 		void navigate({ to: "/decisions", search: { call: id } });
 	}, [navigate]);
+	const closeCall = useCallback(() => {
+		const closing = callId;
+		void navigate({ to: "/decisions", search: {} });
+		// Return focus to the card the panel was opened from, when it is still on the board.
+		if (closing) {
+			requestAnimationFrame(() => {
+				document.querySelector<HTMLElement>(`[data-decision-card="${CSS.escape(closing)}"]`)?.focus();
+			});
+		}
+	}, [callId, navigate]);
 
 	let body;
 	if (board.data && board.data.calls.length > 0) {
@@ -64,11 +76,26 @@ export function DecisionsView({ callId }: DecisionsViewProps) {
 	return (
 		<div className="flex min-h-0 flex-1 flex-col bg-background">
 			<PageTopbar lead={<PageTopbarTitle as="h1" icon={<ListChecks className="size-icon-md" aria-hidden="true" />}>{t("decisions.title")}</PageTopbarTitle>} />
-			<main className="min-h-0 flex-1 overflow-auto overscroll-contain">{body}</main>
-			{/* Slice 4 replaces this with sync freshness; until then it names whose ledger this is. */}
-			<footer className="shrink-0 border-t border-border px-(--space-4_5) py-1.5 text-caption text-muted-foreground">
-				{t("decisions.footerLocal")}
-			</footer>
+			<ResizablePanelGroup className="min-h-0 flex-1">
+				<ResizablePanel id="decisions-board" minSize="30%">
+					<div className="flex h-full min-w-0 flex-col">
+						<main className="min-h-0 flex-1 overflow-auto overscroll-contain">{body}</main>
+						{/* Slice 4 replaces this with sync freshness; until then it names whose ledger this is. */}
+						<footer className="shrink-0 border-t border-border px-(--space-4_5) py-1.5 text-caption text-muted-foreground">
+							{t("decisions.footerLocal")}
+						</footer>
+					</div>
+				</ResizablePanel>
+				{callId ? (
+					<>
+						<ResizableHandle />
+						{/* The shell's inspector position: beside the board, never a modal. */}
+						<ResizablePanel id="decision-call" defaultSize="420px" minSize="360px" maxSize="55%">
+							<DecisionCallPanel key={callId} callId={callId} onClose={closeCall} />
+						</ResizablePanel>
+					</>
+				) : null}
+			</ResizablePanelGroup>
 		</div>
 	);
 }
