@@ -2866,36 +2866,44 @@ func (m *Manager) trackerIntakeCapacityReleaseProof(
 	if reservation.CapacityReleased && (!found || reservation.ReleasesCapacityFor(rec)) {
 		return reservation, nil
 	}
-	proof := reservation
+	owners := reservation
+	if found {
+		// Initial Chat intake reserved the controller before its generation was
+		// known. Once the same row publishes that generation, retain it as the
+		// exact owner that the caller has just stopped.
+		if owners.ControllerPossible && strings.TrimSpace(owners.ControllerGeneration) == "" &&
+			domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+			owners.ControllerGeneration = strings.TrimSpace(rec.Metadata.ControllerGeneration)
+		}
+	} else {
+		rec.ID = id
+	}
+	if controllerStopped {
+		reservedGeneration := strings.TrimSpace(owners.ControllerGeneration)
+		rowGeneration := strings.TrimSpace(rec.Metadata.ControllerGeneration)
+		if reservedGeneration != "" && rowGeneration != "" && reservedGeneration != rowGeneration {
+			return reservation, fmt.Errorf("reserved tracker intake Chat generation %s does not match stopped row generation %s",
+				reservedGeneration, rowGeneration)
+		}
+	}
+	// Verify the unreleased owner set before constructing a stopped-generation
+	// proof. Setting ReleasedRuntimeLaunchID first would incorrectly exempt every
+	// fallback handle that shares the published row's generation.
+	if err := m.ensureTrackerIntakePriorRuntimeStopped(ctx, rec, owners, controllerStopped); err != nil {
+		return reservation, fmt.Errorf("verify tracker intake owners before releasing capacity: %w", err)
+	}
+	proof := owners
 	proof.CapacityReleased = true
 	proof.ReleasedRuntimeLaunchID = ""
 	proof.ReleasedControllerGeneration = ""
 	if found {
 		proof.ReleasedRuntimeLaunchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
 		proof.ReleasedControllerGeneration = strings.TrimSpace(rec.Metadata.ControllerGeneration)
-		// Initial Chat intake reserved the controller before its generation was
-		// known. Once the same row publishes that generation, retain it as the
-		// exact owner that the caller has just stopped.
-		if proof.ControllerPossible && strings.TrimSpace(proof.ControllerGeneration) == "" &&
-			domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-			proof.ControllerGeneration = proof.ReleasedControllerGeneration
-		}
-	} else {
-		rec.ID = id
 	}
 	if controllerStopped {
-		reservedGeneration := strings.TrimSpace(proof.ControllerGeneration)
-		rowGeneration := strings.TrimSpace(rec.Metadata.ControllerGeneration)
-		if reservedGeneration != "" && rowGeneration != "" && reservedGeneration != rowGeneration {
-			return reservation, fmt.Errorf("reserved tracker intake Chat generation %s does not match stopped row generation %s",
-				reservedGeneration, rowGeneration)
-		}
-		if reservedGeneration != "" {
+		if reservedGeneration := strings.TrimSpace(proof.ControllerGeneration); reservedGeneration != "" {
 			proof.ReleasedControllerGeneration = reservedGeneration
 		}
-	}
-	if err := m.ensureTrackerIntakePriorRuntimeStopped(ctx, rec, proof, controllerStopped); err != nil {
-		return reservation, fmt.Errorf("verify tracker intake owners before releasing capacity: %w", err)
 	}
 	return proof, nil
 }

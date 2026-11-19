@@ -141,11 +141,30 @@ func TestSwitchTargetWithoutANativeSessionYetRestoresFromTheHandoff(t *testing.T
 
 func TestSwitchTUIProviderKeepsReservedReplacementFenced(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		probe ports.FencedProbeResult
+		name      string
+		launchID  string
+		handleIDs []string
+		probes    map[string]ports.FencedProbeResult
 	}{
-		{name: "live", probe: ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}},
-		{name: "unknown", probe: ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}},
+		{
+			name: "live replacement", launchID: "replacement-generation", handleIDs: []string{"runtime-replacement"},
+			probes: map[string]ports.FencedProbeResult{
+				"runtime-replacement": {Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+			},
+		},
+		{
+			name: "unknown replacement", launchID: "replacement-generation", handleIDs: []string{"runtime-replacement"},
+			probes: map[string]ports.FencedProbeResult{
+				"runtime-replacement": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			},
+		},
+		{
+			name: "matching generation unknown fallback", launchID: "published-generation",
+			handleIDs: []string{"h1", "runtime-fallback"},
+			probes: map[string]ports.FencedProbeResult{
+				"runtime-fallback": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := newFakeStore()
@@ -159,12 +178,12 @@ func TestSwitchTUIProviderKeepsReservedReplacementFenced(t *testing.T) {
 			key := "mer\x00" + string(rec.IssueID)
 			st.trackerIntakePending[key] = rec.ID
 			st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
-				RuntimeLaunchID: "replacement-generation", RuntimeHandleIDs: []string{"runtime-replacement"},
+				RuntimeLaunchID: tc.launchID, RuntimeHandleIDs: tc.handleIDs,
 				DeliveryPossible: true,
 			}
 			runtime := &fakeRuntime{
 				aliveByHandle: map[string]bool{rec.Metadata.RuntimeHandleID: true},
-				fencedResults: map[string]ports.FencedProbeResult{"runtime-replacement": tc.probe},
+				fencedResults: tc.probes,
 			}
 			m := New(Deps{
 				Runtime: runtime, Agents: singleAgent{agent: &recordingAgent{}}, Store: &launchOptionsFakeStore{fakeStore: st},
@@ -180,7 +199,7 @@ func TestSwitchTUIProviderKeepsReservedReplacementFenced(t *testing.T) {
 				t.Fatalf("SwitchTUIProvider() error = %v, want recovery required", err)
 			}
 			reservation := st.trackerIntakeRecovery[rec.ID]
-			if reservation.CapacityReleased || reservation.RuntimeLaunchID != "replacement-generation" {
+			if reservation.CapacityReleased || reservation.RuntimeLaunchID != tc.launchID {
 				t.Fatalf("tracker intake reservation = %+v, want replacement owner still fenced", reservation)
 			}
 			if runtime.created != 0 {

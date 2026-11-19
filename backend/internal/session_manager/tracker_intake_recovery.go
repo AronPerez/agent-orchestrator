@@ -768,8 +768,16 @@ func (m *Manager) ensureTrackerIntakePriorRuntimeStopped(
 	rowLaunchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
 	rowReleased := rec.RuntimeReleased() || (reservedRuntimeReleased && rowLaunchID == reservedLaunchID)
 	if rowHandleID != "" || rowLaunchID != "" {
-		if err := add(rowHandleID, rowLaunchID, rowReleased); err != nil {
-			return err
+		// Spawn rollback clears the published handle after destroying it but keeps
+		// its launch ID for history. When the reservation still owns handles for
+		// that same generation, those candidates are the complete fence and must
+		// all be probed; the handle-less row does not describe another owner.
+		rowCoveredByReservation := rowHandleID == "" && rowLaunchID != "" &&
+			rowLaunchID == reservedLaunchID && len(reservedHandles) != 0
+		if !rowCoveredByReservation {
+			if err := add(rowHandleID, rowLaunchID, rowReleased); err != nil {
+				return err
+			}
 		}
 	}
 	chatOwnerStopped := controllerStopped && reservation.ControllerPossible

@@ -1176,11 +1176,30 @@ func TestInterfaceTransitionTUIToChatStopsBeforeStartingAndReusesNativeConversat
 
 func TestInterfaceTransitionTUIToChatKeepsReservedReplacementFenced(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		probe ports.FencedProbeResult
+		name      string
+		launchID  string
+		handleIDs []string
+		probeByID map[string]ports.FencedProbeResult
 	}{
-		{name: "live", probe: ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}},
-		{name: "unknown", probe: ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}},
+		{
+			name: "live replacement", launchID: "replacement-generation", handleIDs: []string{"runtime-replacement"},
+			probeByID: map[string]ports.FencedProbeResult{
+				"runtime-replacement": {Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+			},
+		},
+		{
+			name: "unknown replacement", launchID: "replacement-generation", handleIDs: []string{"runtime-replacement"},
+			probeByID: map[string]ports.FencedProbeResult{
+				"runtime-replacement": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			},
+		},
+		{
+			name: "matching generation unknown fallback", launchID: "old-tui-generation",
+			handleIDs: []string{"runtime-1", "runtime-fallback"},
+			probeByID: map[string]ports.FencedProbeResult{
+				"runtime-fallback": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			manager, store, runtime, chat, _ := newTransitionManager(t, domain.SessionModeTUI)
@@ -1189,10 +1208,10 @@ func TestInterfaceTransitionTUIToChatKeepsReservedReplacementFenced(t *testing.T
 			store.sessions[rec.ID] = rec
 			store.trackerIntakePending["proj\x00"+string(rec.IssueID)] = rec.ID
 			store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
-				RuntimeLaunchID: "replacement-generation", RuntimeHandleIDs: []string{"runtime-replacement"},
+				RuntimeLaunchID: tc.launchID, RuntimeHandleIDs: tc.handleIDs,
 				DeliveryPossible: true,
 			}
-			runtime.fencedResults = map[string]ports.FencedProbeResult{"runtime-replacement": tc.probe}
+			runtime.fencedResults = tc.probeByID
 
 			transition, err := manager.StartInterfaceTransition(
 				context.Background(), rec.ID, domain.SessionModeChat,
@@ -1206,7 +1225,7 @@ func TestInterfaceTransitionTUIToChatKeepsReservedReplacementFenced(t *testing.T
 				t.Fatalf("transition = %+v, want recovery while replacement owner is unresolved", settled)
 			}
 			reservation := store.trackerIntakeRecovery[rec.ID]
-			if reservation.CapacityReleased || reservation.RuntimeLaunchID != "replacement-generation" {
+			if reservation.CapacityReleased || reservation.RuntimeLaunchID != tc.launchID {
 				t.Fatalf("tracker intake reservation = %+v, want replacement owner still fenced", reservation)
 			}
 			if runtime.created != 0 || chat.start.SessionID != "" {

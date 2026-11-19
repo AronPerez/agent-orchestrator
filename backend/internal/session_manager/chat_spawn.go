@@ -395,6 +395,18 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 				}
 				return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, agentlaunch.RedactError(err, in.project.Config.Env))
 			}
+			if in.cfg.TrackerIntakeLimits != nil {
+				cleanupCtx, cancel := spawnRollbackContext(ctx)
+				releaseErr := m.markTrackerIntakeCapacityReleasedAfterControllerStop(cleanupCtx, id)
+				cancel()
+				if releaseErr != nil {
+					if completionErr != nil {
+						return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, errors.Join(completionErr, releaseErr))
+					}
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController,
+						agentlaunch.RedactError(errors.Join(err, releaseErr), in.project.Config.Env))
+				}
+			}
 			workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
 			if in.cfg.TrackerIntakeLimits != nil && !workspaceDestroyed {
 				if completionErr != nil {
@@ -465,6 +477,14 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 				controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
 				workspaceDestroyed := false
 				if controllerStopped {
+					cleanupCtx, cancel := spawnRollbackContext(ctx)
+					releaseErr := m.markTrackerIntakeCapacityReleasedAfterControllerStop(cleanupCtx, id)
+					cancel()
+					if releaseErr != nil {
+						err = errors.Join(err, releaseErr)
+						return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt,
+							agentlaunch.RedactError(err, in.project.Config.Env))
+					}
 					workspaceDestroyed = m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
 				}
 				if !controllerStopped || !workspaceDestroyed {
