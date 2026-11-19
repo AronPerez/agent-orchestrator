@@ -55,6 +55,7 @@ func TestValidateDecisionOverrule(t *testing.T) {
 func TestReduceDecidedCall(t *testing.T) {
 	decided := validDecided()
 	decided.Verify = "The PR list shows one open PR for the ticket."
+	decided.OutsidePolicy = DecisionOutsidePolicyReserved
 	entries := []DecisionEntry{decisionEntry(t, "dent_d", 1, DecisionKindDecided, decided)}
 	call, ok := ReduceDecisionCall(entries)
 	if !ok {
@@ -67,7 +68,7 @@ func TestReduceDecidedCall(t *testing.T) {
 		call.Raised.OwnerSessionID != "w-1" || len(call.Raised.Options) != 0 {
 		t.Fatalf("raised view = %+v", call.Raised)
 	}
-	if call.Decided == nil || call.Decided.Undo != decided.Undo || call.Decided.Verify != decided.Verify {
+	if call.Decided == nil || call.Decided.Undo != decided.Undo || call.Decided.Verify != decided.Verify || call.Decided.OutsidePolicy != DecisionOutsidePolicyReserved {
 		t.Fatalf("decided = %+v", call.Decided)
 	}
 	if call.Delivery != DecisionDeliveryNone || call.StandingEntryID != "" {

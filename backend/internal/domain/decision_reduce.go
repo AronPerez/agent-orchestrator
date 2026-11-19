@@ -136,7 +136,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Origin = entry.Origin
 			call.Raised = payload.raisedView()
 			call.RaisedAt = entry.WrittenAt
-			call.Decided = &DecisionDecidedDetail{Undo: payload.Undo, Verify: payload.Verify}
+			call.Decided = &DecisionDecidedDetail{Undo: payload.Undo, Verify: payload.Verify, OutsidePolicy: payload.OutsidePolicy}
 		case DecisionKindOverruled:
 			// Entries are ordered, so a decided call's own entry precedes any
 			// overrule of it; an overrule on any other call is ignored.

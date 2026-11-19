@@ -87,8 +87,9 @@ type decisionOverruleAPIRequest struct {
 }
 
 type decisionDecidedAPI struct {
-	Undo   string `json:"undo"`
-	Verify string `json:"verify,omitempty"`
+	Undo          string `json:"undo"`
+	Verify        string `json:"verify,omitempty"`
+	OutsidePolicy string `json:"outsidePolicy,omitempty"`
 }
 
 type decisionCallAPI struct {
@@ -625,7 +626,12 @@ func newDecisionDecideCommand(ctx *commandContext) *cobra.Command {
 			if jsonOutput {
 				return writeJSON(cmd.OutOrStdout(), response)
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Recorded %s\n%s\n", response.ID, response.Link)
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Recorded %s\n%s\n", response.ID, response.Link); err != nil {
+				return err
+			}
+			if note := outsidePolicyNote(response.Decided); note != "" {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), note)
+			}
 			return err
 		},
 	}
@@ -639,6 +645,21 @@ func newDecisionDecideCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&request.Reference, "ref", "", "Issue or plan reference")
 	f.BoolVar(&jsonOutput, "json", false, "Print JSON")
 	return cmd
+}
+
+// outsidePolicyNote tells a session whose instructions are out of date that
+// its decision was kept but should have been a call.
+func outsidePolicyNote(decided *decisionDecidedAPI) string {
+	if decided == nil {
+		return ""
+	}
+	switch decided.OutsidePolicy {
+	case "autonomy_not_on":
+		return "Kept, but this project no longer lets sessions decide on the person's behalf. Tell the person what you did, and raise a call for every decision from now on."
+	case "kind_reserved":
+		return "Kept, but this kind of decision is now reserved for the person. Tell the person what you did, and raise a call for this kind from now on."
+	}
+	return ""
 }
 
 func newDecisionOverruleCommand(ctx *commandContext) *cobra.Command {
@@ -923,7 +944,7 @@ func writeDecisionDetail(w io.Writer, detail decisionDetailAPIResponse) error {
 		lines = append(lines, fmt.Sprintf("Would have decided: %d. %s — %s (undo: %s)", prediction.Option, prediction.Label, prediction.Why, prediction.Undo))
 	}
 	if call.Decided != nil {
-		lines = append(lines, "Undo: "+call.Decided.Undo, "Verify: "+call.Decided.Verify)
+		lines = append(lines, "Undo: "+call.Decided.Undo, "Verify: "+call.Decided.Verify, "Outside policy: "+call.Decided.OutsidePolicy)
 	}
 	if call.PredictionAgreed != nil {
 		if *call.PredictionAgreed {

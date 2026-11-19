@@ -9,6 +9,15 @@ import (
 // MaxDecisionVerify bounds the optional "how we'll know it worked" note.
 const MaxDecisionVerify = 300
 
+// DecisionOutsidePolicyNotOn and DecisionOutsidePolicyReserved say why a
+// decided entry falls outside the project's policy when it is recorded. A
+// session acts before it records, so a record is never refused for policy:
+// the action already happened and the person must be able to see it.
+const (
+	DecisionOutsidePolicyNotOn    = "autonomy_not_on"
+	DecisionOutsidePolicyReserved = "kind_reserved"
+)
+
 // DecisionDecidedPayload is a decision a session made on the person's behalf:
 // what it decided, why, how to undo it, and optionally how to tell it worked.
 // Orchestrator fills in the same origin fields as a raised call.
@@ -28,6 +37,9 @@ type DecisionDecidedPayload struct {
 	OwnerSessionID   SessionID      `json:"ownerSessionId"`
 	OwnerSessionName string         `json:"ownerSessionName"`
 	AutonomyMode     AutonomyMode   `json:"autonomyMode,omitempty"`
+	// OutsidePolicy is filled in by Orchestrator when the project's policy
+	// did not allow this decision at the time it was recorded.
+	OutsidePolicy string `json:"outsidePolicy,omitempty"`
 }
 
 // DecisionOverruledPayload records why the person overruled a decided call.
@@ -38,8 +50,9 @@ type DecisionOverruledPayload struct {
 // DecisionDecidedDetail is what a decided call carries beyond the fields it
 // shares with a raised call.
 type DecisionDecidedDetail struct {
-	Undo   string `json:"undo"`
-	Verify string `json:"verify,omitempty"`
+	Undo          string `json:"undo"`
+	Verify        string `json:"verify,omitempty"`
+	OutsidePolicy string `json:"outsidePolicy,omitempty"`
 }
 
 // raisedView presents a decided call through the raised payload, so lists,

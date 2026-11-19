@@ -375,7 +375,7 @@ func decisionCallResponse(call domain.DecisionCall) DecisionCallResponse {
 		response.PredictionAgreed = &agreed
 	}
 	if call.Decided != nil {
-		response.Decided = &DecisionDecidedResponse{Undo: call.Decided.Undo, Verify: call.Decided.Verify}
+		response.Decided = &DecisionDecidedResponse{Undo: call.Decided.Undo, Verify: call.Decided.Verify, OutsidePolicy: call.Decided.OutsidePolicy}
 	}
 	if !call.AnsweredAt.IsZero() {
 		answeredAt := call.AnsweredAt

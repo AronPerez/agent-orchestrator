@@ -681,3 +681,19 @@ func TestDecisionDecideAndOverruleUsage(t *testing.T) {
 		})
 	}
 }
+
+func TestDecisionDecideWarnsWhenOutsidePolicy(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "w-1")
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"dec_3","link":"ao://decisions/dec_3","state":"decided","decided":{"undo":"u","outsidePolicy":"kind_reserved"}}`)
+	}))
+	out, _, err := executeCLI(t, deps, "decision", "decide", "--kind", "pr_hygiene", "--what", "w", "--why", "y", "--undo", "u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Recorded dec_3") || !strings.Contains(out, "this kind of decision is now reserved for the person") {
+		t.Fatalf("out = %q", out)
+	}
+}

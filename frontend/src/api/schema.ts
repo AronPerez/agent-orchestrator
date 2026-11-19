@@ -7571,6 +7571,8 @@ export interface components {
             urgency?: "blocking" | "can_wait";
         };
         DecisionDecidedResponse: {
+            /** @enum {string} */
+            outsidePolicy?: "autonomy_not_on" | "kind_reserved";
             undo: string;
             verify?: string;
         };

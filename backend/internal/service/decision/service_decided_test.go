@@ -49,30 +49,54 @@ func TestDecideRecordsADecisionMadeForThePerson(t *testing.T) {
 	}
 }
 
-func TestDecideIsRefusedOutsideModeOn(t *testing.T) {
-	for _, mode := range []domain.AutonomyMode{"", domain.AutonomyObserve} {
-		t.Run(string(mode), func(t *testing.T) {
+// A session in mode on acts first and records afterwards. If the project's
+// policy changed while it was running, the record must still be kept, so the
+// person can see and overrule an action that already happened. It is flagged
+// with the reason instead of refused.
+func TestDecideKeepsTheRecordWhenThePolicyChangedUnderTheSession(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config domain.AutonomyConfig
+		kind   string
+		want   string
+	}{
+		{"mode switched off", domain.AutonomyConfig{}, "pr_hygiene", domain.DecisionOutsidePolicyNotOn},
+		{"mode switched to observe", domain.AutonomyConfig{Mode: domain.AutonomyObserve}, "pr_hygiene", domain.DecisionOutsidePolicyNotOn},
+		{"kind reserved since", domain.AutonomyConfig{Mode: domain.AutonomyOn, Reserved: []domain.DecisionKindID{"pr_hygiene"}}, "pr_hygiene", domain.DecisionOutsidePolicyReserved},
+		{"catch-all kind", domain.AutonomyConfig{Mode: domain.AutonomyOn}, "other", domain.DecisionOutsidePolicyReserved},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			fixture := newDecisionService(t)
-			setShopAutonomy(t, fixture, domain.AutonomyConfig{Mode: mode})
-			_, err := fixture.service.Decide(context.Background(), Actor{Session: fixture.w1}, validDecideInput())
-			assertRaiseRule(t, err, "autonomy_not_on")
+			setShopAutonomy(t, fixture, tc.config)
+			input := validDecideInput()
+			input.Kind = tc.kind
+			call, err := fixture.service.Decide(context.Background(), Actor{Session: fixture.w1}, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if call.State != domain.DecisionStateDecided || call.Decided == nil || call.Decided.OutsidePolicy != tc.want {
+				t.Fatalf("call = %+v decided = %+v", call, call.Decided)
+			}
 		})
 	}
-	fixture := newDecisionService(t)
-	_, err := fixture.service.Decide(context.Background(), Actor{Session: fixture.loose}, validDecideInput())
-	assertRaiseRule(t, err, "autonomy_not_on")
 }
 
-func TestDecideRefusesReservedKindsAndBadInput(t *testing.T) {
+func TestDecideWithinPolicyIsNotFlagged(t *testing.T) {
+	fixture := newDecisionService(t)
+	setShopAutonomy(t, fixture, domain.AutonomyConfig{Mode: domain.AutonomyOn})
+	call, err := fixture.service.Decide(context.Background(), Actor{Session: fixture.w1}, validDecideInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Decided.OutsidePolicy != "" {
+		t.Fatalf("outsidePolicy = %q", call.Decided.OutsidePolicy)
+	}
+}
+
+func TestDecideStillRefusesAMalformedRecord(t *testing.T) {
 	fixture := newDecisionService(t)
 	setShopAutonomy(t, fixture, domain.AutonomyConfig{Mode: domain.AutonomyOn})
 	ctx := context.Background()
-	for _, kind := range []string{"production", "other"} {
-		input := validDecideInput()
-		input.Kind = kind
-		_, err := fixture.service.Decide(ctx, Actor{Session: fixture.w1}, input)
-		assertRaiseRule(t, err, "kind_reserved")
-	}
 	input := validDecideInput()
 	input.Undo = " "
 	_, err := fixture.service.Decide(ctx, Actor{Session: fixture.w1}, input)

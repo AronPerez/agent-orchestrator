@@ -21972,6 +21972,11 @@ components:
       type: object
     DecisionDecidedResponse:
       properties:
+        outsidePolicy:
+          enum:
+          - autonomy_not_on
+          - kind_reserved
+          type: string
         undo:
           type: string
         verify:

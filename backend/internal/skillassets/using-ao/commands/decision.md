@@ -103,9 +103,11 @@ ao decision decide \
 ```
 
 `--undo` is required: write it so the human could follow it without you.
-`--verify` is optional. Recording is refused outside mode `on`, and for a
-reserved kind; `other` is always reserved. When you are unsure which kind
-applies, or whether it can be undone, raise a call instead.
+`--verify` is optional. `other` is always reserved. If the project left
+mode `on`, or reserved the kind, after you started, the record is still kept
+so the human can see and overrule what you did, and the command says so: tell
+the human, and raise calls for that kind from then on. When you are unsure
+which kind applies, or whether it can be undone, raise a call instead.
 
 The human sees the decision on the Decisions page under Decided for you, or
 with `ao decision ls --decided`, and may overrule it. An overrule arrives as a

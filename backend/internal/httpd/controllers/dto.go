@@ -165,6 +165,9 @@ type DecisionCallResponse struct {
 type DecisionDecidedResponse struct {
 	Undo   string `json:"undo"`
 	Verify string `json:"verify,omitempty"`
+	// OutsidePolicy is set when the project's policy did not allow this
+	// decision when it was recorded. The record is kept so it can be overruled.
+	OutsidePolicy string `json:"outsidePolicy,omitempty" enum:"autonomy_not_on,kind_reserved"`
 }
 
 // DecideRequest records a decision the calling session made on the person's

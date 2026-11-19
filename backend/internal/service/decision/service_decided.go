@@ -3,7 +3,6 @@ package decision
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -23,8 +22,10 @@ type DecideInput struct {
 }
 
 // Decide records a decision the calling session made on the person's
-// behalf. It is accepted only in a project whose autonomy mode is on, and
-// only for a kind the project has not reserved.
+// behalf. The project must be in mode on and the kind unreserved for the
+// decision to be within policy. A record outside policy is still kept, with
+// the reason, because a session started under an older policy may already
+// have acted on it and the person must be able to see and overrule it.
 func (s *Service) Decide(ctx context.Context, actor Actor, input DecideInput) (domain.DecisionCall, error) {
 	session, err := s.actingSession(ctx, actor)
 	if err != nil {
@@ -47,15 +48,16 @@ func (s *Service) Decide(ctx context.Context, actor Actor, input DecideInput) (d
 		MachineLabel: origin.machineLabel, OwnerSessionID: session.ID, OwnerSessionName: sessionName(session),
 		AutonomyMode: origin.autonomy.EffectiveMode(),
 	}
-	if payload.AutonomyMode != domain.AutonomyOn {
-		return domain.DecisionCall{}, policyRule("autonomy_not_on", "This project does not let sessions decide on the person's behalf. Raise a call instead.")
-	}
 	if err := domain.ValidateDecisionDecided(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
-	if origin.autonomy.IsReserved(payload.Kind) {
-		kind, _ := domain.LookupDecisionKind(string(payload.Kind))
-		return domain.DecisionCall{}, policyRule("kind_reserved", fmt.Sprintf("%q is reserved for the person in this project. Raise a call instead.", kind.Label))
+	// The session has usually acted already, so a policy mismatch never
+	// loses the record: it is kept, flagged, and shown to the person.
+	switch {
+	case payload.AutonomyMode != domain.AutonomyOn:
+		payload.OutsidePolicy = domain.DecisionOutsidePolicyNotOn
+	case origin.autonomy.IsReserved(payload.Kind):
+		payload.OutsidePolicy = domain.DecisionOutsidePolicyReserved
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
