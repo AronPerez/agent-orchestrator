@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -74,6 +75,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/computeruse"
 	cuesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/cue"
 	decisionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/decision"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
 	fsbrowsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/fsbrowser"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubpat"
@@ -1223,14 +1225,20 @@ func Run(buildVersion string) (retErr error) {
 		}
 	}
 	// Linked machines exchange ledger entries through this server on the
-	// remote listener. A pushed answer for a call this machine owns wakes the
-	// deliverer exactly as a local answer does.
-	decisionSync := newDecisionSyncServer(ctx, store, hostIdentity.HostID, log, wakeDecisionDeliverer, decisionNotifications.Wake)
+	// remote listener. Received pages go through the decision service, so a
+	// synced answer passes the same plan-first gate as a local one and wakes
+	// the deliverer exactly as a local answer does.
+	var decisionSync atomic.Pointer[decisionsync.Server]
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
 		MutationGate: decisionMutationGate,
-		OnAppended:   decisionAppendHook(wakeDecisionDeliverer, decisionNotifications.Wake, decisionSync.Changed),
+		OnAppended: decisionAppendHook(wakeDecisionDeliverer, decisionNotifications.Wake, func() {
+			if server := decisionSync.Load(); server != nil {
+				server.Changed()
+			}
+		}),
 	})
+	decisionSync.Store(newDecisionSyncServer(ctx, store, decisionSvc, hostIdentity.HostID, log, wakeDecisionDeliverer, decisionNotifications.Wake))
 	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
 		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
 		MutationGate:       decisionMutationGate,
@@ -1350,7 +1358,7 @@ func Run(buildVersion string) (retErr error) {
 		Notifications:               notifier,
 		Reports:                     reportSvc,
 		Decisions:                   decisionSvc,
-		DecisionSync:                decisionSync,
+		DecisionSync:                decisionSync.Load(),
 		NotificationStream:          notificationHub,
 		Push:                        pushRegistry,
 		Presence:                    presenceTracker,
