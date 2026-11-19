@@ -1445,6 +1445,7 @@
 	"decisions.clearSearch": "検索をクリア",
 	"decisions.retiredMarker": "該当しなくなった",
 	"decisions.finishedAt": "{{time}}に完了",
+	"decisions.keyboardHint": "矢印キーで意思決定間を移動し、Enter で開きます。",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "変更がリクエストされました",
 	"pr.card.checksFailing": "チェックに失敗",

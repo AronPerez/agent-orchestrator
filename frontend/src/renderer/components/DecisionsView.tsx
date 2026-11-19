@@ -104,6 +104,10 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 	} else if (board.data && board.data.calls.length > 0) {
 		body = (
 			<>
+				{board.isError ? (
+					// The last board stays; say that it could not be refreshed.
+					<LoadError error={board.error} fallback={t("decisionInbox.loadFailed")} onRetry={() => void board.refetch()} className="mx-(--space-4_5) my-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm" />
+				) : null}
 				{board.data.needsYouCount === 0 ? (
 					<p role="status" aria-label={t("decisions.nothingNeedsYou")} className="px-(--space-4_5) pt-3 pb-2 text-caption text-muted-foreground">
 						{t("decisions.nothingNeedsYou")}
@@ -126,7 +130,18 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 	}
 
 	return (
-		<div className="flex min-h-0 flex-1 flex-col bg-background">
+		<div
+			className="flex min-h-0 flex-1 flex-col bg-background"
+			onKeyDown={(event) => {
+				// Escape closes the open call from anywhere on the page, a focused card included.
+				if (event.key !== "Escape" || event.defaultPrevented || !callId) return;
+				event.preventDefault();
+				closeCall();
+			}}
+		>
+			<p aria-live="polite" className="sr-only">
+				{board.data ? t("decisions.navNeedsYou", { count: board.data.needsYouCount }) : ""}
+			</p>
 			<PageTopbar
 				lead={<PageTopbarTitle as="h1" icon={<ListChecks className="size-icon-md" aria-hidden="true" />}>{t("decisions.title")}</PageTopbarTitle>}
 				actions={<ToolbarSearch label={t("decisions.search")} query={draft} onQueryChange={setDraft} />}

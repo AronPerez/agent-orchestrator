@@ -131,4 +131,55 @@ describe("DecisionsBoard", () => {
 			"Checkout · laptop",
 		]);
 	});
+
+	describe("keyboard", () => {
+		const card = (id: string) => screen.getByRole("button", { name: new RegExp(`^Question ${id}`) });
+		const tabStops = () => screen.getAllByRole("button").filter((button) => button.hasAttribute("data-decision-card") && button.tabIndex === 0);
+
+		it("has one tab stop: the selected card, else the first Needs you card", () => {
+			const { rerender, onSelect } = renderBoard();
+			expect(tabStops()).toEqual([card("wide")]);
+			rerender(<DecisionsBoard model={buildDecisionBoard(calls)} now={NOW} onSelect={onSelect} selectedId="sent" />);
+			expect(tabStops()).toEqual([card("sent")]);
+		});
+
+		it("moves with the arrow keys down a lane and across to the next lane in the row", async () => {
+			renderBoard();
+			card("wide").focus();
+			await userEvent.keyboard("{ArrowDown}");
+			expect(card("need")).toHaveFocus();
+			await userEvent.keyboard("{ArrowUp}{ArrowRight}");
+			expect(card("sent")).toHaveFocus();
+			await userEvent.keyboard("{ArrowDown}");
+			expect(card("pending")).toHaveFocus();
+			await userEvent.keyboard("{ArrowRight}");
+			expect(card("done")).toHaveFocus();
+			await userEvent.keyboard("{ArrowRight}");
+			expect(card("done")).toHaveFocus();
+			expect(tabStops()).toEqual([card("done")]);
+		});
+
+		it("skips folded bands", async () => {
+			renderBoard();
+			await userEvent.click(screen.getByRole("button", { name: /agent-orchestrator/ }));
+			card("sent").focus();
+			await userEvent.keyboard("{ArrowDown}");
+			expect(card("sent")).toHaveFocus();
+		});
+
+		it("keeps focus on the board when the focused card leaves", async () => {
+			const { rerender, onSelect } = renderBoard();
+			card("pending").focus();
+			rerender(<DecisionsBoard model={buildDecisionBoard(calls.filter((item) => item.id !== "pending"))} now={NOW} onSelect={onSelect} />);
+			expect(card("orphan")).toHaveFocus();
+			expect(tabStops()).toEqual([card("orphan")]);
+		});
+
+		it("opens a card with Enter", async () => {
+			const { onSelect } = renderBoard();
+			card("need").focus();
+			await userEvent.keyboard("{Enter}");
+			expect(onSelect).toHaveBeenCalledWith("need");
+		});
+	});
 });

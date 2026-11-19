@@ -1461,6 +1461,7 @@
 	"decisions.clearSearch": "Limpar pesquisa",
 	"decisions.retiredMarker": "Não se aplica mais",
 	"decisions.finishedAt": "Concluída {{time}}",
+	"decisions.keyboardHint": "Use as setas para navegar entre decisões e Enter para abrir uma.",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Alterações solicitadas",
 	"pr.card.checksFailing": "Verificações falhando",

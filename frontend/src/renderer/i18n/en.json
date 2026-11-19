@@ -1411,6 +1411,7 @@
 	"decisions.clearSearch": "Clear search",
 	"decisions.retiredMarker": "No longer applies",
 	"decisions.finishedAt": "Finished {{time}}",
+	"decisions.keyboardHint": "Use the arrow keys to move between decisions and Enter to open one.",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "Changes requested",
 	"pr.card.checksFailing": "Checks failing",

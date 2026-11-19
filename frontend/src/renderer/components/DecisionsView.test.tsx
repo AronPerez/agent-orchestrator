@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -263,5 +263,39 @@ describe("DecisionsView", () => {
 			expect(alert).toHaveTextContent("Unable to list decisions");
 			expect(within(alert).getByRole("button", { name: "Retry" })).toBeInTheDocument();
 		});
+	});
+
+	describe("keyboard and live updates", () => {
+		it("closes the open call with Escape from a focused card", async () => {
+			const selected = call({ id: "dec_1" });
+			answer(board([selected]), { dec_1: selected });
+			renderView(<DecisionsView callId="dec_1" />);
+			const card = await screen.findByRole("button", { name: /^Question dec_1/ });
+			card.focus();
+			await userEvent.keyboard("{Escape}");
+			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: {} });
+		});
+
+		it("announces the Needs-you count in one polite live region", async () => {
+			answer(board([call({ id: "dec_1" }), call({ id: "dec_2" })]));
+			const { container } = renderView(<DecisionsView />);
+			await screen.findByRole("button", { name: /^Question dec_1/ });
+			const regions = container.querySelectorAll("[aria-live]");
+			expect(regions).toHaveLength(1);
+			expect(regions[0]).toHaveAttribute("aria-live", "polite");
+			expect(regions[0]).toHaveTextContent("Decisions, needs you: 2");
+		});
+
+		it("keeps the last board and reports a failed refresh with a retry", async () => {
+			answer(board([call({ id: "dec_1" })]));
+			const view = renderView(<DecisionsView />);
+			await screen.findByRole("button", { name: /^Question dec_1/ });
+			answer({ error: { code: "DECISION_BOARD_FAILED", message: "Unable to load decisions" } });
+			await act(() => clientOf(view).invalidateQueries());
+			const alert = await screen.findByRole("alert", undefined, { timeout: 4_000 });
+			expect(alert).toHaveTextContent("Unable to load decisions");
+			expect(within(alert).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: /^Question dec_1/ })).toBeInTheDocument();
+		}, 10_000);
 	});
 });

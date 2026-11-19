@@ -1445,6 +1445,7 @@
 	"decisions.clearSearch": "검색 지우기",
 	"decisions.retiredMarker": "더 이상 해당 없음",
 	"decisions.finishedAt": "{{time}} 완료",
+	"decisions.keyboardHint": "화살표 키로 결정 사이를 이동하고 Enter로 엽니다.",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "변경 요청됨",
 	"pr.card.checksFailing": "검사 실패",

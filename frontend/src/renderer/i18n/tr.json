@@ -1411,6 +1411,7 @@
 	"decisions.clearSearch": "Aramayı temizle",
 	"decisions.retiredMarker": "Artık geçerli değil",
 	"decisions.finishedAt": "{{time}} tamamlandı",
+	"decisions.keyboardHint": "Kararlar arasında ok tuşlarıyla gezinin, açmak için Enter'a basın.",
 	"pr.botSuffix": "{{name}} botu",
 	"pr.card.changesRequested": "Değişiklik istendi",
 	"pr.card.checksFailing": "Denetimler başarısız",

@@ -1445,6 +1445,7 @@
 	"decisions.clearSearch": "Suche löschen",
 	"decisions.retiredMarker": "Trifft nicht mehr zu",
 	"decisions.finishedAt": "Abgeschlossen {{time}}",
+	"decisions.keyboardHint": "Mit den Pfeiltasten zwischen Entscheidungen wechseln, mit Eingabe eine öffnen.",
 	"pr.botSuffix": "{{name}}-Bot",
 	"pr.card.changesRequested": "Änderungen angefordert",
 	"pr.card.checksFailing": "Checks fehlgeschlagen",

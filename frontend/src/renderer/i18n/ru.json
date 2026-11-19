@@ -1439,6 +1439,7 @@
 	"decisions.clearSearch": "Очистить поиск",
 	"decisions.retiredMarker": "Неактуально",
 	"decisions.finishedAt": "Завершено {{time}}",
+	"decisions.keyboardHint": "Стрелками переходите между решениями, Enter открывает решение.",
 	"pr.botSuffix": "{{name}} бот",
 	"pr.card.changesRequested": "Запрошены изменения",
 	"pr.card.checksFailing": "Есть ошибки проверок",

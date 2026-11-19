@@ -11,6 +11,7 @@ import {
 	mergeDecisionInboxSources,
 	runDecisionAction,
 	type DecisionAction,
+	type DecisionBoard,
 	type DecisionCall,
 	type DecisionInboxEntry,
 } from "../lib/decision-inbox";
@@ -121,7 +122,28 @@ export function useDecisionBoard() {
 		queryKey: decisionKeys.board(),
 		queryFn: ({ signal }) => fetchDecisionBoard(signal),
 		retry: 1,
+		// No event fires when a Done card ages out of the seven-day window, so
+		// refetch at the next such moment.
+		refetchInterval: (query) => nextDoneExpiryDelay(query.state.data),
 	});
+}
+
+const DONE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_TIMER_MS = 24 * 60 * 60 * 1000;
+
+/** Milliseconds until the oldest board Done card passes the window, or false. */
+export function nextDoneExpiryDelay(board: DecisionBoard | undefined, now = Date.now()): number | false {
+	let soonest = Number.POSITIVE_INFINITY;
+	for (const call of board?.calls ?? []) {
+		if (call.state !== "done" || call.retired || !call.outcomeAt) continue;
+		const expires = Date.parse(call.outcomeAt) + DONE_WINDOW_MS;
+		if (Number.isFinite(expires)) soonest = Math.min(soonest, expires);
+	}
+	if (!Number.isFinite(soonest)) return false;
+	const delay = soonest - now;
+	// Past due means the daemon's clock has not dropped it yet; look again in a minute.
+	if (delay <= 0) return 60_000;
+	return Math.min(MAX_TIMER_MS, Math.max(1_000, delay + 250));
 }
 
 /** One call and its full history; `null` data means it no longer exists. */

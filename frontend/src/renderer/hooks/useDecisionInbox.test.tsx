@@ -16,7 +16,7 @@ vi.mock("../lib/host-clients", () => ({
 vi.mock("./useHostConnection", () => ({ useConnectedHosts: () => connectedHostsMock() }));
 
 import { decisionKeys } from "../lib/decision-inbox";
-import { decisionInboxQueryKey, useDecisionAction, useDecisionAnswer, useDecisionBoard, useDecisionDetail, useDecisionInbox, useDecisionSearch } from "./useDecisionInbox";
+import { decisionInboxQueryKey, nextDoneExpiryDelay, useDecisionAction, useDecisionAnswer, useDecisionBoard, useDecisionDetail, useDecisionInbox, useDecisionSearch } from "./useDecisionInbox";
 
 const decisionCall = (id: string, raisedAt: string) => ({
 	id,
@@ -226,5 +226,29 @@ describe("decision page mutations", () => {
 			await expect(result.current.action.mutateAsync({ kind: "retire", callId: "dec_1", retired: true })).rejects.toThrow("Closed.");
 		});
 		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBeGreaterThan(before));
+	});
+
+describe("board freshness", () => {
+	it("refetches the board when its oldest Done card leaves the seven-day window, with no event", async () => {
+		const outcomeAt = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000 + 1_200).toISOString();
+		const local = setupLedger("local", [{ ...decisionCall("dec_done", "2026-11-01T09:00:00Z"), state: "done", stateLabel: "Done", outcomeAt } as unknown as ReturnType<typeof decisionCall>]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		renderHook(() => useDecisionBoard(), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(1));
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(2), { timeout: 4_000 });
+	});
+});
+
+	it("times the refresh from the oldest non-retired Done card only", () => {
+		const now = Date.parse("2026-11-18T12:00:00Z");
+		const week = 7 * 24 * 60 * 60 * 1000;
+		const done = (outcomeAt: string, retired = false) => ({ ...decisionCall("d", "2026-11-01T00:00:00Z"), state: "done" as const, outcomeAt, retired });
+		const boardOf = (calls: unknown[]) => ({ calls, needsYouCount: 0, servingHostId: "h", doneSince: "" }) as never;
+		expect(nextDoneExpiryDelay(undefined, now)).toBe(false);
+		expect(nextDoneExpiryDelay(boardOf([decisionCall("n", "2026-11-18T00:00:00Z")]), now)).toBe(false);
+		expect(nextDoneExpiryDelay(boardOf([done(new Date(now - week + 60_000).toISOString(), true)]), now)).toBe(false);
+		expect(nextDoneExpiryDelay(boardOf([done(new Date(now - week + 60_000).toISOString()), done(new Date(now - week + 120_000).toISOString())]), now)).toBe(60_250);
+		expect(nextDoneExpiryDelay(boardOf([done(new Date(now - week - 1).toISOString())]), now)).toBe(60_000);
+		expect(nextDoneExpiryDelay(boardOf([done(new Date(now).toISOString())]), now)).toBe(24 * 60 * 60 * 1000);
 	});
 });

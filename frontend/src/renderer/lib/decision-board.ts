@@ -262,3 +262,68 @@ export function buildDecisionBoard(calls: readonly DecisionCall[]): DecisionBoar
 	}
 	return { bands: ordered, totals, cardById, topology };
 }
+
+export type DecisionFocusDirection = "up" | "down" | "left" | "right";
+
+function locate(topology: readonly DecisionTopologyRow[], id: string) {
+	for (let row = 0; row < topology.length; row += 1) {
+		for (const lane of DECISION_LANES) {
+			const index = topology[row]!.lanes[lane].indexOf(id);
+			if (index >= 0) return { row, lane, index };
+		}
+	}
+	return undefined;
+}
+
+const column = (topology: readonly DecisionTopologyRow[], lane: DecisionLane) => topology.flatMap((row) => row.lanes[lane]);
+
+/**
+ * Arrow-key movement over the visible cards. Up/Down walk one lane down the
+ * whole board; Left/Right go to the nearest card of the next lane in the same
+ * row, passing empty lanes. At an edge focus stays where it is.
+ */
+export function moveDecisionFocus(topology: readonly DecisionTopologyRow[], currentId: string, direction: DecisionFocusDirection): string {
+	const at = locate(topology, currentId);
+	if (!at) return currentId;
+	if (direction === "up" || direction === "down") {
+		const ids = column(topology, at.lane);
+		const index = ids.indexOf(currentId) + (direction === "down" ? 1 : -1);
+		return ids[index] ?? currentId;
+	}
+	const step = direction === "right" ? 1 : -1;
+	const row = topology[at.row]!;
+	for (let lane = DECISION_LANES.indexOf(at.lane) + step; lane >= 0 && lane < DECISION_LANES.length; lane += step) {
+		const ids = row.lanes[DECISION_LANES[lane]!];
+		if (ids.length > 0) return ids[Math.min(at.index, ids.length - 1)]!;
+	}
+	return currentId;
+}
+
+/** The board's single tab stop: the selected card, else the first Needs you card, else the first card. */
+export function initialDecisionFocusId(topology: readonly DecisionTopologyRow[], selectedId: string | undefined): string | undefined {
+	if (selectedId && locate(topology, selectedId)) return selectedId;
+	return column(topology, "needs_you")[0] ?? topology.flatMap((row) => DECISION_LANES.flatMap((lane) => row.lanes[lane]))[0];
+}
+
+/**
+ * Where focus goes when its card leaves the visible board (it changed state,
+ * was removed, or its band folded): the next card that was below it in its
+ * lane, else the one above, else the first visible card.
+ */
+export function replacementDecisionFocusId(
+	before: readonly DecisionTopologyRow[],
+	removedId: string,
+	after: readonly DecisionTopologyRow[],
+): string | undefined {
+	const visible = new Set(after.flatMap((row) => DECISION_LANES.flatMap((lane) => row.lanes[lane])));
+	const at = locate(before, removedId);
+	if (at) {
+		const ids = column(before, at.lane);
+		const index = ids.indexOf(removedId);
+		const next = ids.slice(index + 1).find((id) => visible.has(id));
+		if (next) return next;
+		const previous = ids.slice(0, index).reverse().find((id) => visible.has(id));
+		if (previous) return previous;
+	}
+	return initialDecisionFocusId(after, undefined);
+}
