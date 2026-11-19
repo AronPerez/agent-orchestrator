@@ -17,8 +17,6 @@ type DecisionInboxProps = {
 	onRetry: () => void;
 	/** Calls whose durable announcement is unread (or was when the panel opened). */
 	unreadCallIds?: ReadonlySet<string>;
-	/** `${sourceHostId}:${callId}` keys whose last answer may already be recorded. */
-	unconfirmed?: ReadonlySet<string>;
 };
 
 function sameCall(entry: DecisionInboxEntry, target?: { sourceHostId: string; callId: string }): boolean {
@@ -34,7 +32,6 @@ export function DecisionInbox({
 	onAnswer,
 	onRetry,
 	unreadCallIds,
-	unconfirmed,
 }: DecisionInboxProps) {
 	const { t } = useTranslation();
 	const [notes, setNotes] = useState<Record<string, string>>({});
@@ -61,9 +58,6 @@ export function DecisionInbox({
 				const callPending = sameCall(entry, pending);
 				const error = sameCall(entry, answerError) ? answerError?.message : undefined;
 				const unread = unreadCallIds?.has(call.id) ?? false;
-				// A lost response may hide a recorded answer: nothing is sent until it is checked.
-				const held = unconfirmed?.has(callKey) ?? false;
-				const disabled = Boolean(pending) || held;
 				return (
 					<article
 						className={cn("border-t border-border px-3 py-3 first:border-t-0", unread && "bg-interactive-hover")}
@@ -100,7 +94,7 @@ export function DecisionInbox({
 												<Label className="mb-1.5 text-caption text-muted-foreground" htmlFor={noteId}>{t("workbench.changes")}</Label>
 												<Input
 													autoComplete="off"
-													disabled={disabled}
+													disabled={Boolean(pending)}
 													id={noteId}
 													onChange={(event) => setNotes((current) => ({ ...current, [callKey]: event.target.value }))}
 													value={note}
@@ -108,7 +102,7 @@ export function DecisionInbox({
 												<Button
 													aria-describedby={descriptionId}
 													className="mt-2 w-full min-w-0 justify-start"
-													disabled={disabled || !note.trim()}
+													disabled={Boolean(pending) || !note.trim()}
 													size="sm"
 													type="submit"
 													variant={option.recommended ? "accent" : "secondary"}
@@ -121,7 +115,7 @@ export function DecisionInbox({
 											<Button
 												aria-describedby={descriptionId}
 												className="w-full min-w-0 justify-start"
-												disabled={disabled}
+												disabled={Boolean(pending)}
 												onClick={() => onAnswer(entry, optionNumber)}
 												size="sm"
 												type="button"
@@ -138,12 +132,6 @@ export function DecisionInbox({
 							})}
 						</div>
 						{error ? <p className="mt-2 text-caption text-error" role="alert">{error}</p> : null}
-						{held ? (
-							<p className="mt-2 flex flex-wrap items-center gap-x-2 text-caption text-status-in-review" role="status">
-								<span>{t("decisionInbox.answerUnconfirmed")}</span>
-								<Button onClick={onRetry} size="xs" type="button" variant="link">{t("decisionInbox.checkAgain")}</Button>
-							</p>
-						) : null}
 					</article>
 				);
 			})}

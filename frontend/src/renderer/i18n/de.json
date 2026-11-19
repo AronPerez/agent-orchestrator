@@ -1448,8 +1448,6 @@
 	"decisions.finishedAt": "Abgeschlossen {{time}}",
 	"decisions.keyboardHint": "Mit den Pfeiltasten zwischen Entscheidungen wechseln, mit Eingabe eine öffnen.",
 	"decisionInbox.unread": "Ungelesen",
-	"decisionInbox.answerUnconfirmed": "Diese Antwort wurde möglicherweise bereits gespeichert. Prüfe es erneut, bevor du sendest.",
-	"decisionInbox.checkAgain": "Erneut prüfen",
 	"pr.botSuffix": "{{name}}-Bot",
 	"pr.card.changesRequested": "Änderungen angefordert",
 	"pr.card.checksFailing": "Checks fehlgeschlagen",

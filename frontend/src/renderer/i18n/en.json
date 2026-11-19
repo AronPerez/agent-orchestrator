@@ -1414,8 +1414,6 @@
 	"decisions.finishedAt": "Finished {{time}}",
 	"decisions.keyboardHint": "Use the arrow keys to move between decisions and Enter to open one.",
 	"decisionInbox.unread": "Unread",
-	"decisionInbox.answerUnconfirmed": "This answer may already be recorded. Check again before sending.",
-	"decisionInbox.checkAgain": "Check again",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "Changes requested",
 	"pr.card.checksFailing": "Checks failing",

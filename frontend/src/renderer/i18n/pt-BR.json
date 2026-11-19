@@ -1464,8 +1464,6 @@
 	"decisions.finishedAt": "Concluída {{time}}",
 	"decisions.keyboardHint": "Use as setas para navegar entre decisões e Enter para abrir uma.",
 	"decisionInbox.unread": "Não lido",
-	"decisionInbox.answerUnconfirmed": "Esta resposta pode já ter sido registrada. Verifique novamente antes de enviar.",
-	"decisionInbox.checkAgain": "Verificar novamente",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Alterações solicitadas",
 	"pr.card.checksFailing": "Verificações falhando",

@@ -1464,8 +1464,6 @@
 	"decisions.finishedAt": "Terminada {{time}}",
 	"decisions.keyboardHint": "Usa las flechas para moverte entre decisiones y Intro para abrir una.",
 	"decisionInbox.unread": "No leído",
-	"decisionInbox.answerUnconfirmed": "Es posible que esta respuesta ya se haya registrado. Vuelve a comprobarlo antes de enviarla.",
-	"decisionInbox.checkAgain": "Volver a comprobar",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Cambios solicitados",
 	"pr.card.checksFailing": "Comprobaciones fallidas",

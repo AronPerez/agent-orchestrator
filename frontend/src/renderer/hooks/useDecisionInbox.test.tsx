@@ -137,68 +137,6 @@ function setupLedger(hostId: string, calls: ReturnType<typeof decisionCall>[]) {
 const pathCalls = (client: { GET: ReturnType<typeof vi.fn> }, path: string) =>
 	client.GET.mock.calls.filter(([called]) => called === path).length;
 
-describe("useDecisionInbox lost answers", () => {
-	// The daemon may record an answer whose response never arrives. If the
-	// re-read then fails too, the bell still shows the call as waiting.
-	function lossyClient(commits: boolean) {
-		let current = [decisionCall("dec_1", "2026-11-18T10:00:00Z")];
-		let getFails = false;
-		const client = {
-			GET: vi.fn().mockImplementation(() => getFails
-				? Promise.reject(new TypeError("network down"))
-				: Promise.resolve({ data: { calls: current } })),
-			POST: vi.fn().mockImplementation(() => {
-				if (commits) current = [];
-				getFails = true;
-				return Promise.reject(new TypeError("response lost"));
-			}),
-			recover: () => { getFails = false; },
-		};
-		clients.set("local", client);
-		return client;
-	}
-
-	it("sends nothing again until a read made after the lost answer succeeds", async () => {
-		connectedHostsMock.mockReturnValue([]);
-		const client = lossyClient(true);
-		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		const { result } = renderHook(() => useDecisionInbox(true), { wrapper: wrapper(queryClient) });
-		await waitFor(() => expect(result.current.entries).toHaveLength(1));
-
-		act(() => result.current.answer(result.current.entries[0], 1));
-		await waitFor(() => expect(result.current.unconfirmed.has("local:dec_1")).toBe(true));
-		await waitFor(() => expect(result.current.pending).toBeUndefined());
-		// The failed re-read leaves the stale call on screen; tapping again sends nothing.
-		expect(result.current.entries).toHaveLength(1);
-		act(() => result.current.answer(result.current.entries[0], 1));
-		expect(client.POST).toHaveBeenCalledTimes(1);
-
-		client.recover();
-		act(() => result.current.retry());
-		await waitFor(() => expect(result.current.entries).toHaveLength(0));
-		expect(result.current.unconfirmed.size).toBe(0);
-		expect(client.POST).toHaveBeenCalledTimes(1);
-	});
-
-	it("allows sending again once a fresh read shows the call still waiting", async () => {
-		connectedHostsMock.mockReturnValue([]);
-		const client = lossyClient(false);
-		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		const { result } = renderHook(() => useDecisionInbox(true), { wrapper: wrapper(queryClient) });
-		await waitFor(() => expect(result.current.entries).toHaveLength(1));
-
-		act(() => result.current.answer(result.current.entries[0], 1));
-		await waitFor(() => expect(result.current.unconfirmed.has("local:dec_1")).toBe(true));
-		client.recover();
-		act(() => result.current.retry());
-		await waitFor(() => expect(result.current.unconfirmed.size).toBe(0));
-		expect(result.current.entries).toHaveLength(1);
-
-		act(() => result.current.answer(result.current.entries[0], 1));
-		await waitFor(() => expect(client.POST).toHaveBeenCalledTimes(2));
-	});
-});
-
 describe("decision page hooks", () => {
 	it("keeps the bell's needs-you key on the shared host branch", () => {
 		expect(decisionInboxQueryKey("remote-a")).toEqual(decisionKeys.needsYou("remote-a"));

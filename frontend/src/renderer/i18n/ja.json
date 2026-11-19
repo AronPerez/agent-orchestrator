@@ -1448,8 +1448,6 @@
 	"decisions.finishedAt": "{{time}}に完了",
 	"decisions.keyboardHint": "矢印キーで意思決定間を移動し、Enter で開きます。",
 	"decisionInbox.unread": "未読",
-	"decisionInbox.answerUnconfirmed": "この回答はすでに記録されている可能性があります。送信する前にもう一度確認してください。",
-	"decisionInbox.checkAgain": "再確認",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "変更がリクエストされました",
 	"pr.card.checksFailing": "チェックに失敗",

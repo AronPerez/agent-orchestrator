@@ -1414,8 +1414,6 @@
 	"decisions.finishedAt": "{{time}} tamamlandı",
 	"decisions.keyboardHint": "Kararlar arasında ok tuşlarıyla gezinin, açmak için Enter'a basın.",
 	"decisionInbox.unread": "Okunmadı",
-	"decisionInbox.answerUnconfirmed": "Bu yanıt zaten kaydedilmiş olabilir. Göndermeden önce yeniden kontrol edin.",
-	"decisionInbox.checkAgain": "Yeniden kontrol et",
 	"pr.botSuffix": "{{name}} botu",
 	"pr.card.changesRequested": "Değişiklik istendi",
 	"pr.card.checksFailing": "Denetimler başarısız",
