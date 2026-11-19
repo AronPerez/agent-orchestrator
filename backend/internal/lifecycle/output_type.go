@@ -7,6 +7,14 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 )
 
+type sessionArtifactRowReader interface {
+	ListSessionArtifacts(context.Context, domain.SessionID) ([]domain.SessionArtifactRecord, error)
+}
+
+type sessionDoneReportReader interface {
+	ListLatestDoneReportsForSessions(context.Context, []domain.SessionID) (map[domain.SessionID]domain.SessionDoneReport, error)
+}
+
 // ReconcileSessionOutputType recomputes a session's durable OutputType from
 // its live PR list and artifact directory contents, and persists it when it
 // has changed. This is the sole writer of the session_output_type column;
@@ -56,11 +64,36 @@ func (m *Manager) ReconcileSessionOutputType(ctx context.Context, id domain.Sess
 	if err != nil {
 		return err
 	}
-	artifacts, err := sessionartifacts.List(ctx, artifactDir)
-	if err != nil {
-		return err
+	var artifacts []domain.SessionArtifactFile
+	if rows, ok := m.store.(sessionArtifactRowReader); ok {
+		stored, err := rows.ListSessionArtifacts(ctx, id)
+		if err != nil {
+			return err
+		}
+		observation, err := sessionartifacts.Observe(ctx, artifactDir, sessionartifacts.RegisteredPaths(stored))
+		if err != nil {
+			return err
+		}
+		artifacts = observation.Apply(stored)
+	} else {
+		artifacts, err = sessionartifacts.List(ctx, artifactDir)
+		if err != nil {
+			return err
+		}
 	}
-	next := sessionartifacts.DeriveOutputType(len(prs), len(artifacts))
+	includePlanApproval := false
+	if rec.RequestedOutput == domain.RequestedOutputArtifact {
+		if reports, ok := m.store.(sessionDoneReportReader); ok {
+			latest, err := reports.ListLatestDoneReportsForSessions(ctx, []domain.SessionID{id})
+			if err != nil {
+				return err
+			}
+			if report, found := latest[id]; found {
+				includePlanApproval = !report.Superseded
+			}
+		}
+	}
+	next := sessionartifacts.DeriveOutputType(len(prs), sessionartifacts.DeliverableCount(artifacts, rec.PlanFirstState == domain.PlanFirstPending, includePlanApproval))
 	if next == rec.OutputType && !backfilled {
 		return nil
 	}

@@ -22,14 +22,15 @@ ORDER BY a.session_id, a.path;
 
 -- name: InsertSessionArtifact :exec
 INSERT INTO session_artifacts (
-    id, session_id, path, registered_at, file_dev, file_ino, file_birth, file_generation, file_mtime, previous_paths, created_at
+    id, session_id, path, role, registered_at, file_dev, file_ino, file_birth, file_generation, file_mtime, previous_paths, created_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)
 ON CONFLICT (session_id, path) DO NOTHING;
 
 -- name: RegisterSessionArtifact :exec
 UPDATE session_artifacts
 SET registered_at = COALESCE(registered_at, sqlc.arg(registered_at)),
+    role = CASE WHEN role = '' THEN sqlc.arg(role) ELSE role END,
     file_dev = sqlc.arg(file_dev), file_ino = sqlc.arg(file_ino), file_birth = sqlc.arg(file_birth),
     file_generation = sqlc.arg(file_generation), file_mtime = sqlc.arg(file_mtime)
 WHERE session_id = sqlc.arg(session_id) AND path = sqlc.arg(path);

@@ -16,13 +16,13 @@ import (
 type fakeDecisionSessionSender struct {
 	id         domain.SessionID
 	message    string
-	attachment *ports.SpawnAttachment
-	options    ports.MessageDeliveryOptions
+	deliveryID string
+	at         time.Time
 	err        error
 }
 
-func (s *fakeDecisionSessionSender) SendWithOptions(_ context.Context, id domain.SessionID, message string, attachment *ports.SpawnAttachment, options ports.MessageDeliveryOptions) error {
-	s.id, s.message, s.attachment, s.options = id, message, attachment, options
+func (s *fakeDecisionSessionSender) DeliverDecisionAnswer(_ context.Context, id domain.SessionID, message, deliveryID string, at time.Time) error {
+	s.id, s.message, s.deliveryID, s.at = id, message, deliveryID, at
 	return s.err
 }
 
@@ -30,16 +30,16 @@ func TestDecisionMessengerSendsAsThePersonAndNamesEndedSessions(t *testing.T) {
 	at := time.Date(2026, 11, 17, 12, 30, 0, 0, time.UTC)
 	sender := &fakeDecisionSessionSender{}
 	messenger := decisionMessenger{sessions: sender}
-	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", at); err != nil {
+	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", "dent-1", at); err != nil {
 		t.Fatal(err)
 	}
-	if sender.id != "w-1" || sender.message != "hello" || sender.attachment != nil || !sender.options.AuthoredByUser || !sender.options.InteractionAt.Equal(at) {
+	if sender.id != "w-1" || sender.message != "hello" || sender.deliveryID != "dent-1" || !sender.at.Equal(at) {
 		t.Fatalf("send = %+v", sender)
 	}
 
 	for _, ended := range []error{sessionmanager.ErrNotFound, sessionmanager.ErrTerminated, sessionmanager.ErrAgentExited} {
 		sender.err = fmt.Errorf("send failed: %w", ended)
-		err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", at)
+		err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", "dent-1", at)
 		if !errors.Is(err, decisionsvc.ErrSessionEnded) || !errors.Is(err, ended) {
 			t.Errorf("DeliverAsPerson(%v) = %v, want ErrSessionEnded wrapping source", ended, err)
 		}
@@ -47,17 +47,17 @@ func TestDecisionMessengerSendsAsThePersonAndNamesEndedSessions(t *testing.T) {
 
 	busy := errors.New("composer busy")
 	sender.err = busy
-	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", at); !errors.Is(err, busy) || errors.Is(err, decisionsvc.ErrSessionEnded) {
+	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", "dent-1", at); !errors.Is(err, busy) || errors.Is(err, decisionsvc.ErrSessionEnded) {
 		t.Fatalf("DeliverAsPerson(other) = %v", err)
 	}
 
 	sender.err = fmt.Errorf("send failed: %w", sessionmanager.ErrResumeInProgress)
-	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", at); !errors.Is(err, sessionmanager.ErrResumeInProgress) || errors.Is(err, decisionsvc.ErrSessionEnded) {
+	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", "dent-1", at); !errors.Is(err, sessionmanager.ErrResumeInProgress) || errors.Is(err, decisionsvc.ErrSessionEnded) {
 		t.Fatalf("DeliverAsPerson(resuming) = %v, want transient ErrResumeInProgress", err)
 	}
 
 	sender.err = fmt.Errorf("send failed: %w", sessionmanager.ErrDeliveryUnconfirmed)
-	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", at); !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) || errors.Is(err, decisionsvc.ErrSessionEnded) {
+	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", "dent-1", at); !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) || errors.Is(err, decisionsvc.ErrSessionEnded) {
 		t.Fatalf("DeliverAsPerson(unconfirmed) = %v, want ambiguous ErrAgentDeliveryUnconfirmed", err)
 	}
 }

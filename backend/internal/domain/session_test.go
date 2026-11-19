@@ -22,3 +22,14 @@ func TestActiveOrchestrator(t *testing.T) {
 		t.Fatalf("ActiveOrchestrator(nil) = %+v, %v; want zero, false", got, ok)
 	}
 }
+
+func TestFileIdentityGenerationIsStableEnoughToMatch(t *testing.T) {
+	withGeneration := FileIdentity{Dev: 7, Ino: 11, Generation: 13}
+	if !withGeneration.SameFile(withGeneration) {
+		t.Fatal("a stable file generation did not identify the same file")
+	}
+	bareInode := FileIdentity{Dev: 7, Ino: 11}
+	if bareInode.SameFile(bareInode) {
+		t.Fatal("a bare device and inode matched without reuse protection")
+	}
+}

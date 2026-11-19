@@ -8,7 +8,7 @@ import (
 
 const (
 	decisionBoardMigrationVersion = int64(20261118232824790)
-	decisionBoardPreviousVersion  = int64(20261118045922851)
+	decisionBoardPreviousVersion  = int64(20261118195032454)
 )
 
 func decisionBoardTriggerNames(t *testing.T, db *sql.DB) []string {

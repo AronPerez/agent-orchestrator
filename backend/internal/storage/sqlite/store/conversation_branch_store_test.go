@@ -40,6 +40,17 @@ func seededChatConversation(t *testing.T) (*sqlite.Store, domain.SessionRecord, 
 	return s, session, conversation
 }
 
+func TestMarkTurnProviderDeliveryAcceptedByProviderIDAllowsUntrackedProviderTurn(t *testing.T) {
+	ctx := context.Background()
+	s, _, conversation := seededChatConversation(t)
+
+	if err := s.MarkTurnProviderDeliveryAcceptedByProviderID(
+		ctx, conversation.ID, "provider-owned-turn",
+	); err != nil {
+		t.Fatalf("MarkTurnProviderDeliveryAcceptedByProviderID: %v", err)
+	}
+}
+
 func seedBranchTurns(t *testing.T, s *sqlite.Store, session domain.SessionRecord, conversation domain.ConversationRecord) {
 	t.Helper()
 	ctx := context.Background()
@@ -642,7 +653,8 @@ func TestCompleteEditDeliveryRollsBackBranchMutationWhenResultCannotSettle(t *te
 		t.Fatalf("completed branch = %+v err=%v", gotBranch, err)
 	}
 	delivery, found, err = s.EditDelivery(ctx, conversation.ID, "edit-atomic")
-	if err != nil || !found || delivery.State != domain.ConversationEditAccepted || delivery.Turn.ID != turn.ID {
+	if err != nil || !found || delivery.State != domain.ConversationEditAccepted ||
+		delivery.Turn.ID != turn.ID || delivery.Turn.ProviderDeliveryState != domain.ProviderDeliveryAccepted {
 		t.Fatalf("completed delivery = %+v found=%v err=%v", delivery, found, err)
 	}
 }

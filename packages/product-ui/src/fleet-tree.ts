@@ -24,6 +24,16 @@ export type FleetTreeScope<Session extends FleetTreeSession> = {
 export type FleetRollup = Record<AttentionZone, number>;
 export type FleetSessionRole = "orchestrator" | "manager" | "worker";
 export type FleetSessionAddress = { machineId: string; sessionId: string };
+/**
+ * Why a recorded parent is not drawn above a session:
+ * - `machine-unknown`: no scope or known machine has the parent's machine ID.
+ * - `machine-offline`: the parent's machine is known but not connected.
+ * - `missing`: no single drawable session has that exact address (absent,
+ *   ambiguous, self-parented, or a broken lineage cycle).
+ */
+export type FleetParentUnavailableReason = "missing" | "machine-offline" | "machine-unknown";
+/** A paired machine that may contribute no scope (for example, offline with no cache). */
+export type FleetKnownMachine = { id: string; reachable: boolean };
 
 export type FleetSessionNode<Session extends FleetTreeSession> = {
 	type: "session";
@@ -35,6 +45,8 @@ export type FleetSessionNode<Session extends FleetTreeSession> = {
 	parentAddress?: FleetSessionAddress;
 	role: FleetSessionRole;
 	parentUnavailable: boolean;
+	/** Set exactly when `parentUnavailable` is true. */
+	parentUnavailableReason?: FleetParentUnavailableReason;
 	zone: AttentionZone;
 	/** Descendants only; the session's own state is in `zone`. */
 	rollup: FleetRollup;
@@ -46,7 +58,10 @@ export type FleetMachineNode<Session extends FleetTreeSession> = {
 	key: string;
 	projectId: string;
 	machine: FleetTreeScope<Session>["machine"];
-	/** Every included session on this machine. */
+	/**
+	 * Every session drawn under this machine branch. A child whose parent is on
+	 * another machine is drawn (and counted) under that parent instead.
+	 */
 	rollup: FleetRollup;
 	sessions: FleetSessionNode<Session>[];
 };
@@ -56,7 +71,7 @@ export type FleetProjectNode<Session extends FleetTreeSession> = {
 	key: string;
 	project: FleetTreeScope<Session>["project"];
 	projectLinkId?: string;
-	/** Every included session in this project, across machines. */
+	/** Every session drawn under this project, across machines. */
 	rollup: FleetRollup;
 	machines: FleetMachineNode<Session>[];
 };
@@ -109,8 +124,8 @@ function addSession(target: FleetRollup, node: FleetSessionNode<FleetTreeSession
 	addRollup(target, node.rollup);
 }
 
-// JSON keys keep arbitrary host/project/session IDs unambiguous and give the
-// later cross-machine edge work a stable target without defining its protocol.
+// JSON keys keep arbitrary host/project/session IDs unambiguous. A session keeps
+// its own qualified key even when it is drawn under a parent on another machine.
 export const fleetProjectKey = (projectId: string, machineId: string): string =>
 	JSON.stringify(["project", machineId, projectId]);
 export const fleetLinkedProjectKey = (projectLinkId: string): string =>
@@ -133,9 +148,22 @@ type ProjectGroup<Session extends FleetTreeSession> = {
 	machines: Map<string, MachineGroup<Session>>;
 };
 
+type SessionEntry<Session extends FleetTreeSession> = {
+	group: MachineGroup<Session>;
+	session: Session;
+};
+
+type ParentResolution<Session extends FleetTreeSession> = {
+	parent?: SessionEntry<Session>;
+	reason?: FleetParentUnavailableReason;
+};
+
+const fleetAddressKey = (machineId: string, sessionId: string): string => JSON.stringify([machineId, sessionId]);
+const isArchived = (item: FleetTreeSession): boolean => Boolean(item.isTerminated) || item.status === "terminated";
+
 export function buildFleetTree<Session extends FleetTreeSession>(
 	scopes: readonly FleetTreeScope<Session>[],
-	options: { showArchived?: boolean } = {},
+	options: { showArchived?: boolean; knownMachines?: readonly FleetKnownMachine[] } = {},
 ): FleetProjectNode<Session>[] {
 	const projects = new Map<string, ProjectGroup<Session>>();
 	for (const scope of scopes) {
@@ -161,111 +189,146 @@ export function buildFleetTree<Session extends FleetTreeSession>(
 		for (const item of scope.sessions) machine.sessions.set(item.id, item);
 	}
 
-	return [...projects.values()].map(({ key, project, projectLinkId, machines }) => {
-		const machineNodes = [...machines.values()].map(({ projectId, machine, sessions }) =>
-			buildMachine(projectId, machine, [...sessions.values()], options.showArchived === true));
+	// Every edge resolves by its exact (machine, session) address across the
+	// whole fleet. A bare session ID is only ever read as local to its own row.
+	const groups = [...projects.values()].flatMap((project) => [...project.machines.values()]);
+	const reachable = new Map((options.knownMachines ?? []).map((machine) => [machine.id, machine.reachable]));
+	const byGroup = new Map<MachineGroup<Session>, Map<string, SessionEntry<Session>>>();
+	const byAddress = new Map<string, SessionEntry<Session>[]>();
+	for (const group of groups) {
+		reachable.set(group.machine.id, group.machine.reachable);
+		const entries = new Map<string, SessionEntry<Session>>();
+		for (const item of group.sessions.values()) {
+			const entry = { group, session: item };
+			entries.set(item.id, entry);
+			const address = fleetAddressKey(group.machine.id, item.id);
+			byAddress.set(address, [...(byAddress.get(address) ?? []), entry]);
+		}
+		byGroup.set(group, entries);
+	}
+	const entries = groups.flatMap((group) => [...byGroup.get(group)!.values()]);
+
+	const resolve = (entry: SessionEntry<Session>): ParentResolution<Session> => {
+		const { session: item, group } = entry;
+		if (item.parentSessionId === undefined) return {};
+		const machineId = item.parentHostId || group.machine.id;
+		if (machineId === group.machine.id) {
+			const sibling = byGroup.get(group)!.get(item.parentSessionId);
+			if (sibling) return sibling === entry ? { reason: "missing" } : { parent: sibling };
+		} else if (!reachable.has(machineId)) {
+			return { reason: "machine-unknown" };
+		} else if (!reachable.get(machineId)) {
+			// Cached rows from a disconnected machine may be stale; do not draw edges into them.
+			return { reason: "machine-offline" };
+		}
+		const matches = (byAddress.get(fleetAddressKey(machineId, item.parentSessionId)) ?? [])
+			.filter((candidate) => candidate !== entry);
+		return matches.length === 1 ? { parent: matches[0] } : { reason: "missing" };
+	};
+	const resolved = new Map(entries.map((entry) => [entry, resolve(entry)]));
+	const children = new Map<SessionEntry<Session>, SessionEntry<Session>[]>();
+	for (const entry of entries) {
+		const parent = resolved.get(entry)!.parent;
+		if (parent) children.set(parent, [...(children.get(parent) ?? []), entry]);
+	}
+
+	const showArchived = options.showArchived === true;
+	const included = new Set<SessionEntry<Session>>();
+	for (const entry of entries) {
+		if (!showArchived && isArchived(entry.session)) continue;
+		let current: SessionEntry<Session> | undefined = entry;
+		while (current && !included.has(current)) {
+			included.add(current);
+			current = resolved.get(current)!.parent;
+		}
+	}
+
+	const visited = new Set<SessionEntry<Session>>();
+	const visit = (entry: SessionEntry<Session>, fallbackRoot = false): FleetSessionNode<Session> | undefined => {
+		if (visited.has(entry) || !included.has(entry)) return undefined;
+		visited.add(entry);
+		const { session: item, group } = entry;
+		const { parent, reason } = resolved.get(entry)!;
+		const recordedChildren = children.get(entry) ?? [];
+		const childNodes = recordedChildren.flatMap((child) => {
+			const node = visit(child);
+			return node ? [node] : [];
+		});
+		const rollup = emptyFleetRollup();
+		for (const child of childNodes) addSession(rollup, child);
+		const parentUnavailable = item.parentSessionId !== undefined && (fallbackRoot || !parent);
+		return {
+			type: "session",
+			key: fleetSessionKey(group.projectId, group.machine.id, item.id),
+			projectId: group.projectId,
+			machineId: group.machine.id,
+			session: item,
+			parentAddress: item.parentSessionId ? {
+				machineId: item.parentHostId || group.machine.id,
+				sessionId: item.parentSessionId,
+			} : undefined,
+			role: item.kind === "orchestrator" ? "orchestrator" : recordedChildren.length ? "manager" : "worker",
+			parentUnavailable,
+			parentUnavailableReason: parentUnavailable ? reason ?? "missing" : undefined,
+			zone: isArchived(item) ? "done" : attentionZone(item.rollupStatus ?? item.status),
+			rollup,
+			children: childNodes,
+		};
+	};
+
+	const rootsByGroup = new Map(groups.map((group) => {
+		const roots = [...byGroup.get(group)!.values()]
+			.filter((entry) => included.has(entry) && !resolved.get(entry)!.parent);
+		const nodes = [
+			...roots.filter((entry) => entry.session.kind === "orchestrator"),
+			...roots.filter((entry) => entry.session.kind !== "orchestrator"),
+		].flatMap((entry) => {
+			const node = visit(entry);
+			return node ? [node] : [];
+		});
+		return [group, nodes] as const;
+	}));
+	// Imported cycles have no root. Only after every real root has claimed its
+	// descendants, start at the first unvisited member and mark that broken link
+	// unavailable so every session remains visible exactly once.
+	for (const group of groups) {
+		for (const entry of byGroup.get(group)!.values()) {
+			const node = visit(entry, true);
+			if (node) rootsByGroup.get(group)!.push(node);
+		}
+	}
+
+	return [...projects.values()].flatMap(({ key, project, projectLinkId, machines }) => {
+		const machineNodes = [...machines.values()].flatMap((group) => {
+			const sessions = rootsByGroup.get(group)!;
+			// A branch whose every visible session is drawn under a parent on another
+			// machine has nothing of its own left to show.
+			const drawnElsewhere = !sessions.length &&
+				[...byGroup.get(group)!.values()].some((entry) => included.has(entry));
+			if (drawnElsewhere) return [];
+			const rollup = emptyFleetRollup();
+			for (const node of sessions) addSession(rollup, node);
+			return [{
+				type: "machine" as const,
+				key: fleetMachineKey(group.projectId, group.machine.id),
+				projectId: group.projectId,
+				machine: group.machine,
+				rollup,
+				sessions,
+			}];
+		});
+		if (machines.size && !machineNodes.length) return [];
 		const rollup = emptyFleetRollup();
 		for (const node of machineNodes) addRollup(rollup, node.rollup);
-		return {
+		return [{
 			type: "project" as const,
 			key,
 			project,
 			projectLinkId,
 			rollup,
 			machines: machineNodes,
-		};
+		}];
 	});
-}
-
-function buildMachine<Session extends FleetTreeSession>(
-	projectId: string,
-	machine: FleetTreeScope<Session>["machine"],
-	sessions: Session[],
-	showArchived: boolean,
-): FleetMachineNode<Session> {
-	const byId = new Map(sessions.map((item) => [item.id, item]));
-	const localParentId = (item: Session): string | undefined =>
-		!item.parentHostId || item.parentHostId === machine.id ? item.parentSessionId : undefined;
-	const children = new Map<string, Session[]>();
-	for (const item of sessions) {
-		const parentId = localParentId(item);
-		if (!parentId || parentId === item.id || !byId.has(parentId)) continue;
-		const siblings = children.get(parentId) ?? [];
-		siblings.push(item);
-		children.set(parentId, siblings);
-	}
-
-	const included = new Set<string>();
-	for (const item of sessions) {
-		if (!showArchived && (item.isTerminated || item.status === "terminated")) continue;
-		let current: Session | undefined = item;
-		while (current && !included.has(current.id)) {
-			included.add(current.id);
-			current = byId.get(localParentId(current) ?? "");
-		}
-	}
-
-	const visited = new Set<string>();
-	const visit = (item: Session, fallbackRoot = false): FleetSessionNode<Session> | undefined => {
-		if (visited.has(item.id) || !included.has(item.id)) return undefined;
-		visited.add(item.id);
-		const parentId = localParentId(item);
-		const externalParent = Boolean(item.parentSessionId && item.parentHostId && item.parentHostId !== machine.id);
-		const recordedChildren = children.get(item.id) ?? [];
-		const directChildren = recordedChildren.filter((child) => included.has(child.id));
-		const childNodes = directChildren.flatMap((child) => {
-			const node = visit(child);
-			return node ? [node] : [];
-		});
-		const rollup = emptyFleetRollup();
-		for (const child of childNodes) addSession(rollup, child);
-		return {
-			type: "session",
-			key: fleetSessionKey(projectId, machine.id, item.id),
-			projectId,
-			machineId: machine.id,
-			session: item,
-			parentAddress: item.parentSessionId ? {
-				machineId: item.parentHostId || machine.id,
-				sessionId: item.parentSessionId,
-			} : undefined,
-			role: item.kind === "orchestrator" ? "orchestrator" : recordedChildren.length ? "manager" : "worker",
-			parentUnavailable: item.parentSessionId !== undefined &&
-				(externalParent || fallbackRoot || parentId === item.id || !parentId || !byId.has(parentId)),
-			zone: item.isTerminated || item.status === "terminated" ? "done" : attentionZone(item.rollupStatus ?? item.status),
-			rollup,
-			children: childNodes,
-		};
-	};
-
-	const roots = sessions.filter((item) => {
-		const parentId = localParentId(item);
-		return included.has(item.id) && (!parentId || !byId.has(parentId) || parentId === item.id);
-	});
-	const rootNodes = [
-		...roots.filter((item) => item.kind === "orchestrator"),
-		...roots.filter((item) => item.kind !== "orchestrator"),
-	].flatMap((item) => {
-		const node = visit(item);
-		return node ? [node] : [];
-	});
-	// Imported cycles have no root. Start at the first unvisited member and mark
-	// that broken link unavailable so every session remains visible exactly once.
-	for (const item of sessions) {
-		const node = visit(item, true);
-		if (node) rootNodes.push(node);
-	}
-
-	const rollup = emptyFleetRollup();
-	for (const node of rootNodes) addSession(rollup, node);
-	return {
-		type: "machine",
-		key: fleetMachineKey(projectId, machine.id),
-		projectId,
-		machine,
-		rollup,
-		sessions: rootNodes,
-	};
 }
 
 export function flattenFleetSessions<Session extends FleetTreeSession>(

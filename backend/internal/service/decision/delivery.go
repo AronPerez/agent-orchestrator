@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,7 +22,7 @@ var ErrSessionEnded = errors.New("decision: session can no longer take a message
 type Messenger interface {
 	// DeliverAsPerson returns an error wrapping ErrSessionEnded when the session
 	// can no longer take a message.
-	DeliverAsPerson(context.Context, domain.SessionID, string, time.Time) error
+	DeliverAsPerson(context.Context, domain.SessionID, string, string, time.Time) error
 }
 
 // FallbackOutcomeAuthorizer lets a selected fallback session record an outcome
@@ -35,35 +36,42 @@ type FallbackOutcomeAuthorizer interface {
 type DeliveryStore interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
 	ListSessions(context.Context, domain.ProjectID) ([]domain.SessionRecord, error)
+	SetSessionPlanFirstState(context.Context, domain.SessionID, domain.PlanFirstState) (bool, error)
 	AppendDecisionEntry(context.Context, domain.DecisionEntry, time.Time) (domain.DecisionEntry, domain.DecisionCall, error)
+	GetDecisionCall(context.Context, string) (domain.DecisionCall, bool, error)
+	ListDecisionCallsForSession(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
 	ListDecisionCallsAwaitingDelivery(context.Context, string) ([]domain.DecisionCall, error)
 }
 
 // DelivererDeps configures decision answer delivery.
 type DelivererDeps struct {
-	Store      DeliveryStore
-	Messenger  Messenger
-	HostID     string
-	Now        func() time.Time
-	NewID      func(prefix string) string
-	RetryDelay time.Duration
-	Log        *slog.Logger
+	Store          DeliveryStore
+	Messenger      Messenger
+	HostID         string
+	MutationGate   *MutationGate
+	Now            func() time.Time
+	NewID          func(prefix string) string
+	RetryDelay     time.Duration
+	AttemptTimeout time.Duration
+	Log            *slog.Logger
 	// FallbackAuthorizer is shared with the decision service in daemon wiring.
 	FallbackAuthorizer FallbackOutcomeAuthorizer
 }
 
 // Deliverer sends pending standing answers and records their delivery state.
 type Deliverer struct {
-	store      DeliveryStore
-	messenger  Messenger
-	hostID     string
-	now        func() time.Time
-	newID      func(string) string
-	retryDelay time.Duration
-	log        *slog.Logger
-	fallback   FallbackOutcomeAuthorizer
-	wake       chan struct{}
-	mu         sync.Mutex
+	store          DeliveryStore
+	messenger      Messenger
+	hostID         string
+	now            func() time.Time
+	newID          func(string) string
+	retryDelay     time.Duration
+	attemptTimeout time.Duration
+	log            *slog.Logger
+	fallback       FallbackOutcomeAuthorizer
+	mutationGate   *MutationGate
+	wake           chan struct{}
+	mu             sync.Mutex
 }
 
 // NewDeliverer constructs an idle decision answer deliverer.
@@ -77,13 +85,19 @@ func NewDeliverer(d DelivererDeps) *Deliverer {
 	if d.RetryDelay <= 0 {
 		d.RetryDelay = 30 * time.Second
 	}
+	if d.AttemptTimeout <= 0 {
+		d.AttemptTimeout = 30 * time.Second
+	}
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
+	if d.MutationGate == nil {
+		d.MutationGate = &MutationGate{}
+	}
 	return &Deliverer{
 		store: d.Store, messenger: d.Messenger, hostID: d.HostID,
-		now: d.Now, newID: d.NewID, retryDelay: d.RetryDelay, log: d.Log,
-		fallback: d.FallbackAuthorizer, wake: make(chan struct{}, 1),
+		now: d.Now, newID: d.NewID, retryDelay: d.RetryDelay, attemptTimeout: d.AttemptTimeout, log: d.Log,
+		fallback: d.FallbackAuthorizer, mutationGate: d.MutationGate, wake: make(chan struct{}, 1),
 	}
 }
 
@@ -161,7 +175,7 @@ func (d *Deliverer) RunDue(ctx context.Context) (int, error) {
 		if call.StandingKind == domain.DecisionKindAnswered && sentAnswers[call.ID] {
 			call.Redelivery = true
 		}
-		retry, sent := d.deliver(ctx, call)
+		retry, sent := d.deliverCurrent(ctx, call)
 		if sent && call.StandingKind == domain.DecisionKindAnswered {
 			sentAnswers[call.ID] = true
 		}
@@ -171,6 +185,77 @@ func (d *Deliverer) RunDue(ctx context.Context) (int, error) {
 		}
 	}
 	return pending, nil
+}
+
+func (d *Deliverer) deliverCurrent(ctx context.Context, call domain.DecisionCall) (bool, bool) {
+	if !isPlanFirstCall(call) {
+		return d.deliver(ctx, call)
+	}
+	unlock, err := d.mutationGate.acquire(ctx, decisionMutationKey(call))
+	if err != nil {
+		d.logFailure(call.ID, "lock current plan answer", err)
+		return true, false
+	}
+	defer unlock()
+
+	current, found, err := d.store.GetDecisionCall(ctx, call.ID)
+	if err != nil || !found {
+		if err == nil {
+			err = errors.New("current decision call no longer exists")
+		}
+		d.logFailure(call.ID, "load current plan answer", err)
+		return true, false
+	}
+	authoritative, found, err := newestPlanFirstCall(ctx, d.store, current.Origin, current.Raised.OwnerSessionID)
+	if err != nil {
+		d.logFailure(call.ID, "load current plan call", err)
+		return true, false
+	}
+	if !found {
+		d.logFailure(call.ID, "load current plan call", errors.New("owner has no plan-first call"))
+		return true, false
+	}
+	if authoritative.ID != current.ID || authoritative.StandingEntryID != current.StandingEntryID {
+		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
+			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSuperseded,
+		}), false
+	}
+	if current.Delivery == domain.DecisionDeliveryPending && !d.holdPlanFirstBeforeDelivery(ctx, current) {
+		return true, false
+	}
+	if current.StandingEntryID != call.StandingEntryID {
+		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
+			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSuperseded,
+		}), false
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, d.attemptTimeout)
+	defer cancel()
+	return d.deliver(attemptCtx, current)
+}
+
+func (d *Deliverer) holdPlanFirstBeforeDelivery(ctx context.Context, call domain.DecisionCall) bool {
+	owner, found, err := d.store.GetSession(ctx, call.Raised.OwnerSessionID)
+	if err != nil {
+		d.logFailure(call.ID, "load plan-first owner", err)
+		return false
+	}
+	if !found || !owner.PlanFirstState.Enabled() {
+		return true
+	}
+	next := domain.PlanFirstPending
+	if call.StandingKind != domain.DecisionKindAnswered || call.Choice != domain.DecisionChoiceOption || call.Option == 3 {
+		next = domain.PlanFirstDeclined
+	}
+	updated, err := d.store.SetSessionPlanFirstState(ctx, owner.ID, next)
+	if err != nil {
+		d.logFailure(call.ID, "hold plan-first gate", err)
+		return false
+	}
+	if !updated {
+		d.logFailure(call.ID, "hold plan-first gate", errors.New("owner session no longer exists"))
+		return false
+	}
+	return true
 }
 
 // deliver reports whether the entry needs another attempt and whether its
@@ -183,14 +268,23 @@ func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) (bool
 	}
 	ended := !found || owner.IsTerminated
 	if !ended {
-		err = d.messenger.DeliverAsPerson(ctx, owner.ID, DeliveryMessage(call, false), d.now().UTC())
+		err = d.messenger.DeliverAsPerson(ctx, owner.ID, DeliveryMessage(call, false), call.StandingEntryID, d.now().UTC())
 		switch {
 		case err == nil:
+			if !d.applyPlanFirstAnswer(ctx, owner, call) {
+				return true, true
+			}
 			return !d.record(ctx, call, domain.DecisionDeliveredPayload{
 				ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSent,
 				SessionID: owner.ID, SessionName: sessionName(owner),
 			}), true
 		case errors.Is(err, ErrSessionEnded):
+			// A stopped plan-first worker is resumable. Keep the answer pending
+			// instead of delivering it elsewhere (or recording no_session), so
+			// the worker receives the approval after it resumes.
+			if owner.PlanFirstState.Enabled() && isPlanFirstCall(call) {
+				return true, false
+			}
 			ended = true
 		default:
 			d.logFailure(call.ID, "send to owner", err)
@@ -201,6 +295,38 @@ func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) (bool
 		return true, false
 	}
 	return d.deliverFallback(ctx, call)
+}
+
+func (d *Deliverer) applyPlanFirstAnswer(ctx context.Context, owner domain.SessionRecord, call domain.DecisionCall) bool {
+	if !owner.PlanFirstState.Enabled() || !isPlanFirstCall(call) {
+		return true
+	}
+	next := domain.PlanFirstDeclined
+	if call.StandingKind == domain.DecisionKindAnswered && call.Choice == domain.DecisionChoiceOption &&
+		(call.Option == 1 || (call.Option == 2 && strings.TrimSpace(call.Note) != "")) {
+		next = domain.PlanFirstApproved
+	} else if call.StandingKind == domain.DecisionKindAnswered && call.Choice == domain.DecisionChoiceOption && call.Option == 2 {
+		next = domain.PlanFirstPending
+	}
+	updated, err := d.store.SetSessionPlanFirstState(ctx, owner.ID, next)
+	if err != nil {
+		d.logFailure(call.ID, "update plan-first gate", err)
+		return false
+	}
+	if !updated {
+		d.logFailure(call.ID, "update plan-first gate", errors.New("owner session no longer exists"))
+		return false
+	}
+	return true
+}
+
+func isPlanFirstCall(call domain.DecisionCall) bool {
+	if call.Raised.Reference != domain.PlanFirstDecisionReference || call.Raised.Title != "Approve this plan?" || len(call.Raised.Options) != 3 {
+		return false
+	}
+	return call.Raised.Options[0].Label == "Approve" &&
+		call.Raised.Options[1].Label == "Approve with changes" &&
+		call.Raised.Options[2].Label == "Do not proceed"
 }
 
 func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCall) (bool, bool) {
@@ -236,7 +362,7 @@ func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCal
 			revoke()
 		}
 	}
-	err := d.messenger.DeliverAsPerson(ctx, orchestrator.ID, DeliveryMessage(call, true), d.now().UTC())
+	err := d.messenger.DeliverAsPerson(ctx, orchestrator.ID, DeliveryMessage(call, true), call.StandingEntryID, d.now().UTC())
 	switch {
 	case err == nil:
 		recorded := d.record(ctx, call, domain.DecisionDeliveredPayload{

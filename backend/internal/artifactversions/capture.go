@@ -253,6 +253,9 @@ func (c *Capturer) track(ctx context.Context, sess domain.SessionRecord, rows []
 	}
 	changes := observation.Changes(rows, c.now().UTC(), uuid.NewString)
 	if changes.Empty() {
+		if err := sessionartifacts.RefreshPlanApprovalPins(dir, rows); err != nil {
+			return observation.Apply(rows), err
+		}
 		return observation.Apply(rows), nil
 	}
 	freed, err := c.store.ApplySessionArtifactChanges(ctx, sess.ID, changes)
@@ -262,11 +265,16 @@ func (c *Capturer) track(ctx context.Context, sess domain.SessionRecord, rows []
 		}
 		return observation.Apply(rows), err
 	}
-	if updated, err := c.store.ListSessionArtifacts(ctx, sess.ID); err == nil {
-		rows = updated
-	}
 	if len(freed) > 0 {
 		c.freed[sess.ID] = append(c.freed[sess.ID], freed...)
+	}
+	updated, err := c.store.ListSessionArtifacts(ctx, sess.ID)
+	if err != nil {
+		return observation.Apply(rows), err
+	}
+	rows = updated
+	if err := sessionartifacts.RefreshPlanApprovalPins(dir, rows); err != nil {
+		return observation.Apply(rows), err
 	}
 	return observation.Apply(rows), nil
 }

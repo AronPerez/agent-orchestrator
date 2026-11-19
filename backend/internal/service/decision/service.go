@@ -24,6 +24,8 @@ type Store interface {
 	ListSessions(context.Context, domain.ProjectID) ([]domain.SessionRecord, error)
 	GetProject(context.Context, string) (domain.ProjectRecord, bool, error)
 	AppendDecisionEntry(context.Context, domain.DecisionEntry, time.Time) (domain.DecisionEntry, domain.DecisionCall, error)
+	AppendDecisionEntries(context.Context, []domain.DecisionEntry, time.Time) ([]domain.DecisionEntry, []domain.DecisionCall, error)
+	SetSessionPlanFirstState(context.Context, domain.SessionID, domain.PlanFirstState) (bool, error)
 	GetDecisionCall(context.Context, string) (domain.DecisionCall, bool, error)
 	ListDecisionEntries(context.Context, string) ([]domain.DecisionEntry, error)
 	ListDecisionCallsForSession(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
@@ -38,6 +40,7 @@ type Store interface {
 type Deps struct {
 	Store        Store
 	HostID       string
+	MutationGate *MutationGate
 	MachineLabel func() string
 	Now          func() time.Time
 	NewID        func(prefix string) string
@@ -52,9 +55,68 @@ type Service struct {
 	now          func() time.Time
 	newID        func(string) string
 	onAppended   func(domain.DecisionEntry)
-	mutateMu     sync.Mutex
+	mutationGate *MutationGate
 	fallbackMu   sync.RWMutex
 	fallback     map[fallbackOutcomeGrant]struct{}
+}
+
+// MutationGate serializes standing-answer changes with delivery. The gate is
+// shared by the service and deliverer, but scoped per call (or per plan-first
+// owner) so one slow provider cannot block unrelated decisions.
+type MutationGate struct {
+	mu    sync.Mutex
+	calls map[string]*callMutation
+}
+
+type callMutation struct {
+	token chan struct{}
+	refs  int
+}
+
+func (g *MutationGate) acquire(ctx context.Context, callID string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	if g.calls == nil {
+		g.calls = make(map[string]*callMutation)
+	}
+	lock := g.calls[callID]
+	if lock == nil {
+		lock = &callMutation{token: make(chan struct{}, 1)}
+		lock.token <- struct{}{}
+		g.calls[callID] = lock
+	}
+	lock.refs++
+	g.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		g.drop(callID, lock)
+		return nil, ctx.Err()
+	case <-lock.token:
+		if err := ctx.Err(); err != nil {
+			lock.token <- struct{}{}
+			g.drop(callID, lock)
+			return nil, err
+		}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			lock.token <- struct{}{}
+			g.drop(callID, lock)
+		})
+	}, nil
+}
+
+func (g *MutationGate) drop(callID string, lock *callMutation) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	lock.refs--
+	if lock.refs == 0 && g.calls[callID] == lock {
+		delete(g.calls, callID)
+	}
 }
 
 type fallbackOutcomeGrant struct {
@@ -80,10 +142,14 @@ func New(d Deps) *Service {
 			return label
 		}
 	}
+	if d.MutationGate == nil {
+		d.MutationGate = &MutationGate{}
+	}
 	return &Service{
 		store: d.Store, hostID: d.HostID, machineLabel: d.MachineLabel,
 		now: d.Now, newID: d.NewID, onAppended: d.OnAppended,
-		fallback: make(map[fallbackOutcomeGrant]struct{}),
+		mutationGate: d.MutationGate,
+		fallback:     make(map[fallbackOutcomeGrant]struct{}),
 	}
 }
 
@@ -193,6 +259,22 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 	if err := domain.ValidateDecisionRaise(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
+	var pendingPlanCall domain.DecisionCall
+	var hasPendingPlanCall bool
+	if isPlanFirstCall(domain.DecisionCall{Raised: payload}) {
+		unlock, err := s.mutationGate.acquire(ctx, planFirstMutationKey(session.ID))
+		if err != nil {
+			return domain.DecisionCall{}, err
+		}
+		defer unlock()
+		if err := s.holdPlanFirstOwnerGate(ctx, session.ID, domain.PlanFirstPending); err != nil {
+			return domain.DecisionCall{}, err
+		}
+		pendingPlanCall, hasPendingPlanCall, err = s.pendingPlanFirstCall(ctx, session.ID)
+		if err != nil {
+			return domain.DecisionCall{}, err
+		}
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -203,6 +285,27 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 		ID: s.newID("dent_"), Origin: s.hostID, CallID: callID,
 		Kind: domain.DecisionKindRaised, Payload: raw, WrittenAt: now,
 		AuthorKind: domain.DecisionAuthorSession, AuthorSession: session.ID,
+	}
+	if hasPendingPlanCall {
+		withdrawn, err := json.Marshal(struct{}{})
+		if err != nil {
+			return domain.DecisionCall{}, err
+		}
+		withdrawal := domain.DecisionEntry{
+			ID: s.newID("dent_"), Origin: s.hostID, CallID: pendingPlanCall.ID,
+			Kind: domain.DecisionKindWithdrawn, Payload: withdrawn, WrittenAt: now,
+			AuthorKind: domain.DecisionAuthorSession, AuthorSession: session.ID,
+		}
+		stored, calls, err := s.store.AppendDecisionEntries(ctx, []domain.DecisionEntry{entry, withdrawal}, now)
+		if err != nil {
+			return domain.DecisionCall{}, err
+		}
+		if s.onAppended != nil {
+			for _, appended := range stored {
+				s.onAppended(appended)
+			}
+		}
+		return calls[0], nil
 	}
 	stored, call, err := s.store.AppendDecisionEntry(ctx, entry, now)
 	if err != nil {
@@ -236,14 +339,16 @@ func (s *Service) Get(ctx context.Context, callID string) (Detail, error) {
 
 // Answer records the person's standing answer to an open call.
 func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input AnswerInput) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
-	call, err := s.call(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
+	defer unlock()
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
+	}
+	if err := s.rejectSupersededPlanCall(ctx, call); err != nil {
+		return domain.DecisionCall{}, err
 	}
 	if call.State != domain.DecisionStateNeedsYou && call.State != domain.DecisionStateInProgress && call.State != domain.DecisionStateDismissed {
 		return domain.DecisionCall{}, wrongState(call, `This call is closed. Its state is "%s".`)
@@ -252,19 +357,24 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	if err := domain.ValidateDecisionAnswer(len(call.Raised.Options), payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
+	if err := s.holdPlanFirstGate(ctx, call, planFirstStateBeforeDelivery(payload)); err != nil {
+		return domain.DecisionCall{}, err
+	}
 	return s.append(ctx, actor, call.ID, domain.DecisionKindAnswered, payload)
 }
 
 // Dismiss records that the person declined to choose from a pending call.
 func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
-	call, err := s.call(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
+	defer unlock()
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
+	}
+	if err := s.rejectSupersededPlanCall(ctx, call); err != nil {
+		return domain.DecisionCall{}, err
 	}
 	if call.State != domain.DecisionStateNeedsYou {
 		return domain.DecisionCall{}, wrongState(call, `Only a call in "Needs you" can be dismissed. This one is "%s".`)
@@ -273,17 +383,83 @@ func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string)
 	if err := domain.ValidateDecisionNote(note); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
+	if err := s.holdPlanFirstGate(ctx, call, domain.PlanFirstDeclined); err != nil {
+		return domain.DecisionCall{}, err
+	}
 	return s.append(ctx, actor, call.ID, domain.DecisionKindDismissed, domain.DecisionDismissedPayload{Note: note})
+}
+
+// holdPlanFirstGate closes a previously approved gate before the changed
+// ledger entry is appended. If the append then fails, the session stays safely
+// blocked until the person retries instead of implementing a superseded plan.
+func (s *Service) holdPlanFirstGate(ctx context.Context, call domain.DecisionCall, next domain.PlanFirstState) error {
+	if !isPlanFirstCall(call) {
+		return nil
+	}
+	return s.holdPlanFirstOwnerGate(ctx, call.Raised.OwnerSessionID, next)
+}
+
+func (s *Service) holdPlanFirstOwnerGate(ctx context.Context, ownerID domain.SessionID, next domain.PlanFirstState) error {
+	owner, ok, err := s.store.GetSession(ctx, ownerID)
+	if err != nil {
+		return err
+	}
+	if !ok || !owner.PlanFirstState.Enabled() {
+		return nil
+	}
+	updated, err := s.store.SetSessionPlanFirstState(ctx, owner.ID, next)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return errors.New("plan-first owner session no longer exists")
+	}
+	return nil
+}
+
+func planFirstStateBeforeDelivery(answer domain.DecisionAnsweredPayload) domain.PlanFirstState {
+	if answer.Choice == domain.DecisionChoiceOption && answer.Option == 3 {
+		return domain.PlanFirstDeclined
+	}
+	return domain.PlanFirstPending
+}
+
+func (s *Service) rejectSupersededPlanCall(ctx context.Context, call domain.DecisionCall) error {
+	if !isPlanFirstCall(call) {
+		return nil
+	}
+	current, found, err := newestPlanFirstCall(ctx, s.store, call.Origin, call.Raised.OwnerSessionID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("plan-first owner has no current call")
+	}
+	if current.ID != call.ID {
+		return apierr.Conflict(
+			"DECISION_SUPERSEDED",
+			"A newer plan decision replaced this call. Answer the latest plan decision instead.",
+			map[string]any{"currentCallId": current.ID},
+		)
+	}
+	return nil
+}
+
+func (s *Service) pendingPlanFirstCall(ctx context.Context, ownerID domain.SessionID) (domain.DecisionCall, bool, error) {
+	current, found, err := newestPlanFirstCall(ctx, s.store, s.hostID, ownerID)
+	if err != nil || !found || current.State != domain.DecisionStateNeedsYou {
+		return domain.DecisionCall{}, false, err
+	}
+	return current, true, nil
 }
 
 // RecordOutcome closes an in-progress call with the result of carrying it out.
 func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string, input OutcomeInput) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
-	call, err := s.call(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
+	defer unlock()
 	input.ForEntry = strings.TrimSpace(input.ForEntry)
 	if actor.Session != "" && !s.mayClose(call, input.ForEntry, actor.Session) {
 		return domain.DecisionCall{}, notOwner()
@@ -313,12 +489,11 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 
 // Withdraw closes a pending call at the owning session's request.
 func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
-	call, err := s.call(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
+	defer unlock()
 	if !s.owns(call, actor.Session) {
 		return domain.DecisionCall{}, notOwner()
 	}
@@ -330,12 +505,11 @@ func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (dom
 
 // Retire changes whether a completed call still applies.
 func (s *Service) Retire(ctx context.Context, actor Actor, callID string, retired bool) (domain.DecisionCall, error) {
-	s.mutateMu.Lock()
-	defer s.mutateMu.Unlock()
-	call, err := s.call(ctx, callID)
+	call, unlock, err := s.lockedCall(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
+	defer unlock()
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
 	}
@@ -483,6 +657,65 @@ func (s *Service) call(ctx context.Context, callID string) (domain.DecisionCall,
 		return domain.DecisionCall{}, apierr.NotFound("DECISION_NOT_FOUND", "Unknown call")
 	}
 	return call, nil
+}
+
+// lockedCall first reads under the ordinary call gate. Plan calls then switch
+// to their owner's shared gate and reload, so replacement calls cannot race an
+// earlier delivery. Ordinary calls keep one read and their independent gate.
+func (s *Service) lockedCall(ctx context.Context, callID string) (domain.DecisionCall, func(), error) {
+	unlock, err := s.mutationGate.acquire(ctx, "call:"+callID)
+	if err != nil {
+		return domain.DecisionCall{}, nil, err
+	}
+	initial, err := s.call(ctx, callID)
+	if err != nil {
+		unlock()
+		return domain.DecisionCall{}, nil, err
+	}
+	if !isPlanFirstCall(initial) {
+		return initial, unlock, nil
+	}
+	unlock()
+	unlock, err = s.mutationGate.acquire(ctx, decisionMutationKey(initial))
+	if err != nil {
+		return domain.DecisionCall{}, nil, err
+	}
+	current, err := s.call(ctx, callID)
+	if err != nil {
+		unlock()
+		return domain.DecisionCall{}, nil, err
+	}
+	return current, unlock, nil
+}
+
+func decisionMutationKey(call domain.DecisionCall) string {
+	if isPlanFirstCall(call) {
+		return planFirstMutationKey(call.Raised.OwnerSessionID)
+	}
+	return "call:" + call.ID
+}
+
+func planFirstMutationKey(owner domain.SessionID) string {
+	return "plan:" + string(owner)
+}
+
+type planFirstCallStore interface {
+	ListDecisionCallsForSession(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
+}
+
+// newestPlanFirstCall returns the owner's plan protocol call with the newest
+// raised-entry ledger stamp. The store supplies calls in that order.
+func newestPlanFirstCall(ctx context.Context, store planFirstCallStore, origin string, owner domain.SessionID) (domain.DecisionCall, bool, error) {
+	calls, err := store.ListDecisionCallsForSession(ctx, origin, owner, -1)
+	if err != nil {
+		return domain.DecisionCall{}, false, err
+	}
+	for _, call := range calls {
+		if call.Raised.OwnerSessionID == owner && isPlanFirstCall(call) {
+			return call, true, nil
+		}
+	}
+	return domain.DecisionCall{}, false, nil
 }
 
 func (s *Service) append(ctx context.Context, actor Actor, callID string, kind domain.DecisionEntryKind, payload any) (domain.DecisionCall, error) {

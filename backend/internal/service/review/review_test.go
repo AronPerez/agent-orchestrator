@@ -25,6 +25,7 @@ type fakeStore struct {
 	prReviews               map[string][]domain.PullRequestReview
 	prComments              map[string][]domain.PullRequestComment
 	sessionAutoInjectReview *bool
+	sessionPlanFirstState   domain.PlanFirstState
 	autoInjectSets          []bool
 
 	updateCalls       int
@@ -88,7 +89,7 @@ func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.S
 	if f.sessionAutoInjectReview != nil {
 		enabled = *f.sessionAutoInjectReview
 	}
-	return domain.SessionRecord{ID: id, AutoInjectReview: enabled}, true, nil
+	return domain.SessionRecord{ID: id, AutoInjectReview: enabled, PlanFirstState: f.sessionPlanFirstState}, true, nil
 }
 
 func (f *fakeStore) SetSessionAutoInjectReview(_ context.Context, _ domain.SessionID, autoInject bool, _ time.Time) (bool, error) {
@@ -828,6 +829,30 @@ func TestTriggerReportsWhoStartedThePass(t *testing.T) {
 				t.Fatalf("reused is still present: %#v", got[0].Payload["reused"])
 			}
 		})
+	}
+}
+
+func TestTriggerAutoDefersWhilePlanApprovalBlocksAutomation(t *testing.T) {
+	store := &fakeStore{sessionPlanFirstState: domain.PlanFirstPending}
+	svc := New(nil, store)
+	called := false
+	svc.engineTrigger = func(context.Context, domain.SessionID, reviewcore.TriggerOptions) (reviewcore.TriggerResult, error) {
+		called = true
+		return reviewcore.TriggerResult{Created: true}, nil
+	}
+
+	result, err := svc.TriggerAuto(context.Background(), "worker-1", domain.ReviewerCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called || result.SkipReason != "plan_first_pending" {
+		t.Fatalf("called=%v result=%+v", called, result)
+	}
+
+	store.sessionPlanFirstState = domain.PlanFirstApproved
+	result, err = svc.TriggerAuto(context.Background(), "worker-1", domain.ReviewerCodex)
+	if err != nil || !called || !result.Created {
+		t.Fatalf("approved trigger called=%v result=%+v err=%v", called, result, err)
 	}
 }
 
