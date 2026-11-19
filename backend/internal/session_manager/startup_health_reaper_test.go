@@ -76,3 +76,76 @@ func TestStartupHealthKeepsDeadTerminalOrchestratorThroughTheReaper(t *testing.T
 		t.Fatalf("startup launched %d runtimes; it must leave the agent stopped", runtime.created)
 	}
 }
+
+func TestStartupHealthSettlesMatchingTrackerIntakeTerminalBeforeTheReaper(t *testing.T) {
+	ctx := context.Background()
+	st, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	idleSince := now.Add(-time.Hour)
+	if err := st.UpsertProject(ctx, domain.ProjectRecord{ID: "mer", Path: "/repo", Config: testRoleAgents(), RegisteredAt: now}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	created, err := st.CreateTrackerIntakeSession(ctx, domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: "github:acme/mer#42",
+		Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeTUI,
+		Activity:      domain.Activity{State: domain.ActivityIdle, LastActivityAt: idleSince},
+		FirstSignalAt: idleSince, CreatedAt: idleSince, UpdatedAt: idleSince,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/worker", Branch: "ao/mer-1/root",
+			RuntimeHandleID: "ptyhost-v1:mer-1", RuntimeLaunchID: "launch-before-reboot",
+			AgentSessionID: "agent-x",
+		},
+	}, domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2})
+	if err != nil {
+		t.Fatalf("seed tracker intake session: %v", err)
+	}
+	if err := st.ReserveTrackerIntakeRecovery(ctx, created.ID, domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: created.Metadata.WorkspacePath, RuntimeLaunchID: created.Metadata.RuntimeLaunchID,
+		RuntimeHandleIDs: []string{created.Metadata.RuntimeHandleID}, RelaunchPublished: true,
+	}); err != nil {
+		t.Fatalf("reserve tracker intake owner: %v", err)
+	}
+
+	runtime := &fakeRuntime{} // the exact generation disappeared with the reboot
+	workspace := &fakeWorkspace{}
+	lcm := lifecycle.New(st, nil)
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: launchArgvAgent{argv: []string{"claude"}}},
+		Workspace: workspace, Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm,
+		DataDir: t.TempDir(),
+	})
+	m.runBackground = func(work func()) { work() }
+
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if err := reaper.New(lcm, st, runtime, reaper.Config{}).Tick(ctx); err != nil {
+		t.Fatalf("reaper tick: %v", err)
+	}
+	rec, ok, err := st.GetSession(ctx, created.ID)
+	if err != nil || !ok {
+		t.Fatalf("read session: ok=%v err=%v", ok, err)
+	}
+	if rec.IsTerminated || rec.Activity.State != domain.ActivityExited || !rec.RuntimeReleased() {
+		t.Fatalf("tracker intake worker after startup = terminated:%v activity:%s released:%q; want stopped and resumable",
+			rec.IsTerminated, rec.Activity.State, rec.Metadata.RuntimeReleasedLaunchID)
+	}
+	reservation, pending, err := st.GetPendingTrackerIntakeRecovery(ctx, created.ID)
+	if err != nil || !pending {
+		t.Fatalf("read pending claim: pending=%v err=%v", pending, err)
+	}
+	if !reservation.CapacityReleased || reservation.ReleasedRuntimeLaunchID != created.Metadata.RuntimeLaunchID {
+		t.Fatalf("released reservation = %+v, want exact stopped generation", reservation)
+	}
+	if runtime.created != 0 || runtime.destroyed != 0 || workspace.destroyed != 0 {
+		t.Fatalf("startup created=%d or destroyed runtime=%d workspace=%d", runtime.created, runtime.destroyed, workspace.destroyed)
+	}
+}

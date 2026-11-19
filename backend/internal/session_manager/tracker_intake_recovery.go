@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -78,6 +79,65 @@ func (m *Manager) scheduleTrackerIntakeClaimInspection(ctx context.Context) erro
 		})
 	}
 	return nil
+}
+
+// reconcileStartupTrackerIntakeTerminalClaims resolves exact terminal owners
+// before the startup gate opens for the runtime reaper. Only a reservation
+// matching the published row is eligible here: interrupted unpublished
+// launches and workspace cleanup remain isolated in the per-claim jobs.
+func (m *Manager) reconcileStartupTrackerIntakeTerminalClaims(ctx context.Context, recs []domain.SessionRecord) bool {
+	claims, err := m.store.ListPendingTrackerIntakeClaims(ctx)
+	if err != nil {
+		m.logger.Warn("reconcile: pending terminal tracker intake claims could not be listed", "error", err)
+		return false
+	}
+	byID := make(map[domain.SessionID]domain.SessionRecord, len(recs))
+	for _, rec := range recs {
+		byID[rec.ID] = rec
+	}
+	candidates := make([]domain.TrackerIntakePendingClaim, 0, len(claims))
+	for _, claim := range claims {
+		rec, found := byID[claim.SessionID]
+		if !found || rec.IsTerminated || rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID ||
+			domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat ||
+			!trackerIntakeRuntimeFenceProbeable(rec, claim.Recovery) ||
+			!trackerIntakeRuntimeReservationMatchesSession(rec, claim.Recovery) {
+			continue
+		}
+		candidates = append(candidates, claim)
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+
+	workers := m.reconcileWorkers
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+	jobs := make(chan domain.TrackerIntakePendingClaim)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for claim := range jobs {
+				recoveryCtx, cancel := context.WithTimeout(ctx, m.statusVerificationLimit)
+				err := m.reconcileTrackerIntakeClaim(recoveryCtx, claim)
+				cancel()
+				if err != nil {
+					m.logger.Warn("reconcile: pending terminal tracker intake owner remains fenced",
+						"sessionID", claim.SessionID, "projectID", claim.ProjectID, "error", err)
+					captureBackgroundFault(ctx, err, "reconcile", "tracker_intake_terminal")
+				}
+			}
+		}()
+	}
+	for _, claim := range candidates {
+		jobs <- claim
+	}
+	close(jobs)
+	wg.Wait()
+	return true
 }
 
 func (m *Manager) beginTrackerIntakeRecovery(id domain.SessionID) bool {
@@ -280,6 +340,14 @@ func trackerIntakeClaimDefersToSessionHealth(rec domain.SessionRecord, reservati
 		}
 		return reservation.DeliveryPossible && rec.Activity.State != domain.ActivityExited
 	}
+	// A matching terminal reservation is the only source that can prove the
+	// exact published generation alive or absent. Ordinary startup health skips
+	// pending terminals, so deferring here would let the boot reaper act on a
+	// stale activity row before the claim owner is settled.
+	if trackerIntakeRuntimeFenceProbeable(rec, reservation) &&
+		trackerIntakeRuntimeReservationMatchesSession(rec, reservation) {
+		return false
+	}
 	if reservation.RelaunchPublished && trackerIntakeRuntimeReservationMatchesSession(rec, reservation) {
 		return rec.Activity.State != domain.ActivityExited
 	}
@@ -369,6 +437,16 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim d
 	if len(alive) == 1 {
 		_, err = m.adoptTrackerIntakeRuntime(ctx, claim, alive[0])
 		return err
+	}
+	if found && !currentRec.IsTerminated && currentRec.Activity.State != domain.ActivityExited &&
+		domain.NormalizeSessionMode(currentRec.Mode) != domain.SessionModeChat &&
+		trackerIntakeRuntimeReservationMatchesSession(currentRec, current) {
+		// The exact published owner ended while AO was down. Record an intentional
+		// stop before releasing intake capacity so the boot reaper preserves the
+		// session and workspace as resumable instead of classifying a crash.
+		if err := m.recordTerminalStoppedAtStartup(ctx, currentRec); err != nil {
+			return fmt.Errorf("recover tracker intake %s: record stopped published runtime: %w", claim.SessionID, err)
+		}
 	}
 	// Every reserved candidate for this exact generation is absent. Persist the
 	// stopped-generation proof before workspace cleanup so the cleanup path does

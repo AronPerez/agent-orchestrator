@@ -5308,6 +5308,15 @@ func (m *Manager) ReconcileBackground(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return fmt.Errorf("reconcile: list sessions: %w", err)
 	}
+	if m.reconcileStartupTrackerIntakeTerminalClaims(ctx, recs) {
+		// Exact-generation recovery can publish an intentional terminal stop.
+		// Refresh the startup snapshot so the ordinary health pass and boot reaper
+		// see that stopped owner instead of the stale pre-recovery activity.
+		recs, err = m.store.ListAllSessions(ctx)
+		if err != nil {
+			return fmt.Errorf("reconcile: refresh sessions after tracker intake recovery: %w", err)
+		}
+	}
 	m.reconcileLivePass(ctx, recs)
 	for _, rec := range recs {
 		if !rec.IsTerminated {
