@@ -155,3 +155,23 @@ func TestLifecycleQuestionActionsAreRefusedOnADecidedCall(t *testing.T) {
 	_, err = fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOther, Note: "n"})
 	assertAPICode(t, err, "DECISION_NOT_A_QUESTION")
 }
+
+// Row: a retry arrives after the policy changed. The existing record is
+// returned (no second record), carrying the current policy's flag so the
+// session is told not to act.
+func TestLifecycleRetryAfterPolicyChangeIsFlagged(t *testing.T) {
+	fixture, ctx := onModeFixture(t)
+	first := decide(t, fixture, fixture.w1)
+	setShopAutonomy(t, fixture, domain.AutonomyConfig{})
+	retry := decide(t, fixture, fixture.w1)
+	if retry.ID != first.ID {
+		t.Fatalf("retry created a second record: %s and %s", first.ID, retry.ID)
+	}
+	if retry.Decided.OutsidePolicy != domain.DecisionOutsidePolicyNotOn {
+		t.Fatalf("retry not flagged: %+v", retry.Decided)
+	}
+	stored, err := fixture.service.Get(ctx, first.ID)
+	if err != nil || stored.Call.Decided.OutsidePolicy != "" {
+		t.Fatalf("the stored record was within policy when written and stays so: %+v, %v", stored.Call.Decided, err)
+	}
+}

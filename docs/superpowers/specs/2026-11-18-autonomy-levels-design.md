@@ -99,6 +99,7 @@ States: **Decided** (unconfirmed or confirmed carried out), **In progress** (ove
 | --- | --- | --- | --- | --- | --- |
 | 1 | Record before acting | new → Decided, unconfirmed | Owner (`ao decision decide`) | Kept even if outside policy (see 10). Malformed records (no undo note) are refused. | `TestDecideRecordsADecisionMadeForThePerson` |
 | 2 | Retry after a lost response | Decided → same record | Owner | An identical open record (same what, kind, undo) is returned; serialised per session | `TestLifecycleRetriedDecideReturnsTheSameRecord` |
+| 2a | Retry after the policy changed | Decided → same record | Owner | The existing record is returned with the current `outsidePolicy` flag in the reply, so the session is told not to act; the stored record stays as written | `TestLifecycleRetryAfterPolicyChangeIsFlagged` |
 | 3 | Crash between record and act, or act and confirm | Decided, unconfirmed (stays) | — | The owner finds it with `ao decision ls` ("Not confirmed carried out"), checks, then confirms or closes; the person sees it in `ao decision ls --decided` | `TestLifecycleCrashBeforeConfirmLeavesARecoverableRecord` |
 | 4 | Confirm carried out | Decided unconfirmed → confirmed | Owner only (`ao decision carried-out`); idempotent; also allowed after an overrule | Records that the action happened | `TestTheOwnerConfirmsADecisionWasCarriedOut` |
 | 5 | Not carried out after all | Decided unconfirmed → Done | Owner or person | Outcome "Not carried out: …" on the decided entry | `TestTheOwnerCanCloseADecisionItDidNotCarryOut` |

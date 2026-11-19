@@ -51,16 +51,6 @@ func (s *Service) Decide(ctx context.Context, actor Actor, input DecideInput) (d
 	if err := domain.ValidateDecisionDecided(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
-	// A session that retries after losing the response must not leave two
-	// records of one action, so an identical open record is returned as is.
-	unlock, err := s.mutationGate.acquire(ctx, "decide:"+string(session.ID))
-	if err != nil {
-		return domain.DecisionCall{}, err
-	}
-	defer unlock()
-	if existing, found, err := s.openIdenticalDecision(ctx, session.ID, payload); err != nil || found {
-		return existing, err
-	}
 	// The session has usually acted already, so a policy mismatch never
 	// loses the record: it is kept, flagged, and shown to the person.
 	switch {
@@ -69,6 +59,25 @@ func (s *Service) Decide(ctx context.Context, actor Actor, input DecideInput) (d
 	case origin.autonomy.IsReserved(payload.Kind):
 		payload.OutsidePolicy = domain.DecisionOutsidePolicyReserved
 	}
+	// A session that retries after losing the response must not leave two
+	// records of one action, so an identical open record is returned. The
+	// current policy still applies to the reply: if it no longer allows the
+	// decision, the reply carries the flag so the session is told not to
+	// act. The stored record is left as written.
+	unlock, err := s.mutationGate.acquire(ctx, "decide:"+string(session.ID))
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	defer unlock()
+	if existing, found, err := s.openIdenticalDecision(ctx, session.ID, payload); err != nil || found {
+		if found && existing.Decided.OutsidePolicy == "" && payload.OutsidePolicy != "" {
+			decided := *existing.Decided
+			decided.OutsidePolicy = payload.OutsidePolicy
+			existing.Decided = &decided
+		}
+		return existing, err
+	}
+
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return domain.DecisionCall{}, err
