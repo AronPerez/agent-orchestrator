@@ -345,9 +345,16 @@ func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryRese
 	reservation.WorkspacePath = strings.TrimSpace(reservation.WorkspacePath)
 	reservation.WorkspaceRepoPath = strings.TrimSpace(reservation.WorkspaceRepoPath)
 	reservation.RuntimeLaunchID = strings.TrimSpace(reservation.RuntimeLaunchID)
-	seen := make(map[string]struct{}, len(reservation.RuntimeHandleIDs))
-	handles := make([]string, 0, len(reservation.RuntimeHandleIDs))
-	for _, handle := range reservation.RuntimeHandleIDs {
+	reservation.ReleasedRuntimeLaunchID = strings.TrimSpace(reservation.ReleasedRuntimeLaunchID)
+	reservation.RuntimeHandleIDs = normalizeTrackerIntakeRuntimeHandles(reservation.RuntimeHandleIDs)
+	reservation.ReleasedRuntimeHandleIDs = normalizeTrackerIntakeRuntimeHandles(reservation.ReleasedRuntimeHandleIDs)
+	return reservation
+}
+
+func normalizeTrackerIntakeRuntimeHandles(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	handles := make([]string, 0, len(values))
+	for _, handle := range values {
 		handle = strings.TrimSpace(handle)
 		if handle == "" {
 			continue
@@ -358,8 +365,7 @@ func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryRese
 		seen[handle] = struct{}{}
 		handles = append(handles, handle)
 	}
-	reservation.RuntimeHandleIDs = handles
-	return reservation
+	return handles
 }
 
 // ReleaseTrackerIntakeSession removes id's pending claim after lifecycle code

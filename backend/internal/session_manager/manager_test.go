@@ -3573,6 +3573,83 @@ func TestReconcileTrackerIntakeClaimsStopsExitedUnpublishedHostBeforeCleanup(t *
 	}
 }
 
+func TestReconcileTrackerIntakeClaimsTrustsConclusiveTerminatedHandleTeardown(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-owner-with-teardown-proof")
+	issueID := domain.IssueID("github:acme/mer#10906")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10906"
+	launchID := "launch-10906"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-owner-with-teardown-proof", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID, ReleasedRuntimeHandleIDs: []string{handleID},
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		IsTerminated: true,
+		Metadata:     domain.SessionMetadata{RuntimeHandleID: handleID, RuntimeLaunchID: launchID},
+	}
+	// A destroyed tmux server is unavailable to a later exact probe. The
+	// durable per-handle teardown proof must let workspace cleanup continue
+	// without treating that unavailable backend as unresolved ownership.
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 0 || rt.destroyed != 0 {
+		t.Fatalf("runtime was revalidated after conclusive teardown: probes=%v destroys=%d", rt.fencedRefs, rt.destroyed)
+	}
+	if ws.destroyed != 1 {
+		t.Fatalf("workspace cleanup = %d, want 1", ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsRetiresOnlyUnreleasedRuntimeHandles(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-owner-with-partial-teardown-proof")
+	issueID := domain.IssueID("github:acme/mer#10907")
+	key := "mer\x00" + string(issueID)
+	releasedHandleID := "direct-10907"
+	unreleasedHandleID := "tmux-10907"
+	launchID := "launch-10907"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-owner-with-partial-teardown-proof", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{releasedHandleID, unreleasedHandleID}, DeliveryPossible: true,
+		CapacityReleased: true, ReleasedRuntimeLaunchID: launchID,
+		ReleasedRuntimeHandleIDs: []string{releasedHandleID},
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		IsTerminated: true,
+		Metadata:     domain.SessionMetadata{RuntimeHandleID: releasedHandleID, RuntimeLaunchID: launchID},
+	}
+	rt.fencedResults = map[string]ports.FencedProbeResult{
+		releasedHandleID:   {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+		unreleasedHandleID: {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited},
+	}
+	rt.aliveByHandle = map[string]bool{unreleasedHandleID: true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || rt.fencedRefs[0].Handle.ID != unreleasedHandleID {
+		t.Fatalf("runtime probes = %v, want only %q", rt.fencedRefs, unreleasedHandleID)
+	}
+	if !reflect.DeepEqual(rt.destroyedIDs, []string{unreleasedHandleID}) || ws.destroyed != 1 {
+		t.Fatalf("cleanup runtimes=%v workspace=%d", rt.destroyedIDs, ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 func TestReconcileTrackerIntakeClaimsPreservesReplacementDuringLegacyTeardown(t *testing.T) {
 	m, st, rt, ws := newManager()
 	id := domain.SessionID("released-owner-with-replacement")
@@ -5766,6 +5843,9 @@ func TestKillTrackerIntakeReleasesCapacityWhileDirtyWorkspaceRemainsFenced(t *te
 	reservation := st.trackerIntakeRecovery[id]
 	if !reservation.CapacityReleased || st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
 		t.Fatalf("post-kill claim = %+v pending=%q handled=%q", reservation, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if !reflect.DeepEqual(reservation.ReleasedRuntimeHandleIDs, []string{rec.Metadata.RuntimeHandleID}) {
+		t.Fatalf("released runtime handles = %v, want [%s]", reservation.ReleasedRuntimeHandleIDs, rec.Metadata.RuntimeHandleID)
 	}
 }
 

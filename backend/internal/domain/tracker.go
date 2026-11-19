@@ -226,11 +226,13 @@ type TrackerIntakeRecoveryReservation struct {
 	// prevents replay, while this flag lets unrelated issues use the freed
 	// project slot during workspace cleanup. A later generation counts again.
 	CapacityReleased bool `json:"capacityReleased,omitempty"`
-	// ReleasedRuntimeLaunchID and ReleasedControllerGeneration identify the
-	// exact owner generation proved stopped when CapacityReleased was recorded.
-	ReleasedRuntimeLaunchID      string `json:"releasedRuntimeLaunchId,omitempty"`
-	ReleasedControllerGeneration string `json:"releasedControllerGeneration,omitempty"`
-	CleanupConfirmed             bool   `json:"cleanupConfirmed,omitempty"`
+	// ReleasedRuntimeLaunchID, ReleasedRuntimeHandleIDs, and
+	// ReleasedControllerGeneration identify the exact owner generation and
+	// terminal handles proved stopped when CapacityReleased was recorded.
+	ReleasedRuntimeLaunchID      string   `json:"releasedRuntimeLaunchId,omitempty"`
+	ReleasedRuntimeHandleIDs     []string `json:"releasedRuntimeHandleIds,omitempty"`
+	ReleasedControllerGeneration string   `json:"releasedControllerGeneration,omitempty"`
+	CleanupConfirmed             bool     `json:"cleanupConfirmed,omitempty"`
 }
 
 // ReleasesCapacityFor reports whether the stopped-generation proof still

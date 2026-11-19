@@ -458,8 +458,29 @@ func trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(
 	return reservation.CapacityReleased &&
 		domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat &&
 		strings.TrimSpace(reservation.RuntimeLaunchID) != "" &&
-		len(uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)) != 0 &&
+		len(trackerIntakeUnreleasedRuntimeHandles(reservation)) != 0 &&
 		(rec.IsTerminated || !trackerIntakeRuntimeReservationMatchesSession(rec, reservation))
+}
+
+func trackerIntakeUnreleasedRuntimeHandles(reservation domain.TrackerIntakeRecoveryReservation) []string {
+	handles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
+	remaining := make([]string, 0, len(handles))
+	for _, handleID := range handles {
+		if !trackerIntakeRuntimeHandleReleased(reservation, handleID, reservation.RuntimeLaunchID) {
+			remaining = append(remaining, handleID)
+		}
+	}
+	return remaining
+}
+
+func trackerIntakeRuntimeHandleReleased(
+	reservation domain.TrackerIntakeRecoveryReservation,
+	handleID, launchID string,
+) bool {
+	return reservation.CapacityReleased &&
+		strings.TrimSpace(launchID) != "" &&
+		strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) == strings.TrimSpace(launchID) &&
+		trackerIntakeHandleReserved(reservation.ReleasedRuntimeHandleIDs, handleID)
 }
 
 func (m *Manager) retireReleasedUnpublishedTrackerIntakeRuntime(
@@ -483,9 +504,23 @@ func (m *Manager) retireReleasedUnpublishedTrackerIntakeRuntime(
 		owner.Metadata.RuntimeReleasedLaunchID = ""
 		owner.Metadata.AgentSessionID = ""
 	}
-	if err := m.stopTrackerIntakeRuntimeOwners(ctx, owner, reservation); err != nil {
+	if trackerIntakeRuntimeHandleReleased(reservation, rowHandleID, rowLaunchID) {
+		// The row handle was conclusively destroyed before this cleanup retry.
+		// Keep any other reserved candidates probeable without asking an absent
+		// backend to rediscover the already-settled row owner.
+		owner.Metadata.RuntimeHandleID = ""
+		owner.Metadata.RuntimeLaunchID = ""
+		owner.Metadata.RuntimeReleasedLaunchID = ""
+	}
+	retiring := reservation
+	retiring.RuntimeHandleIDs = trackerIntakeUnreleasedRuntimeHandles(reservation)
+	if err := m.stopTrackerIntakeRuntimeOwners(ctx, owner, retiring); err != nil {
 		return reservation, err
 	}
+	reservation.ReleasedRuntimeHandleIDs = uniqueTrackerIntakeHandles(append(
+		append([]string(nil), reservation.ReleasedRuntimeHandleIDs...),
+		retiring.RuntimeHandleIDs...,
+	))
 	reservation.RuntimeLaunchID = ""
 	reservation.RuntimeHandleIDs = nil
 	if err := m.store.ReserveTrackerIntakeRecovery(ctx, rec.ID, reservation); err != nil {

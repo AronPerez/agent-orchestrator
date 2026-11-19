@@ -383,11 +383,14 @@ func TestTrackerIntakeRuntimeReservationAtomicallyCheckpointsRecoveryIdentity(t 
 		t.Fatal(err)
 	}
 	reservation := domain.TrackerIntakeRecoveryReservation{
-		Branch:            "ao/demo-12/root",
-		WorkspacePath:     "/tmp/demo-12",
-		WorkspaceRepoPath: "/tmp/demo-12",
-		RuntimeLaunchID:   "launch-12",
-		RuntimeHandleIDs:  []string{"ptyhost-v1:demo-1", "demo-1"},
+		Branch:                   "ao/demo-12/root",
+		WorkspacePath:            "/tmp/demo-12",
+		WorkspaceRepoPath:        "/tmp/demo-12",
+		RuntimeLaunchID:          "launch-12",
+		RuntimeHandleIDs:         []string{"ptyhost-v1:demo-1", "demo-1"},
+		CapacityReleased:         true,
+		ReleasedRuntimeLaunchID:  " launch-12 ",
+		ReleasedRuntimeHandleIDs: []string{" ptyhost-v1:demo-1 ", "ptyhost-v1:demo-1", "demo-1"},
 	}
 	if err := store.ReserveTrackerIntakeRecovery(ctx, created.ID, reservation); err != nil {
 		t.Fatalf("ReserveTrackerIntakeRecovery(): %v", err)
@@ -400,6 +403,10 @@ func TestTrackerIntakeRuntimeReservationAtomicallyCheckpointsRecoveryIdentity(t 
 	if got.RuntimeLaunchID != reservation.RuntimeLaunchID || got.WorkspacePath != reservation.WorkspacePath ||
 		fmt.Sprint(got.RuntimeHandleIDs) != fmt.Sprint(reservation.RuntimeHandleIDs) {
 		t.Fatalf("runtime reservation = %+v, want %+v", got, reservation)
+	}
+	if got.ReleasedRuntimeLaunchID != "launch-12" ||
+		fmt.Sprint(got.ReleasedRuntimeHandleIDs) != fmt.Sprint(reservation.RuntimeHandleIDs) {
+		t.Fatalf("released runtime proof = %+v, want launch-12 and handles %v", got, reservation.RuntimeHandleIDs)
 	}
 }
 

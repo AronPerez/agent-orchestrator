@@ -2909,6 +2909,7 @@ func (m *Manager) trackerIntakeCapacityReleaseProof(
 	proof := owners
 	proof.CapacityReleased = true
 	proof.ReleasedRuntimeLaunchID = ""
+	proof.ReleasedRuntimeHandleIDs = nil
 	proof.ReleasedControllerGeneration = ""
 	if found {
 		proof.ReleasedRuntimeLaunchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
@@ -2919,6 +2920,10 @@ func (m *Manager) trackerIntakeCapacityReleaseProof(
 			proof.ReleasedControllerGeneration = reservedGeneration
 		}
 	}
+	if stoppedRuntimeHandleID != "" && stoppedRuntimeLaunchID != "" {
+		proof.ReleasedRuntimeLaunchID = stoppedRuntimeLaunchID
+		proof.ReleasedRuntimeHandleIDs = []string{stoppedRuntimeHandleID}
+	}
 	return proof, nil
 }
 
@@ -2927,13 +2932,15 @@ func (m *Manager) recordTrackerIntakeStoppedOwners(
 	rec domain.SessionRecord,
 	reservation domain.TrackerIntakeRecoveryReservation,
 ) (domain.TrackerIntakeRecoveryReservation, error) {
+	rowHandleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
 	reservation.CapacityReleased = true
 	reservation.ReleasedRuntimeLaunchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	reservation.ReleasedRuntimeHandleIDs = uniqueTrackerIntakeHandles([]string{rowHandleID})
 	reservation.ReleasedControllerGeneration = strings.TrimSpace(rec.Metadata.ControllerGeneration)
 	reservation.RuntimeLaunchID = reservation.ReleasedRuntimeLaunchID
 	reservation.RuntimeHandleIDs = nil
-	if handleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID); handleID != "" {
-		reservation.RuntimeHandleIDs = []string{handleID}
+	if rowHandleID != "" {
+		reservation.RuntimeHandleIDs = []string{rowHandleID}
 	}
 	if reservation.ControllerPossible {
 		reservation.ControllerGeneration = reservation.ReleasedControllerGeneration
