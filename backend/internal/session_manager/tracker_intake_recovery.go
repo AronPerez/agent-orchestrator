@@ -748,27 +748,31 @@ func (m *Manager) ensureTrackerIntakePriorRuntimeStopped(
 	}
 
 	reservedLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
-	reservedReleased := reservation.CapacityReleased && reservedLaunchID != "" &&
+	reservedRuntimeReleased := reservation.CapacityReleased && reservedLaunchID != "" &&
 		strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) == reservedLaunchID
+	reservedControllerGeneration := strings.TrimSpace(reservation.ControllerGeneration)
+	reservedControllerReleased := reservation.CapacityReleased && reservedControllerGeneration != "" &&
+		strings.TrimSpace(reservation.ReleasedControllerGeneration) == reservedControllerGeneration
 	reservedHandles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
-	if len(reservedHandles) == 0 && reservedLaunchID != "" && !reservedReleased {
+	if len(reservedHandles) == 0 && reservedLaunchID != "" && !reservedRuntimeReleased {
 		return fmt.Errorf("pending tracker intake runtime has no handle fence: %w", ports.ErrRuntimeProbeInconclusive)
 	}
 	for _, handleID := range reservedHandles {
-		if err := add(handleID, reservedLaunchID, reservedReleased); err != nil {
+		if err := add(handleID, reservedLaunchID, reservedRuntimeReleased); err != nil {
 			return err
 		}
 	}
 
 	rowHandleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
 	rowLaunchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
-	rowReleased := rec.RuntimeReleased() || (reservedReleased && rowLaunchID == reservedLaunchID)
+	rowReleased := rec.RuntimeReleased() || (reservedRuntimeReleased && rowLaunchID == reservedLaunchID)
 	if rowHandleID != "" || rowLaunchID != "" {
 		if err := add(rowHandleID, rowLaunchID, rowReleased); err != nil {
 			return err
 		}
 	}
-	if len(candidates) == 0 && (reservation.DeliveryPossible || reservation.RelaunchPublished) && !reservedReleased {
+	if len(candidates) == 0 && (reservation.DeliveryPossible || reservation.RelaunchPublished) &&
+		!reservedRuntimeReleased && !reservedControllerReleased {
 		return fmt.Errorf("pending tracker intake runtime has no probeable owner: %w", ports.ErrRuntimeProbeInconclusive)
 	}
 

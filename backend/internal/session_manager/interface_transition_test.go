@@ -2623,6 +2623,13 @@ func TestInterfaceTransitionChatToTUIRejectsReservedIDWhenHistoryIsMissing(t *te
 
 func TestInterfaceTransitionChatToTUIInterruptsThenStopsBeforeStarting(t *testing.T) {
 	manager, store, runtime, chat, log := newTransitionManager(t, domain.SessionModeChat)
+	rec := store.sessions["session-1"]
+	rec.IssueID = "github:acme/repo#123"
+	store.sessions[rec.ID] = rec
+	store.trackerIntakePending["proj\x00"+string(rec.IssueID)] = rec.ID
+	store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		ControllerPossible: true, ControllerGeneration: rec.Metadata.ControllerGeneration, DeliveryPossible: true,
+	}
 	transition, err := manager.StartInterfaceTransition(context.Background(), "session-1", domain.SessionModeTUI, domain.SessionInterfaceTransitionInterrupt, domain.SessionInterfaceTransitionHistoryStrict)
 	if err != nil {
 		t.Fatal(err)
@@ -2634,7 +2641,7 @@ func TestInterfaceTransitionChatToTUIInterruptsThenStopsBeforeStarting(t *testin
 	if chat.preparedPolicy != domain.SessionInterfaceTransitionInterrupt {
 		t.Fatalf("prepared policy = %s", chat.preparedPolicy)
 	}
-	rec := store.sessions["session-1"]
+	rec = store.sessions["session-1"]
 	if rec.Mode != domain.SessionModeTUI {
 		t.Fatalf("mode = %s, want tui", rec.Mode)
 	}
@@ -2654,6 +2661,11 @@ func TestInterfaceTransitionChatToTUIInterruptsThenStopsBeforeStarting(t *testin
 	}
 	if runtime.created != 1 {
 		t.Fatalf("terminal runtime created %d times, want 1", runtime.created)
+	}
+	reservation := store.trackerIntakeRecovery[rec.ID]
+	if !reservation.DeliveryPossible || reservation.RuntimeLaunchID != rec.Metadata.RuntimeLaunchID ||
+		reservation.ControllerPossible || reservation.CapacityReleased {
+		t.Fatalf("tracker intake ownership after Chat-to-TUI switch = %+v, want fenced terminal generation", reservation)
 	}
 	if got := fmt.Sprint(*log); got != "[prepare:chat:interrupt stop:chat start:tui]" {
 		t.Fatalf("controller order = %s", got)

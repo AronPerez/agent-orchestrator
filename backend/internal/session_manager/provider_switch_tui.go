@@ -149,6 +149,9 @@ func (m *Manager) SwitchTUIProvider(ctx context.Context, id domain.SessionID, re
 		}
 		return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalUnavailable, Detail: what + ": " + cause.Error(), Cause: cause}
 	}
+	if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+		return restoreSource(err, "could not record stopped tracker intake ownership")
+	}
 
 	targetRecord := source
 	targetRecord.Harness = target

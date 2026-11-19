@@ -590,6 +590,10 @@ func (m *Manager) runInterfaceTransition(
 		return
 	}
 	sourceStopped = true
+	if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+		fail("TRACKER_INTAKE_FENCE_FAILED", fmt.Errorf("record stopped source ownership: %w", err))
+		return
+	}
 	if err := m.moveInterfaceTransition(transition.ID, domain.SessionInterfaceTransitionSourceStopped, "", ""); err != nil {
 		fail("TRANSITION_STATE_FAILED", err)
 		return
