@@ -157,3 +157,25 @@ func TestOverruleOnlyAppliesToDecidedCallsAndAnswerNotToThem(t *testing.T) {
 	_, err = fixture.service.Answer(ctx, person, decided.ID, AnswerInput{Choice: domain.DecisionChoiceOther, Note: "n"})
 	assertAPICode(t, err, "DECISION_NOT_A_QUESTION")
 }
+
+// After a restart or compaction a session runs `ao decision ls` to find what
+// it owes, so its decided calls must be in its own list, overruled or not.
+func TestADecidedCallIsInItsSessionsOwnList(t *testing.T) {
+	fixture := newDecisionService(t)
+	setShopAutonomy(t, fixture, domain.AutonomyConfig{Mode: domain.AutonomyOn})
+	ctx := context.Background()
+	call, err := fixture.service.Decide(ctx, Actor{Session: fixture.w1}, validDecideInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.Overrule(ctx, Actor{Surface: domain.RequestSurfaceDesktop}, call.ID, "Keep both open."); err != nil {
+		t.Fatal(err)
+	}
+	mine, err := fixture.service.List(ctx, Actor{Session: fixture.w1}, ScopeMine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mine) != 1 || mine[0].ID != call.ID || mine[0].State != domain.DecisionStateInProgress || mine[0].Raised.StreamName != "Checkout epic" {
+		t.Fatalf("mine = %+v", mine)
+	}
+}

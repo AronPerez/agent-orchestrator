@@ -53,7 +53,7 @@ SELECT * FROM decision_calls WHERE call_id = ?;
 SELECT calls.*
 FROM decision_calls AS calls
 JOIN decision_entries AS raised
-  ON raised.call_id = calls.call_id AND raised.kind = 'raised'
+  ON raised.call_id = calls.call_id AND raised.kind IN ('raised', 'decided')
 WHERE calls.origin = sqlc.arg(origin)
   AND (
     calls.owner_session_id = sqlc.arg(session_id)
@@ -96,7 +96,7 @@ WHERE current.stream_session_id <> ''
       SELECT latest.call_id
       FROM decision_calls AS latest
       JOIN decision_entries AS raised
-        ON raised.call_id = latest.call_id AND raised.kind = 'raised'
+        ON raised.call_id = latest.call_id AND raised.kind IN ('raised', 'decided')
       WHERE latest.origin = current.origin
         AND latest.stream_session_id = current.stream_session_id
       ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC

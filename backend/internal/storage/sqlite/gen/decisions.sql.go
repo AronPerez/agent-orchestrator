@@ -148,7 +148,7 @@ const listDecisionCallsForSession = `-- name: ListDecisionCallsForSession :many
 SELECT calls.call_id, calls.origin, calls.project_id, calls.stream_session_id, calls.stream_name, calls.owner_session_id, calls.state, calls.delivery, calls.retired, calls.raised_at, calls.last_wall, calls.last_counter, calls.body, calls.search_text
 FROM decision_calls AS calls
 JOIN decision_entries AS raised
-  ON raised.call_id = calls.call_id AND raised.kind = 'raised'
+  ON raised.call_id = calls.call_id AND raised.kind IN ('raised', 'decided')
 WHERE calls.origin = ?1
   AND (
     calls.owner_session_id = ?2
@@ -309,7 +309,7 @@ WHERE current.stream_session_id <> ''
       SELECT latest.call_id
       FROM decision_calls AS latest
       JOIN decision_entries AS raised
-        ON raised.call_id = latest.call_id AND raised.kind = 'raised'
+        ON raised.call_id = latest.call_id AND raised.kind IN ('raised', 'decided')
       WHERE latest.origin = current.origin
         AND latest.stream_session_id = current.stream_session_id
       ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
