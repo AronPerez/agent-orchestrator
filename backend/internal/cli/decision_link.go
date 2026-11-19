@@ -64,7 +64,7 @@ type decisionSyncAPIResponse struct {
 
 // sealedPasswordMessage explains why --host cannot link a machine whose saved
 // password only the desktop app can unseal.
-const sealedPasswordMessage = "That machine's password is stored by the desktop app. Turn on Sync decisions for it in Settings › Remote hosts, or give its address with --password-stdin."
+const sealedPasswordMessage = "That machine's password is stored by the desktop app. Turn on Sync decisions for it in Settings › Remote hosts, or give its address with --password-stdin"
 
 // refuseDecisionLinkRemote keeps link and sync on this computer's daemon: it
 // is the daemon that holds the links and talks to the other machines.
