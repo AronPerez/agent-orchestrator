@@ -696,14 +696,14 @@ INSERT INTO conversation_turns (
 -- name: AdoptProviderConversationTurn :exec
 INSERT OR IGNORE INTO conversation_turns (
     id, conversation_id, handled_by_session_id, provider_turn_id,
-    controller_generation, state, requested_at, started_at
-) VALUES (?, ?, ?, ?, ?, 'running', ?, ?);
+    controller_generation, state, requested_at, started_at, provider_delivery_state
+) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, 'accepted');
 
 -- name: AdoptReviewProviderConversationTurn :exec
 INSERT OR IGNORE INTO conversation_turns (
     id, conversation_id, handled_by_session_id, handled_by_review_id,
-    provider_turn_id, controller_generation, state, requested_at, started_at
-) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?);
+    provider_turn_id, controller_generation, state, requested_at, started_at, provider_delivery_state
+) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, 'accepted');
 
 -- Correlating a provider notification back to its turn happens on every streamed
 -- event, so it is a keyed lookup rather than a scan.
@@ -721,6 +721,21 @@ WHERE id = ?;
 UPDATE conversation_turns
 SET state = 'running', started_at = COALESCE(started_at, ?)
 WHERE id = ?;
+
+-- name: MarkConversationTurnProviderDeliveryAttempted :execrows
+UPDATE conversation_turns
+SET provider_delivery_state = 'attempted'
+WHERE id = ? AND provider_delivery_state = 'none';
+
+-- name: MarkConversationTurnProviderDeliveryAccepted :execrows
+UPDATE conversation_turns
+SET provider_delivery_state = 'accepted'
+WHERE id = ?;
+
+-- name: MarkConversationTurnProviderDeliveryAcceptedByProviderID :execrows
+UPDATE conversation_turns
+SET provider_delivery_state = 'accepted'
+WHERE conversation_id = ? AND provider_turn_id = ? AND provider_turn_id <> '';
 
 -- name: SettleConversationTurn :exec
 UPDATE conversation_turns
@@ -1229,6 +1244,17 @@ WHERE id = sqlc.arg(id)
 UPDATE conversation_turns
 SET provider_input_text = ?
 WHERE id = ? AND state IN ('queued', 'running', 'completed') AND provider_input_text = '';
+
+-- Reopen only a turn that durably failed before crossing the provider boundary.
+-- Prepared input and ids are cleared only while the durable boundary is none.
+-- name: ReopenUndispatchedConversationTurn :execrows
+UPDATE conversation_turns
+SET state = 'queued', error_message = '', failure_code = '',
+    provider_turn_id = '', provider_input_text = '',
+    started_at = NULL, completed_at = NULL, usage_limit_resets_at = NULL
+WHERE id = ?
+  AND state IN ('failed', 'cancelled')
+  AND provider_delivery_state = 'none';
 
 -- Stopping the agent stops the queue with it: a brake that starts new work
 -- instead of ending it would be the wrong shape for the button the user pressed.

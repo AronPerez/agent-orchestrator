@@ -5,6 +5,7 @@ import { FleetPage } from "./FleetPage";
 
 const { fleetProps, navigateMock } = vi.hoisted(() => ({
 	fleetProps: { current: undefined as undefined | {
+		localHostId?: string;
 		localWorkspaces: readonly WorkspaceSummary[];
 		remoteWorkspaces?: readonly WorkspaceSummary[];
 		remoteHosts?: readonly { hostId: string }[];
@@ -27,6 +28,8 @@ const remoteWorkspaces = [{ id: "remote-project", name: "Remote", path: "/remote
 vi.mock("../hooks/useWorkspaceQuery", () => ({
 	useWorkspaceQuery: () => ({ data: localWorkspaces, isError: false }),
 }));
+
+vi.mock("../hooks/useLocalHostId", () => ({ useLocalHostId: () => "h_local" }));
 
 vi.mock("../lib/shell-context", () => ({
 	useShellMaybe: () => ({
@@ -57,6 +60,7 @@ describe("FleetPage", () => {
 
 		expect(screen.getByText("Fleet")).toBeInTheDocument();
 		expect(fleetProps.current?.localWorkspaces).toEqual(localWorkspaces);
+		expect(fleetProps.current?.localHostId).toBe("h_local");
 		expect(fleetProps.current?.remoteWorkspaces).toEqual(remoteWorkspaces);
 		expect(fleetProps.current?.remoteHosts).toEqual([expect.objectContaining({ hostId: "build-box" })]);
 		expect(fleetProps.current).toMatchObject({

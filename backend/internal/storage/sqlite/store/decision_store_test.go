@@ -139,6 +139,33 @@ func TestAppendDecisionEntryRefusesAnIncompleteEntry(t *testing.T) {
 	}
 }
 
+func TestAppendDecisionEntriesRollsBackWhenTheSecondEntryFails(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_000_000).UTC()
+	appendDecision(t, store, decisionRaised("dent_old", "h_a", "dec_old", "w-1", "", "", at), at)
+
+	withdrawal := domain.DecisionEntry{
+		ID: "dent_old", Origin: "h_a", CallID: "dec_old", Kind: domain.DecisionKindWithdrawn,
+		Payload: mustDecisionJSON(struct{}{}), WrittenAt: at.Add(time.Second),
+		AuthorKind: domain.DecisionAuthorSession, AuthorSession: "w-1",
+	}
+	_, _, err := store.AppendDecisionEntries(ctx, []domain.DecisionEntry{
+		decisionRaised("dent_new", "h_a", "dec_new", "w-1", "", "", at.Add(time.Second)),
+		withdrawal,
+	}, at.Add(time.Second))
+	if err == nil {
+		t.Fatal("batch append succeeded despite the duplicate second entry id")
+	}
+	if _, found, getErr := store.GetDecisionCall(ctx, "dec_new"); getErr != nil || found {
+		t.Fatalf("replacement call after rollback: found=%v err=%v", found, getErr)
+	}
+	old, found, getErr := store.GetDecisionCall(ctx, "dec_old")
+	if getErr != nil || !found || old.State != domain.DecisionStateNeedsYou {
+		t.Fatalf("original call after rollback: call=%+v found=%v err=%v", old, found, getErr)
+	}
+}
+
 func TestDecisionCallLists(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -214,6 +241,10 @@ func TestDecisionStreamsUseLedgerOrderWhenTheClockMovesBackward(t *testing.T) {
 	second, _ := appendDecision(t, store, decisionRaised("dent_2", "h_a", "dec_2", "w-1", "epic", "Checkout epic", at.Add(-time.Hour)), at.Add(-time.Hour))
 	if domain.CompareDecisionEntries(first, second) >= 0 {
 		t.Fatalf("ledger order first=%+v second=%+v, want second later", first.Stamp, second.Stamp)
+	}
+	calls, err := store.ListDecisionCallsForSession(ctx, "h_a", "w-1", 50)
+	if err != nil || decisionIDs(calls) != "dec_2,dec_1" {
+		t.Fatalf("owner calls=%q err=%v, want ledger-newest first", decisionIDs(calls), err)
 	}
 
 	streams, err := store.ListDecisionStreams(ctx)

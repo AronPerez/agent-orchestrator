@@ -15,66 +15,102 @@ import (
 // AppendDecisionEntry assigns ordering, appends one immutable entry and
 // recomputes its call's read model in one transaction.
 func (s *Store) AppendDecisionEntry(ctx context.Context, entry domain.DecisionEntry, now time.Time) (domain.DecisionEntry, domain.DecisionCall, error) {
-	if entry.ID == "" || entry.Origin == "" || entry.CallID == "" || entry.Kind == "" || entry.AuthorKind == "" {
-		return domain.DecisionEntry{}, domain.DecisionCall{}, fmt.Errorf("%w: id, origin, call id, kind and author kind are required", domain.ErrDecisionEntryInvalid)
+	stored, calls, err := s.appendDecisionEntries(ctx, []domain.DecisionEntry{entry}, now)
+	if err != nil {
+		return domain.DecisionEntry{}, domain.DecisionCall{}, fmt.Errorf("append decision entry %s: %w", entry.ID, err)
+	}
+	return stored[0], calls[0], nil
+}
+
+// AppendDecisionEntries assigns ordering and appends entries atomically in the
+// supplied order, recomputing every affected call's read model.
+func (s *Store) AppendDecisionEntries(ctx context.Context, entries []domain.DecisionEntry, now time.Time) ([]domain.DecisionEntry, []domain.DecisionCall, error) {
+	stored, calls, err := s.appendDecisionEntries(ctx, entries, now)
+	if err != nil {
+		return nil, nil, fmt.Errorf("append decision entries: %w", err)
+	}
+	return stored, calls, nil
+}
+
+func (s *Store) appendDecisionEntries(ctx context.Context, entries []domain.DecisionEntry, now time.Time) ([]domain.DecisionEntry, []domain.DecisionCall, error) {
+	if len(entries) == 0 {
+		return nil, nil, fmt.Errorf("%w: at least one entry is required", domain.ErrDecisionEntryInvalid)
+	}
+	for _, entry := range entries {
+		if entry.ID == "" || entry.Origin == "" || entry.CallID == "" || entry.Kind == "" || entry.AuthorKind == "" {
+			return nil, nil, fmt.Errorf("%w: id, origin, call id, kind and author kind are required", domain.ErrDecisionEntryInvalid)
+		}
 	}
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	var stored domain.DecisionEntry
-	var call domain.DecisionCall
-	err := s.inTx(ctx, "append decision entry", func(q *gen.Queries) error {
-		sequence, err := q.NextDecisionOriginSequence(ctx, entry.Origin)
-		if err != nil {
-			return err
+	stored := make([]domain.DecisionEntry, len(entries))
+	calls := make([]domain.DecisionCall, len(entries))
+	err := s.inTx(ctx, "append decision entries", func(q *gen.Queries) error {
+		for i, entry := range entries {
+			var err error
+			stored[i], calls[i], err = appendDecisionEntry(ctx, q, entry, now)
+			if err != nil {
+				return err
+			}
 		}
-		newest := domain.DecisionStamp{}
-		stamp, err := q.NewestDecisionStamp(ctx)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if err == nil {
-			newest = domain.DecisionStamp{WallMS: stamp.StampWall, Counter: stamp.StampCounter}
-		}
-		entry.OriginSeq = sequence
-		entry.Stamp = newest.Next(now.UnixMilli())
-		row, err := q.CreateDecisionEntry(ctx, gen.CreateDecisionEntryParams{
-			ID: entry.ID, Origin: entry.Origin, OriginSeq: entry.OriginSeq,
-			StampWall: entry.Stamp.WallMS, StampCounter: entry.Stamp.Counter,
-			CallID: entry.CallID, Kind: string(entry.Kind), Payload: string(entry.Payload),
-			WrittenAt: entry.WrittenAt, AuthorKind: string(entry.AuthorKind),
-			AuthorSurface: string(entry.AuthorSurface), AuthorSession: string(entry.AuthorSession),
-		})
-		if err != nil {
-			return err
-		}
-		stored = decisionEntryFromGen(row)
-		rows, err := q.ListDecisionEntries(ctx, entry.CallID)
-		if err != nil {
-			return err
-		}
-		entries := decisionEntriesFromGen(rows)
-		var ok bool
-		call, ok = domain.ReduceDecisionCall(entries)
-		if !ok {
-			return nil
-		}
-		body, err := json.Marshal(call)
-		if err != nil {
-			return fmt.Errorf("encode decision call: %w", err)
-		}
-		_, err = q.UpsertDecisionCall(ctx, gen.UpsertDecisionCallParams{
-			CallID: call.ID, Origin: call.Origin, ProjectID: string(call.Raised.ProjectID),
-			StreamSessionID: string(call.Raised.StreamSessionID), StreamName: call.Raised.StreamName,
-			OwnerSessionID: string(call.Raised.OwnerSessionID), State: string(call.State),
-			Delivery: string(call.Delivery), Retired: boolInt(call.Retired), RaisedAt: call.RaisedAt,
-			LastWall: call.LastStamp.WallMS, LastCounter: call.LastStamp.Counter,
-			Body: string(body), SearchText: call.SearchText(),
-		})
-		return err
+		return nil
 	})
 	if err != nil {
-		return domain.DecisionEntry{}, domain.DecisionCall{}, fmt.Errorf("append decision entry %s: %w", entry.ID, err)
+		return nil, nil, err
+	}
+	return stored, calls, nil
+}
+
+func appendDecisionEntry(ctx context.Context, q *gen.Queries, entry domain.DecisionEntry, now time.Time) (domain.DecisionEntry, domain.DecisionCall, error) {
+	sequence, err := q.NextDecisionOriginSequence(ctx, entry.Origin)
+	if err != nil {
+		return domain.DecisionEntry{}, domain.DecisionCall{}, err
+	}
+	newest := domain.DecisionStamp{}
+	stamp, err := q.NewestDecisionStamp(ctx)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.DecisionEntry{}, domain.DecisionCall{}, err
+	}
+	if err == nil {
+		newest = domain.DecisionStamp{WallMS: stamp.StampWall, Counter: stamp.StampCounter}
+	}
+	entry.OriginSeq = sequence
+	entry.Stamp = newest.Next(now.UnixMilli())
+	row, err := q.CreateDecisionEntry(ctx, gen.CreateDecisionEntryParams{
+		ID: entry.ID, Origin: entry.Origin, OriginSeq: entry.OriginSeq,
+		StampWall: entry.Stamp.WallMS, StampCounter: entry.Stamp.Counter,
+		CallID: entry.CallID, Kind: string(entry.Kind), Payload: string(entry.Payload),
+		WrittenAt: entry.WrittenAt, AuthorKind: string(entry.AuthorKind),
+		AuthorSurface: string(entry.AuthorSurface), AuthorSession: string(entry.AuthorSession),
+	})
+	if err != nil {
+		return domain.DecisionEntry{}, domain.DecisionCall{}, err
+	}
+	stored := decisionEntryFromGen(row)
+	rows, err := q.ListDecisionEntries(ctx, entry.CallID)
+	if err != nil {
+		return domain.DecisionEntry{}, domain.DecisionCall{}, err
+	}
+	entries := decisionEntriesFromGen(rows)
+	call, ok := domain.ReduceDecisionCall(entries)
+	if !ok {
+		return stored, domain.DecisionCall{}, nil
+	}
+	body, err := json.Marshal(call)
+	if err != nil {
+		return domain.DecisionEntry{}, domain.DecisionCall{}, fmt.Errorf("encode decision call: %w", err)
+	}
+	_, err = q.UpsertDecisionCall(ctx, gen.UpsertDecisionCallParams{
+		CallID: call.ID, Origin: call.Origin, ProjectID: string(call.Raised.ProjectID),
+		StreamSessionID: string(call.Raised.StreamSessionID), StreamName: call.Raised.StreamName,
+		OwnerSessionID: string(call.Raised.OwnerSessionID), State: string(call.State),
+		Delivery: string(call.Delivery), Retired: boolInt(call.Retired), RaisedAt: call.RaisedAt,
+		LastWall: call.LastStamp.WallMS, LastCounter: call.LastStamp.Counter,
+		Body: string(body), SearchText: call.SearchText(),
+	})
+	if err != nil {
+		return domain.DecisionEntry{}, domain.DecisionCall{}, err
 	}
 	return stored, call, nil
 }

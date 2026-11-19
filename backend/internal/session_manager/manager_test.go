@@ -67,6 +67,15 @@ func TestSeedRecordPreservesWorkerContract(t *testing.T) {
 	}
 }
 
+func TestSeedRecordPersistsPlanFirstGate(t *testing.T) {
+	rec := seedRecord(ports.SpawnConfig{
+		ProjectID: "plans", Kind: domain.KindWorker, PlanFirst: true,
+	}, domain.ProjectConfig{}, time.Date(2026, time.November, 18, 9, 0, 0, 0, time.UTC))
+	if rec.PlanFirstState != domain.PlanFirstPending {
+		t.Fatalf("plan-first state = %q, want %q", rec.PlanFirstState, domain.PlanFirstPending)
+	}
+}
+
 func TestValidateSpawnContractRejectsIncompleteOrNonWorkerContracts(t *testing.T) {
 	for _, tc := range []struct {
 		name string

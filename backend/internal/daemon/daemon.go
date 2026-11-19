@@ -1211,8 +1211,10 @@ func Run(buildVersion string) (retErr error) {
 		log.Warn("could not establish host identity; /api/v1/identity will report unimplemented", "error", identityErr)
 	}
 	var decisionDeliverer *decisionsvc.Deliverer
+	decisionMutationGate := &decisionsvc.MutationGate{}
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
+		MutationGate: decisionMutationGate,
 		OnAppended: func(domain.DecisionEntry) {
 			if decisionDeliverer != nil {
 				decisionDeliverer.Wake()
@@ -1221,6 +1223,7 @@ func Run(buildVersion string) (retErr error) {
 	})
 	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
 		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
+		MutationGate:       decisionMutationGate,
 		FallbackAuthorizer: decisionSvc,
 	})
 	decisionDeliveryDone := decisionDeliverer.Start(ctx)
@@ -1781,18 +1784,15 @@ func (a reportEvidenceArtifacts) Unregister(ctx context.Context, id domain.Sessi
 }
 
 type decisionMessageSession interface {
-	SendWithOptions(context.Context, domain.SessionID, string, *ports.SpawnAttachment, ports.MessageDeliveryOptions) error
+	DeliverDecisionAnswer(context.Context, domain.SessionID, string, string, time.Time) error
 }
 
 type decisionMessenger struct {
 	sessions decisionMessageSession
 }
 
-func (m decisionMessenger) DeliverAsPerson(ctx context.Context, id domain.SessionID, message string, at time.Time) error {
-	err := m.sessions.SendWithOptions(ctx, id, message, nil, ports.MessageDeliveryOptions{
-		InteractionAt:  at,
-		AuthoredByUser: true,
-	})
+func (m decisionMessenger) DeliverAsPerson(ctx context.Context, id domain.SessionID, message, deliveryID string, at time.Time) error {
+	err := m.sessions.DeliverDecisionAnswer(ctx, id, message, deliveryID, at)
 	if errors.Is(err, sessionmanager.ErrNotFound) || errors.Is(err, sessionmanager.ErrTerminated) || errors.Is(err, sessionmanager.ErrAgentExited) {
 		return fmt.Errorf("%w: %w", decisionsvc.ErrSessionEnded, err)
 	}

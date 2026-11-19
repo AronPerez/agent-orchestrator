@@ -9611,6 +9611,7 @@ export interface components {
             model?: string;
             parentHostId?: string;
             parentSessionId?: string;
+            planFirst?: boolean;
             projectId?: string;
             prompt?: string;
             /** @enum {string} */

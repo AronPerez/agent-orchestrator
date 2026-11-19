@@ -16,6 +16,7 @@ import {
 	rememberFleetCollapsePreference,
 	resolveFleetCollapsedKeys,
 	type FleetMachineNode,
+	type FleetParentUnavailableReason,
 	type FleetProjectNode,
 	type FleetRollup,
 	type FleetSessionNode,
@@ -58,7 +59,14 @@ import { WorkerListRow } from "./worker-list-row";
 
 type ProjectRow = { kind: "project"; key: string; depth: number; node: FleetProjectNode<MobileFleetSession> };
 type MachineRow = { kind: "machine"; key: string; depth: number; node: FleetMachineNode<MobileFleetSession> };
-type SessionRow = { kind: "session"; key: string; depth: number; node: FleetSessionNode<MobileFleetSession> };
+type SessionRow = {
+	kind: "session";
+	key: string;
+	depth: number;
+	node: FleetSessionNode<MobileFleetSession>;
+	/** The session runs on a different machine from the branch it is drawn under. */
+	otherMachine: boolean;
+};
 type ArchiveHeaderRow = { kind: "archive"; key: string };
 type ArchivedSessionRow = { kind: "archived"; key: string; session: DashboardSession };
 type ArchiveStatusRow = { kind: "archive-status"; key: string };
@@ -133,10 +141,10 @@ function flattenRows(
 	collapsed: ReadonlySet<string>,
 ): MobileFleetRow[] {
 	const rows: MobileFleetRow[] = [];
-	const addSessions = (nodes: readonly FleetSessionNode<MobileFleetSession>[], depth: number) => {
+	const addSessions = (nodes: readonly FleetSessionNode<MobileFleetSession>[], depth: number, machineId: string) => {
 		for (const node of nodes) {
-			rows.push({ kind: "session", key: node.key, depth, node });
-			if (!collapsed.has(node.key)) addSessions(node.children, depth + 1);
+			rows.push({ kind: "session", key: node.key, depth, node, otherMachine: node.machineId !== machineId });
+			if (!collapsed.has(node.key)) addSessions(node.children, depth + 1, machineId);
 		}
 	};
 	for (const node of projects) {
@@ -144,10 +152,20 @@ function flattenRows(
 		if (collapsed.has(node.key)) continue;
 		for (const machine of node.machines) {
 			rows.push({ kind: "machine", key: machine.key, depth: 1, node: machine });
-			if (!collapsed.has(machine.key)) addSessions(machine.sessions, 2);
+			if (!collapsed.has(machine.key)) addSessions(machine.sessions, 2, machine.machine.id);
 		}
 	}
 	return rows;
+}
+
+const parentUnavailableLabels: Record<FleetParentUnavailableReason, string> = {
+	"missing": "Parent unavailable",
+	"machine-offline": "Parent's machine not connected",
+	"machine-unknown": "Parent on an unknown machine",
+};
+
+function parentUnavailableText(node: FleetSessionNode<MobileFleetSession>): string | undefined {
+	return node.parentUnavailableReason ? parentUnavailableLabels[node.parentUnavailableReason] : undefined;
 }
 
 function rowHasChildren(row: ProjectRow | MachineRow | SessionRow): boolean {
@@ -680,8 +698,11 @@ export function FleetTreeList({
 
 		const role = sessionRole(item.node);
 		const visual = statusVisual(theme, item.node.session.source.status);
-		const detail = [role, visual.label, item.node.parentUnavailable ? "Parent unavailable" : undefined]
-			.filter(Boolean).join(" · ");
+		const onMachine = item.otherMachine
+			? `On ${hostsById.get(item.node.machineId)?.name ?? item.node.machineId}`
+			: undefined;
+		const parentUnavailable = parentUnavailableText(item.node);
+		const detail = [role, visual.label, onMachine, parentUnavailable].filter(Boolean).join(" · ");
 		const descendants = rollupText(item.node.rollup);
 		const hasDescendantRollup = rollupOrder.some((zone) => item.node.rollup[zone] > 0);
 		const source = item.node.session.source;
@@ -689,7 +710,8 @@ export function FleetTreeList({
 			const rowKey = hostedSessionKey(source);
 			const projectName = [
 				role,
-				item.node.parentUnavailable ? "Parent unavailable" : undefined,
+				onMachine,
+				parentUnavailable,
 				hasDescendantRollup ? descendants : undefined,
 			].filter(Boolean).join(" · ");
 			return (
@@ -726,7 +748,8 @@ export function FleetTreeList({
 					`Open ${item.node.session.title}`,
 					role,
 					visual.label,
-					item.node.parentUnavailable ? "Parent unavailable" : undefined,
+					onMachine,
+					parentUnavailable,
 					hasDescendantRollup ? descendants : undefined,
 				].filter(Boolean).join(", ")}
 				accessibilityRole="button"

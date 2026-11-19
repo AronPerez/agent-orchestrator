@@ -3130,9 +3130,10 @@ func (s *Service) RelaySessionChatTurn(ctx context.Context, id domain.SessionID,
 }
 
 // ConfirmSessionChatTurn reads the durable boundary for a prior keyed relay.
-// A queued turn is accepted by AO for later delivery, and a provider turn ID is
-// proof the provider accepted it. A terminal turn with no recorded provider
-// input failed before provider I/O and is safe to retry with a new identity.
+// A queued turn is accepted by AO for later delivery, and the provider-delivery
+// state distinguishes confirmed acceptance from an ambiguous attempt. A
+// terminal turn that never crossed the boundary is safe to retry with a new
+// identity.
 func (s *Service) ConfirmSessionChatTurn(
 	ctx context.Context,
 	id domain.SessionID,
@@ -3158,10 +3159,11 @@ func (s *Service) ConfirmSessionChatTurn(
 	if !found {
 		return false, nil
 	}
-	if turn.State == domain.TurnStateQueued || turn.ProviderTurnID != "" {
+	if turn.State == domain.TurnStateQueued || turn.ProviderDeliveryState == domain.ProviderDeliveryAccepted {
 		return true, nil
 	}
-	if turn.ProviderInputText == "" && (turn.State == domain.TurnStateFailed || turn.State == domain.TurnStateCancelled) {
+	if turn.ProviderDeliveryState != domain.ProviderDeliveryAttempted &&
+		(turn.State == domain.TurnStateFailed || turn.State == domain.TurnStateCancelled) {
 		return false, nil
 	}
 	return false, ports.ErrAgentDeliveryUnconfirmed

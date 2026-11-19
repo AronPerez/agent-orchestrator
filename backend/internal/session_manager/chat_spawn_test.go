@@ -94,6 +94,9 @@ type recordingLauncher struct {
 	confirmed           []string
 	confirmAccepted     bool
 	confirmErr          error
+	idleSent            bool
+	idleErr             error
+	idleMessages        []ports.ChatUserMessage
 	stopped             []domain.SessionID
 	backgroundHarnesses []domain.AgentHarness
 	background          []ports.ChatStartConfig
@@ -257,6 +260,11 @@ func (l *recordingLauncher) RelaySessionChatTurn(_ context.Context, _ domain.Ses
 func (l *recordingLauncher) ConfirmSessionChatTurn(_ context.Context, _ domain.SessionID, _ string, clientMessageID string, _ ports.MessageDeliveryOptions) (bool, error) {
 	l.confirmed = append(l.confirmed, clientMessageID)
 	return l.confirmAccepted, l.confirmErr
+}
+
+func (l *recordingLauncher) SendIfIdle(_ context.Context, _ domain.SessionID, msg ports.ChatUserMessage) (bool, error) {
+	l.idleMessages = append(l.idleMessages, msg)
+	return l.idleSent, l.idleErr
 }
 
 func (l *recordingLauncher) StopChat(_ context.Context, id domain.SessionID) error { //nolint:unparam
@@ -2251,6 +2259,31 @@ func TestSendRoutesIntoTheChatConversation(t *testing.T) {
 		}
 	}
 
+}
+
+func TestDeliverDecisionAnswerWaitsForAnIdleChatProvider(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, store, _ := newChatManager(launcher)
+	rec := domain.SessionRecord{ID: "mer-chat", ProjectID: chatTestProject, Mode: domain.SessionModeChat, Activity: domain.Activity{State: domain.ActivityActive}}
+	store.sessions[rec.ID] = rec
+	at := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	err := mgr.DeliverDecisionAnswer(context.Background(), rec.ID, "Approved", "dent-7", at)
+	if !errors.Is(err, ErrDeliveryUnconfirmed) {
+		t.Fatalf("busy delivery error = %v, want ErrDeliveryUnconfirmed", err)
+	}
+	if len(launcher.relayed) != 0 || len(launcher.idleMessages) != 1 {
+		t.Fatalf("busy answer queued=%v immediate=%+v", launcher.relayed, launcher.idleMessages)
+	}
+	msg := launcher.idleMessages[0]
+	if msg.ClientMessageID != "decision:dent-7" || !msg.AuthoredByUser || !msg.InteractionAt.Equal(at) {
+		t.Fatalf("decision message = %+v", msg)
+	}
+
+	launcher.idleSent = true
+	if err := mgr.DeliverDecisionAnswer(context.Background(), rec.ID, "Approved", "dent-7", at); err != nil {
+		t.Fatalf("idle delivery: %v", err)
+	}
 }
 
 func TestConfirmSemanticChatDistinguishesRejectedAndAcceptedDelivery(t *testing.T) {
