@@ -122,10 +122,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, rec domain.NotificationRecord
 	if d.hostID == "" {
 		return
 	}
-	// Decision announcements need their own copy, identity, and phone routing;
-	// session-shaped data would send an older app to the PR list. They stay
-	// bell-only until phone support ships.
-	if rec.Type.TargetsDecision() {
+	if !shouldPush(rec, d.hostID, decisionPushMode) {
 		return
 	}
 	devices := d.devices.List()
@@ -291,6 +288,9 @@ func (d *Dispatcher) sweepReceipts(ctx context.Context) {
 // The data blob carries exactly what the app needs to deep-link on tap and to
 // mark the record read; nothing secret beyond the human-readable title/body.
 func messageFor(rec domain.NotificationRecord, token, hostID, hostName string) Message {
+	if rec.Type.TargetsDecision() {
+		return decisionMessageFor(rec, token, hostID)
+	}
 	// Device-provided labels appear in an OS banner: keep them one line and
 	// prevent control/format characters from altering what the user sees.
 	label := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
@@ -322,6 +322,64 @@ func messageFor(rec domain.NotificationRecord, token, hostID, hostName string) M
 			"projectId":      string(rec.ProjectID),
 			"prUrl":          rec.PRURL,
 			"notificationId": rec.ID,
+		},
+	}
+}
+
+// DecisionPushMode selects which hosts push a decision call that more than one
+// host knows about (after ledger sync, every host holds a copy of the call).
+type DecisionPushMode int
+
+const (
+	// DecisionPushOriginOnly pushes only from the host that raised the call.
+	DecisionPushOriginOnly DecisionPushMode = iota
+	// DecisionPushAllHostsCollapse pushes from every host and relies on
+	// collapseId/tag to show one notification. Not validated on devices.
+	DecisionPushAllHostsCollapse
+)
+
+// decisionPushMode is the shipped policy. Physical iOS/Android devices have not
+// yet shown that collapseId/tag turn two hosts' sends into one sound/vibration,
+// so the approved fallback ships: only the origin pushes. Until ledger sync a
+// call exists only on its origin host, so both modes behave the same today.
+const decisionPushMode = DecisionPushOriginOnly
+
+// shouldPush decides whether a stored notification may interrupt a phone. It
+// is the one push-eligibility seam: a later, separately approved urgency policy
+// (blocking vs can-wait) belongs here, not in the ledger or the bell.
+func shouldPush(rec domain.NotificationRecord, dispatcherHostID string, mode DecisionPushMode) bool {
+	if !rec.Type.TargetsDecision() {
+		return true
+	}
+	if rec.DecisionCallID == "" {
+		return false
+	}
+	if mode == DecisionPushAllHostsCollapse {
+		return true
+	}
+	return rec.DecisionOriginHostID == dispatcherHostID
+}
+
+// decisionMessageFor builds a decision announcement. The copy carries no host
+// prefix, so two hosts announcing one call send byte-identical banners, and the
+// collapse key is the call itself. Only the call title reaches the lock screen.
+func decisionMessageFor(rec domain.NotificationRecord, token, hostID string) Message {
+	key := "decision:" + rec.DecisionCallID
+	return Message{
+		To:         token,
+		Title:      rec.Title,
+		Body:       rec.Body,
+		Sound:      "default",
+		Priority:   "high",
+		ChannelID:  androidChannelID,
+		CollapseID: key,
+		Tag:        key,
+		Data: map[string]any{
+			"type":                 string(rec.Type),
+			"hostId":               hostID,
+			"notificationId":       rec.ID,
+			"decisionCallId":       rec.DecisionCallID,
+			"decisionOriginHostId": rec.DecisionOriginHostID,
 		},
 	}
 }
