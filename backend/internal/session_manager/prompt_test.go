@@ -386,7 +386,9 @@ func TestBuildSystemPromptMakesLedgerAnswersBindAndAsksForUrgency(t *testing.T) 
 			got := buildSystemPromptText(cfg)
 			for _, want := range []string{
 				"binds every session, however it reaches you",
-				"check it with `ao decision show <call-link>`",
+				"check it with `ao decision show <call-link>` before acting",
+				"act on the call's current answer, the `Chose:` line and its note, not an older entry in its history",
+				"If the current answer differs from what was relayed, follow the current one.",
 				"Never ask the human to confirm it again in your own thread.",
 				"Pass `--urgency blocking` only when all your remaining work depends on the answer.",
 			} {

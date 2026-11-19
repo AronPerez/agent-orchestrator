@@ -58,7 +58,7 @@ An empty `reserved` list means the kinds reserved by default:
 | `observe` | Ask everything they would ask today, and also ask before any action of a reserved kind. Every call names its kind. For a kind that is not reserved, the call also records what the session would have decided, why, and how to undo it. The session still waits for the answer and follows it. |
 | `on` (a later slice) | Raise a call for reserved kinds. Decide the rest, act, and record a `decided` entry. |
 
-The policy reaches sessions as a standing-instructions section, rendered only in observe (and later on) mode. It is a guard rail, not a boundary: an agent can file a decision under the wrong kind. The observe period exists to find that out before any session acts alone.
+The policy reaches sessions as a standing-instructions section, rendered only in observe (and later on) mode. Standing instructions are built when a session starts, so a change to the mode or the reserved list reaches sessions started after it. A running session keeps the instructions it started with, and its calls are never refused for lacking a kind it was never told to give. It is a guard rail, not a boundary: an agent can file a decision under the wrong kind. The observe period exists to find that out before any session acts alone.
 
 ### 3. New fields on the `raised` entry
 
@@ -67,7 +67,7 @@ All optional, all ignored by older machines (section 5 of the ledger design):
 | Field | Written by | Meaning |
 | --- | --- | --- |
 | `urgency` | Session | `blocking` (all its remaining work depends on the answer) or `can_wait`. Absent means can wait. |
-| `kind` | Session | A decision kind id. Required in observe mode. |
+| `kind` | Session | A decision kind id. Observe-mode instructions ask for it on every call. It is not enforced, because a session started before the switch has no such instruction; calls without a kind are left out of the observe readout. |
 | `prediction` | Session | `{option, why, undo}`: what the session would have decided on its own. Required in observe mode for kinds that are not reserved; refused for reserved kinds in every mode. |
 | `reserved`, `autonomyMode` | Orchestrator | The project's policy at the moment the call was raised. Snapshotted, so a later policy change does not rewrite history and every machine reads the same thing. |
 
@@ -77,7 +77,7 @@ The read model gains `predictionAgreed`: once a predicted call has an answer, wh
 
 ### 4. Answers recorded in the ledger bind every session
 
-A rule for every session, in every mode: an answer the person recorded in the ledger is their decision, however it reaches a session — delivered by Orchestrator, or relayed by another session. A session that receives a relayed answer checks it with `ao decision show <call-link>` and acts on it. It never asks the person to confirm it again. The delivered answer message says the same thing, so a session that forwards it forwards the rule too.
+A rule for every session, in every mode: an answer the person recorded in the ledger is their decision, however it reaches a session — delivered by Orchestrator, or relayed by another session. A session that receives a relayed answer checks it with `ao decision show <call-link>` and acts on the call's **current** answer and note, not on an older answer still in its append-only history, and not on a call marked no longer applies. If the current answer differs from what was relayed, it follows the current one. It never asks the person to confirm it again. The delivered answer message says the same thing, so a session that forwards it forwards the rule too.
 
 This was the largest single cost in the study, and without it the rest of this design adds a layer while the main cost stays.
 

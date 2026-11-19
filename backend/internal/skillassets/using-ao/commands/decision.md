@@ -68,7 +68,9 @@ marked blocking interrupts them for nothing.
 
 `ao decision kinds` lists the kinds of decision and which ones your project
 reserves for the human, with the project's autonomy mode. In mode `off`, the
-default, `--kind` is optional. In mode `observe`:
+default, `--kind` is optional. A change to the mode or the reserved list
+reaches sessions started after it; a session that is already running keeps
+the instructions it started with. In mode `observe`:
 
 - Pass `--kind <id>` on every call; use `other` when no kind fits.
 - Raise a call before any action of a reserved kind, even one you used to take
@@ -156,9 +158,12 @@ Act on the human's message, including its note and any replacement warning.
 
 An answer the human recorded in the ledger is their decision, however it
 reaches you: delivered by Orchestrator, or relayed by another session. When it
-is relayed, check it with `ao decision show <call-link>`. If the history shows
-the human's answer, act on it. Never ask the human to confirm it again in your
-own thread.
+is relayed, check it with `ao decision show <call-link>` before acting. Act on
+the call's current answer, the `Chose:` line and its note at the top, not an
+older entry in its history; the history keeps every answer, including ones the
+human later replaced. Do not act on a call marked no longer applies. If the
+current answer differs from what was relayed, follow the current one. Never ask
+the human to confirm it again in your own thread.
 
 ## Recording the outcome
 
