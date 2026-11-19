@@ -364,6 +364,73 @@ describe("NotificationCenter", () => {
 		expect(screen.getByRole("dialog", { name: "Notifications" })).toBeInTheDocument();
 	});
 
+	describe("decision alerts", () => {
+		const decisionAlert: NotificationDTO = {
+			id: "ntf_dec", sessionId: "", projectId: "", prUrl: "", type: "decision_needed",
+			title: "Decision needed · acme/app", body: pendingDecision.call.title, status: "unread",
+			createdAt: "2026-11-18T10:00:01Z",
+			target: { kind: "decision", sessionId: "", callId: "dec_1", originHostId: "h_local" },
+		};
+		const withAlert = (status: NotificationListStatus, notifications: NotificationDTO[]) => {
+			const base = notificationQueryResult(status);
+			return { ...base, data: { ...base.data, pages: [{ ...base.data.pages[0], notifications: [decisionAlert, ...notifications], unreadCount: unreadNotifications.length + 1 }] } };
+		};
+		beforeEach(() => {
+			const unread = withAlert("unread", unreadNotifications);
+			const all = withAlert("all", allNotifications);
+			notificationQueryMock.mockImplementation((status: NotificationListStatus) => status === "unread" ? unread : all);
+		});
+
+		it("joins the alert onto the Attention inbox card instead of rendering a second row", async () => {
+			decisionInboxMock.mockReturnValue({
+				entries: [pendingDecision], isLoading: false, loadFailed: false, pending: undefined, answerError: undefined,
+				answer: vi.fn(), retry: vi.fn(),
+			});
+			renderNotificationCenter();
+			expect(screen.getByRole("button", { name: `${unreadNotifications.length + 1} unread notifications` })).toBeInTheDocument();
+			await clickOpen();
+
+			expect(screen.queryByText("Decision needed · acme/app", { selector: "p:not([class*='status-needs-you'])" })).toBeNull();
+			expect(screen.getAllByText(pendingDecision.call.title)).toHaveLength(1);
+			const card = screen.getByText(pendingDecision.call.title).closest("article")!;
+			expect(card).toHaveClass("bg-interactive-hover");
+			expect(within(card).getByText("Unread")).toBeInTheDocument();
+			// Opening acknowledges the alert row like any other unread row.
+			await waitFor(() => expect(markAllMock).toHaveBeenCalledWith(expect.arrayContaining(["ntf_dec"])));
+		});
+
+		it("keeps the call card answerable after notification history is cleared", async () => {
+			decisionInboxMock.mockReturnValue({
+				entries: [pendingDecision], isLoading: false, loadFailed: false, pending: undefined, answerError: undefined,
+				answer: vi.fn(), retry: vi.fn(),
+			});
+			renderNotificationCenter();
+			await clickOpen();
+			await userEvent.click(screen.getByRole("button", { name: /Clear all/ }));
+			await waitFor(() => expect(clearAllMock).toHaveBeenCalled());
+			expect(screen.getByRole("button", { name: /Ship today/ })).toBeEnabled();
+		});
+
+		it("shows no ghost row for an alert whose call was just answered", async () => {
+			renderNotificationCenter();
+			await clickOpen();
+			expect(screen.queryByText(pendingDecision.call.title)).toBeNull();
+			expect(screen.queryByText("Decision needed · acme/app")).toBeNull();
+		});
+
+		it("keeps the durable badge when the decision list fails to load", async () => {
+			decisionInboxMock.mockReturnValue({
+				entries: [], isLoading: false, loadFailed: true, pending: undefined, answerError: undefined,
+				answer: vi.fn(), retry: vi.fn(),
+			});
+			renderNotificationCenter();
+			expect(screen.getByRole("button", { name: `${unreadNotifications.length + 1} unread notifications` })).toBeInTheDocument();
+			await clickOpen();
+			expect(screen.getByText("Could not load decisions.")).toBeInTheDocument();
+			expect(screen.queryByText(pendingDecision.call.title)).toBeNull();
+		});
+	});
+
 	it("subscribes to workspace metadata only while the panel is open", async () => {
 		renderNotificationCenter();
 

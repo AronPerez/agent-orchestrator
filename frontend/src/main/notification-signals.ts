@@ -9,7 +9,7 @@
  */
 
 /** The notification types defined by `backend/internal/domain/notification.go`. */
-export type NotificationType = "needs_input" | "session_stalled" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged";
+export type NotificationType = "needs_input" | "session_stalled" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "decision_needed";
 
 /**
  * Whether to fire the Windows/Linux taskbar flash. Restricted to the
@@ -19,7 +19,7 @@ export type NotificationType = "needs_input" | "session_stalled" | "ready_to_mer
  * The macOS dock bounce is deliberately NOT gated by this allowlist — every
  * notification bounces there, with urgency carried by {@link dockBounceType}.
  */
-const ATTENTION_TYPES: ReadonlySet<string> = new Set<NotificationType>(["needs_input", "session_stalled", "ready_to_merge"]);
+const ATTENTION_TYPES: ReadonlySet<string> = new Set<NotificationType>(["needs_input", "session_stalled", "ready_to_merge", "decision_needed"]);
 
 /** Whether this notification type should flash the Windows/Linux taskbar. */
 export function shouldSignalAttention(type: string | undefined): boolean {
@@ -85,5 +85,7 @@ export function toastSilent(
  * signal without a merged PR nagging as insistently as a blocked agent.
  */
 export function dockBounceType(type: string | undefined): "critical" | "informational" {
-	return type === "needs_input" || type === "session_stalled" ? "critical" : "informational";
+	// A decision call in Needs you waits on the person exactly as a blocked
+	// agent does.
+	return type === "needs_input" || type === "session_stalled" || type === "decision_needed" ? "critical" : "informational";
 }

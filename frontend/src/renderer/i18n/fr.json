@@ -1377,6 +1377,7 @@
 	"decisionInbox.neededForProject": "Décision requise · {{project}}",
 	"decisionInbox.recommended": "Recommandé",
 	"decisionInbox.title": "Décisions qui vous attendent",
+	"decisionInbox.unread": "Non lu",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Modifications demandées",
 	"pr.card.checksFailing": "Vérifications en échec",
