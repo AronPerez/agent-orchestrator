@@ -31,6 +31,8 @@ type DecisionService interface {
 	RecordOutcome(context.Context, decisionsvc.Actor, string, decisionsvc.OutcomeInput) (domain.DecisionCall, error)
 	Withdraw(context.Context, decisionsvc.Actor, string) (domain.DecisionCall, error)
 	Retire(context.Context, decisionsvc.Actor, string, bool) (domain.DecisionCall, error)
+	Kinds(context.Context, decisionsvc.Actor, domain.ProjectID) (decisionsvc.Policy, error)
+	Observe(context.Context, decisionsvc.Actor, domain.ProjectID) (decisionsvc.ObserveReport, error)
 }
 
 // DecisionsController owns the /decisions routes.
@@ -40,6 +42,8 @@ type DecisionsController struct{ Svc DecisionService }
 func (c *DecisionsController) Register(r chi.Router) {
 	r.Post("/decisions", c.raise)
 	r.Get("/decisions", c.list)
+	r.Get("/decisions/kinds", c.kinds)
+	r.Get("/decisions/observe", c.observe)
 	r.Get("/decisions/{id}", c.get)
 	r.Post("/decisions/{id}/answer", c.answer)
 	r.Post("/decisions/{id}/dismiss", c.dismiss)
@@ -69,9 +73,14 @@ func (c *DecisionsController) raise(w http.ResponseWriter, r *http.Request) {
 	for i, link := range req.Links {
 		links[i] = domain.DecisionLink{Label: link.Label, URL: link.URL}
 	}
-	call, err := c.Svc.Raise(r.Context(), decisionActor(r), decisionsvc.RaiseInput{
+	input := decisionsvc.RaiseInput{
 		Title: req.Title, Context: req.Context, Options: options, Links: links, Reference: req.Reference,
-	})
+		Urgency: req.Urgency, Kind: req.Kind,
+	}
+	if req.Prediction != nil {
+		input.Prediction = &domain.DecisionPrediction{Option: req.Prediction.Option, Why: req.Prediction.Why, Undo: req.Prediction.Undo}
+	}
+	call, err := c.Svc.Raise(r.Context(), decisionActor(r), input)
 	if err != nil {
 		envelope.WriteErrorWithCode(w, r, err, "DECISION_RAISE_FAILED", "Unable to raise decision")
 		return
@@ -108,6 +117,51 @@ func (c *DecisionsController) list(w http.ResponseWriter, r *http.Request) {
 	response := ListDecisionsResponse{Calls: make([]DecisionCallResponse, len(calls))}
 	for i := range calls {
 		response.Calls[i] = decisionCallResponse(calls[i])
+	}
+	envelope.WriteJSON(w, http.StatusOK, response)
+}
+
+func (c *DecisionsController) kinds(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/decisions/kinds")
+		return
+	}
+	project := domain.ProjectID(strings.TrimSpace(r.URL.Query().Get("project")))
+	policy, err := c.Svc.Kinds(r.Context(), decisionActor(r), project)
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_KINDS_FAILED", "Unable to list decision kinds")
+		return
+	}
+	response := DecisionKindsResponse{
+		ProjectID: string(policy.ProjectID), Mode: string(policy.Mode),
+		Kinds: make([]DecisionKindResponse, len(policy.Kinds)),
+	}
+	for i, kind := range policy.Kinds {
+		response.Kinds[i] = DecisionKindResponse{ID: string(kind.ID), Label: kind.Label, Reserved: kind.Reserved, ReservedByDefault: kind.ReservedByDefault}
+	}
+	envelope.WriteJSON(w, http.StatusOK, response)
+}
+
+func (c *DecisionsController) observe(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/decisions/observe")
+		return
+	}
+	project := domain.ProjectID(strings.TrimSpace(r.URL.Query().Get("project")))
+	report, err := c.Svc.Observe(r.Context(), decisionActor(r), project)
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_OBSERVE_FAILED", "Unable to report observe mode")
+		return
+	}
+	response := DecisionObserveResponse{
+		ProjectID: string(report.ProjectID), Mode: string(report.Mode),
+		Rows: make([]DecisionObserveRowResponse, len(report.Rows)),
+	}
+	for i, row := range report.Rows {
+		response.Rows[i] = DecisionObserveRowResponse{
+			Kind: string(row.Kind), Label: row.Label, Reserved: row.Reserved,
+			Calls: row.Calls, Answered: row.Answered, Agreed: row.Agreed, Differed: row.Differed,
+		}
 	}
 	envelope.WriteJSON(w, http.StatusOK, response)
 }
@@ -261,6 +315,20 @@ func decisionCallResponse(call domain.DecisionCall) DecisionCallResponse {
 		Retired: call.Retired, Delivery: string(call.Delivery), DeliveredTo: string(call.DeliveredTo),
 		DeliveredToName: call.DeliveredToName, DeliveredFallback: call.DeliveredFallback,
 		ChangedAfterClose: call.ChangedAfterClose,
+		Urgency:           call.Raised.EffectiveUrgency(), Kind: string(call.Raised.Kind),
+		Reserved: call.Raised.Reserved, AutonomyMode: string(call.Raised.AutonomyMode),
+	}
+	if kind, ok := domain.LookupDecisionKind(string(call.Raised.Kind)); ok {
+		response.KindLabel = kind.Label
+	}
+	if prediction := call.Raised.Prediction; prediction != nil {
+		response.Prediction = &DecisionPredictionPayload{Option: prediction.Option, Why: prediction.Why, Undo: prediction.Undo}
+		if prediction.Option >= 1 && prediction.Option <= len(call.Raised.Options) {
+			response.Prediction.Label = call.Raised.Options[prediction.Option-1].Label
+		}
+	}
+	if agreed, known := call.PredictionAgreed(); known {
+		response.PredictionAgreed = &agreed
 	}
 	if !call.AnsweredAt.IsZero() {
 		answeredAt := call.AnsweredAt

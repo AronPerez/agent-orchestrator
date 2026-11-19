@@ -128,6 +128,11 @@ type workerContractConfig struct {
 	StallMinutes int `json:"stallMinutes,omitempty"`
 }
 
+type autonomyConfig struct {
+	Mode     string   `json:"mode,omitempty"`
+	Reserved []string `json:"reserved,omitempty"`
+}
+
 // projectConfig mirrors the daemon's typed domain.ProjectConfig for the CLI
 // client. The CLI sets common fields via flags and the whole object via
 // --config-json. Every domain key must be modeled here, or set-config drops it
@@ -159,6 +164,9 @@ type projectConfig struct {
 	Reviewers            []reviewerConfig     `json:"reviewers,omitempty"`
 	CollisionRadar       collisionRadarConfig `json:"collisionRadar,omitempty"`
 	WorkerContracts      workerContractConfig `json:"workerContracts,omitempty"`
+	// Autonomy must round-trip so a CLI edit of another field never resets
+	// the project's reserved decision kinds.
+	Autonomy autonomyConfig `json:"autonomy,omitempty"`
 }
 
 // setConfigRequest mirrors the daemon's SetConfigInput body for

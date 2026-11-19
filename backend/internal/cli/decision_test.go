@@ -37,6 +37,10 @@ func TestDecisionRaiseUsage(t *testing.T) {
 		{"recommend too high", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "3"}, "--recommend takes the position"},
 		{"recommend zero", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "0"}, "--recommend takes the position"},
 		{"bad link", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "1", "--link", "PR"}, "write each --link as"},
+		{"bad urgency", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "1", "--urgency", "soon"}, "--urgency is blocking or can-wait"},
+		{"why without prediction", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "1", "--why", "w"}, "--why and --undo go with --would-decide"},
+		{"undo without prediction", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "1", "--undo", "u"}, "--why and --undo go with --would-decide"},
+		{"file with kind", []string{"decision", "raise", "--file", "call.json", "--kind", "design"}, "--file cannot be combined"},
 		{"search without words", []string{"decision", "search"}, "say what to search for"},
 		{"search with whitespace only", []string{"decision", "search", "  ", "\t"}, "say what to search for"},
 		{"show without id", []string{"decision", "show"}, "ao decision show <id>"},
@@ -94,6 +98,7 @@ func TestDecisionRaiseSendsTheCallAndPrintsItsLink(t *testing.T) {
 		Title:     "Which auth scheme should the proxy use?",
 		Context:   "The connector calls the proxy for each tenant.",
 		Reference: "SKY-12",
+		Urgency:   "can_wait",
 		Options: []decisionOptionAPI{
 			{Label: "OAuth client credentials", Consequence: "One app registration per tenant :: no keys to rotate", Recommended: true},
 			{Label: "Per-tenant API keys", Consequence: "Customers rotate keys by hand"},
@@ -438,5 +443,158 @@ func assertDecisionJSONBody(t *testing.T, got, want string) {
 	}
 	if !reflect.DeepEqual(gotJSON, wantJSON) {
 		t.Fatalf("body=%s want=%s", got, want)
+	}
+}
+
+func TestDecisionRaiseSendsUrgencyKindAndPrediction(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "w-1")
+	var got decisionRaiseAPIRequest
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		got = decisionRaiseAPIRequest{}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"dec_1","link":"ao://decisions/dec_1"}`)
+	}))
+	_, _, err := executeCLI(t, deps,
+		"decision", "raise", "--title", "Close the duplicate PR?", "--context", "It repeats an open one.",
+		"--option", "Close it :: Branch kept", "--option", "Keep both :: Two reviews", "--recommend", "1",
+		"--urgency", "can-wait", "--kind", "pr_hygiene",
+		"--would-decide", "1", "--why", "It is a duplicate.", "--undo", "Reopen the PR.",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &decisionPredictionAPI{Option: 1, Why: "It is a duplicate.", Undo: "Reopen the PR."}
+	if got.Urgency != "can_wait" || got.Kind != "pr_hygiene" || !reflect.DeepEqual(got.Prediction, want) {
+		t.Fatalf("request=%+v prediction=%+v", got, got.Prediction)
+	}
+
+	_, _, err = executeCLI(t, deps,
+		"decision", "raise", "--title", "Ship it?", "--context", "c",
+		"--option", "Yes :: y", "--option", "No :: n", "--recommend", "1", "--urgency", "blocking",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Urgency != "blocking" || got.Kind != "" || got.Prediction != nil {
+		t.Fatalf("request=%+v", got)
+	}
+}
+
+func TestDecisionShowPrintsAutonomyFields(t *testing.T) {
+	callJSON := `{"id":"dec_1","link":"ao://decisions/dec_1","state":"in_progress","stateLabel":"In progress","title":"Close the duplicate PR?","context":"c","options":[],"links":[],"hostId":"h_a","machineLabel":"m","ownerSessionId":"w-1","ownerSessionName":"w-1","raisedAt":"2026-11-16T15:00:00Z","retired":false,` +
+		`"urgency":"blocking","kind":"pr_hygiene","kindLabel":"Pull request hygiene","autonomyMode":"observe","prediction":{"option":1,"label":"Close it","why":"It is a duplicate.","undo":"Reopen the PR."},"predictionAgreed":false}`
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/decisions/dec_1" {
+			_, _ = io.WriteString(w, `{"call":`+callJSON+`,"history":[]}`)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	out, _, err := executeCLI(t, deps, "decision", "show", "dec_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Urgency: blocking",
+		"Kind: Pull request hygiene (pr_hygiene)",
+		"Reserved: false",
+		"Autonomy mode: observe",
+		"Would have decided: 1. Close it — It is a duplicate. (undo: Reopen the PR.)",
+		"Prediction: differed from the answer",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("show output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDecisionKinds(t *testing.T) {
+	var paths []string
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions/kinds" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		paths = append(paths, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"projectId":"shop","mode":"observe","kinds":[{"id":"production","label":"Production changes and deploys","reserved":true},{"id":"pr_hygiene","label":"Pull request hygiene","reserved":false}]}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "w-1")
+	out, _, err := executeCLI(t, deps, "decision", "kinds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Project shop · autonomy mode: observe",
+		"Reserved for the person:",
+		"  production  Production changes and deploys",
+		"Not reserved:",
+		"  pr_hygiene  Pull request hygiene",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("kinds output missing %q:\n%s", want, out)
+		}
+	}
+	t.Setenv("AO_SESSION_ID", "")
+	if _, _, err := executeCLI(t, deps, "decision", "kinds", "--project", "shop", "--json"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/api/v1/decisions/kinds", "/api/v1/decisions/kinds?project=shop"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths=%q want=%q", paths, want)
+	}
+}
+
+func TestDecisionObserve(t *testing.T) {
+	var paths []string
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions/observe" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		paths = append(paths, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"projectId":"shop","mode":"observe","rows":[{"kind":"design","label":"Design and product behaviour","reserved":true,"calls":1,"answered":0,"agreed":0,"differed":0},{"kind":"pr_hygiene","label":"Pull request hygiene","reserved":false,"calls":4,"answered":3,"agreed":1,"differed":2}]}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "")
+	out, _, err := executeCLI(t, deps, "decision", "observe", "--project", "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Project shop · autonomy mode: observe",
+		"Design and product behaviour (design), reserved: 1 call",
+		"Pull request hygiene (pr_hygiene): 4 calls, 3 answered, 1 agreed, 2 differed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("observe output missing %q:\n%s", want, out)
+		}
+	}
+	if !reflect.DeepEqual(paths, []string{"/api/v1/decisions/observe?project=shop"}) {
+		t.Fatalf("paths=%q", paths)
+	}
+}
+
+func TestDecisionObserveWithNothingToShow(t *testing.T) {
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"projectId":"shop","mode":"off","rows":[]}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "w-1")
+	out, _, err := executeCLI(t, deps, "decision", "observe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "No calls raised in observe mode yet.") {
+		t.Fatalf("output=%q", out)
 	}
 }

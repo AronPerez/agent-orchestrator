@@ -241,3 +241,83 @@ func TestDecisionStateLabelsAndSearchText(t *testing.T) {
 		t.Fatalf("SearchText() = %q, want %q", got, want)
 	}
 }
+
+func TestReduceKeepsRaisedAutonomyFields(t *testing.T) {
+	raised := DecisionRaisedPayload{
+		Title: "Close the duplicate PR?", Context: "It repeats an open one.",
+		Options: []DecisionOption{
+			{Label: "Close it", Consequence: "Branch kept.", Recommended: true},
+			{Label: "Keep both", Consequence: "Two reviews."},
+		},
+		Urgency: DecisionUrgencyBlocking, Kind: "pr_hygiene",
+		Prediction:   &DecisionPrediction{Option: 1, Why: "It is a duplicate.", Undo: "Reopen the PR."},
+		Reserved:     false,
+		AutonomyMode: AutonomyObserve,
+		MachineLabel: "m", OwnerSessionID: "w-1", OwnerSessionName: "w-1",
+	}
+	call, ok := ReduceDecisionCall([]DecisionEntry{decisionEntry(t, "dent_r", 1, DecisionKindRaised, raised)})
+	if !ok {
+		t.Fatal("call did not reduce")
+	}
+	if call.Raised.Urgency != DecisionUrgencyBlocking || call.Raised.Kind != "pr_hygiene" || call.Raised.AutonomyMode != AutonomyObserve {
+		t.Fatalf("raised fields lost: %+v", call.Raised)
+	}
+	if call.Raised.Prediction == nil || *call.Raised.Prediction != *raised.Prediction {
+		t.Fatalf("prediction lost: %+v", call.Raised.Prediction)
+	}
+}
+
+func TestRaisedPayloadWithoutAutonomyFieldsStillReduces(t *testing.T) {
+	legacy := json.RawMessage(`{"title":"Q?","context":"C","options":[{"label":"A","consequence":"a","recommended":true},{"label":"B","consequence":"b"}],"machineLabel":"m","ownerSessionId":"w-1","ownerSessionName":"w-1"}`)
+	entry := DecisionEntry{ID: "dent_r", Origin: "h_a", CallID: "dec_1", Kind: DecisionKindRaised, Payload: legacy, Stamp: DecisionStamp{WallMS: 1}, AuthorKind: DecisionAuthorSession}
+	call, ok := ReduceDecisionCall([]DecisionEntry{entry})
+	if !ok || call.State != DecisionStateNeedsYou {
+		t.Fatalf("legacy call = %+v, %v", call, ok)
+	}
+	if call.Raised.EffectiveUrgency() != DecisionUrgencyCanWait || call.Raised.Prediction != nil {
+		t.Fatalf("legacy defaults wrong: %+v", call.Raised)
+	}
+	if _, known := call.PredictionAgreed(); known {
+		t.Fatal("a call without a prediction has no agreement")
+	}
+}
+
+func TestPredictionAgreed(t *testing.T) {
+	raised := DecisionRaisedPayload{
+		Title: "Q?", Context: "C",
+		Options: []DecisionOption{
+			{Label: "A", Consequence: "a", Recommended: true},
+			{Label: "B", Consequence: "b"},
+		},
+		Kind: "pr_hygiene", Prediction: &DecisionPrediction{Option: 2, Why: "w", Undo: "u"},
+		MachineLabel: "m", OwnerSessionID: "w-1", OwnerSessionName: "w-1",
+	}
+	raisedEntry := decisionEntry(t, "dent_r", 1, DecisionKindRaised, raised)
+	cases := []struct {
+		name          string
+		then          []DecisionEntry
+		agreed, known bool
+	}{
+		{"unanswered", nil, false, false},
+		{"agreed", []DecisionEntry{decisionEntry(t, "dent_a", 2, DecisionKindAnswered, DecisionAnsweredPayload{Choice: DecisionChoiceOption, Option: 2})}, true, true},
+		{"differed", []DecisionEntry{decisionEntry(t, "dent_a", 2, DecisionKindAnswered, DecisionAnsweredPayload{Choice: DecisionChoiceOption, Option: 1})}, false, true},
+		{"something else", []DecisionEntry{decisionEntry(t, "dent_a", 2, DecisionKindAnswered, DecisionAnsweredPayload{Choice: DecisionChoiceOther, Note: "n"})}, false, true},
+		{"dismissed", []DecisionEntry{decisionEntry(t, "dent_d", 2, DecisionKindDismissed, DecisionDismissedPayload{})}, false, false},
+		{"changed to agree", []DecisionEntry{
+			decisionEntry(t, "dent_a", 2, DecisionKindAnswered, DecisionAnsweredPayload{Choice: DecisionChoiceOption, Option: 1}),
+			decisionEntry(t, "dent_b", 3, DecisionKindAnswered, DecisionAnsweredPayload{Choice: DecisionChoiceOption, Option: 2}),
+		}, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call, ok := ReduceDecisionCall(append([]DecisionEntry{raisedEntry}, tc.then...))
+			if !ok {
+				t.Fatal("call did not reduce")
+			}
+			agreed, known := call.PredictionAgreed()
+			if agreed != tc.agreed || known != tc.known {
+				t.Fatalf("PredictionAgreed() = %v, %v; want %v, %v", agreed, known, tc.agreed, tc.known)
+			}
+		})
+	}
+}

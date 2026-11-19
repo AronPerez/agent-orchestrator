@@ -7359,6 +7359,7 @@ func promptProjectContext(projectID domain.ProjectID, project domain.ProjectReco
 		Path:          project.Path,
 
 		WorkersRequestReview: cfg.WorkersRequestReview,
+		Autonomy:             cfg.Autonomy,
 	}
 }
 
