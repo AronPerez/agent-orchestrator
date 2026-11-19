@@ -11,7 +11,11 @@ vi.mock("./host-clients", () => ({ clientForSessionHost: clientForSessionHostMoc
 
 import {
 	answerDecisionInboxCall,
+	decisionKeys,
+	fetchDecisionBoard,
+	fetchDecisionDetail,
 	fetchDecisionInboxCalls,
+	fetchDecisionSearch,
 	mergeDecisionInboxSources,
 } from "./decision-inbox";
 
@@ -84,5 +88,59 @@ describe("mergeDecisionInboxSources", () => {
 			["remote-a", "dec_old"],
 			["local", "dec_shared"],
 		]);
+	});
+});
+
+describe("decision query keys", () => {
+	it("keeps one root partitioned by host, with page views under this computer", () => {
+		expect(decisionKeys.all).toEqual(["decision-inbox"]);
+		// The bell's needs-you list keeps its original key.
+		expect(decisionKeys.needsYou("remote-a")).toEqual(["decision-inbox", "remote-a"]);
+		expect(decisionKeys.host("remote-a")).toEqual(["decision-inbox", "remote-a"]);
+		expect(decisionKeys.board()).toEqual(["decision-inbox", "local", "board"]);
+		expect(decisionKeys.detail("dec_1")).toEqual(["decision-inbox", "local", "detail", "dec_1"]);
+		expect(decisionKeys.search("auth", 50)).toEqual(["decision-inbox", "local", "search", "auth", 50]);
+		for (const key of [decisionKeys.board(), decisionKeys.detail("dec_1"), decisionKeys.search("auth", 50)]) {
+			expect(key.slice(0, 2)).toEqual(decisionKeys.host("local"));
+		}
+	});
+});
+
+describe("decision page API", () => {
+	it("loads the board snapshot from this computer", async () => {
+		const board = { calls: [call("dec_1", "2026-11-18T10:00:00Z")], needsYouCount: 1, servingHostId: "h_local", doneSince: "2026-11-11T10:00:00Z" };
+		getMock.mockResolvedValue({ data: board });
+		const signal = new AbortController().signal;
+
+		await expect(fetchDecisionBoard(signal)).resolves.toEqual(board);
+		expect(clientForSessionHostMock).toHaveBeenCalledWith("local");
+		expect(getMock).toHaveBeenCalledWith("/api/v1/decisions/board", { signal });
+	});
+
+	it("keeps an empty board as an empty list", async () => {
+		getMock.mockResolvedValue({ data: { calls: [], needsYouCount: 0, servingHostId: "h_local", doneSince: "2026-11-11T10:00:00Z" } });
+		await expect(fetchDecisionBoard()).resolves.toMatchObject({ calls: [], needsYouCount: 0 });
+	});
+
+	it("loads one call with its history, and reports a missing call as null", async () => {
+		const detail = { call: call("dec_1", "2026-11-18T10:00:00Z"), history: [] };
+		getMock.mockResolvedValueOnce({ data: detail, response: { status: 200 } });
+		await expect(fetchDecisionDetail("dec_1")).resolves.toEqual(detail);
+		expect(getMock).toHaveBeenCalledWith("/api/v1/decisions/{id}", { params: { path: { id: "dec_1" } }, signal: undefined });
+
+		getMock.mockResolvedValueOnce({ error: { error: { code: "DECISION_NOT_FOUND", message: "Unknown decision" } }, response: { status: 404 } });
+		await expect(fetchDecisionDetail("dec_gone")).resolves.toBeNull();
+
+		getMock.mockResolvedValueOnce({ error: { error: { code: "DECISION_GET_FAILED", message: "Unable to get decision" } }, response: { status: 500 } });
+		await expect(fetchDecisionDetail("dec_1")).rejects.toThrow();
+	});
+
+	it("searches every call with a bounded page", async () => {
+		const calls = [call("dec_1", "2026-11-18T10:00:00Z")];
+		getMock.mockResolvedValue({ data: { calls } });
+		const signal = new AbortController().signal;
+
+		await expect(fetchDecisionSearch("auth scheme", 50, signal)).resolves.toEqual(calls);
+		expect(getMock).toHaveBeenCalledWith("/api/v1/decisions", { params: { query: { q: "auth scheme", limit: 50 } }, signal });
 	});
 });

@@ -1,8 +1,13 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import {
 	answerDecisionInboxCall,
+	DECISION_SEARCH_LIMIT,
+	decisionKeys,
+	fetchDecisionBoard,
+	fetchDecisionDetail,
 	fetchDecisionInboxCalls,
+	fetchDecisionSearch,
 	mergeDecisionInboxSources,
 	type DecisionCall,
 	type DecisionInboxEntry,
@@ -11,7 +16,7 @@ import { labelForHost } from "../lib/host-clients";
 import { LOCAL_HOST, type HostId } from "../lib/hosts";
 import { useConnectedHosts } from "./useHostConnection";
 
-export const decisionInboxQueryKey = (hostId: HostId) => ["decision-inbox", hostId] as const;
+export const decisionInboxQueryKey = (hostId: HostId) => decisionKeys.needsYou(hostId);
 
 export function useDecisionInbox(enabled: boolean) {
 	const queryClient = useQueryClient();
@@ -47,7 +52,7 @@ export function useDecisionInbox(enabled: boolean) {
 			queryClient.setQueryData<DecisionCall[]>(decisionInboxQueryKey(input.sourceHostId), (current) =>
 				current?.filter((call) => call.id !== input.callId),
 			);
-			await queryClient.invalidateQueries({ queryKey: ["decision-inbox"] });
+			await queryClient.invalidateQueries({ queryKey: decisionKeys.all });
 		},
 		onError: (_error, input) => {
 			void queryClient.invalidateQueries({ queryKey: decisionInboxQueryKey(input.sourceHostId) });
@@ -80,4 +85,39 @@ export function useDecisionInbox(enabled: boolean) {
 		answer,
 		retry,
 	};
+}
+
+/**
+ * This computer's Decisions board. The sidebar count and the page share this
+ * one query; live `decision_updated` events refresh it through the local host
+ * branch, so it does not poll.
+ */
+export function useDecisionBoard() {
+	return useQuery({
+		queryKey: decisionKeys.board(),
+		queryFn: ({ signal }) => fetchDecisionBoard(signal),
+		retry: 1,
+	});
+}
+
+/** One call and its full history; `null` data means it no longer exists. */
+export function useDecisionDetail(callId: string | undefined) {
+	return useQuery({
+		queryKey: decisionKeys.detail(callId ?? ""),
+		queryFn: ({ signal }) => fetchDecisionDetail(callId!, signal),
+		enabled: Boolean(callId),
+		retry: 1,
+	});
+}
+
+/** Full-ledger search. Earlier results stay visible while a new query loads. */
+export function useDecisionSearch(query: string) {
+	const words = query.trim();
+	return useQuery({
+		queryKey: decisionKeys.search(words, DECISION_SEARCH_LIMIT),
+		queryFn: ({ signal }) => fetchDecisionSearch(words, DECISION_SEARCH_LIMIT, signal),
+		enabled: words.length > 0,
+		placeholderData: keepPreviousData,
+		retry: 1,
+	});
 }

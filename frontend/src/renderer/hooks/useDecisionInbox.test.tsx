@@ -15,7 +15,8 @@ vi.mock("../lib/host-clients", () => ({
 
 vi.mock("./useHostConnection", () => ({ useConnectedHosts: () => connectedHostsMock() }));
 
-import { useDecisionInbox } from "./useDecisionInbox";
+import { decisionKeys } from "../lib/decision-inbox";
+import { decisionInboxQueryKey, useDecisionBoard, useDecisionDetail, useDecisionInbox, useDecisionSearch } from "./useDecisionInbox";
 
 const decisionCall = (id: string, raisedAt: string) => ({
 	id,
@@ -108,5 +109,83 @@ describe("useDecisionInbox", () => {
 		}));
 		await waitFor(() => expect(result.current.entries).toEqual([]));
 		expect(remote.GET.mock.calls.length).toBeGreaterThan(1);
+	});
+});
+
+/** A daemon that answers every decision route this page reads. */
+function setupLedger(hostId: string, calls: ReturnType<typeof decisionCall>[]) {
+	const client = {
+		GET: vi.fn().mockImplementation((path: string, request?: { params?: { path?: { id?: string }; query?: { q?: string } } }) => {
+			if (path === "/api/v1/decisions/board") {
+				return Promise.resolve({ data: { calls, needsYouCount: calls.length, servingHostId: "h_local", doneSince: "2026-11-11T10:00:00Z" } });
+			}
+			if (path === "/api/v1/decisions/{id}") {
+				const found = calls.find((call) => call.id === request?.params?.path?.id);
+				return Promise.resolve(found
+					? { data: { call: found, history: [] }, response: { status: 200 } }
+					: { error: { error: { code: "DECISION_NOT_FOUND", message: "Unknown decision" } }, response: { status: 404 } });
+			}
+			const q = request?.params?.query?.q;
+			return Promise.resolve({ data: { calls: q ? calls.filter((call) => call.title.includes(q)) : calls } });
+		}),
+		POST: vi.fn(),
+	};
+	clients.set(hostId, client);
+	return client;
+}
+
+const pathCalls = (client: { GET: ReturnType<typeof vi.fn> }, path: string) =>
+	client.GET.mock.calls.filter(([called]) => called === path).length;
+
+describe("decision page hooks", () => {
+	it("keeps the bell's needs-you key on the shared host branch", () => {
+		expect(decisionInboxQueryKey("remote-a")).toEqual(decisionKeys.needsYou("remote-a"));
+	});
+
+	it("loads the board, one call's detail and search results from this computer", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({
+			board: useDecisionBoard(),
+			detail: useDecisionDetail("dec_1"),
+			missing: useDecisionDetail("dec_gone"),
+			search: useDecisionSearch("Question"),
+		}), { wrapper: wrapper(queryClient) });
+
+		await waitFor(() => expect(result.current.board.data?.calls).toHaveLength(1));
+		await waitFor(() => expect(result.current.detail.data?.call.id).toBe("dec_1"));
+		await waitFor(() => expect(result.current.missing.isSuccess).toBe(true));
+		expect(result.current.missing.data).toBeNull();
+		await waitFor(() => expect(result.current.search.data?.map((call) => call.id)).toEqual(["dec_1"]));
+		expect(local.GET).toHaveBeenCalledWith("/api/v1/decisions", expect.objectContaining({ params: { query: { q: "Question", limit: 50 } } }));
+	});
+
+	it("does not fetch detail without a call or search without words", () => {
+		const local = setupLedger("local", []);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		renderHook(() => ({ detail: useDecisionDetail(undefined), search: useDecisionSearch("   ") }), { wrapper: wrapper(queryClient) });
+		expect(local.GET).not.toHaveBeenCalled();
+	});
+
+	it("refreshes this computer's bell list and board together, and a remote host alone", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		const remote = setupLedger("remote-a", [decisionCall("dec_2", "2026-11-18T08:00:00Z")]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({ inbox: useDecisionInbox(true), board: useDecisionBoard() }), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.inbox.entries).toHaveLength(2));
+		await waitFor(() => expect(result.current.board.data).toBeDefined());
+		const localList = pathCalls(local, "/api/v1/decisions");
+		const localBoard = pathCalls(local, "/api/v1/decisions/board");
+		const remoteList = pathCalls(remote, "/api/v1/decisions");
+
+		await act(() => queryClient.invalidateQueries({ queryKey: decisionKeys.host("remote-a") }));
+		await waitFor(() => expect(pathCalls(remote, "/api/v1/decisions")).toBe(remoteList + 1));
+		expect(pathCalls(local, "/api/v1/decisions/board")).toBe(localBoard);
+		expect(pathCalls(local, "/api/v1/decisions")).toBe(localList);
+
+		await act(() => queryClient.invalidateQueries({ queryKey: decisionKeys.host("local") }));
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(localBoard + 1));
+		expect(pathCalls(local, "/api/v1/decisions")).toBe(localList + 1);
+		expect(pathCalls(remote, "/api/v1/decisions")).toBe(remoteList + 1);
 	});
 });
