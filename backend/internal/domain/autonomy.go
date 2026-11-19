@@ -68,12 +68,16 @@ const (
 	// kind of each call and, for kinds that are not reserved, what the session
 	// would have decided on its own.
 	AutonomyObserve AutonomyMode = "observe"
+	// AutonomyOn lets sessions decide kinds the person has not reserved, act,
+	// and record a decided entry the person can overrule. It is set through
+	// project config; the settings page does not offer it yet.
+	AutonomyOn AutonomyMode = "on"
 )
 
 // AutonomyConfig is a project's policy for which decisions belong to the
 // person. Read when a call is raised and when standing instructions are built.
 type AutonomyConfig struct {
-	Mode AutonomyMode `json:"mode,omitempty" enum:"off,observe"`
+	Mode AutonomyMode `json:"mode,omitempty" enum:"off,observe,on"`
 	// Reserved lists the kinds the person keeps. Empty means the kinds that
 	// are reserved by default.
 	Reserved []DecisionKindID `json:"reserved,omitempty"`
@@ -87,8 +91,13 @@ func (c AutonomyConfig) EffectiveMode() AutonomyMode {
 	return c.Mode
 }
 
-// IsReserved reports whether the person keeps decisions of this kind.
+// IsReserved reports whether the person keeps decisions of this kind. The
+// catch-all kind is always reserved, so a decision that fits no named kind is
+// never made without the person, whatever list the project sets.
 func (c AutonomyConfig) IsReserved(id DecisionKindID) bool {
+	if id == DecisionKindOther {
+		return true
+	}
 	if len(c.Reserved) == 0 {
 		kind, ok := LookupDecisionKind(string(id))
 		return ok && kind.ReservedByDefault
@@ -104,7 +113,7 @@ func (c AutonomyConfig) IsReserved(id DecisionKindID) bool {
 // Validate refuses unknown modes, unknown kinds and repeated kinds.
 func (c AutonomyConfig) Validate() error {
 	switch c.Mode {
-	case "", AutonomyOff, AutonomyObserve:
+	case "", AutonomyOff, AutonomyObserve, AutonomyOn:
 	default:
 		return fmt.Errorf("autonomy.mode: unknown mode %q", c.Mode)
 	}

@@ -17,6 +17,9 @@ const (
 	DecisionStateDone       DecisionCallState = "done"
 	DecisionStateDismissed  DecisionCallState = "dismissed"
 	DecisionStateWithdrawn  DecisionCallState = "withdrawn"
+	// DecisionStateDecided is a decision a session made on the person's
+	// behalf that nobody has overruled.
+	DecisionStateDecided DecisionCallState = "decided"
 )
 
 // Label is the one user-facing name for a decision state.
@@ -32,6 +35,8 @@ func (s DecisionCallState) Label() string {
 		return "Dismissed"
 	case DecisionStateWithdrawn:
 		return "Withdrawn"
+	case DecisionStateDecided:
+		return "Decided for you"
 	default:
 		return ""
 	}
@@ -73,6 +78,9 @@ type DecisionCall struct {
 	Redelivery        bool                  `json:"redelivery,omitempty"`
 	ChangedAfterClose bool                  `json:"changedAfterClose,omitempty"`
 	LastStamp         DecisionStamp         `json:"lastStamp"`
+	// Decided is set for a call that began as a decision made on the
+	// person's behalf rather than as a question.
+	Decided *DecisionDecidedDetail `json:"decided,omitempty"`
 }
 
 type reducedDelivery struct {
@@ -115,6 +123,39 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Origin = entry.Origin
 			call.Raised = payload
 			call.RaisedAt = entry.WrittenAt
+		case DecisionKindDecided:
+			if raised {
+				continue
+			}
+			var payload DecisionDecidedPayload
+			if json.Unmarshal(entry.Payload, &payload) != nil {
+				continue
+			}
+			raised = true
+			call.ID = entry.CallID
+			call.Origin = entry.Origin
+			call.Raised = payload.raisedView()
+			call.RaisedAt = entry.WrittenAt
+			call.Decided = &DecisionDecidedDetail{Undo: payload.Undo, Verify: payload.Verify}
+		case DecisionKindOverruled:
+			// Entries are ordered, so a decided call's own entry precedes any
+			// overrule of it; an overrule on any other call is ignored.
+			if call.Decided == nil {
+				continue
+			}
+			var payload DecisionOverruledPayload
+			if json.Unmarshal(entry.Payload, &payload) != nil {
+				continue
+			}
+			standing = entry
+			standingKind = entry.Kind
+			call.StandingEntryID = entry.ID
+			call.StandingKind = entry.Kind
+			call.Choice = ""
+			call.Option = 0
+			call.Note = payload.Note
+			call.AnsweredAt = entry.WrittenAt
+			call.AnswerSurface = entry.AuthorSurface
 		case DecisionKindAnswered:
 			var payload DecisionAnsweredPayload
 			if json.Unmarshal(entry.Payload, &payload) != nil {
@@ -193,10 +234,12 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 		call.State = DecisionStateDone
 	} else if withdrawn {
 		call.State = DecisionStateWithdrawn
-	} else if standingKind == DecisionKindAnswered {
+	} else if standingKind == DecisionKindAnswered || standingKind == DecisionKindOverruled {
 		call.State = DecisionStateInProgress
 	} else if standingKind == DecisionKindDismissed {
 		call.State = DecisionStateDismissed
+	} else if call.Decided != nil {
+		call.State = DecisionStateDecided
 	} else {
 		call.State = DecisionStateNeedsYou
 	}
