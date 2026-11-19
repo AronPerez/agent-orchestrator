@@ -528,8 +528,13 @@ type Manager struct {
 	backgroundWorkers       sync.WaitGroup
 	trackerIntakeRecoveryMu sync.Mutex
 	trackerIntakeRecovering map[domain.SessionID]struct{}
-	asyncChatSpawnsMu       sync.Mutex
-	asyncChatSpawns         map[domain.SessionID]*asyncChatSpawnRun
+	// trackerIntakeReaperFenced keeps observation-driven runtime death from
+	// terminating a session whose exact intake owner is still unresolved. It is
+	// deliberately separate from agentOperations so explicit Kill/Resume can
+	// resolve the ambiguity instead of being blocked by it.
+	trackerIntakeReaperFenced map[domain.SessionID]struct{}
+	asyncChatSpawnsMu         sync.Mutex
+	asyncChatSpawns           map[domain.SessionID]*asyncChatSpawnRun
 	// provisionObserver hears provision-state writes (SetProvisionObserver).
 	provisionObserver ProvisionObserver
 	// killTeardown bounds Kill's detached teardown. Zero means
@@ -1055,6 +1060,7 @@ func New(d Deps) *Manager {
 		taskNamingSlots:                make(chan struct{}, 4),
 		asyncChatSpawns:                make(map[domain.SessionID]*asyncChatSpawnRun),
 		trackerIntakeRecovering:        make(map[domain.SessionID]struct{}),
+		trackerIntakeReaperFenced:      make(map[domain.SessionID]struct{}),
 		taskPreparationTTL:             defaultTaskPreparationTTL,
 		openTranscriptFile:             os.Open,
 		lookPath:                       d.LookPath,

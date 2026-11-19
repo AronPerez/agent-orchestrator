@@ -92,6 +92,15 @@ func (m *Manager) SessionMutationInProgress(id domain.SessionID) bool {
 	return live
 }
 
+// SessionObservationInProgress extends the runtime-observation termination
+// gate to unresolved tracker-intake ownership. It intentionally does not
+// participate in other lifecycle reactions, input admission, or user
+// operations: Kill and Resume remain available to resolve an inconclusive
+// external owner.
+func (m *Manager) SessionObservationInProgress(id domain.SessionID) bool {
+	return m.SessionMutationInProgress(id) || m.trackerIntakeReaperFenceActive(id)
+}
+
 func (m *Manager) agentOperationActiveLocked(id domain.SessionID) bool {
 	_, ok := m.agentOperations[id]
 	_, deferred := m.deferredInterfaceRecovery[id]

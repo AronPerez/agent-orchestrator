@@ -22,14 +22,18 @@ func (m *Manager) ReconcileTrackerIntakeClaims(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	m.syncTrackerIntakeReaperFences(claims)
 	var reconcileErr error
 	for _, claim := range claims {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(reconcileErr, err)
 		}
+		m.setTrackerIntakeReaperFence(claim.SessionID)
 		if err := m.reconcileTrackerIntakeClaim(ctx, claim); err != nil {
 			reconcileErr = errors.Join(reconcileErr, err)
+			continue
 		}
+		m.clearTrackerIntakeReaperFence(claim.SessionID)
 	}
 	return reconcileErr
 }
@@ -42,10 +46,12 @@ func (m *Manager) ScheduleTrackerIntakeClaimReconciliation(ctx context.Context) 
 	if err != nil {
 		return err
 	}
+	m.syncTrackerIntakeReaperFences(claims)
 	for _, claim := range claims {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		m.setTrackerIntakeReaperFence(claim.SessionID)
 		if !m.beginTrackerIntakeRecovery(claim.SessionID) {
 			continue
 		}
@@ -53,7 +59,9 @@ func (m *Manager) ScheduleTrackerIntakeClaimReconciliation(ctx context.Context) 
 			defer m.endTrackerIntakeRecovery(claim.SessionID)
 			if err := m.reconcileTrackerIntakeClaim(m.backgroundContext, claim); err != nil {
 				m.logger.Warn("tracker intake: claim cleanup deferred", "sessionID", claim.SessionID, "projectID", claim.ProjectID, "error", err)
+				return
 			}
+			m.clearTrackerIntakeReaperFence(claim.SessionID)
 		})
 	}
 	return nil
@@ -88,9 +96,15 @@ func (m *Manager) scheduleTrackerIntakeClaimInspection(ctx context.Context) erro
 func (m *Manager) reconcileStartupTrackerIntakeTerminalClaims(ctx context.Context, recs []domain.SessionRecord) bool {
 	claims, err := m.store.ListPendingTrackerIntakeClaims(ctx)
 	if err != nil {
+		for _, rec := range recs {
+			if !rec.IsTerminated && domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
+				m.setTrackerIntakeReaperFence(rec.ID)
+			}
+		}
 		m.logger.Warn("reconcile: pending terminal tracker intake claims could not be listed", "error", err)
 		return false
 	}
+	m.syncTrackerIntakeReaperFences(claims)
 	byID := make(map[domain.SessionID]domain.SessionRecord, len(recs))
 	for _, rec := range recs {
 		byID[rec.ID] = rec
@@ -108,6 +122,9 @@ func (m *Manager) reconcileStartupTrackerIntakeTerminalClaims(ctx context.Contex
 	}
 	if len(candidates) == 0 {
 		return false
+	}
+	for _, claim := range candidates {
+		m.setTrackerIntakeReaperFence(claim.SessionID)
 	}
 
 	workers := m.reconcileWorkers
@@ -128,7 +145,9 @@ func (m *Manager) reconcileStartupTrackerIntakeTerminalClaims(ctx context.Contex
 					m.logger.Warn("reconcile: pending terminal tracker intake owner remains fenced",
 						"sessionID", claim.SessionID, "projectID", claim.ProjectID, "error", err)
 					captureBackgroundFault(ctx, err, "reconcile", "tracker_intake_terminal")
+					continue
 				}
+				m.clearTrackerIntakeReaperFence(claim.SessionID)
 			}
 		}()
 	}
@@ -138,6 +157,52 @@ func (m *Manager) reconcileStartupTrackerIntakeTerminalClaims(ctx context.Contex
 	close(jobs)
 	wg.Wait()
 	return true
+}
+
+func (m *Manager) setTrackerIntakeReaperFence(id domain.SessionID) {
+	m.trackerIntakeRecoveryMu.Lock()
+	defer m.trackerIntakeRecoveryMu.Unlock()
+	if m.trackerIntakeReaperFenced == nil {
+		m.trackerIntakeReaperFenced = make(map[domain.SessionID]struct{})
+	}
+	m.trackerIntakeReaperFenced[id] = struct{}{}
+}
+
+func (m *Manager) clearTrackerIntakeReaperFence(id domain.SessionID) {
+	m.trackerIntakeRecoveryMu.Lock()
+	delete(m.trackerIntakeReaperFenced, id)
+	m.trackerIntakeRecoveryMu.Unlock()
+}
+
+func (m *Manager) trackerIntakeReaperFenceActive(id domain.SessionID) bool {
+	m.trackerIntakeRecoveryMu.Lock()
+	defer m.trackerIntakeRecoveryMu.Unlock()
+	_, fenced := m.trackerIntakeReaperFenced[id]
+	return fenced
+}
+
+// syncTrackerIntakeReaperFences atomically fences every pending owner and
+// retires conservative fences once a successful durable claim listing proves
+// that the session is no longer pending. Pending entries retain their fence
+// until exact reconciliation succeeds.
+func (m *Manager) syncTrackerIntakeReaperFences(claims []domain.TrackerIntakePendingClaim) {
+	pending := make(map[domain.SessionID]struct{}, len(claims))
+	for _, claim := range claims {
+		pending[claim.SessionID] = struct{}{}
+	}
+	m.trackerIntakeRecoveryMu.Lock()
+	defer m.trackerIntakeRecoveryMu.Unlock()
+	if m.trackerIntakeReaperFenced == nil {
+		m.trackerIntakeReaperFenced = make(map[domain.SessionID]struct{}, len(pending))
+	}
+	for id := range m.trackerIntakeReaperFenced {
+		if _, found := pending[id]; !found {
+			delete(m.trackerIntakeReaperFenced, id)
+		}
+	}
+	for id := range pending {
+		m.trackerIntakeReaperFenced[id] = struct{}{}
+	}
 }
 
 func (m *Manager) beginTrackerIntakeRecovery(id domain.SessionID) bool {
