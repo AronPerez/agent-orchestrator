@@ -21,6 +21,7 @@ export function decisionStatusText(status: DecisionCardStatus, now: number, t: T
 		case "pending": return t("decisions.notDelivered");
 		case "no_session": return t("decisions.noSession");
 		case "outcome": return status.text;
+		case "decided": return t(status.carriedOut ? "decisions.carriedOut" : "decisions.notCarriedOut");
 	}
 }
 

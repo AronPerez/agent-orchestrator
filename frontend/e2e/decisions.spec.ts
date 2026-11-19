@@ -36,13 +36,14 @@ class Ledger {
 	constructor(calls: Call[]) {
 		for (const item of calls) {
 			this.calls.set(item.id, item);
-			this.history.set(item.id, [{ id: `${item.id}-raised`, kind: "raised", writtenAt: item.raisedAt, hostId: HOST, authorKind: "session", authorSession: item.ownerSessionId }]);
+			const kind = item.state === "decided" ? "decided" : "raised";
+			this.history.set(item.id, [{ id: `${item.id}-${kind}`, kind, text: kind === "decided" ? item.title : undefined, writtenAt: item.raisedAt, hostId: HOST, authorKind: "session", authorSession: item.ownerSessionId }]);
 		}
 	}
 	board() {
 		const doneSince = Date.now() - 7 * 24 * hour;
 		const calls = [...this.calls.values()].filter((item) =>
-			item.state === "needs_you" || item.state === "in_progress" ||
+			item.state === "needs_you" || item.state === "in_progress" || item.state === "decided" ||
 			(item.state === "done" && !item.retired && Date.parse(item.outcomeAt ?? "") >= doneSince));
 		return { calls, needsYouCount: calls.filter((item) => item.state === "needs_you").length, servingHostId: HOST, doneSince: new Date(doneSince).toISOString() };
 	}
@@ -59,6 +60,12 @@ class Ledger {
 		const chosenLabel = body.choice === "other" ? "Something else" : item.options[(body.option ?? 1) - 1]!.label;
 		this.record(id, { kind: "answered", authorKind: "person", authorSurface: "desktop", choice: body.choice, option: body.option, note: body.note });
 		Object.assign(item, { state: "in_progress", stateLabel: "In progress", choice: body.choice, option: body.option, chosenLabel, delivery: "pending", answeredAt: new Date().toISOString(), standingEntryId: `${id}-answer` });
+		return item;
+	}
+	overrule(id: string, note: string) {
+		const item = this.calls.get(id)!;
+		this.record(id, { kind: "overruled", authorKind: "person", authorSurface: "desktop", note });
+		Object.assign(item, { state: "in_progress", stateLabel: "In progress", note, delivery: "pending", answeredAt: new Date().toISOString(), standingEntryId: `${id}-overrule`, standingKind: "overruled" });
 		return item;
 	}
 }
@@ -95,6 +102,7 @@ async function openDecisions(page: Page, ledger: Ledger, path = "/#/decisions") 
 		}
 		const body = route.request().postDataJSON() ?? {};
 		if (segments[1] === "answer") await route.fulfill({ json: ledger.answer(id, body) });
+		else if (segments[1] === "overrule") await route.fulfill({ json: ledger.overrule(id, body.note) });
 		else if (segments[1] === "dismiss") {
 			ledger.record(id, { kind: "dismissed", authorKind: "person", authorSurface: "desktop", note: body.note });
 			await route.fulfill({ json: Object.assign(item, { state: "dismissed", stateLabel: "Dismissed" }) });
@@ -209,4 +217,34 @@ test("decisions: a narrow window puts each stream's name above its row", async (
 	const nameBox = (await name.boundingBox())!;
 	const cardBox = (await card.boundingBox())!;
 	expect(nameBox.y + nameBox.height).toBeLessThanOrEqual(cardBox.y + 1);
+});
+
+test("decisions: a decision made for the person has its own lane and can be overruled with a note", async ({ page }) => {
+	const decided = (id: string, title: string, overrides: Partial<Call> = {}): Call => call(id, title, {
+		state: "decided", stateLabel: "Decided for you", options: [], context: "It repeats #11, which is further along.",
+		decided: { key: "pr_hygiene", undo: "Reopen #12; its branch is kept.", verify: "One open PR remains for the ticket.", carriedOut: false },
+		...overrides,
+	});
+	const ledger = new Ledger([
+		decided("dec_close", "Closed the duplicate pull request #12"),
+		decided("dec_label", "Labelled stale issues", { decided: { undo: "Remove the stale label.", carriedOut: true, carriedOutAt: iso(hour), outsidePolicy: "kind_reserved" } }),
+	]);
+	await openDecisions(page, ledger);
+	await expect(page.getByRole("heading", { name: "No decisions yet" })).toHaveCount(0);
+	const states = page.getByRole("list", { name: "Decision states" });
+	await expect(states.getByRole("listitem")).toHaveText([/Needs you\s*0/, /Decided for you\s*2/, /In progress\s*0/, /Done\s*0/]);
+	await expect(page.getByRole("button", { name: /^Labelled stale issues/ })).toContainText("Carried out");
+
+	await page.getByRole("button", { name: /^Closed the duplicate/ }).click();
+	const panel = page.getByRole("complementary", { name: "Decision" });
+	await expect(panel.getByText("Reopen #12; its branch is kept.")).toBeVisible();
+	await expect(panel.getByText("One open PR remains for the ticket.")).toBeVisible();
+	await panel.getByRole("button", { name: "Overrule" }).click();
+	await expect(panel.getByText("Say what to do instead.")).toBeVisible();
+	await panel.getByRole("textbox", { name: "What to do instead" }).fill("Keep both open.");
+	await panel.getByRole("button", { name: "Overrule" }).click();
+	await expect(states.getByRole("listitem")).toHaveText([/Needs you\s*0/, /Decided for you\s*1/, /In progress\s*1/, /Done\s*0/]);
+	await expect(panel.getByRole("list", { name: "History" }).getByText(/Overruled/)).toBeVisible();
+	await expect(panel.getByRole("button", { name: "Record outcome" })).toBeVisible();
+	await expect(panel.getByRole("button", { name: "Send decision" })).toHaveCount(0);
 });

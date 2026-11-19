@@ -117,7 +117,8 @@ function answerBody(input: DecisionInboxAnswer) {
 export type DecisionAction =
 	| { kind: "dismiss"; callId: string; note?: string }
 	| { kind: "outcome"; callId: string; forEntry?: string; text: string; link?: string }
-	| { kind: "retire"; callId: string; retired: boolean };
+	| { kind: "retire"; callId: string; retired: boolean }
+	| { kind: "overrule"; callId: string; note: string };
 
 export async function dismissDecisionCall(callId: string, note?: string): Promise<DecisionCall> {
 	const trimmed = note?.trim();
@@ -152,11 +153,22 @@ export async function retireDecisionCall(callId: string, retired: boolean): Prom
 	return data;
 }
 
+/** The person reverses a decision a session made for them; the note says what to do instead. */
+export async function overruleDecisionCall(callId: string, note: string): Promise<DecisionCall> {
+	const { data, error } = await clientForSessionHost(LOCAL_HOST).POST("/api/v1/decisions/{id}/overrule", {
+		params: { path: { id: callId } },
+		body: { note: note.trim() },
+	});
+	if (error || !data) throw apiErrorException(error, "Could not overrule this decision");
+	return data;
+}
+
 export function runDecisionAction(action: DecisionAction): Promise<DecisionCall> {
 	switch (action.kind) {
 		case "dismiss": return dismissDecisionCall(action.callId, action.note);
 		case "outcome": return recordDecisionOutcome(action.callId, action);
 		case "retire": return retireDecisionCall(action.callId, action.retired);
+		case "overrule": return overruleDecisionCall(action.callId, action.note);
 	}
 }
 

@@ -85,11 +85,15 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 		if (search.data && search.data.length > 0) {
 			body = (
 				<div aria-busy={search.isPlaceholderData || undefined}>
+					{search.isError ? (
+						// The last results stay; say that they could not be refreshed.
+						<LoadError error={search.error} fallback={t("decisionInbox.loadFailed")} onRetry={() => void search.refetch()} className="mx-(--space-4_5) my-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm" />
+					) : null}
 					{search.isPlaceholderData ? <p role="status" className="px-(--space-4_5) pt-2 text-caption text-passive">{t("decisions.updating")}</p> : null}
 					<DecisionSearchResults calls={search.data} selectedId={callId} onSelect={selectCall} />
 				</div>
 			);
-		} else if (search.data) {
+		} else if (search.data && !search.isError) {
 			body = (
 				<div className="flex flex-col items-center gap-3 px-6 py-16 text-center">
 					<p className="text-sm text-muted-foreground">{t("decisions.noMatches", { query: words })}</p>
@@ -116,7 +120,7 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} />
 			</>
 		);
-	} else if (board.data) {
+	} else if (board.data && !board.isError) {
 		body = (
 			<div className="flex flex-col items-center px-6 py-16 text-center">
 				<h2 className="text-heading-sm font-medium text-foreground">{t("decisions.emptyTitle")}</h2>
@@ -170,19 +174,22 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 	);
 }
 
+// The skeleton draws the three lanes every board has.
+const SKELETON_LANES = DECISION_LANES.filter((lane) => lane !== "decided");
+
 /** Placeholder cells on the board's own grid, so loading does not reflow. */
 function DecisionsBoardSkeleton({ label }: { label: string }) {
 	return (
 		<div role="status" aria-label={label} className="@container">
 			<div className="grid grid-cols-[repeat(3,minmax(11rem,1fr))] @3xl:grid-cols-[minmax(7rem,10rem)_repeat(3,minmax(11rem,1fr))]">
 				<div className="hidden border-b border-border @3xl:block" />
-				{DECISION_LANES.map((lane) => (
+				{SKELETON_LANES.map((lane) => (
 					<div key={lane} className="border-b border-l border-border px-2.5 py-2"><Skeleton className="h-3 w-20" /></div>
 				))}
 				{[0, 1].map((row) => (
 					<div key={row} className="contents">
 						<div className="hidden border-b border-border px-3 py-2 @3xl:block"><Skeleton className="h-3 w-16" /></div>
-						{DECISION_LANES.map((lane) => (
+						{SKELETON_LANES.map((lane) => (
 							<div key={lane} className="min-h-14 border-b border-l border-border p-1.5">
 								{row === 0 ? <Skeleton className="h-11 w-full rounded-md" /> : null}
 							</div>

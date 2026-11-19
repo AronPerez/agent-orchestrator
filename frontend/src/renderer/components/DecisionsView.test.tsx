@@ -256,6 +256,18 @@ describe("DecisionsView", () => {
 			expect(screen.queryByRole("button", { name: /Stale/ })).not.toBeInTheDocument();
 		});
 
+		it("reports a failed refresh over cached search results, keeping them", async () => {
+			answerSearch({ auth: closedHistory });
+			const view = renderView(<DecisionsView query="auth" />);
+			await screen.findByRole("list", { name: "Search results" });
+			answerSearch({ auth: Promise.resolve({ error: { code: "DECISION_LIST_FAILED", message: "Unable to list decisions" } }) });
+			await act(() => clientOf(view).invalidateQueries());
+			const alert = await screen.findByRole("alert", undefined, { timeout: 4_000 });
+			expect(alert).toHaveTextContent("Unable to list decisions");
+			expect(within(alert).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+			expect(screen.getByRole("list", { name: "Search results" })).toBeInTheDocument();
+		}, 10_000);
+
 		it("reports a failed search with a retry", async () => {
 			answerSearch({ auth: Promise.resolve({ error: { code: "DECISION_LIST_FAILED", message: "Unable to list decisions" } }) });
 			renderView(<DecisionsView query="auth" />);
@@ -298,4 +310,23 @@ describe("DecisionsView", () => {
 			expect(screen.getByRole("button", { name: /^Question dec_1/ })).toBeInTheDocument();
 		}, 10_000);
 	});
+
+	it("shows standing decisions instead of an empty ledger", async () => {
+		answer(board([call({ id: "dec_decided", state: "decided", stateLabel: "Decided for you", decided: { undo: "Undo it", carriedOut: true } })]));
+		renderView(<DecisionsView />);
+		expect(await screen.findByRole("button", { name: /^Question dec_decided/ })).toBeInTheDocument();
+		expect(screen.queryByRole("heading", { name: "No decisions yet" })).not.toBeInTheDocument();
+		expect(screen.getByRole("status", { name: "Nothing needs you" })).toBeInTheDocument();
+	});
+
+	it("reports a failed refresh of an empty board instead of calling it empty", async () => {
+		answer(board([]));
+		const view = renderView(<DecisionsView />);
+		await screen.findByRole("heading", { name: "No decisions yet" });
+		answer({ error: { code: "DECISION_BOARD_FAILED", message: "Unable to load decisions" } });
+		await act(() => clientOf(view).invalidateQueries());
+		const alert = await screen.findByRole("alert", undefined, { timeout: 4_000 });
+		expect(alert).toHaveTextContent("Unable to load decisions");
+		expect(screen.queryByRole("heading", { name: "No decisions yet" })).not.toBeInTheDocument();
+	}, 10_000);
 });

@@ -1,7 +1,12 @@
 import type { DecisionCall } from "./decision-inbox";
 
 /** The three board columns, in display order. */
-export const DECISION_LANES = ["needs_you", "in_progress", "done"] as const;
+/**
+ * Every board lane, in display order. "decided" holds decisions a session made
+ * for the person that still stand; it sits before In progress because an
+ * overruled decision moves there, and is shown only when it has cards.
+ */
+export const DECISION_LANES = ["needs_you", "decided", "in_progress", "done"] as const;
 export type DecisionLane = (typeof DECISION_LANES)[number];
 
 /** Row key for calls with no work stream; it is always first in its band. */
@@ -21,7 +26,8 @@ export type DecisionCardStatus =
 	| { kind: "sent"; to: string; fallback: boolean }
 	| { kind: "pending" }
 	| { kind: "no_session" }
-	| { kind: "outcome"; text: string };
+	| { kind: "outcome"; text: string }
+	| { kind: "decided"; carriedOut: boolean; carriedOutAt?: string };
 
 export type DecisionCardModel = {
 	id: string;
@@ -30,6 +36,8 @@ export type DecisionCardModel = {
 	secondary: DecisionCardSecondary;
 	status: DecisionCardStatus;
 	changedAfterClose: boolean;
+	/** Set when a decision made for the person was recorded outside the project's policy. */
+	outsidePolicy?: string;
 	call: DecisionCall;
 	/** The timestamp the card's lane sorts by. */
 	sortAt: string;
@@ -72,6 +80,8 @@ export type DecisionTopologyRow = {
 export type DecisionCardLocation = { card: DecisionCardModel; bandKey: string; rowKey: string };
 
 export type DecisionBoardModel = {
+	/** The lanes to draw: the decided lane only when it has cards. */
+	lanes: DecisionLane[];
 	bands: DecisionProjectBand[];
 	totals: Record<DecisionLane, number>;
 	cardById: Map<string, DecisionCardLocation>;
@@ -79,11 +89,11 @@ export type DecisionBoardModel = {
 	topology: DecisionTopologyRow[];
 };
 
-const emptyCounts = (): Record<DecisionLane, number> => ({ needs_you: 0, in_progress: 0, done: 0 });
-const emptyLanes = (): DecisionLaneCards => ({ needs_you: [], in_progress: [], done: [] });
+const emptyCounts = (): Record<DecisionLane, number> => ({ needs_you: 0, decided: 0, in_progress: 0, done: 0 });
+const emptyLanes = (): DecisionLaneCards => ({ needs_you: [], decided: [], in_progress: [], done: [] });
 
 function laneOf(call: DecisionCall): DecisionLane | undefined {
-	if (call.state === "needs_you" || call.state === "in_progress") return call.state;
+	if (call.state === "needs_you" || call.state === "in_progress" || call.state === "decided") return call.state;
 	if (call.state === "done" && !call.retired) return "done";
 	return undefined;
 }
@@ -111,7 +121,7 @@ function compareCards(lane: DecisionLane) {
 }
 
 function secondaryOf(call: DecisionCall, lane: DecisionLane): DecisionCardSecondary {
-	if (lane === "needs_you") {
+	if (lane === "needs_you" || lane === "decided") {
 		return {
 			kind: "who",
 			machine: call.machineLabel || call.hostId,
@@ -124,6 +134,9 @@ function secondaryOf(call: DecisionCall, lane: DecisionLane): DecisionCardSecond
 
 function statusOf(call: DecisionCall, lane: DecisionLane): DecisionCardStatus {
 	if (lane === "needs_you") return { kind: "waiting", since: call.raisedAt };
+	if (lane === "decided") {
+		return { kind: "decided", carriedOut: Boolean(call.decided?.carriedOut), carriedOutAt: call.decided?.carriedOutAt ?? undefined };
+	}
 	if (lane === "done") return { kind: "outcome", text: call.outcome ?? "" };
 	if (call.delivery === "sent") {
 		return { kind: "sent", to: call.deliveredToName || call.deliveredTo || "", fallback: Boolean(call.deliveredFallback) };
@@ -204,6 +217,7 @@ export function buildDecisionBoard(calls: readonly DecisionCall[]): DecisionBoar
 			secondary: secondaryOf(call, lane),
 			status: statusOf(call, lane),
 			changedAfterClose: Boolean(call.changedAfterClose),
+			outsidePolicy: call.decided?.outsidePolicy || undefined,
 			call,
 			sortAt: sortTimeOf(call, lane),
 		};
@@ -250,7 +264,7 @@ export function buildDecisionBoard(calls: readonly DecisionCall[]): DecisionBoar
 	const topology: DecisionTopologyRow[] = [];
 	for (const band of ordered) {
 		for (const row of band.rows) {
-			const ids = { needs_you: [] as string[], in_progress: [] as string[], done: [] as string[] };
+			const ids: Record<DecisionLane, string[]> = { needs_you: [], decided: [], in_progress: [], done: [] };
 			for (const lane of DECISION_LANES) {
 				for (const card of row.lanes[lane]) {
 					ids[lane].push(card.id);
@@ -260,7 +274,8 @@ export function buildDecisionBoard(calls: readonly DecisionCall[]): DecisionBoar
 			topology.push({ bandKey: band.key, rowKey: row.key, lanes: ids });
 		}
 	}
-	return { bands: ordered, totals, cardById, topology };
+	const lanes = DECISION_LANES.filter((lane) => lane !== "decided" || totals.decided > 0);
+	return { lanes, bands: ordered, totals, cardById, topology };
 }
 
 export type DecisionFocusDirection = "up" | "down" | "left" | "right";
@@ -268,14 +283,15 @@ export type DecisionFocusDirection = "up" | "down" | "left" | "right";
 function locate(topology: readonly DecisionTopologyRow[], id: string) {
 	for (let row = 0; row < topology.length; row += 1) {
 		for (const lane of DECISION_LANES) {
-			const index = topology[row]!.lanes[lane].indexOf(id);
+			const index = (topology[row]!.lanes[lane] ?? []).indexOf(id);
 			if (index >= 0) return { row, lane, index };
 		}
 	}
 	return undefined;
 }
 
-const column = (topology: readonly DecisionTopologyRow[], lane: DecisionLane) => topology.flatMap((row) => row.lanes[lane]);
+const laneIds = (row: DecisionTopologyRow, lane: DecisionLane) => row.lanes[lane] ?? [];
+const column = (topology: readonly DecisionTopologyRow[], lane: DecisionLane) => topology.flatMap((row) => laneIds(row, lane));
 
 /**
  * Arrow-key movement over the visible cards. Up/Down walk one lane down the
@@ -293,7 +309,7 @@ export function moveDecisionFocus(topology: readonly DecisionTopologyRow[], curr
 	const step = direction === "right" ? 1 : -1;
 	const row = topology[at.row]!;
 	for (let lane = DECISION_LANES.indexOf(at.lane) + step; lane >= 0 && lane < DECISION_LANES.length; lane += step) {
-		const ids = row.lanes[DECISION_LANES[lane]!];
+		const ids = row.lanes[DECISION_LANES[lane]!] ?? [];
 		if (ids.length > 0) return ids[Math.min(at.index, ids.length - 1)]!;
 	}
 	return currentId;
@@ -302,7 +318,7 @@ export function moveDecisionFocus(topology: readonly DecisionTopologyRow[], curr
 /** The board's single tab stop: the selected card, else the first Needs you card, else the first card. */
 export function initialDecisionFocusId(topology: readonly DecisionTopologyRow[], selectedId: string | undefined): string | undefined {
 	if (selectedId && locate(topology, selectedId)) return selectedId;
-	return column(topology, "needs_you")[0] ?? topology.flatMap((row) => DECISION_LANES.flatMap((lane) => row.lanes[lane]))[0];
+	return column(topology, "needs_you")[0] ?? topology.flatMap((row) => DECISION_LANES.flatMap((lane) => laneIds(row, lane)))[0];
 }
 
 /**
@@ -315,7 +331,7 @@ export function replacementDecisionFocusId(
 	removedId: string,
 	after: readonly DecisionTopologyRow[],
 ): string | undefined {
-	const visible = new Set(after.flatMap((row) => DECISION_LANES.flatMap((lane) => row.lanes[lane])));
+	const visible = new Set(after.flatMap((row) => DECISION_LANES.flatMap((lane) => laneIds(row, lane))));
 	const at = locate(before, removedId);
 	if (at) {
 		const ids = column(before, at.lane);

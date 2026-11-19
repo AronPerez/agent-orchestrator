@@ -13,6 +13,7 @@ import {
 	type DecisionAction,
 	type DecisionBoard,
 	type DecisionCall,
+	type DecisionDetail,
 	type DecisionInboxEntry,
 } from "../lib/decision-inbox";
 import { labelForHost } from "../lib/host-clients";
@@ -31,15 +32,17 @@ export function useDecisionAnswer() {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationFn: answerDecisionInboxCall,
-		onSuccess: async (_call, input) => {
+		onSuccess: async (confirmed, input) => {
 			queryClient.setQueryData<DecisionCall[]>(decisionInboxQueryKey(input.sourceHostId), (current) =>
 				current?.filter((call) => call.id !== input.callId),
 			);
+			if (input.sourceHostId === LOCAL_HOST) seedConfirmedCall(queryClient, confirmed);
 			await queryClient.invalidateQueries({ queryKey: decisionKeys.all });
 		},
-		onError: (_error, input) => {
-			void queryClient.invalidateQueries({ queryKey: decisionKeys.host(input.sourceHostId) });
-		},
+		// The daemon may have committed the answer even though the response was
+		// lost: stay pending until the source host's calls are re-read, so the
+		// same answer is not sent twice.
+		onError: (_error, input) => queryClient.invalidateQueries({ queryKey: decisionKeys.host(input.sourceHostId) }),
 	});
 }
 
@@ -52,7 +55,32 @@ export function useDecisionAction() {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationFn: (action: DecisionAction) => runDecisionAction(action),
+		onSuccess: (confirmed) => seedConfirmedCall(queryClient, confirmed),
 		onSettled: () => queryClient.invalidateQueries({ queryKey: decisionKeys.host(LOCAL_HOST) }),
+	});
+}
+
+/**
+ * Puts the daemon's confirmed call into this computer's detail and board
+ * views at once. A re-read that then fails keeps it, so a stale call is never
+ * shown as still open to the same action.
+ */
+function seedConfirmedCall(queryClient: ReturnType<typeof useQueryClient>, confirmed: DecisionCall) {
+	queryClient.setQueryData<DecisionDetail | null>(decisionKeys.detail(confirmed.id), (current) =>
+		current ? { ...current, call: confirmed } : current,
+	);
+	queryClient.setQueryData<DecisionBoard>(decisionKeys.board(), (current) => {
+		const before = current?.calls.find((call) => call.id === confirmed.id);
+		if (!current || !before) return current;
+		// Keep the board's own window and count true to the confirmed call.
+		const stays = confirmed.state === "needs_you" || confirmed.state === "in_progress" || confirmed.state === "decided" ||
+			(confirmed.state === "done" && !confirmed.retired && Date.parse(confirmed.outcomeAt ?? "") >= Date.parse(current.doneSince));
+		const needsYou = (call: DecisionCall) => (call.state === "needs_you" ? 1 : 0);
+		return {
+			...current,
+			calls: current.calls.flatMap((call) => (call.id !== confirmed.id ? [call] : stays ? [confirmed] : [])),
+			needsYouCount: current.needsYouCount - needsYou(before) + (stays ? needsYou(confirmed) : 0),
+		};
 	});
 }
 

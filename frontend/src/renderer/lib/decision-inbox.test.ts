@@ -19,6 +19,7 @@ import {
 	fetchDecisionSearch,
 	decisionOptionRequiresNote,
 	mergeDecisionInboxSources,
+	overruleDecisionCall,
 	recordDecisionOutcome,
 	retireDecisionCall,
 } from "./decision-inbox";
@@ -195,5 +196,14 @@ describe("decisionOptionRequiresNote", () => {
 		expect(decisionOptionRequiresNote(plan, 2)).toBe(true);
 		expect(decisionOptionRequiresNote(plan, 1)).toBe(false);
 		expect(decisionOptionRequiresNote({ ...plan, reference: undefined }, 2)).toBe(false);
+	});
+});
+
+describe("overruleDecisionCall", () => {
+	it("overrules on this computer with the trimmed note", async () => {
+		postMock.mockResolvedValue({ data: call("dec_1", "2026-11-18T10:00:00Z") });
+		await overruleDecisionCall("dec_1", "  Keep #12 open ");
+		expect(clientForSessionHostMock).toHaveBeenCalledWith("local");
+		expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/overrule", { params: { path: { id: "dec_1" } }, body: { note: "Keep #12 open" } });
 	});
 });

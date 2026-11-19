@@ -23,8 +23,13 @@ function isWebUrl(url: string): boolean {
 	}
 }
 
-/** True when the panel offers an answer form for this state. */
+/**
+ * True when the panel offers an answer form for this call. A decision made
+ * for the person is never a question, even once overruled: the daemon refuses
+ * an answer to it.
+ */
 export function decisionAcceptsAnswer(call: DecisionCall): boolean {
+	if (call.decided) return false;
 	return call.state === "needs_you" || call.state === "in_progress" || call.state === "dismissed";
 }
 
@@ -34,10 +39,28 @@ export function decisionAcceptsAnswer(call: DecisionCall): boolean {
  * action. One request at a time, nothing changes before the daemon agrees,
  * and every result refetches the call.
  */
-export function DecisionCallActions({ call, extraActions }: { call: DecisionCall; extraActions?: ReactNode }) {
+export function DecisionCallActions({
+	call,
+	extraActions,
+	readAt,
+	onRecheck,
+}: {
+	call: DecisionCall;
+	extraActions?: ReactNode;
+	/** When this call was last read from the daemon (the detail query's dataUpdatedAt). */
+	readAt?: number;
+	onRecheck?: () => void;
+}) {
+	const { t } = useTranslation();
 	const answer = useDecisionAnswer();
 	const action = useDecisionAction();
 	const busy = answer.isPending || action.isPending;
+	// The daemon may commit an answer whose response is lost. Until a read made
+	// after that answer was sent succeeds, sending again could deliver it twice.
+	const [lostAnswerAt, setLostAnswerAt] = useState<number>();
+	const unconfirmed = lostAnswerAt !== undefined && !(readAt !== undefined && readAt > lostAnswerAt);
+	// A standing decision is closed by the person without naming an answer: it has none.
+	const outcomeFor = call.state === "decided" ? undefined : call.standingEntryId;
 	const failure = answer.isError ? answer.error : action.isError ? action.error : undefined;
 	const reset = () => {
 		answer.reset();
@@ -51,32 +74,49 @@ export function DecisionCallActions({ call, extraActions }: { call: DecisionCall
 					key={`${call.state}:${call.standingEntryId ?? ""}`}
 					call={call}
 					busy={busy}
+					unconfirmed={unconfirmed}
 					extraActions={extraActions}
 					onAnswer={(choice, note) => {
 						reset();
+						const sentAt = Date.now();
 						answer.mutate({
 							sourceHostId: LOCAL_HOST,
 							callId: call.id,
 							choice: choice === OTHER ? "other" : "option",
 							option: choice === OTHER ? undefined : Number(choice),
 							note,
-						});
+						}, { onError: () => setLostAnswerAt(sentAt) });
 					}}
 					onDismiss={(note) => {
 						reset();
 						action.mutate({ kind: "dismiss", callId: call.id, note });
 					}}
 				/>
+			) : call.state === "decided" ? (
+				<OverruleForm
+					busy={busy}
+					extraActions={extraActions}
+					onOverrule={(note) => {
+						reset();
+						action.mutate({ kind: "overrule", callId: call.id, note });
+					}}
+				/>
 			) : extraActions ? <div className="flex flex-wrap items-center gap-2">{extraActions}</div> : null}
-			{call.state === "in_progress" ? (
+			{call.state === "in_progress" || call.state === "decided" ? (
 				<OutcomeForm
-					key={call.standingEntryId ?? ""}
+					forEntry={outcomeFor}
 					busy={busy}
 					onRecord={(text, link) => {
 						reset();
-						action.mutate({ kind: "outcome", callId: call.id, forEntry: call.standingEntryId, text, link });
+						action.mutate({ kind: "outcome", callId: call.id, forEntry: outcomeFor, text, link });
 					}}
 				/>
+			) : null}
+			{unconfirmed && decisionAcceptsAnswer(call) ? (
+				<p role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-status-in-review">
+					<span>{t("decisions.answerUnconfirmed")}</span>
+					{onRecheck ? <Button type="button" size="sm" variant="secondary" onClick={onRecheck}>{t("decisions.checkAgain")}</Button> : null}
+				</p>
 			) : null}
 			{call.state === "done" ? <RetireAction call={call} busy={busy} onRetire={(retired) => {
 				reset();
@@ -101,12 +141,15 @@ function ActionError({ error }: { error: unknown }) {
 function AnswerForm({
 	call,
 	busy,
+	unconfirmed,
 	extraActions,
 	onAnswer,
 	onDismiss,
 }: {
 	call: DecisionCall;
 	busy: boolean;
+	/** An earlier answer may have been recorded; nothing is sent until it is checked. */
+	unconfirmed: boolean;
 	extraActions?: ReactNode;
 	onAnswer: (choice: string, note: string) => void;
 	onDismiss: (note: string) => void;
@@ -121,10 +164,13 @@ function AnswerForm({
 	const [noteMissing, setNoteMissing] = useState(false);
 	const [dismissing, setDismissing] = useState(false);
 	const [dismissNote, setDismissNote] = useState("");
+	// Sending the standing answer again would only append and deliver a copy.
+	const unchanged = standing !== "" && choice === standing && note.trim() === (call.note ?? "").trim();
+	const blocked = busy || unconfirmed || !choice || unchanged;
 
 	const submit = (event: FormEvent) => {
 		event.preventDefault();
-		if (busy || !choice) return;
+		if (blocked) return;
 		if (!note.trim() && (choice === OTHER || decisionOptionRequiresNote(call, Number(choice)))) {
 			setNoteMissing(true);
 			return;
@@ -191,7 +237,7 @@ function AnswerForm({
 			</div>
 			{hint ? <p id={hintId} className="text-caption text-muted-foreground">{hint}</p> : null}
 			<div className="flex flex-wrap items-center gap-2">
-				<Button type="submit" variant="primary" size="sm" disabled={busy || !choice} aria-busy={busy || undefined}>
+				<Button type="submit" variant="primary" size="sm" disabled={blocked} aria-busy={busy || undefined}>
 					{t("decisions.send")}
 				</Button>
 				{extraActions}
@@ -219,15 +265,24 @@ function AnswerForm({
 	);
 }
 
-function OutcomeForm({ busy, onRecord }: { busy: boolean; onRecord: (text: string, link: string) => void }) {
+function OutcomeForm({ forEntry, busy, onRecord }: { forEntry?: string; busy: boolean; onRecord: (text: string, link: string) => void }) {
 	const { t } = useTranslation();
 	const id = useId();
 	const [text, setText] = useState("");
 	const [link, setLink] = useState("");
 	const [errors, setErrors] = useState<{ text?: string; link?: string }>({});
+	// The answer this draft was written against. If another surface changes the
+	// answer meanwhile, the draft stays and the person reviews the new answer
+	// before recording, instead of losing what they typed.
+	const [draftFor, setDraftFor] = useState(forEntry);
+	const answerChanged = Boolean(text.trim() || link.trim()) && draftFor !== forEntry;
 	const submit = (event: FormEvent) => {
 		event.preventDefault();
 		if (busy) return;
+		if (answerChanged) {
+			setDraftFor(forEntry);
+			return;
+		}
 		const next: { text?: string; link?: string } = {};
 		const trimmed = text.trim();
 		if (!trimmed || /[\r\n]/.test(trimmed)) next.text = t("decisions.outcomeRequired");
@@ -249,7 +304,10 @@ function OutcomeForm({ busy, onRecord }: { busy: boolean; onRecord: (text: strin
 						disabled={busy}
 						aria-invalid={errors.text ? true : undefined}
 						aria-describedby={errors.text ? `${id}-text-error` : undefined}
-						onChange={(event) => setText(event.target.value)}
+						onChange={(event) => {
+							if (!text.trim() && !link.trim()) setDraftFor(forEntry);
+							setText(event.target.value);
+						}}
 					/>
 					{errors.text ? <p id={`${id}-text-error`} className="text-caption text-destructive">{errors.text}</p> : null}
 				</div>
@@ -268,10 +326,54 @@ function OutcomeForm({ busy, onRecord }: { busy: boolean; onRecord: (text: strin
 					{errors.link ? <p id={`${id}-link-error`} className="text-caption text-destructive">{errors.link}</p> : null}
 				</div>
 			</fieldset>
+			{answerChanged ? <p role="status" className="text-caption text-status-in-review">{t("decisions.outcomeAnswerChanged")}</p> : null}
 			<div>
 				<Button type="submit" variant="secondary" size="sm" disabled={busy} aria-busy={busy || undefined}>
 					{t("decisions.recordOutcome")}
 				</Button>
+			</div>
+		</form>
+	);
+}
+
+/** Overruling a decision made for the person needs a note saying what to do instead. */
+function OverruleForm({ busy, extraActions, onOverrule }: { busy: boolean; extraActions?: ReactNode; onOverrule: (note: string) => void }) {
+	const { t } = useTranslation();
+	const id = useId();
+	const [note, setNote] = useState("");
+	const [missing, setMissing] = useState(false);
+	const submit = (event: FormEvent) => {
+		event.preventDefault();
+		if (busy) return;
+		if (!note.trim()) {
+			setMissing(true);
+			return;
+		}
+		onOverrule(note);
+	};
+	return (
+		<form noValidate onSubmit={submit} className="flex flex-col gap-2">
+			<div className="flex flex-col gap-1.5">
+				<Label htmlFor={`${id}-note`}>{t("decisions.overruleLabel")}</Label>
+				<Textarea
+					id={`${id}-note`}
+					value={note}
+					maxLength={1000}
+					disabled={busy}
+					aria-invalid={missing || undefined}
+					aria-describedby={missing ? `${id}-error` : undefined}
+					onChange={(event) => {
+						setNote(event.target.value);
+						if (event.target.value.trim()) setMissing(false);
+					}}
+				/>
+				{missing ? <p id={`${id}-error`} className="text-caption text-destructive">{t("decisions.noteRequired")}</p> : null}
+			</div>
+			<div className="flex flex-wrap items-center gap-2">
+				<Button type="submit" variant="primary" size="sm" disabled={busy} aria-busy={busy || undefined}>
+					{t("decisions.overrule")}
+				</Button>
+				{extraActions}
 			</div>
 		</form>
 	);

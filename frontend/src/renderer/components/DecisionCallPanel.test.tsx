@@ -281,6 +281,23 @@ describe("DecisionCallPanel", () => {
 			});
 		});
 
+		it("keeps an outcome draft when the answer changes underneath it, and asks for a review first", async () => {
+			serve(inProgress);
+			const { client } = renderPanel();
+			await userEvent.type(await screen.findByLabelText("What happened"), "Shipped in PR 412");
+			serve({ ...inProgress, standingEntryId: "dent_answer_2", option: 2, chosenLabel: "Per-tenant API keys" });
+			await act(() => client.invalidateQueries());
+			expect(await screen.findByText("The answer changed after you started. Review it, then record the outcome.")).toBeInTheDocument();
+			expect(screen.getByLabelText("What happened")).toHaveValue("Shipped in PR 412");
+			await userEvent.click(screen.getByRole("button", { name: "Record outcome" }));
+			expect(postMock).not.toHaveBeenCalled();
+			await userEvent.click(screen.getByRole("button", { name: "Record outcome" }));
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/outcome", {
+				params: { path: { id: "dec_1" } },
+				body: { forEntry: "dent_answer_2", text: "Shipped in PR 412" },
+			});
+		});
+
 		it("dismisses only after a confirmation that takes an optional note", async () => {
 			serve(needsYou);
 			renderPanel();
@@ -316,6 +333,52 @@ describe("DecisionCallPanel", () => {
 			await screen.findByRole("heading", { level: 2, name: call.title });
 			expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
 			expect(screen.queryByRole("button", { name: /Send decision|Dismiss|Record outcome|Mark/ })).not.toBeInTheDocument();
+		});
+
+		// The daemon may commit an answer whose response is lost. Until a fresh
+		// read says what the call is now, sending again could deliver it twice.
+		it("keeps Send disabled after an answer it could not confirm, until the call is read again", async () => {
+			serve(needsYou);
+			renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			postMock.mockRejectedValue(new Error("connection reset"));
+			getMock.mockRejectedValue(new Error("offline"));
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(await screen.findByText("Your answer may have been recorded. Check again before sending it.")).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Send decision" })).toBeDisabled();
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledTimes(1);
+
+			serve(needsYou);
+			await userEvent.click(screen.getByRole("button", { name: "Check again" }));
+			await vi.waitFor(() => expect(screen.getByRole("button", { name: "Send decision" })).toBeEnabled());
+			expect(screen.queryByText("Your answer may have been recorded. Check again before sending it.")).not.toBeInTheDocument();
+		});
+
+		it("shows an answer recorded despite a lost response and does not send it again", async () => {
+			serve(needsYou);
+			renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			postMock.mockRejectedValue(new Error("connection reset"));
+			serve({ ...inProgress, option: 2, chosenLabel: "Per-tenant API keys", standingEntryId: "dent_2" });
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(await screen.findByText("Sending a different pick delivers it to the session as an update.")).toBeInTheDocument();
+			await vi.waitFor(() => expect(screen.getByRole("button", { name: "Send decision" })).toBeDisabled());
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not resend an unchanged standing answer, but sends a changed pick or note", async () => {
+			serve(inProgress);
+			renderPanel();
+			const send = await screen.findByRole("button", { name: "Send decision" });
+			expect(send).toBeDisabled();
+			await userEvent.click(screen.getByRole("radio", { name: /Per-tenant API keys/ }));
+			expect(send).toBeEnabled();
+			await userEvent.click(screen.getByRole("radio", { name: /OAuth client credentials/ }));
+			expect(send).toBeDisabled();
+			await userEvent.type(screen.getByLabelText("Note for the session"), "Use staging first");
+			expect(send).toBeEnabled();
 		});
 
 		it("allows one action at a time and shows the daemon's refusal with its request id", async () => {
@@ -382,4 +445,92 @@ describe("DecisionCallPanel", () => {
 		expect(within(alert).getByRole("button", { name: "Retry" })).toBeInTheDocument();
 		expect(screen.getByRole("heading", { level: 2, name: call.title })).toBeInTheDocument();
 	}, 10_000);
+
+	describe("decided for you", () => {
+		const decidedCall: DecisionCall = {
+			...call,
+			state: "decided",
+			stateLabel: "Decided for you",
+			title: "Closed the duplicate pull request #12",
+			context: "It repeated #9 exactly.",
+			options: [],
+			choice: undefined,
+			option: undefined,
+			chosenLabel: undefined,
+			delivery: undefined,
+			changedAfterClose: false,
+			decided: { undo: "Reopen #12; its branch is kept.", verify: "#12 shows as closed.", carriedOut: false, outsidePolicy: "autonomy_not_on" },
+		};
+		const decidedHistory: DecisionHistoryEntry[] = [
+			entry({ id: "d1", kind: "decided", authorKind: "session", authorSession: "w-5512", text: "Closed the duplicate pull request #12", writtenAt: at(1) }),
+			entry({ id: "d2", kind: "carried_out", authorKind: "session", authorSession: "w-5512", writtenAt: at(2) }),
+			entry({ id: "d3", kind: "overruled", note: "Keep #12 open", authorSurface: "desktop", writtenAt: at(3) }),
+		];
+
+		it("shows how to undo and verify it, whether it was carried out, and why it is outside policy", async () => {
+			serve(decidedCall, decidedHistory);
+			renderPanel();
+			expect(await screen.findByRole("heading", { level: 2, name: decidedCall.title })).toBeInTheDocument();
+			expect(screen.getByText("Decided for you")).toBeInTheDocument();
+			expect(screen.getByText("Reopen #12; its branch is kept.")).toBeInTheDocument();
+			expect(screen.getByText("#12 shows as closed.")).toBeInTheDocument();
+			expect(screen.getByText("Not confirmed as carried out yet")).toBeInTheDocument();
+			expect(screen.getByText("Recorded while autonomy was not on for this project")).toBeInTheDocument();
+			expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+			expect(screen.queryByRole("list", { name: "Options" })).not.toBeInTheDocument();
+		});
+
+		it("names a reserved kind and a confirmed carry-out", async () => {
+			serve({ ...decidedCall, decided: { ...decidedCall.decided!, outsidePolicy: "kind_reserved", carriedOut: true, carriedOutAt: "2026-11-18T10:05:00Z" } }, decidedHistory);
+			renderPanel();
+			expect(await screen.findByText("Recorded for a kind this project reserves for you")).toBeInTheDocument();
+			expect(screen.getByText(/^Carried out \S/)).toBeInTheDocument();
+		});
+
+		// The daemon refuses an answer to a decision made for the person, so an
+		// overruled one offers no answer form, only the outcome.
+		it("offers no answer form once a decision is overruled", async () => {
+			serve({ ...decidedCall, state: "in_progress", stateLabel: "In progress", note: "Keep #12 open", delivery: "pending", standingEntryId: "d3" }, decidedHistory);
+			renderPanel();
+			expect(await screen.findByRole("button", { name: "Record outcome" })).toBeInTheDocument();
+			expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: "Send decision" })).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: "Overrule" })).not.toBeInTheDocument();
+		});
+
+		it.each([["not yet confirmed", false], ["confirmed", true]])("lets the person close a standing decision %s with an outcome", async (_label, carriedOut) => {
+			serve({ ...decidedCall, decided: { ...decidedCall.decided!, carriedOut } }, decidedHistory);
+			renderPanel();
+			await userEvent.type(await screen.findByLabelText("What happened"), "Reviewed; #12 stays closed");
+			await userEvent.click(screen.getByRole("button", { name: "Record outcome" }));
+			expect(postMock).toHaveBeenCalledTimes(1);
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/outcome", {
+				params: { path: { id: "dec_1" } },
+				body: { text: "Reviewed; #12 stays closed" },
+			});
+		});
+
+		it("overrules only with a note saying what to do instead", async () => {
+			serve(decidedCall, decidedHistory);
+			renderPanel();
+			await userEvent.click(await screen.findByRole("button", { name: "Overrule" }));
+			expect(postMock).not.toHaveBeenCalled();
+			expect(screen.getByLabelText("What to do instead")).toHaveAccessibleDescription("Say what to do instead.");
+			await userEvent.type(screen.getByLabelText("What to do instead"), "Keep #12 open");
+			await userEvent.click(screen.getByRole("button", { name: "Overrule" }));
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/overrule", { params: { path: { id: "dec_1" } }, body: { note: "Keep #12 open" } });
+		});
+
+		it("tells its history", async () => {
+			serve(decidedCall, decidedHistory);
+			renderPanel();
+			const list = await screen.findByRole("list", { name: "History" });
+			expect([...list.querySelectorAll("[data-slot='history-what']")].map((node) => node.textContent)).toEqual([
+				"Decided for you: Closed the duplicate pull request #12",
+				"Carried out",
+				"Overruled",
+			]);
+			expect(within(list).getByText("Keep #12 open")).toBeInTheDocument();
+		});
+	});
 });
