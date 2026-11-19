@@ -20,6 +20,10 @@ const (
 	idleJitter   = 0.10
 	// syncTimeout bounds one whole sync, however many pages it moves.
 	syncTimeout = 5 * time.Minute
+	// quickEmptyWait: a waiting exchange that comes back empty sooner than
+	// this means the peer does not hold waits; the loop then rests for the
+	// idle interval instead of asking again at once.
+	quickEmptyWait = 5 * time.Second
 )
 
 // backoffSteps are the waits after one, two, three... failures in a row.
@@ -126,12 +130,19 @@ func (s *Scheduler) Refresh() {
 			continue
 		}
 		ctx, cancel := context.WithCancel(s.ctx)
-		w := &peerWorker{s: s, hostID: peer.HostID, cancel: cancel, poke: make(chan struct{}, 1), now: make(chan syncRequest)}
+		w := &peerWorker{
+			s: s, hostID: peer.HostID, cancel: cancel,
+			poke: make(chan struct{}, 1), now: make(chan syncRequest), healthy: make(chan struct{}, 1),
+		}
 		s.workers[peer.HostID] = w
-		s.wg.Add(1)
+		s.wg.Add(2)
 		go func() {
 			defer s.wg.Done()
 			w.run(ctx)
+		}()
+		go func() {
+			defer s.wg.Done()
+			w.waitLoop(ctx)
 		}()
 	}
 	for id, w := range s.workers {
@@ -200,6 +211,47 @@ type peerWorker struct {
 	poke     chan struct{}
 	now      chan syncRequest
 	failures int
+	// healthy is signalled after each successful sync; it (re)starts the
+	// waiting loop.
+	healthy chan struct{}
+}
+
+// waitLoop keeps one waiting exchange open on the peer while the link is
+// healthy, so a change there reaches this machine within seconds even though
+// the peer cannot reach this machine. Any failure ends the loop until the
+// next successful sync; the timer and backoff cover the gap.
+func (w *peerWorker) waitLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.healthy:
+		}
+		for ctx.Err() == nil {
+			peer, ok := w.s.deps.Links.Get(w.hostID)
+			if !ok {
+				return
+			}
+			started := w.s.deps.Now()
+			res, err := w.s.deps.Engine.Wait(ctx, w.hostID, w.s.deps.Remote(peer), MaxWaitSeconds)
+			if err != nil {
+				break
+			}
+			if res.More {
+				select {
+				case w.poke <- struct{}{}:
+				default:
+				}
+			}
+			if res.Empty && w.s.deps.Now().Sub(started) < quickEmptyWait {
+				select {
+				case <-ctx.Done():
+					return
+				case <-w.s.deps.After(idleInterval):
+				}
+			}
+		}
+	}
 }
 
 func (w *peerWorker) run(ctx context.Context) {
@@ -264,6 +316,10 @@ func (w *peerWorker) sync(ctx context.Context) SyncResult {
 		w.s.deps.Log.Info("decision sync failed", "peer", w.hostID, "code", result.ErrorCode, "failures", w.failures)
 	} else {
 		w.failures = 0
+		select {
+		case w.healthy <- struct{}{}:
+		default:
+		}
 		attempt.InSync, attempt.PeerLabel, attempt.PeerVector = out.InSync, out.PeerLabel, out.PeerVector
 		attempt.ClockAheadMS, attempt.PeerProtocol = out.ClockAhead.Milliseconds(), domain.DecisionSyncProtocol
 		if out.Pulled+out.Pushed > 0 || len(out.Conflicts) > 0 {

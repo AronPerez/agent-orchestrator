@@ -44,7 +44,9 @@ The password is used once: the other machine issues this machine a credential th
 
 Shortly after any decision is written, about once a minute while idle, when Orchestrator starts, and when you run `ao decision sync`. A machine that does not answer is retried after 1, 2, 5, 10 and then every 15 minutes, and never slows anything else down.
 
-An answer given on the machine that owns the call's session is delivered at once. An answer given elsewhere reaches the owning machine on its next sync, and the call reads **Not delivered yet** until the owning machine records delivery. Only the owning machine ever delivers an answer.
+While a link is healthy, the machine that linked keeps one request waiting on the other machine, so a change on either side arrives within seconds, even when the other machine cannot reach this one. The minute timer is the fallback.
+
+An answer given on the machine that owns the call's session is delivered at once. An answer given elsewhere reaches the owning machine within seconds while the link is up, and otherwise on its next sync; until the owning machine records delivery, the call reads **Not delivered yet**. Only the owning machine ever delivers an answer.
 
 ## Trust
 

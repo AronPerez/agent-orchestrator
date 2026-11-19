@@ -191,3 +191,47 @@ func (e *Engine) push(ctx context.Context, peerID string, remote Remote, last Ex
 		}
 	}
 }
+
+// WaitResult is what one waiting exchange brought back.
+type WaitResult struct {
+	Pulled int
+	// More is true when the peer has more than one page for this machine, or
+	// a page left a gap: a full Sync should follow.
+	More bool
+	// Empty is true when the wait ended with nothing to send.
+	Empty bool
+}
+
+// Wait holds one exchange open on the peer for up to waitSeconds and applies
+// whatever it returns. It is how a machine that only initiates hears of a
+// change on the peer within seconds instead of on its next timer.
+func (e *Engine) Wait(ctx context.Context, expectedPeer string, remote Remote, waitSeconds int) (WaitResult, error) {
+	heads, err := e.deps.Ledger.DecisionHeads(ctx)
+	if err != nil {
+		return WaitResult{}, err
+	}
+	resp, err := remote.Exchange(ctx, ExchangeRequest{
+		Protocol: domain.DecisionSyncProtocol, HostID: e.deps.HostID, MachineLabel: e.deps.MachineLabel(),
+		Have: skipStopped(heads.Vector(), heads), Heads: heads, WaitSeconds: waitSeconds,
+	})
+	if err != nil {
+		return WaitResult{}, err
+	}
+	if resp.HostID != expectedPeer {
+		return WaitResult{}, fmt.Errorf("%w: expected %s, got %s", ErrPeerIdentityChanged, expectedPeer, resp.HostID)
+	}
+	if _, err := e.deps.Ledger.CheckDecisionHeads(ctx, expectedPeer, resp.Heads, e.deps.Now()); err != nil {
+		return WaitResult{}, err
+	}
+	if len(resp.Entries) == 0 {
+		return WaitResult{Empty: true, More: resp.More}, nil
+	}
+	result, err := e.deps.Ledger.ApplyDecisionEntries(ctx, expectedPeer, resp.Entries, e.deps.Now())
+	if err != nil {
+		return WaitResult{}, err
+	}
+	if result.Applied > 0 && e.deps.OnApplied != nil {
+		e.deps.OnApplied(expectedPeer, result)
+	}
+	return WaitResult{Pulled: result.Applied, More: resp.More || len(result.Gaps) > 0}, nil
+}

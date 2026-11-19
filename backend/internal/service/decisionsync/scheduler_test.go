@@ -88,7 +88,12 @@ type countingRemote struct {
 	block     <-chan struct{}
 }
 
-func (r *countingRemote) Exchange(ctx context.Context, _ decisionsync.ExchangeRequest) (decisionsync.ExchangeResponse, error) {
+func (r *countingRemote) Exchange(ctx context.Context, req decisionsync.ExchangeRequest) (decisionsync.ExchangeResponse, error) {
+	if req.WaitSeconds > 0 {
+		// A waiting exchange: hold it until the worker stops.
+		<-ctx.Done()
+		return decisionsync.ExchangeResponse{}, ctx.Err()
+	}
 	r.exchanges.Add(1)
 	if r.block != nil {
 		select {
@@ -353,4 +358,129 @@ func TestHTTPRemoteProbesBeforeBearer(t *testing.T) {
 			t.Fatalf("a request carried the bearer to the wrong machine: %q", bearers)
 		}
 	}
+}
+
+// mutableLinks lets a test unlink a peer while the scheduler runs.
+type mutableLinks struct {
+	mu    sync.Mutex
+	peers staticLinks
+}
+
+func (l *mutableLinks) Linked() []decisionsync.StoredPeer {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]decisionsync.StoredPeer(nil), l.peers...)
+}
+
+func (l *mutableLinks) Get(hostID string) (decisionsync.StoredPeer, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.peers.Get(hostID)
+}
+
+func (l *mutableLinks) set(peers ...decisionsync.StoredPeer) {
+	l.mu.Lock()
+	l.peers = peers
+	l.mu.Unlock()
+}
+
+// waitTracker counts waiting exchanges in flight on the peer.
+type waitTracker struct {
+	inner  decisionsync.Remote
+	active *atomic.Int64
+}
+
+func (w *waitTracker) Exchange(ctx context.Context, req decisionsync.ExchangeRequest) (decisionsync.ExchangeResponse, error) {
+	if req.WaitSeconds > 0 {
+		w.active.Add(1)
+		defer w.active.Add(-1)
+	}
+	return w.inner.Exchange(ctx, req)
+}
+
+func (w *waitTracker) Push(ctx context.Context, req decisionsync.PushRequest) (decisionsync.PushResponse, error) {
+	return w.inner.Push(ctx, req)
+}
+
+// initiatorPair is A, which links to B, and B, which serves with waits that
+// end only when B changes (its own timer never fires).
+func initiatorPair(t *testing.T, links decisionsync.LinkSource) (*ledgertest.MemLedger, *ledgertest.MemLedger, *decisionsync.Server, *decisionsync.Scheduler, *fakeClock, *atomic.Int64) {
+	t.Helper()
+	a, b := ledgertest.NewMemLedger("h_a"), ledgertest.NewMemLedger("h_b")
+	never := make(chan time.Time)
+	server := decisionsync.NewServer(decisionsync.ServerDeps{
+		Ledger: b, HostID: "h_b", Now: fixedNow(t0), After: func(time.Duration) <-chan time.Time { return never },
+	})
+	clock := newFakeClock()
+	active := &atomic.Int64{}
+	sched := decisionsync.NewScheduler(decisionsync.SchedulerDeps{
+		Engine: decisionsync.NewEngine(decisionsync.EngineDeps{Ledger: a, HostID: "h_a", Now: clock.Now}),
+		Links:  links, After: clock.After, Now: clock.Now, Rand: func() float64 { return 0.5 },
+		Remote: func(decisionsync.StoredPeer) decisionsync.Remote {
+			return &waitTracker{inner: &ledgertest.DirectRemote{Server: server, CallerID: "h_a"}, active: active}
+		},
+	})
+	return a, b, server, sched, clock, active
+}
+
+func waitForActive(t *testing.T, active *atomic.Int64, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if active.Load() == want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waiting exchanges in flight = %d, want %d", active.Load(), want)
+}
+
+func TestAnswerReachesInitiatorWithinSeconds(t *testing.T) {
+	links := staticLinks{{HostID: "h_b"}}
+	a, b, server, sched, clock, active := initiatorPair(t, links)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+	waitForActive(t, active, 1) // the start-up sync succeeded and a wait is open
+	asked := len(clock.Asked())
+
+	written := b.Append(ledgertest.Answer("dec_1", 1, "from b"), t0)
+	server.Changed()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, e := range a.Entries() {
+			if e.ID == written.ID {
+				if fired := clock.Asked()[asked:]; len(fired) > 1 {
+					t.Logf("timers asked meanwhile: %v", fired)
+				}
+				return // no fake time passed: the waiting exchange carried it
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the answer on b did not reach a within 2 seconds, without any timer firing")
+}
+
+func TestWaitLoopStopsOnUnlinkAndShutdown(t *testing.T) {
+	links := &mutableLinks{}
+	links.set(decisionsync.StoredPeer{HostID: "h_b"})
+	_, _, _, sched, _, active := initiatorPair(t, links)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := sched.Start(ctx)
+	waitForActive(t, active, 1)
+
+	links.set()
+	sched.Refresh()
+	waitForActive(t, active, 0)
+
+	links.set(decisionsync.StoredPeer{HostID: "h_b"})
+	sched.Refresh()
+	waitForActive(t, active, 1)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("scheduler did not stop with a wait in flight")
+	}
+	waitForActive(t, active, 0)
 }
