@@ -706,3 +706,206 @@ func TestNotificationStore_MarkNotificationsReadOnlyTouchesGivenIDs(t *testing.T
 		t.Fatalf("unread count = %d err=%v, want 1 (ntf_3 must stay reachable)", count, err)
 	}
 }
+
+func decisionNotificationRecord(id, callID string, at time.Time) domain.NotificationRecord {
+	return domain.NotificationRecord{
+		ID:                   id,
+		Type:                 domain.NotificationDecisionNeeded,
+		Title:                "Decision needed · ao",
+		Body:                 "Ship it?",
+		Status:               domain.NotificationUnread,
+		CreatedAt:            at,
+		SourceKey:            "decision:" + callID,
+		DecisionCallID:       callID,
+		DecisionOriginHostID: "h_origin",
+	}
+}
+
+func TestNotificationStore_DecisionNotificationIsSessionless(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	created, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_dec", "dec_1", now))
+	if err != nil || !inserted {
+		t.Fatalf("CreateNotification inserted=%v err=%v", inserted, err)
+	}
+	if created.SessionID != "" || created.ProjectID != "" || created.DecisionCallID != "dec_1" ||
+		created.DecisionOriginHostID != "h_origin" || created.Type != domain.NotificationDecisionNeeded {
+		t.Fatalf("created = %+v", created)
+	}
+	// An empty session_id would violate the sessions foreign key, so a
+	// successful insert proves the row stored NULL.
+	unresolved, err := s.ListNotifications(ctx, domain.NotificationListUnresolved, time.Time{}, "", 10)
+	if err != nil || len(unresolved) != 1 || unresolved[0].DecisionCallID != "dec_1" {
+		t.Fatalf("unresolved=%+v err=%v", unresolved, err)
+	}
+	count, err := s.CountUnresolvedNotifications(ctx)
+	if err != nil || count != 1 {
+		t.Fatalf("unresolved count=%d err=%v", count, err)
+	}
+}
+
+func TestNotificationStore_DecisionNotificationDedupesByCall(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_a", "dec_1", now)); err != nil || !inserted {
+		t.Fatalf("first create inserted=%v err=%v", inserted, err)
+	}
+	existing, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_b", "dec_1", now.Add(time.Second)))
+	if err != nil || inserted || existing.ID != "ntf_a" {
+		t.Fatalf("retry existing=%+v inserted=%v err=%v", existing, inserted, err)
+	}
+	rows, err := s.ListNotifications(ctx, domain.NotificationListAll, time.Time{}, "", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestNotificationStore_SessionDeleteKeepsDecisionNotifications(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	now := time.Now().UTC().Truncate(time.Second)
+	// DeleteSession only removes seed-state rows, so cascade is observable on one.
+	sess, err := s.CreateSession(ctx, domain.SessionRecord{
+		ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, _, err := s.CreateNotification(ctx, domain.NotificationRecord{
+		ID: "ntf_session", SessionID: sess.ID, ProjectID: sess.ProjectID, Type: domain.NotificationNeedsInput,
+		Title: "needs input", Status: domain.NotificationUnread, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_dec", "dec_1", now)); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := s.DeleteSession(ctx, sess.ID); err != nil || !deleted {
+		t.Fatalf("DeleteSession deleted=%v err=%v", deleted, err)
+	}
+	rows, err := s.ListNotifications(ctx, domain.NotificationListAll, time.Time{}, "", 10)
+	if err != nil || len(rows) != 1 || rows[0].ID != "ntf_dec" {
+		t.Fatalf("after session delete rows=%+v err=%v", rows, err)
+	}
+}
+
+func decisionEntry(entryID, callID string, kind domain.DecisionEntryKind, payload any, at time.Time) domain.DecisionEntry {
+	author := domain.DecisionAuthorPerson
+	if kind == domain.DecisionKindWithdrawn {
+		author = domain.DecisionAuthorSession
+	}
+	entry := domain.DecisionEntry{
+		ID: entryID, Origin: "h_a", CallID: callID, Kind: kind, Payload: mustDecisionJSON(payload),
+		WrittenAt: at, AuthorKind: author,
+	}
+	if author == domain.DecisionAuthorPerson {
+		entry.AuthorSurface = domain.RequestSurfaceCLI
+	} else {
+		entry.AuthorSession = "w-1"
+	}
+	return entry
+}
+
+func TestNotificationStore_ReconcileResolvesStaleDecisionNotifications(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_000_000).UTC()
+	calls := []string{"dec_answer", "dec_dismiss", "dec_withdraw", "dec_wait", "dec_read_wait", "dec_outcome", "dec_hidden"}
+	for i, callID := range calls {
+		appendDecision(t, s, decisionRaised("dent_r"+callID, "h_a", callID, "w-1", "", "", at), at)
+		if _, _, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_"+callID, callID, at.Add(time.Duration(i)*time.Second))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A notification whose call row does not exist (pruned or never projected).
+	if _, _, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_dec_missing", "dec_missing", at)); err != nil {
+		t.Fatal(err)
+	}
+	later := at.Add(time.Minute)
+	appendDecision(t, s, decisionAnswered("dent_a", "h_a", "dec_answer", 1, later), later)
+	appendDecision(t, s, decisionEntry("dent_d", "dec_dismiss", domain.DecisionKindDismissed, domain.DecisionDismissedPayload{}, later), later)
+	appendDecision(t, s, decisionEntry("dent_w", "dec_withdraw", domain.DecisionKindWithdrawn, map[string]any{}, later), later)
+	appendDecision(t, s, decisionAnswered("dent_o1", "h_a", "dec_outcome", 1, later), later)
+	appendDecision(t, s, decisionAnswered("dent_h", "h_a", "dec_hidden", 1, later), later)
+	if _, err := s.MarkNotificationsRead(ctx, []string{"ntf_dec_read_wait"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.DeleteNotification(ctx, "ntf_dec_hidden"); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := s.ReconcileResolvedNotifications(ctx, later)
+	if err != nil {
+		t.Fatalf("ReconcileResolvedNotifications: %v", err)
+	}
+	got := map[string]bool{}
+	for _, rec := range resolved {
+		got[rec.ID] = true
+	}
+	for _, id := range []string{"ntf_dec_answer", "ntf_dec_dismiss", "ntf_dec_withdraw", "ntf_dec_outcome", "ntf_dec_missing"} {
+		if !got[id] {
+			t.Fatalf("reconcile did not resolve %s; resolved=%v", id, got)
+		}
+	}
+	if len(got) != 5 {
+		t.Fatalf("reconcile resolved unexpected rows: %v", got)
+	}
+	unresolved, err := s.ListNotifications(ctx, domain.NotificationListUnresolved, time.Time{}, "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var open []string
+	for _, rec := range unresolved {
+		open = append(open, rec.ID)
+	}
+	if len(open) != 2 {
+		t.Fatalf("still-waiting rows (read or unread) must stay open; open=%v", open)
+	}
+	// The hidden tombstone for a call that left Needs you is deleted so it
+	// cannot block a later re-raise and never emits a resolved event.
+	all, err := s.ListNotifications(ctx, domain.NotificationListAll, time.Time{}, "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range all {
+		if rec.ID == "ntf_dec_hidden" {
+			t.Fatal("dismissed decision tombstone survived reconcile")
+		}
+	}
+	if _, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_dec_hidden_2", "dec_hidden", later)); err != nil || !inserted {
+		t.Fatalf("tombstone still blocks the call: inserted=%v err=%v", inserted, err)
+	}
+
+	again, err := s.ReconcileResolvedNotifications(ctx, later.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range again {
+		if rec.ID != "ntf_dec_hidden_2" {
+			t.Fatalf("second reconcile re-resolved %s", rec.ID)
+		}
+	}
+}
+
+func TestNotificationStore_ResolveDecisionNotificationsByCall(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, callID := range []string{"dec_1", "dec_2"} {
+		if _, _, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_"+callID, callID, now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.ResolveDecisionNotifications(ctx, "dec_1", domain.NotificationDecisionNeeded, now)
+	if err != nil || len(rows) != 1 || rows[0].ID != "ntf_dec_1" || !rows[0].Resolved() {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	again, err := s.ResolveDecisionNotifications(ctx, "dec_1", domain.NotificationDecisionNeeded, now)
+	if err != nil || len(again) != 0 {
+		t.Fatalf("second resolve rows=%+v err=%v", again, err)
+	}
+}

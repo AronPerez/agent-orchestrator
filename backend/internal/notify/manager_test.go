@@ -249,3 +249,72 @@ func TestManagerReconcilePublishesRecoveredResolutions(t *testing.T) {
 		t.Fatal("expected published resolution")
 	}
 }
+
+func (f *fakeStore) ResolveDecisionNotifications(
+	_ context.Context,
+	callID string,
+	typ domain.NotificationType,
+	at time.Time,
+) ([]domain.NotificationRecord, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.resolveMatching(at, func(rec domain.NotificationRecord) bool {
+		return rec.DecisionCallID == callID && rec.Type == typ
+	}), nil
+}
+
+func TestManagerNotifyDecisionStoresSessionlessRow(t *testing.T) {
+	st := &fakeStore{}
+	now := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
+	mgr := New(Deps{Store: st, Clock: func() time.Time { return now }, NewID: func() string { return "ntf_d" }})
+	if err := mgr.Notify(context.Background(), Intent{
+		Type: domain.NotificationDecisionNeeded, DecisionCallID: "dec_1", DecisionOriginHostID: "h_origin",
+		DecisionProjectName: "ao", DecisionTitle: "Ship it?",
+	}); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if len(st.rows) != 1 || st.rows[0].SessionID != "" || st.rows[0].DecisionCallID != "dec_1" || st.rows[0].SourceKey != "decision:dec_1" {
+		t.Fatalf("rows = %+v", st.rows)
+	}
+}
+
+func TestManagerResolveDecisionByCallPublishes(t *testing.T) {
+	st := &fakeStore{rows: []domain.NotificationRecord{
+		{ID: "ntf_d", Type: domain.NotificationDecisionNeeded, DecisionCallID: "dec_1"},
+		{ID: "ntf_other", Type: domain.NotificationDecisionNeeded, DecisionCallID: "dec_2"},
+	}}
+	hub := NewHub()
+	ch, unsub := hub.Subscribe("")
+	defer unsub()
+	now := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
+	mgr := New(Deps{Store: st, Publisher: hub, Clock: func() time.Time { return now }})
+	if err := mgr.Resolve(context.Background(), Resolution{Type: domain.NotificationDecisionNeeded, DecisionCallID: "dec_1"}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !st.rows[0].Resolved() || st.rows[1].Resolved() {
+		t.Fatalf("rows = %+v", st.rows)
+	}
+	select {
+	case got := <-ch:
+		if got.Kind != domain.NotificationResolved || got.Record.ID != "ntf_d" {
+			t.Fatalf("published = %+v", got)
+		}
+	default:
+		t.Fatal("expected resolved event")
+	}
+}
+
+func TestManagerResolveRejectsDecisionCombinedWithOtherTargets(t *testing.T) {
+	mgr := New(Deps{Store: &fakeStore{}})
+	for _, res := range []Resolution{
+		{Type: domain.NotificationDecisionNeeded, DecisionCallID: "dec_1", SessionID: "s_1"},
+		{Type: domain.NotificationDecisionNeeded, DecisionCallID: "dec_1", PRURL: "https://github.com/o/r/pull/1"},
+		{Type: domain.NotificationDecisionNeeded},
+		{Type: domain.NotificationNeedsInput, DecisionCallID: "dec_1"},
+	} {
+		if err := mgr.Resolve(context.Background(), res); err == nil {
+			t.Fatalf("Resolve(%+v) accepted an ambiguous target", res)
+		}
+	}
+}

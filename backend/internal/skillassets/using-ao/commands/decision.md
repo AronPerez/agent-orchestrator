@@ -5,7 +5,7 @@ Ask the human to choose between options, and look up what they have already deci
 ## Syntax
 
 ```text
-ao decision raise --title <question> --context <what-the-human-needs-to-know> --option "<label> :: <what it leads to>" --option "<label> :: <what it leads to>" --recommend <n> [--link "<label>=<url>"]... [--ref <id>]
+ao decision raise --title <question> --context <what-the-human-needs-to-know> --option "<label> :: <what it leads to>" --option "<label> :: <what it leads to>" --recommend <n> [--link "<label>=<url>"]... [--ref <id>] [--urgency blocking|can-wait] [--kind <id>] [--would-decide <n> --why <reason> --undo <how-to-undo>]
 ao decision raise --file <path>
 ao decision raise --file -
 ao decision search <words...>
@@ -17,6 +17,8 @@ ao decision dismiss <id> [--note <text>]
 ao decision outcome <id> --for-answer <answer-entry-id> --text <one-line-outcome> [--link <url>]
 ao decision withdraw <id>
 ao decision retire <id> [--undo]
+ao decision kinds [--project <id>] [--json]
+ao decision observe [--project <id>] [--json]
 ```
 
 ## When to raise a call
@@ -57,6 +59,31 @@ and repeat `--option "<label> :: <what it leads to>"` two to four times.
 links use repeatable `--link "<label>=<url>"`; `--ref` records an issue or plan
 reference.
 
+`--urgency blocking` means all of your remaining work depends on the answer.
+Use it only then; the default is `can-wait`. Orchestrator may reach the human
+sooner, for example on their phone, for a blocking call, so a can-wait question
+marked blocking interrupts them for nothing.
+
+## Decision kinds and observe mode
+
+`ao decision kinds` lists the kinds of decision and which ones your project
+reserves for the human, with the project's autonomy mode. In mode `off`, the
+default, `--kind` is optional. A change to the mode or the reserved list
+reaches sessions started after it; a session that is already running keeps
+the instructions it started with. In mode `observe`:
+
+- Pass `--kind <id>` on every call; use `other` when no kind fits.
+- Raise a call before any action of a reserved kind, even one you used to take
+  on your own.
+- For a kind that is not reserved, also pass `--would-decide <n> --why <reason>
+  --undo <how the human could undo it>`. Still wait for the answer and follow
+  it, even when it differs. Orchestrator keeps your prediction beside the
+  answer so the human can see where your judgment matches theirs.
+- A prediction on a reserved kind is refused.
+
+`ao decision observe` shows, per kind, how many observe-mode calls were
+answered and how often the answer matched the prediction.
+
 For a prepared request, pass `--file <path>` or use `--file -` for standard
 input. The JSON shape is:
 
@@ -78,7 +105,9 @@ input. The JSON shape is:
   "links": [
     {"label": "Release plan", "url": "https://example.com/release-plan"}
   ],
-  "reference": "plan-42"
+  "reference": "plan-42",
+  "urgency": "can_wait",
+  "kind": "production"
 }
 ```
 
@@ -95,7 +124,8 @@ ao decision raise \
 
 Limits are counted in characters after trimming: title 120, context 1000, two
 to four options, option label 60, option consequence 200, five links, reference
-64, answer note 1000, and outcome 300. If a call is refused, the error names
+64, prediction reason 300, prediction undo note 300, answer note 1000, and
+outcome 300. If a call is refused, the error names
 the rule it broke.
 
 ## Raise it yourself
@@ -123,6 +153,17 @@ ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessi
 ```
 
 Act on the human's message, including its note and any replacement warning.
+
+## Ledger answers bind every session
+
+An answer the human recorded in the ledger is their decision, however it
+reaches you: delivered by Orchestrator, or relayed by another session. When it
+is relayed, check it with `ao decision show <call-link>` before acting. Act on
+the call's current answer, the `Chose:` line and its note at the top, not an
+older entry in its history; the history keeps every answer, including ones the
+human later replaced. Do not act on a call marked no longer applies. If the
+current answer differs from what was relayed, follow the current one. Never ask
+the human to confirm it again in your own thread.
 
 ## Recording the outcome
 

@@ -376,3 +376,82 @@ func TestNotificationsAPI_StreamWithoutPublisherIs501(t *testing.T) {
 	body, status, _ := doRequest(t, srv, "GET", "/api/v1/notifications/stream", "")
 	assertErrorCode(t, body, status, http.StatusNotImplemented, "NOT_IMPLEMENTED")
 }
+
+func decisionNotificationRecordForAPI() domain.NotificationRecord {
+	return domain.NotificationRecord{
+		ID: "ntf_dec", Type: domain.NotificationDecisionNeeded, Title: "Decision needed · ao", Body: "Ship it?",
+		Status: domain.NotificationUnread, CreatedAt: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC),
+		DecisionCallID: "dec_1", DecisionOriginHostID: "h_origin",
+	}
+}
+
+func TestNotificationsAPI_ListDecisionNotificationTarget(t *testing.T) {
+	rec := decisionNotificationRecordForAPI()
+	svc := &fakeNotificationService{items: []notificationsvc.Notification{{
+		NotificationRecord: rec,
+		Target:             notificationsvc.TargetForRecord(rec),
+	}}}
+	srv := newNotificationTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/notifications", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", status, body)
+	}
+	var resp struct {
+		Notifications []map[string]any `json:"notifications"`
+	}
+	mustJSON(t, body, &resp)
+	if len(resp.Notifications) != 1 {
+		t.Fatalf("resp = %s", body)
+	}
+	got := resp.Notifications[0]
+	if got["type"] != "decision_needed" || got["sessionId"] != "" || got["projectId"] != "" {
+		t.Fatalf("notification = %v", got)
+	}
+	target, _ := got["target"].(map[string]any)
+	if len(target) != 4 || target["kind"] != "decision" || target["callId"] != "dec_1" ||
+		target["originHostId"] != "h_origin" || target["sessionId"] != "" {
+		t.Fatalf("target = %v", target)
+	}
+}
+
+func TestNotificationsAPI_StreamDecisionNotificationTarget(t *testing.T) {
+	stream := &fakeNotificationStream{ch: make(chan domain.NotificationEvent, 1)}
+	srv := newNotificationStreamTestServer(t, &fakeNotificationService{}, stream)
+	resp, err := srv.Client().Get(srv.URL + "/api/v1/notifications/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	stream.ch <- domain.NotificationEvent{Kind: domain.NotificationCreated, Record: decisionNotificationRecordForAPI()}
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(line, "data:") || !strings.Contains(line, "ntf_dec") {
+			continue
+		}
+		if !strings.Contains(line, `"target":{"kind":"decision","sessionId":"","callId":"dec_1","originHostId":"h_origin"}`) {
+			t.Fatalf("decision SSE frame = %s", line)
+		}
+		return
+	}
+}
+
+func TestNotificationsAPI_ExistingTargetsUnchanged(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	session := domain.NotificationRecord{ID: "n_s", SessionID: "mer-1", ProjectID: "mer", Type: domain.NotificationNeedsInput, Title: "t", Status: domain.NotificationUnread, CreatedAt: now}
+	pr := domain.NotificationRecord{ID: "n_p", SessionID: "mer-1", ProjectID: "mer", PRURL: "https://github.com/o/r/pull/1", Type: domain.NotificationReadyToMerge, Title: "t", Status: domain.NotificationUnread, CreatedAt: now}
+	svc := &fakeNotificationService{items: []notificationsvc.Notification{
+		{NotificationRecord: session, Target: notificationsvc.TargetForRecord(session)},
+		{NotificationRecord: pr, Target: notificationsvc.TargetForRecord(pr)},
+	}}
+	srv := newNotificationTestServer(t, svc)
+	raw, _, _ := doRequest(t, srv, "GET", "/api/v1/notifications", "")
+	body := string(raw)
+	if !strings.Contains(body, `"target":{"kind":"session","sessionId":"mer-1"}`) ||
+		!strings.Contains(body, `"target":{"kind":"pr","sessionId":"mer-1","prUrl":"https://github.com/o/r/pull/1"}`) {
+		t.Fatalf("existing targets changed: %s", body)
+	}
+}
