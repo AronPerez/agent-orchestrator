@@ -5455,6 +5455,7 @@
 	"settings.project.autonomyDescription": "観察モードでは、エージェントはこれまでどおりすべての判断をあなたに確認し、自分ならどう判断したかも記録するので、比較できます。変更後に開始したセッションに適用されます。",
 	"settings.project.autonomyOff": "オフ",
 	"settings.project.autonomyObserve": "観察",
+	"settings.project.autonomyOn": "オン（コマンドラインで設定）",
 	"settings.project.reservedKinds": "あなたが判断する種類",
 	"settings.project.reservedKindsReset": "既定値に戻す",
 	"settings.project.decisionKind.production": "本番環境の変更とデプロイ",

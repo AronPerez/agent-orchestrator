@@ -5611,6 +5611,7 @@
 	"settings.project.autonomyDescription": "No modo de observação, os agentes continuam perguntando cada decisão e também registram o que teriam decidido, para que você possa comparar. Vale para as sessões iniciadas depois da alteração.",
 	"settings.project.autonomyOff": "Desativado",
 	"settings.project.autonomyObserve": "Observar",
+	"settings.project.autonomyOn": "Ativado (definido pela linha de comando)",
 	"settings.project.reservedKinds": "Reservado para você",
 	"settings.project.reservedKindsReset": "Restaurar padrões",
 	"settings.project.decisionKind.production": "Mudanças em produção e implantações",

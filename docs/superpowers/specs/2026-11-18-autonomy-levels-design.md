@@ -56,7 +56,7 @@ An empty `reserved` list means the kinds reserved by default:
 | --- | --- |
 | `off` (default) | As before. |
 | `observe` | Ask everything they would ask today, and also ask before any action of a reserved kind. Every call names its kind. For a kind that is not reserved, the call also records what the session would have decided, why, and how to undo it. The session still waits for the answer and follows it. |
-| `on` (a later slice) | Raise a call for reserved kinds. Decide the rest, act, and record a `decided` entry. |
+| `on` | Raise a call for reserved kinds. Decide the rest, act, and record a `decided` entry. Set through project config (`ao project set-config --config-json`); until the person decides whether Settings should offer it, the settings page only shows it for a project already in it, so saving there never downgrades it. |
 
 The policy reaches sessions as a standing-instructions section, rendered only in observe (and later on) mode. Standing instructions are built when a session starts, so a change to the mode or the reserved list reaches sessions started after it. A running session keeps the instructions it started with, and its calls are never refused for lacking a kind it was never told to give. It is a guard rail, not a boundary: an agent can file a decision under the wrong kind. The observe period exists to find that out before any session acts alone.
 
@@ -81,14 +81,14 @@ A rule for every session, in every mode: an answer the person recorded in the le
 
 This was the largest single cost in the study, and without it the rest of this design adds a layer while the main cost stays.
 
-### 5. Decided entries and overrule (a later slice)
+### 5. Decided entries and overrule
 
-Two new entry kinds, written in this final shape when they ship:
+Two new entry kinds:
 
 - `decided`: written by a session in `on` mode for a kind the project has not reserved. Carries what was decided, why, **how to undo it (required)**, optionally how to know it worked, and the kind, plus the same Orchestrator-filled project, stream, machine and owner fields as `raised`. It forms a call in a new state, "Decided for you", listed on the Decisions page.
 - `overruled`: written only by the person, with a required note. It becomes the call's standing entry and is delivered to the owning session like an answer, including the fallback to the project's orchestrator when that session has ended. The session undoes the decision and records an outcome, which closes the call.
 
-An older machine stores and passes on both kinds. With no `raised` entry it builds no call from a `decided` entry, and it ignores `overruled`.
+Sessions record one with `ao decision decide` (refused outside mode `on` and for reserved kinds); the person overrules with `ao decision overrule <id> --note` or from the Decisions page, and lists them with `ao decision ls --decided` (`GET /api/v1/decisions?scope=decided`). The catch-all kind `other` is reserved under every policy, including a custom reserved list, so a decision that fits no kind is never made alone. An older machine stores and passes on both kinds. With no `raised` entry it builds no call from a `decided` entry, and it ignores `overruled`.
 
 ## Changes to the ledger design
 

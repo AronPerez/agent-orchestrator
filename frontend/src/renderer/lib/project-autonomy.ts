@@ -1,7 +1,8 @@
 import type { components } from "../../api/schema";
 
 export type AutonomyConfig = components["schemas"]["AutonomyConfig"];
-export type AutonomyMode = "off" | "observe";
+/** "on" is set from the command line; the settings page shows it but does not offer it. */
+export type AutonomyMode = "off" | "observe" | "on";
 
 /** One decision kind as the project's daemon reports it. */
 export type DecisionKindOption = { id: string; label: string; reservedByDefault: boolean };
@@ -15,7 +16,7 @@ export type AutonomyDraft = {
 export function initialAutonomyDraft(config: AutonomyConfig | undefined): AutonomyDraft {
 	const reserved = config?.reserved ?? [];
 	return {
-		autonomyMode: config?.mode === "observe" ? "observe" : "off",
+		autonomyMode: config?.mode === "observe" || config?.mode === "on" ? config.mode : "off",
 		reservedKinds: reserved.length > 0 ? [...reserved] : undefined,
 	};
 }

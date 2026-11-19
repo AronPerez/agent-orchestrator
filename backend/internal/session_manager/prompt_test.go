@@ -421,6 +421,17 @@ func TestBuildSystemPromptAddsObserveModeSectionForOptedInProjects(t *testing.T)
 	}
 }
 
+func TestBuildSystemPromptAddsOnModeSection(t *testing.T) {
+	project := promptProject{ID: "shop", Autonomy: domain.AutonomyConfig{Mode: domain.AutonomyOn}}
+	got := buildSystemPromptText(systemPromptConfig{Role: sessionPromptRoleWorker, OrchestratorSessionID: "shop-1", Project: project})
+	if count := strings.Count(got, "## Reserved Decisions (on)"); count != 1 {
+		t.Fatalf("on section appears %d times, want 1", count)
+	}
+	if !strings.Contains(got, "`ao decision decide --kind <id> --what <what you decided> --why <why> --undo <how to undo it>`") {
+		t.Error("on section missing the decide command")
+	}
+}
+
 func TestPromptProjectContextCarriesAutonomy(t *testing.T) {
 	record := domain.ProjectRecord{ID: "shop", Config: domain.ProjectConfig{Autonomy: domain.AutonomyConfig{Mode: domain.AutonomyObserve}}}
 	if got := promptProjectContext("shop", record); got.Autonomy.Mode != domain.AutonomyObserve {

@@ -21,6 +21,9 @@ export function ProjectAutonomyControls({ draft, kinds, onChange }: {
 	const modes: { value: AutonomyMode; label: string }[] = [
 		{ value: "off", label: t("settings.project.autonomyOff") },
 		{ value: "observe", label: t("settings.project.autonomyObserve") },
+		// Mode on is chosen from the command line for now; show it only so a
+		// project already in it reads truthfully and is not downgraded on save.
+		...(draft.autonomyMode === "on" ? [{ value: "on" as const, label: t("settings.project.autonomyOn") }] : []),
 	];
 	return <>
 		<ProjectSettingsSection title={t("settings.project.decisions")} grouped>
@@ -34,7 +37,7 @@ export function ProjectAutonomyControls({ draft, kinds, onChange }: {
 				/>
 			</SettingsRow>
 		</ProjectSettingsSection>
-		{draft.autonomyMode === "observe" && <ProjectSettingsSection title={t("settings.project.reservedKinds")} grouped>
+		{draft.autonomyMode !== "off" && <ProjectSettingsSection title={t("settings.project.reservedKinds")} grouped>
 			{kinds.map((kind) => {
 				const label = t(`settings.project.decisionKind.${kind.id}`, { defaultValue: kind.label });
 				return <SettingsRow key={kind.id} label={label}>

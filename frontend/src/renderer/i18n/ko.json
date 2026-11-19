@@ -5455,6 +5455,7 @@
 	"settings.project.autonomyDescription": "관찰 모드에서는 에이전트가 계속 모든 결정을 물어보고, 자신이라면 어떻게 결정했을지도 기록하므로 비교할 수 있습니다. 변경 후 시작한 세션에 적용됩니다.",
 	"settings.project.autonomyOff": "끔",
 	"settings.project.autonomyObserve": "관찰",
+	"settings.project.autonomyOn": "켬(명령줄에서 설정)",
 	"settings.project.reservedKinds": "직접 결정할 종류",
 	"settings.project.reservedKindsReset": "기본값으로 재설정",
 	"settings.project.decisionKind.production": "프로덕션 변경 및 배포",

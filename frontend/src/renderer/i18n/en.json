@@ -5434,6 +5434,7 @@
 	"settings.project.autonomyDescription": "In observe mode, agents still ask you every decision and also record what they would have decided, so you can compare. Applies to sessions started after you change it.",
 	"settings.project.autonomyOff": "Off",
 	"settings.project.autonomyObserve": "Observe",
+	"settings.project.autonomyOn": "On (set from the command line)",
 	"settings.project.reservedKinds": "Reserved for you",
 	"settings.project.reservedKindsReset": "Reset to defaults",
 	"settings.project.decisionKind.production": "Production changes and deploys",

@@ -5434,6 +5434,7 @@
 	"settings.project.autonomyDescription": "Gözlem modunda ajanlar her kararı size sormaya devam eder ve kendileri ne karar verirdi onu da kaydeder; böylece karşılaştırabilirsiniz. Değişiklikten sonra başlayan oturumlara uygulanır.",
 	"settings.project.autonomyOff": "Kapalı",
 	"settings.project.autonomyObserve": "Gözlem",
+	"settings.project.autonomyOn": "Açık (komut satırından ayarlandı)",
 	"settings.project.reservedKinds": "Size ayrılanlar",
 	"settings.project.reservedKindsReset": "Varsayılanlara sıfırla",
 	"settings.project.decisionKind.production": "Üretim değişiklikleri ve dağıtımlar",

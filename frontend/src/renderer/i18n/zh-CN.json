@@ -5437,6 +5437,7 @@
 	"settings.project.autonomyDescription": "在观察模式下，智能体仍会就每个决策询问你，同时记录它们本会如何决定，方便你比较。更改后启动的会话才会生效。",
 	"settings.project.autonomyOff": "关闭",
 	"settings.project.autonomyObserve": "观察",
+	"settings.project.autonomyOn": "开启（通过命令行设置）",
 	"settings.project.reservedKinds": "由你决定",
 	"settings.project.reservedKindsReset": "恢复默认",
 	"settings.project.decisionKind.production": "生产环境变更与部署",

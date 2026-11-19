@@ -5749,6 +5749,7 @@
 	"settings.project.autonomyDescription": "В режиме наблюдения агенты по-прежнему спрашивают вас о каждом решении и записывают, что решили бы сами, чтобы вы могли сравнить. Действует для сессий, запущенных после изменения.",
 	"settings.project.autonomyOff": "Выкл.",
 	"settings.project.autonomyObserve": "Наблюдение",
+	"settings.project.autonomyOn": "Вкл. (задано из командной строки)",
 	"settings.project.reservedKinds": "Решаете вы",
 	"settings.project.reservedKindsReset": "Сбросить по умолчанию",
 	"settings.project.decisionKind.production": "Изменения в продакшене и развёртывания",
