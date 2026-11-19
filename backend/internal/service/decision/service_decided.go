@@ -1,0 +1,103 @@
+package decision
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+)
+
+// DecideInput is the session-authored part of a decision made on the
+// person's behalf.
+type DecideInput struct {
+	Kind      string
+	What      string
+	Why       string
+	Undo      string
+	Verify    string
+	Links     []domain.DecisionLink
+	Reference string
+}
+
+// Decide records a decision the calling session made on the person's
+// behalf. It is accepted only in a project whose autonomy mode is on, and
+// only for a kind the project has not reserved.
+func (s *Service) Decide(ctx context.Context, actor Actor, input DecideInput) (domain.DecisionCall, error) {
+	session, err := s.actingSession(ctx, actor)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	origin, err := s.callOrigin(ctx, session)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	links := make([]domain.DecisionLink, len(input.Links))
+	for i, link := range input.Links {
+		links[i] = domain.DecisionLink{Label: strings.TrimSpace(link.Label), URL: strings.TrimSpace(link.URL)}
+	}
+	payload := domain.DecisionDecidedPayload{
+		What: strings.TrimSpace(input.What), Why: strings.TrimSpace(input.Why),
+		Undo: strings.TrimSpace(input.Undo), Verify: strings.TrimSpace(input.Verify),
+		Kind: domain.DecisionKindID(strings.TrimSpace(input.Kind)), Links: links, Reference: strings.TrimSpace(input.Reference),
+		ProjectID: session.ProjectID, ProjectName: origin.projectName,
+		StreamSessionID: origin.streamSessionID, StreamName: origin.streamName,
+		MachineLabel: origin.machineLabel, OwnerSessionID: session.ID, OwnerSessionName: sessionName(session),
+		AutonomyMode: origin.autonomy.EffectiveMode(),
+	}
+	if payload.AutonomyMode != domain.AutonomyOn {
+		return domain.DecisionCall{}, policyRule("autonomy_not_on", "This project does not let sessions decide on the person's behalf. Raise a call instead.")
+	}
+	if err := domain.ValidateDecisionDecided(payload); err != nil {
+		return domain.DecisionCall{}, invalidDecision(err)
+	}
+	if origin.autonomy.IsReserved(payload.Kind) {
+		kind, _ := domain.LookupDecisionKind(string(payload.Kind))
+		return domain.DecisionCall{}, policyRule("kind_reserved", fmt.Sprintf("%q is reserved for the person in this project. Raise a call instead.", kind.Label))
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	now := s.now().UTC()
+	entry := domain.DecisionEntry{
+		ID: s.newID("dent_"), Origin: s.hostID, CallID: s.newID("dec_"),
+		Kind: domain.DecisionKindDecided, Payload: raw, WrittenAt: now,
+		AuthorKind: domain.DecisionAuthorSession, AuthorSession: session.ID,
+	}
+	stored, call, err := s.store.AppendDecisionEntry(ctx, entry, now)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	if s.onAppended != nil {
+		s.onAppended(stored)
+	}
+	return call, nil
+}
+
+// Overrule records the person reversing a decision made on their behalf.
+// The overrule is delivered to the owning session like an answer, and the
+// session undoes the decision and records the outcome.
+func (s *Service) Overrule(ctx context.Context, actor Actor, callID, note string) (domain.DecisionCall, error) {
+	call, unlock, err := s.lockedCall(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	defer unlock()
+	if actor.Session != "" {
+		return domain.DecisionCall{}, personOnly()
+	}
+	if call.Decided == nil {
+		return domain.DecisionCall{}, apierr.Conflict("DECISION_NOT_DECIDED", "Only a decision made for you can be overruled. Answer or dismiss a call instead.", nil)
+	}
+	if call.State != domain.DecisionStateDecided {
+		return domain.DecisionCall{}, wrongState(call, `Only a decision that stands can be overruled. This one is "%s".`)
+	}
+	note = strings.TrimSpace(note)
+	if err := domain.ValidateDecisionOverrule(note); err != nil {
+		return domain.DecisionCall{}, invalidDecision(err)
+	}
+	return s.append(ctx, actor, call.ID, domain.DecisionKindOverruled, domain.DecisionOverruledPayload{Note: note})
+}

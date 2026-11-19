@@ -195,6 +195,8 @@ type Scope string
 const (
 	ScopeMine     Scope = "mine"
 	ScopeNeedsYou Scope = "needs_you"
+	// ScopeDecided lists decisions made for the person that nobody overruled.
+	ScopeDecided Scope = "decided"
 )
 
 // Detail combines a call read model with its immutable history.
@@ -205,51 +207,26 @@ type Detail struct {
 
 // Raise validates and appends a new call owned by the acting session.
 func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (domain.DecisionCall, error) {
-	if actor.Session == "" {
-		return domain.DecisionCall{}, apierr.Invalid("DECISION_SESSION_REQUIRED", "This needs a session. Run it from inside a session.", nil)
-	}
-	if s.hostID == "" {
-		return domain.DecisionCall{}, apierr.Unavailable("DECISION_HOST_UNKNOWN", "This machine has no identity yet, so it cannot record decisions.")
-	}
-	session, ok, err := s.store.GetSession(ctx, actor.Session)
+	session, err := s.actingSession(ctx, actor)
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
-	if !ok {
-		return domain.DecisionCall{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	origin, err := s.callOrigin(ctx, session)
+	if err != nil {
+		return domain.DecisionCall{}, err
 	}
+	autonomy := origin.autonomy
 
 	input = normalizeRaiseInput(input)
 	payload := domain.DecisionRaisedPayload{
 		Title: input.Title, Context: input.Context, Options: input.Options, Links: input.Links,
-		Reference: input.Reference, ProjectID: session.ProjectID,
-		MachineLabel: s.machineLabel(), OwnerSessionID: session.ID, OwnerSessionName: sessionName(session),
+		Reference: input.Reference, ProjectID: session.ProjectID, ProjectName: origin.projectName,
+		StreamSessionID: origin.streamSessionID, StreamName: origin.streamName,
+		MachineLabel: origin.machineLabel, OwnerSessionID: session.ID, OwnerSessionName: sessionName(session),
 		Urgency: input.Urgency, Kind: domain.DecisionKindID(input.Kind), Prediction: input.Prediction,
 	}
 	if payload.Urgency == "" {
 		payload.Urgency = domain.DecisionUrgencyCanWait
-	}
-	var autonomy domain.AutonomyConfig
-	if session.ProjectID != "" {
-		project, found, err := s.store.GetProject(ctx, string(session.ProjectID))
-		if err != nil {
-			return domain.DecisionCall{}, err
-		}
-		payload.ProjectName = string(session.ProjectID)
-		if found {
-			if project.DisplayName != "" {
-				payload.ProjectName = project.DisplayName
-			}
-			autonomy = project.Config.Autonomy
-		}
-		sessions, err := s.store.ListSessions(ctx, session.ProjectID)
-		if err != nil {
-			return domain.DecisionCall{}, err
-		}
-		if stream, found := domain.DeriveDecisionStream(session.ID, sessions); found {
-			payload.StreamSessionID = stream.ID
-			payload.StreamName = sessionName(stream)
-		}
 	}
 	if err := domain.ValidateDecisionRaise(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
@@ -315,6 +292,62 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 		s.onAppended(stored)
 	}
 	return call, nil
+}
+
+// actingSession returns the calling session for an operation only a session
+// may perform on this machine's ledger.
+func (s *Service) actingSession(ctx context.Context, actor Actor) (domain.SessionRecord, error) {
+	if actor.Session == "" {
+		return domain.SessionRecord{}, apierr.Invalid("DECISION_SESSION_REQUIRED", "This needs a session. Run it from inside a session.", nil)
+	}
+	if s.hostID == "" {
+		return domain.SessionRecord{}, apierr.Unavailable("DECISION_HOST_UNKNOWN", "This machine has no identity yet, so it cannot record decisions.")
+	}
+	session, ok, err := s.store.GetSession(ctx, actor.Session)
+	if err != nil {
+		return domain.SessionRecord{}, err
+	}
+	if !ok {
+		return domain.SessionRecord{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	return session, nil
+}
+
+// origin is what Orchestrator, never the session, records about where a new
+// call came from, plus the project's autonomy policy at that moment.
+type origin struct {
+	projectName     string
+	streamSessionID domain.SessionID
+	streamName      string
+	machineLabel    string
+	autonomy        domain.AutonomyConfig
+}
+
+func (s *Service) callOrigin(ctx context.Context, session domain.SessionRecord) (origin, error) {
+	result := origin{machineLabel: s.machineLabel()}
+	if session.ProjectID == "" {
+		return result, nil
+	}
+	project, found, err := s.store.GetProject(ctx, string(session.ProjectID))
+	if err != nil {
+		return origin{}, err
+	}
+	result.projectName = string(session.ProjectID)
+	if found {
+		if project.DisplayName != "" {
+			result.projectName = project.DisplayName
+		}
+		result.autonomy = project.Config.Autonomy
+	}
+	sessions, err := s.store.ListSessions(ctx, session.ProjectID)
+	if err != nil {
+		return origin{}, err
+	}
+	if stream, found := domain.DeriveDecisionStream(session.ID, sessions); found {
+		result.streamSessionID = stream.ID
+		result.streamName = sessionName(stream)
+	}
+	return result, nil
 }
 
 // checkRaisePolicy applies the project's autonomy policy, already snapshotted
@@ -424,6 +457,9 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	defer unlock()
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
+	}
+	if call.Decided != nil {
+		return domain.DecisionCall{}, apierr.Conflict("DECISION_NOT_A_QUESTION", "This is a decision made for you, not a question. Overrule it instead.", nil)
 	}
 	if err := s.rejectSupersededPlanCall(ctx, call); err != nil {
 		return domain.DecisionCall{}, err
@@ -609,6 +645,8 @@ func (s *Service) List(ctx context.Context, actor Actor, scope Scope) ([]domain.
 		calls, err = s.store.ListDecisionCallsForSession(ctx, s.hostID, actor.Session, -1)
 	case ScopeNeedsYou:
 		calls, err = s.store.ListDecisionCallsByState(ctx, domain.DecisionStateNeedsYou, -1)
+	case ScopeDecided:
+		calls, err = s.store.ListDecisionCallsByState(ctx, domain.DecisionStateDecided, -1)
 	default:
 		return nil, apierr.Invalid("DECISION_SCOPE_INVALID", "Unknown scope.", nil)
 	}
