@@ -3098,6 +3098,9 @@ func TestSpawnTrackerIntakeAmbiguousInCommandDeliveryRemainsFencedAfterRuntimeDi
 	if err := m.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile(restart): %v", err)
 	}
+	if err := m.WaitBackgroundWorkers(context.Background()); err != nil {
+		t.Fatalf("WaitBackgroundWorkers(): %v", err)
+	}
 	if got := st.trackerIntakePending[key]; got != "" {
 		t.Fatalf("pending claim after exact dead proof = %q, want settled", got)
 	}
@@ -3587,7 +3590,12 @@ func TestRequestKillTrackerIntakeUsesRecoveredWorkspaceProjectInventory(t *testi
 
 func TestKillTrackerIntakeConfirmedWorkspaceRunsCleanupHook(t *testing.T) {
 	m, st, _, _ := newManager()
-	workspace := t.TempDir()
+	dataDir := t.TempDir()
+	workspace := filepath.Join(dataDir, "worktrees", "confirmed-workspace-kill")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.dataDir = dataDir
 	project := st.projects["mer"]
 	project.Config.PreRemove = []string{"echo ran > cleanup-marker"}
 	st.projects["mer"] = project

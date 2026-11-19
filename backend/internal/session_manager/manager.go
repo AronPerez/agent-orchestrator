@@ -5301,9 +5301,6 @@ func (m *Manager) ReconcileBackground(ctx context.Context) (resultErr error) {
 		}
 	}
 	m.startupProvisioningRetries = nil
-	if err := m.ScheduleTrackerIntakeClaimReconciliation(ctx); err != nil {
-		m.logger.Warn("reconcile: pending tracker intake cleanup scheduling deferred", "error", err)
-	}
 	recs, err := m.store.ListAllSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("reconcile: list sessions: %w", err)
@@ -5322,6 +5319,9 @@ func (m *Manager) ReconcileBackground(ctx context.Context) (resultErr error) {
 		m.logger.Error("reconcile: transition-message delivery deferred for retry", "error", err)
 	}
 	m.wakeTransitionMessageDispatcher()
+	if err := m.ScheduleTrackerIntakeClaimReconciliation(ctx); err != nil {
+		m.logger.Warn("reconcile: pending tracker intake cleanup scheduling deferred", "error", err)
+	}
 	return nil
 }
 
