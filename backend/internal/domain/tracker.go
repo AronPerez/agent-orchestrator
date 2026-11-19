@@ -207,7 +207,17 @@ type TrackerIntakeRecoveryReservation struct {
 	WorkspaceCreationIntent bool     `json:"workspaceCreationIntent,omitempty"`
 	RuntimeLaunchID         string   `json:"runtimeLaunchId,omitempty"`
 	RuntimeHandleIDs        []string `json:"runtimeHandleIds,omitempty"`
-	ControllerPossible      bool     `json:"controllerPossible,omitempty"`
+	// RuntimeTeardownHandleID and RuntimeTeardownLaunchID checkpoint one exact
+	// idempotent terminal teardown before Destroy runs. A restart retries that
+	// destroy directly before any relaunch or workspace cleanup can proceed.
+	RuntimeTeardownHandleID        string `json:"runtimeTeardownHandleId,omitempty"`
+	RuntimeTeardownLaunchID        string `json:"runtimeTeardownLaunchId,omitempty"`
+	RuntimeTeardownRestoreCapacity bool   `json:"runtimeTeardownRestoreCapacity,omitempty"`
+	// Completed teardown proof is separate from capacity-release identity: an
+	// unpublished candidate can be destroyed without ever becoming the row owner.
+	RuntimeTeardownCompletedLaunchID  string   `json:"runtimeTeardownCompletedLaunchId,omitempty"`
+	RuntimeTeardownCompletedHandleIDs []string `json:"runtimeTeardownCompletedHandleIds,omitempty"`
+	ControllerPossible                bool     `json:"controllerPossible,omitempty"`
 	// ControllerGeneration fences a Chat controller reserved by a user resume.
 	// A matching session row proves that controller reached durable publication;
 	// recovery must not stop it as residue from the original failed intake.

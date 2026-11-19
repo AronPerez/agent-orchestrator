@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -383,14 +384,19 @@ func TestTrackerIntakeRuntimeReservationAtomicallyCheckpointsRecoveryIdentity(t 
 		t.Fatal(err)
 	}
 	reservation := domain.TrackerIntakeRecoveryReservation{
-		Branch:                   "ao/demo-12/root",
-		WorkspacePath:            "/tmp/demo-12",
-		WorkspaceRepoPath:        "/tmp/demo-12",
-		RuntimeLaunchID:          "launch-12",
-		RuntimeHandleIDs:         []string{"ptyhost-v1:demo-1", "demo-1"},
-		CapacityReleased:         true,
-		ReleasedRuntimeLaunchID:  " launch-12 ",
-		ReleasedRuntimeHandleIDs: []string{" ptyhost-v1:demo-1 ", "ptyhost-v1:demo-1", "demo-1"},
+		Branch:                            "ao/demo-12/root",
+		WorkspacePath:                     "/tmp/demo-12",
+		WorkspaceRepoPath:                 "/tmp/demo-12",
+		RuntimeLaunchID:                   "launch-12",
+		RuntimeHandleIDs:                  []string{"ptyhost-v1:demo-1", "demo-1"},
+		RuntimeTeardownHandleID:           " demo-1 ",
+		RuntimeTeardownLaunchID:           " launch-12 ",
+		RuntimeTeardownRestoreCapacity:    true,
+		RuntimeTeardownCompletedLaunchID:  " launch-11 ",
+		RuntimeTeardownCompletedHandleIDs: []string{" old-demo-1 ", "old-demo-1"},
+		CapacityReleased:                  true,
+		ReleasedRuntimeLaunchID:           " launch-12 ",
+		ReleasedRuntimeHandleIDs:          []string{" ptyhost-v1:demo-1 ", "ptyhost-v1:demo-1", "demo-1"},
 	}
 	if err := store.ReserveTrackerIntakeRecovery(ctx, created.ID, reservation); err != nil {
 		t.Fatalf("ReserveTrackerIntakeRecovery(): %v", err)
@@ -407,6 +413,18 @@ func TestTrackerIntakeRuntimeReservationAtomicallyCheckpointsRecoveryIdentity(t 
 	if got.ReleasedRuntimeLaunchID != "launch-12" ||
 		fmt.Sprint(got.ReleasedRuntimeHandleIDs) != fmt.Sprint(reservation.RuntimeHandleIDs) {
 		t.Fatalf("released runtime proof = %+v, want launch-12 and handles %v", got, reservation.RuntimeHandleIDs)
+	}
+	if got.RuntimeTeardownHandleID != "demo-1" || got.RuntimeTeardownLaunchID != "launch-12" {
+		t.Fatalf("runtime teardown checkpoint = %q/%q, want demo-1/launch-12",
+			got.RuntimeTeardownHandleID, got.RuntimeTeardownLaunchID)
+	}
+	if !got.RuntimeTeardownRestoreCapacity {
+		t.Fatal("runtime teardown capacity restore bit was not preserved")
+	}
+	if got.RuntimeTeardownCompletedLaunchID != "launch-11" ||
+		!reflect.DeepEqual(got.RuntimeTeardownCompletedHandleIDs, []string{"old-demo-1"}) {
+		t.Fatalf("completed runtime teardown proof = %q/%v",
+			got.RuntimeTeardownCompletedLaunchID, got.RuntimeTeardownCompletedHandleIDs)
 	}
 }
 

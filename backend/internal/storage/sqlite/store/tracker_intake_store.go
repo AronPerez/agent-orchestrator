@@ -337,7 +337,9 @@ func getPendingTrackerIntakeRecovery(ctx context.Context, q *gen.Queries, id dom
 
 func trackerIntakeRecoveryNeedsFence(reservation domain.TrackerIntakeRecoveryReservation) bool {
 	return reservation.DeliveryPossible || reservation.ControllerPossible ||
-		strings.TrimSpace(reservation.WorkspacePath) != "" || len(reservation.RuntimeHandleIDs) != 0
+		strings.TrimSpace(reservation.WorkspacePath) != "" || len(reservation.RuntimeHandleIDs) != 0 ||
+		strings.TrimSpace(reservation.RuntimeTeardownHandleID) != "" ||
+		strings.TrimSpace(reservation.RuntimeTeardownLaunchID) != ""
 }
 
 func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryReservation) domain.TrackerIntakeRecoveryReservation {
@@ -345,8 +347,12 @@ func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryRese
 	reservation.WorkspacePath = strings.TrimSpace(reservation.WorkspacePath)
 	reservation.WorkspaceRepoPath = strings.TrimSpace(reservation.WorkspaceRepoPath)
 	reservation.RuntimeLaunchID = strings.TrimSpace(reservation.RuntimeLaunchID)
+	reservation.RuntimeTeardownHandleID = strings.TrimSpace(reservation.RuntimeTeardownHandleID)
+	reservation.RuntimeTeardownLaunchID = strings.TrimSpace(reservation.RuntimeTeardownLaunchID)
+	reservation.RuntimeTeardownCompletedLaunchID = strings.TrimSpace(reservation.RuntimeTeardownCompletedLaunchID)
 	reservation.ReleasedRuntimeLaunchID = strings.TrimSpace(reservation.ReleasedRuntimeLaunchID)
 	reservation.RuntimeHandleIDs = normalizeTrackerIntakeRuntimeHandles(reservation.RuntimeHandleIDs)
+	reservation.RuntimeTeardownCompletedHandleIDs = normalizeTrackerIntakeRuntimeHandles(reservation.RuntimeTeardownCompletedHandleIDs)
 	reservation.ReleasedRuntimeHandleIDs = normalizeTrackerIntakeRuntimeHandles(reservation.ReleasedRuntimeHandleIDs)
 	return reservation
 }
