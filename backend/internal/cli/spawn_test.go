@@ -643,6 +643,63 @@ func TestRequestedOutputArtifactSetsRequestedOutput(t *testing.T) {
 	}
 }
 
+func TestSpawnPlanFirstSetsPlanFirst(t *testing.T) {
+	cfg := setConfigEnv(t)
+	var req map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
+			_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","path":"/repo/demo","repo":"https://github.com/aoagents/agent-orchestrator","defaultBranch":"main"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(w, `{"session":{"id":"demo-1","status":"idle"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+
+	_, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"spawn", "--project", "demo", "--agent", "codex", "--name", "Plan first", "--prompt", "Add search", "--plan-first", "--skip-agent-check")
+	if err != nil {
+		t.Fatalf("spawn failed: %v stderr=%s", err, errOut)
+	}
+	if req["planFirst"] != true {
+		t.Fatalf("planFirst = %#v, want true; request=%#v", req["planFirst"], req)
+	}
+}
+
+func TestSpawnPlanFirstRequiresATask(t *testing.T) {
+	_, _, err := executeCLI(t, Deps{},
+		"spawn", "--project", "demo", "--agent", "codex", "--name", "Plan first", "--plan-first", "--skip-agent-check")
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "requires --prompt or --issue") {
+		t.Fatalf("err=%v exit=%d, want task-required usage error", err, ExitCode(err))
+	}
+}
+
+func TestSpawnPlanFirstRejectsUnsupportedSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "orchestrator", args: []string{"--kind", "orchestrator"}, want: "worker sessions only"},
+		{name: "standalone", args: []string{"--standalone", "--agent", "codex"}, want: "registered project"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"spawn", "--name", "Plan first", "--plan-first"}, tc.args...)
+			_, _, err := executeCLI(t, Deps{}, args...)
+			if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v exit=%d, want usage error containing %q", err, ExitCode(err), tc.want)
+			}
+		})
+	}
+}
+
 func TestSpawnWorkerContractSetsGoalAndTimebox(t *testing.T) {
 	cfg := setConfigEnv(t)
 	var req map[string]any

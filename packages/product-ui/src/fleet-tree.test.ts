@@ -194,7 +194,110 @@ describe("buildFleetTree", () => {
 		expect(localChild.node.parentAddress).toEqual({ machineId: "laptop", sessionId: "parent" });
 		expect(remoteChild.depth).toBe(0);
 		expect(remoteChild.node.parentUnavailable).toBe(true);
+		expect(remoteChild.node.parentUnavailableReason).toBe("machine-unknown");
 		expect(remoteChild.node.parentAddress).toEqual({ machineId: "server", sessionId: "parent" });
+		expect(localChild.node.parentUnavailableReason).toBeUndefined();
+	});
+
+	it("draws a worker on another machine under its orchestrator by exact address", () => {
+		const tree = buildFleetTree([
+			scope("ao", "laptop", [session("orch", "working", { kind: "orchestrator" })]),
+			scope("ao-box", "server", [
+				session("worker", "needs_input", { parentHostId: "laptop", parentSessionId: "orch" }),
+			]),
+		]);
+
+		expect(tree.map((project) => project.project.id)).toEqual(["ao"]);
+		const laptop = tree[0]!.machines[0]!;
+		const rows = flattenFleetSessions(laptop.sessions, new Set());
+		expect(rows.map(({ node, depth }) => [node.session.id, node.machineId, depth])).toEqual([
+			["orch", "laptop", 0],
+			["worker", "server", 1],
+		]);
+		const worker = rows[1]!.node;
+		expect(worker.key).toBe(fleetSessionKey("ao-box", "server", "worker"));
+		expect(worker.projectId).toBe("ao-box");
+		expect(worker.parentUnavailable).toBe(false);
+		expect(worker.parentUnavailableReason).toBeUndefined();
+		expect(worker.parentAddress).toEqual({ machineId: "laptop", sessionId: "orch" });
+		expect(rows[0]!.node.rollup).toEqual({ ...emptyFleetRollup(), action: 1 });
+		expect(laptop.rollup).toEqual({ ...emptyFleetRollup(), working: 1, action: 1 });
+		expect(tree[0]!.rollup).toEqual(laptop.rollup);
+	});
+
+	it("keeps the child's own machine branch when it still holds other sessions", () => {
+		const tree = buildFleetTree([
+			scope("ao", "laptop", [session("orch", "working", { kind: "orchestrator" })]),
+			scope("ao", "server", [
+				session("worker", "working", { parentHostId: "laptop", parentSessionId: "orch" }),
+				session("local", "idle"),
+			]),
+		]);
+		const server = tree.find((project) => project.machines[0]?.machine.id === "server")!.machines[0]!;
+		expect(server.sessions.map((node) => node.session.id)).toEqual(["local"]);
+		expect(server.rollup).toEqual({ ...emptyFleetRollup(), working: 1 });
+	});
+
+	it("never links a cross-machine parent by a bare session ID", () => {
+		const tree = buildFleetTree([
+			scope("ao", "laptop", [session("orch", "working")]),
+			scope("ao", "server", [
+				session("orch", "working"),
+				session("qualified", "working", { parentHostId: "laptop", parentSessionId: "missing" }),
+				session("unqualified", "working", { parentSessionId: "orch-elsewhere" }),
+			]),
+			scope("docs", "laptop", [session("orch-elsewhere", "working")]),
+		]);
+		const server = tree.find((project) => project.machines[0]?.machine.id === "server")!.machines[0]!;
+		const rows = flattenFleetSessions(server.sessions, new Set());
+		expect(rows.map(({ node, depth }) => [node.session.id, depth, node.parentUnavailableReason])).toEqual([
+			["orch", 0, undefined],
+			["qualified", 0, "missing"],
+			["unqualified", 0, "missing"],
+		]);
+	});
+
+	it("keeps a child as a marked root when its parent's machine is not connected", () => {
+		const offline = buildFleetTree([
+			{ ...scope("ao", "laptop", [session("orch", "working")]), machine: { id: "laptop", name: "Laptop", reachable: false } },
+			scope("ao", "server", [session("worker", "working", { parentHostId: "laptop", parentSessionId: "orch" })]),
+		]);
+		const worker = offline.find((project) => project.machines[0]?.machine.id === "server")!.machines[0]!.sessions[0]!;
+		expect(worker.session.id).toBe("worker");
+		expect(worker.parentUnavailable).toBe(true);
+		expect(worker.parentUnavailableReason).toBe("machine-offline");
+
+		const known = buildFleetTree(
+			[scope("ao", "server", [session("worker", "working", { parentHostId: "laptop", parentSessionId: "orch" })])],
+			{ knownMachines: [{ id: "laptop", reachable: false }] },
+		);
+		expect(known[0]!.machines[0]!.sessions[0]!.parentUnavailableReason).toBe("machine-offline");
+
+		const reachableButEmpty = buildFleetTree(
+			[scope("ao", "server", [session("worker", "working", { parentHostId: "laptop", parentSessionId: "orch" })])],
+			{ knownMachines: [{ id: "laptop", reachable: true }] },
+		);
+		expect(reachableButEmpty[0]!.machines[0]!.sessions[0]!.parentUnavailableReason).toBe("missing");
+	});
+
+	it("keeps an archived cross-machine ancestor needed by a live child", () => {
+		const tree = buildFleetTree([
+			scope("ao", "laptop", [session("orch", "terminated", { isTerminated: true })]),
+			scope("ao", "server", [session("worker", "working", { parentHostId: "laptop", parentSessionId: "orch" })]),
+		]);
+		const rows = flattenFleetSessions(tree[0]!.machines[0]!.sessions, new Set());
+		expect(rows.map(({ node, depth }) => [node.session.id, depth])).toEqual([["orch", 0], ["worker", 1]]);
+	});
+
+	it("shows a cross-machine lineage cycle once", () => {
+		const tree = buildFleetTree([
+			scope("ao", "laptop", [session("a", "idle", { parentHostId: "server", parentSessionId: "b" })]),
+			scope("ao", "server", [session("b", "idle", { parentHostId: "laptop", parentSessionId: "a" })]),
+		]);
+		const rows = tree.flatMap((project) => project.machines.flatMap((machine) =>
+			flattenFleetSessions(machine.sessions, new Set())));
+		expect(rows.map(({ node }) => node.session.id).sort()).toEqual(["a", "b"]);
+		expect(rows.filter(({ node }) => node.parentUnavailable)).toHaveLength(1);
 	});
 
 	it("flattens collapse state by qualified node key", () => {
