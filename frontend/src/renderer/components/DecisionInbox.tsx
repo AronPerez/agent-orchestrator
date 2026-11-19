@@ -1,7 +1,7 @@
 import { LoaderCircle } from "@/components/app-icons";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { DecisionInboxAnswer, DecisionInboxEntry } from "../lib/decision-inbox";
+import { decisionOptionRequiresNote, type DecisionInboxAnswer, type DecisionInboxEntry } from "../lib/decision-inbox";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -79,7 +79,7 @@ export function DecisionInbox({
 								const isPendingOption = callPending && pending?.option === optionNumber;
 								const descriptionId = `decision-${call.id}-option-${optionNumber}`;
 								const noteId = `${descriptionId}-note`;
-								const requiresNote = call.reference === "plan-first" && optionNumber === 2 && option.label === "Approve with changes";
+								const requiresNote = decisionOptionRequiresNote(call, optionNumber);
 								const note = notes[callKey] ?? "";
 								return (
 									<div className="min-w-0" key={`${call.id}:${optionNumber}`}>

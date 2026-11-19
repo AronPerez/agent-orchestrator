@@ -17,6 +17,8 @@ import { editorHandoffQueryKey, editorHandoffQueryRoot } from "../hooks/useEdito
 import { shellTerminalsQueryKey, shellTerminalsQueryKeyForHost } from "../hooks/useShellTerminals";
 import { baseUrlForHost, connectedHosts, subscribeConnectedHosts } from "./host-clients";
 import { probeRemoteSse } from "./remote-sse-probe";
+import { decisionKeys } from "./decision-inbox";
+import { LOCAL_HOST } from "./hosts";
 import { persistRemoteCache } from "./remote-chat-cache";
 
 export type EventTransport = {
@@ -37,8 +39,9 @@ const EVENTSOURCE_CLOSED = 2;
 // CDC event types the daemon pushes over the SSE stream (see
 // backend/internal/cdc/event.go). The SSE writer tags each frame with
 // `event: <type>`, so named events bypass EventSource.onmessage and must be
-// subscribed explicitly. Every one of these can change the project/session list
-// the sidebar renders, so they all trigger a (batched) workspace refetch.
+// subscribed explicitly. Every one of these except decision_updated can change
+// the project/session list the sidebar renders, so they trigger a (batched)
+// workspace refetch; decision_updated refreshes only that host's decision views.
 const CDC_EVENT_TYPES = [
 	"session_created",
 	"session_updated",
@@ -50,6 +53,7 @@ const CDC_EVENT_TYPES = [
 	"pr_review_thread_resolved",
 	"review_run_created",
 	"review_run_updated",
+	"decision_updated",
 ] as const;
 
 /**
@@ -73,6 +77,8 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 			const pendingEditorHandoffSessions = new Set<string>();
 			const pendingModelCatalogScopes = new Map<string, { agentId: string; projectId: string }>();
 			let workspaceInvalidationPending = false;
+			// This computer's decision views (bell list, board, detail, search).
+			let decisionInvalidationPending = false;
 			let allConversationsInvalidationPending = false;
 			let allEditorHandoffsInvalidationPending = false;
 			// Reviews, interface transitions and model catalogs are otherwise only
@@ -160,6 +166,9 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 				invalidate(["project-config", hostId]);
 				if (reconnect) invalidate(["remote-conversation", hostId]);
 				if (reconnect) invalidate(["reviewer-conversation", hostId]);
+				// Decision events missed while disconnected; their own events refresh
+				// this host's decision list otherwise.
+				if (reconnect) invalidate(decisionKeys.host(hostId));
 				invalidate(["session-scm-summary", hostId]);
 				invalidate(["session-reviews", hostId]);
 				invalidate(["session-usage", hostId]);
@@ -214,7 +223,11 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 								};
 								const payload = typeof decoded.payload === "object" && decoded.payload !== null ? decoded.payload : undefined;
 								const sessionId = typeof decoded.sessionId === "string" && decoded.sessionId ? decoded.sessionId : undefined;
-								if (typeof payload?.reviewId === "string") {
+								if (decoded.type === "decision_updated") {
+									// Only that machine's own decision list changed.
+									invalidate(decisionKeys.host(hostId));
+									conversationOnly = true;
+								} else if (typeof payload?.reviewId === "string") {
 									invalidate(["reviewer-conversation", hostId, payload.reviewId]);
 									conversationOnly = typeof payload.conversationId === "string";
 								} else if (sessionId && typeof payload?.conversationId === "string") {
@@ -291,6 +304,10 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 					workspaceInvalidationPending = false;
 					lastWorkspaceRefreshAt = Date.now();
 					idOnlyWorkspaceRefreshPending = false;
+				}
+				if (decisionInvalidationPending) {
+					invalidate(decisionKeys.host(LOCAL_HOST));
+					decisionInvalidationPending = false;
 				}
 				if (allEventScopedCachesInvalidationPending) {
 					invalidate(["session-reviews"]);
@@ -385,6 +402,7 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 					allConversationsInvalidationPending = true;
 					allEditorHandoffsInvalidationPending = true;
 					allEventScopedCachesInvalidationPending = true;
+					decisionInvalidationPending = true;
 				}
 				if (event && "data" in event) {
 					try {
@@ -411,6 +429,12 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 										projectId?: unknown;
 								  })
 								: undefined;
+						// A decision call changed. Its payload names only the call, and no
+						// project or session list shows calls, so refresh decision views alone.
+						if (decoded.type === "decision_updated") {
+							decisionInvalidationPending = true;
+							conversationOnly = true;
+						}
 						// A shell's program title changed; only the shell list shows it.
 						if (typeof payload?.shellTerminalHandleId === "string") {
 							void queryClient.invalidateQueries({ queryKey: shellTerminalsQueryKey });

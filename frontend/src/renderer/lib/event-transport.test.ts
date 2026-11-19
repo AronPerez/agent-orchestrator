@@ -1333,3 +1333,71 @@ it.each([
 			vi.useRealTimers();
 		}
 	});
+
+describe("decision events", () => {
+	const decisionEvent = (callId = "dec_1") => JSON.stringify({
+		seq: 9, projectId: "", type: "decision_updated", payload: { callId }, createdAt: "2026-11-18T10:00:00Z",
+	});
+	const invalidated = (client: ReturnType<typeof fakeQueryClient>) =>
+		vi.mocked(client.invalidateQueries).mock.calls.map(([filters]) => (filters as { queryKey: unknown[] }).queryKey);
+
+	it("subscribes to decision_updated on every stream", () => {
+		const disconnect = createEventTransport(fakeQueryClient()).connect();
+		expect(cdcSources()[0].listeners).toContain("decision_updated");
+		disconnect();
+	});
+
+	it("refreshes this computer's decision views once per burst without refetching workspaces", () => {
+		vi.useFakeTimers();
+		try {
+			const client = fakeQueryClient();
+			const disconnect = createEventTransport(client).connect();
+			vi.advanceTimersByTime(1_000);
+			vi.mocked(client.invalidateQueries).mockClear();
+			cdcSources()[0].emit("decision_updated", decisionEvent("dec_1"));
+			cdcSources()[0].emit("decision_updated", decisionEvent("dec_2"));
+			vi.advanceTimersByTime(1_000);
+			const keys = invalidated(client);
+			expect(keys.filter((key) => JSON.stringify(key) === JSON.stringify(["decision-inbox", "local"]))).toHaveLength(1);
+			expect(keys).not.toContainEqual(["workspaces"]);
+			expect(keys).not.toContainEqual(["decision-inbox"]);
+			disconnect();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("refreshes this computer's decision views when the stream reopens", () => {
+		vi.useFakeTimers();
+		try {
+			const client = fakeQueryClient();
+			createEventTransport(client).connect();
+			cdcSources()[0].onopen?.();
+			vi.advanceTimersByTime(200);
+			expect(invalidated(client)).toContainEqual(["decision-inbox", "local"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("refreshes only the remote host's decision list for its decision events and reconnects", async () => {
+		const client = fakeQueryClient();
+		connectedHostsMock.mockReturnValue(["box-a", "box-b"]);
+		baseUrlForHostMock.mockImplementation((hostId) => `http://127.0.0.1:4000/${hostId}`);
+		const disconnect = createEventTransport(client).connect();
+		const remoteA = EventSourceStub.instances.find((source) => source.url.includes("/box-a/"))!;
+		await Promise.resolve();
+		remoteA.emit("cursor", "0");
+		expect(invalidated(client)).toContainEqual(["decision-inbox", "box-a"]);
+		await Promise.resolve();
+		vi.mocked(client.invalidateQueries).mockClear();
+
+		remoteA.emit("decision_updated", decisionEvent());
+		const keys = invalidated(client);
+		expect(keys).toContainEqual(["decision-inbox", "box-a"]);
+		expect(keys).not.toContainEqual(["decision-inbox", "box-b"]);
+		expect(keys).not.toContainEqual(["decision-inbox", "local"]);
+		expect(keys).not.toContainEqual(["remote-workspaces", "box-a"]);
+		disconnect();
+	});
+});

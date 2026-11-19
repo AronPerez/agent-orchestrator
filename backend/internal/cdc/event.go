@@ -30,6 +30,10 @@ const (
 	EventPRReviewThreadResolved EventType = "pr_review_thread_resolved"
 	EventReviewRunCreated       EventType = "review_run_created"
 	EventReviewRunUpdated       EventType = "review_run_updated"
+	// EventDecisionUpdated invalidates decision views. Its payload is only
+	// {"callId": ...}; ProjectID is empty when the call's recorded project does
+	// not exist on this machine.
+	EventDecisionUpdated EventType = "decision_updated"
 )
 
 // Event is one CDC change read from change_log. Seq is the monotonic ordering +

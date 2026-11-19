@@ -7,6 +7,7 @@ import type { WorkspaceSummary } from "../types/workspace";
 import { LOCAL_HOST } from "./hosts";
 import { useNavigateToSession } from "./navigate-to-session";
 import { parseArtifactLink, parseSessionLink, resolveSessionLink } from "./session-links";
+import { useDecisionLinkNavigation } from "./use-decision-link-navigation";
 
 export type SessionLinkSource = {
 	ready: boolean;
@@ -65,7 +66,10 @@ export function useSessionLinkNavigation(sourceHostId?: string, sourceKind?: "cl
 	const navigateToSession = useNavigateToSession();
 	const showGlobalToast = useUiStore((state) => state.showGlobalToast);
 	const requestWorkspaceFileOpen = useUiStore((state) => state.requestWorkspaceFileOpen);
+	// Decision calls live in this computer's ledger, whichever chat names one.
+	const openDecision = useDecisionLinkNavigation();
 	return useCallback((url: string) => {
+		if (openDecision(url)) return true;
 		const artifact = parseArtifactLink(url);
 		const target = parseSessionLink(url) ?? artifact;
 		if (!target) {
@@ -110,5 +114,5 @@ export function useSessionLinkNavigation(sourceHostId?: string, sourceKind?: "cl
 		if (remoteHostId) navigateToSession(resolved.projectId, resolved.sessionId, remoteHostId);
 		else navigateToSession(resolved.projectId, resolved.sessionId);
 		return true;
-	}, [navigateToSession, remoteHostId, requestWorkspaceFileOpen, showGlobalToast, source, sourceKind]);
+	}, [navigateToSession, openDecision, remoteHostId, requestWorkspaceFileOpen, showGlobalToast, source, sourceKind]);
 }

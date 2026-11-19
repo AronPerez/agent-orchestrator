@@ -234,11 +234,11 @@ func TestSearchPutsTheSameProjectFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "auth scheme")
+	calls, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "auth scheme", 0)
 	if err != nil || callIDs(calls) != here.ID+","+elsewhere.ID {
 		t.Fatalf("search = %q, err=%v", callIDs(calls), err)
 	}
-	if _, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "  "); apiCode(err) != "DECISION_QUERY_REQUIRED" {
+	if _, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "  ", 0); apiCode(err) != "DECISION_QUERY_REQUIRED" {
 		t.Fatalf("blank search error = %v", err)
 	}
 }
@@ -263,7 +263,7 @@ func TestSearchAppliesProjectAndRetirementPriorityBeforeLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	calls, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "auth scheme")
+	calls, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "auth scheme", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestSearchAppliesProjectlessSessionPriorityBeforeLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		calls, err := fixture.service.Search(ctx, Actor{Session: fixture.loose}, "auth scheme")
+		calls, err := fixture.service.Search(ctx, Actor{Session: fixture.loose}, "auth scheme", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -313,7 +313,7 @@ func TestSearchAppliesProjectlessSessionPriorityBeforeLimit(t *testing.T) {
 		}
 		retireDecisionForTest(t, fixture, projectless, 0)
 
-		calls, err := fixture.service.Search(ctx, Actor{Session: fixture.loose}, "auth scheme")
+		calls, err := fixture.service.Search(ctx, Actor{Session: fixture.loose}, "auth scheme", 0)
 		if err != nil || callIDs(calls) != projectless.ID+","+project.ID {
 			t.Fatalf("search=%q err=%v, want projectless call first", callIDs(calls), err)
 		}

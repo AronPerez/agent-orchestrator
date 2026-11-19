@@ -148,3 +148,39 @@ func TestUnexpectedTimestampTriggerWriteRollsBackAndBlocksStartup(t *testing.T) 
 		t.Fatalf("fallback reader unavailable: %v %v", ok, err)
 	}
 }
+
+// Normalizing a decision call's stored timestamps is a representation-only
+// write: its decision_calls_cdc_update trigger fires, but the repair removes
+// that event, so no decision_updated reaches clients for it.
+func TestRepairDoesNotPublishDecisionEvents(t *testing.T) {
+	db := openMigratedTestDB(t)
+	const legacy = "2026-10-21 09:00:00.123456789 +0530 IST"
+	if _, err := db.Exec(`INSERT INTO decision_calls(call_id,origin,owner_session_id,state,raised_at,last_wall,last_counter,body,outcome_at)
+VALUES('dec_legacy','h_a','w-1','done',?,1,0,'{}',?)`, legacy, legacy); err != nil {
+		t.Fatal(err)
+	}
+	events := func() (count int64, head int64) {
+		t.Helper()
+		if err := db.QueryRow(`SELECT count(*),COALESCE((SELECT seq FROM sqlite_sequence WHERE name='change_log'),-1) FROM change_log WHERE event_type='decision_updated'`).Scan(&count, &head); err != nil {
+			t.Fatal(err)
+		}
+		return count, head
+	}
+	beforeCount, beforeHead := events()
+	if beforeCount != 1 {
+		t.Fatalf("seeded decision events = %d, want the insert's one", beforeCount)
+	}
+	if err := repairTimestamps(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if count, head := events(); count != beforeCount || head != beforeHead {
+		t.Fatalf("repair published decision events: count %d->%d head %d->%d", beforeCount, count, beforeHead, head)
+	}
+	var raised, outcome string
+	if err := db.QueryRow(`SELECT CAST(raised_at AS TEXT),CAST(outcome_at AS TEXT) FROM decision_calls WHERE call_id='dec_legacy'`).Scan(&raised, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	if raised != "2026-10-21 03:30:00.123456789 +0000 UTC" || outcome != raised {
+		t.Fatalf("decision timestamps not normalized: raised=%q outcome=%q", raised, outcome)
+	}
+}

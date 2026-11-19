@@ -200,6 +200,16 @@ type DecisionObserveResponse struct {
 type ListDecisionsQuery struct {
 	Scope string `query:"scope,omitempty" enum:"mine,needs_you" description:"Which calls to list. Defaults to needs_you. Ignored when q is given."`
 	Q     string `query:"q,omitempty" description:"Search words. When given, the response is the search result."`
+	Limit int    `query:"limit,omitempty" minimum:"1" description:"Most search results to return. Defaults to 20; values above 100 are capped. Ignored when q is absent."`
+}
+
+// DecisionBoardResponse is the Decisions page snapshot: every active call plus
+// non-retired Done calls whose outcome landed at or after doneSince.
+type DecisionBoardResponse struct {
+	Calls         []DecisionCallResponse `json:"calls"`
+	NeedsYouCount int                    `json:"needsYouCount" description:"Exact number of calls in Needs you."`
+	ServingHostID string                 `json:"servingHostId" description:"Host id of the daemon that served this board; compare with each call's hostId."`
+	DoneSince     time.Time              `json:"doneSince" description:"Oldest outcome time a Done call may have and still be on the board."`
 }
 
 // ListDecisionsResponse contains ordered decision projections.

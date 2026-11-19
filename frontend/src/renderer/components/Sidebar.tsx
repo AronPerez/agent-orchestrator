@@ -18,6 +18,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
 	Archive,
 	CalendarClock,
+	ListChecks,
 	ChevronRight,
 	CircleAlert,
 	Copy,
@@ -61,6 +62,8 @@ import { flushSync } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { artifactCount, groupArtifactsByProject, withKeptArtifacts } from "../lib/artifacts";
 import { useKeptArtifacts } from "../hooks/useKeptArtifacts";
+import { useDecisionBoard } from "../hooks/useDecisionInbox";
+import { formatDecisionCount } from "../lib/decisions-route";
 import {
 	hasConfiguredOrchestratorAgent,
 	newestActiveOrchestrator,
@@ -548,6 +551,7 @@ function useSelection() {
 	const goHome = useCallback(() => void navigate({ to: "/" }), [navigate]);
 	const goAutomations = useCallback(() => void navigate({ to: "/automations" }), [navigate]);
 	const goArtifacts = useCallback(() => void navigate({ to: "/artifacts" }), [navigate]);
+	const goDecisions = useCallback(() => void navigate({ to: "/decisions" }), [navigate]);
 	const goFleet = useCallback(() => void navigate({ to: "/fleet" }), [navigate]);
 	const goUsage = useCallback(() => void navigate({ to: "/usage" }), [navigate]);
 	const goStandaloneBoard = useCallback(() => void navigate({ to: "/sessions" }), [navigate]);
@@ -576,6 +580,7 @@ function useSelection() {
 		isHome: pathname === "/",
 		isAutomations: pathname === "/automations",
 		isArtifacts: pathname === "/artifacts",
+		isDecisions: pathname === "/decisions",
 		isFleet: pathname === "/fleet",
 		isUsage: pathname === "/usage",
 		activeRemoteHostId: params.hostId,
@@ -586,6 +591,7 @@ function useSelection() {
 		goHome,
 		goAutomations,
 		goArtifacts,
+		goDecisions,
 		goFleet,
 		goUsage,
 		goStandaloneBoard,
@@ -596,7 +602,7 @@ function useSelection() {
 		goSettings,
 		goProject,
 		goSession,
-	}), [goArtifacts, goAutomations, goFleet, goUsage, goConnectMobile, goGlobalSettings, goHome, goProject, goSession, goSettings, goStandaloneBoard, params.hostId, params.projectId, params.sessionId, pathname]);
+	}), [goArtifacts, goAutomations, goDecisions, goFleet, goUsage, goConnectMobile, goGlobalSettings, goHome, goProject, goSession, goSettings, goStandaloneBoard, params.hostId, params.projectId, params.sessionId, pathname]);
 }
 
 // Rows showing the red alert sit above the rest, but only in the default
@@ -756,6 +762,11 @@ export const Sidebar = memo(function Sidebar({
 		() => artifactCount(withKeptArtifacts(groupArtifactsByProject(cloudArtifacts ? workspaces : workspaces.filter((workspace) => workspace.kind !== "cloud")), kept, workspaces, "")),
 		[cloudArtifacts, workspaces, kept],
 	);
+	// The page shares this query, so the count is the board's exact Needs-you
+	// number. A failed or still-loading board shows no count rather than zero.
+	const decisionBoard = useDecisionBoard();
+	const decisionsNeedingYou = decisionBoard.isError ? undefined : decisionBoard.data?.needsYouCount;
+	const decisionsBadge = typeof decisionsNeedingYou === "number" ? formatDecisionCount(decisionsNeedingYou) : undefined;
 	const existingProjectPaths = useMemo(
 		() => workspaces
 			.filter((workspace) => workspace.kind !== STANDALONE_PROJECT_KIND)
@@ -1170,6 +1181,18 @@ export const Sidebar = memo(function Sidebar({
 							label={t("automations.title")}
 							onClick={selection.goAutomations}
 							tooltip={isCollapsed ? t("automations.title") : undefined}
+						/>
+					</SidebarMenuItem>
+					<SidebarMenuItem>
+						<SidebarTopNavRow
+							active={selection.isDecisions}
+							ariaLabel={decisionsBadge ? t("decisions.navNeedsYou", { count: decisionsNeedingYou }) : undefined}
+							icon={<ListChecks aria-hidden="true" />}
+							label={t("decisions.title")}
+							onClick={selection.goDecisions}
+							tooltip={isCollapsed ? t("decisions.title") : undefined}
+							trailing={decisionsBadge}
+							trailingTone="needs-you"
 						/>
 					</SidebarMenuItem>
 					<SidebarMenuItem>
@@ -3638,6 +3661,7 @@ function SidebarTopNavRow({
 	onClick,
 	tooltip,
 	trailing,
+	trailingTone,
 }: {
 	active?: boolean;
 	ariaLabel?: string;
@@ -3647,6 +3671,8 @@ function SidebarTopNavRow({
 	onClick: () => void;
 	tooltip?: string;
 	trailing?: string;
+	/** A trailing count that asks for the person's attention uses its semantic colour. */
+	trailingTone?: "needs-you";
 }) {
 	return (
 		<SidebarMenuButton
@@ -3670,7 +3696,12 @@ function SidebarTopNavRow({
 				{label}
 			</span>
 			{trailing ? (
-				<span className="sidebar-expanded-chrome relative z-[1] ml-auto shrink-0 font-sans text-caption text-passive group-data-[collapsible=icon]:hidden">
+				<span
+					className={cn(
+						"sidebar-expanded-chrome relative z-[1] ml-auto shrink-0 font-sans text-caption tabular-nums group-data-[collapsible=icon]:hidden",
+						trailingTone === "needs-you" ? "font-medium text-status-needs-you" : "text-passive",
+					)}
+				>
 					{trailing}
 				</span>
 			) : null}

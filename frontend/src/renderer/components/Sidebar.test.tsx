@@ -810,6 +810,62 @@ describe("Sidebar", () => {
 		expect(navigateMock).toHaveBeenCalledWith({ to: "/artifacts" });
 	});
 
+	describe("Decisions row", () => {
+		const board = (needsYouCount: number) => ({
+			calls: [], needsYouCount, servingHostId: "h_local", doneSince: "2026-11-11T10:00:00Z",
+		});
+		const answerBoard = (result: unknown) => {
+			const fallback = getMock.getMockImplementation();
+			getMock.mockImplementation((path: string, ...rest: unknown[]) =>
+				path === "/api/v1/decisions/board" ? Promise.resolve(result) : fallback?.(path, ...rest));
+		};
+		const boardFetches = () => getMock.mock.calls.filter(([path]) => path === "/api/v1/decisions/board").length;
+
+		it("sits under Automations with the exact Needs-you count and opens the page", async () => {
+			const user = userEvent.setup();
+			answerBoard({ data: board(3) });
+			renderSidebar();
+
+			const decisions = await screen.findByRole("button", { name: "Decisions, needs you: 3" });
+			const automations = screen.getByRole("button", { name: "Automations" });
+			expect(automations.compareDocumentPosition(decisions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+			expect(within(decisions).getByText("3")).toHaveClass("text-status-needs-you");
+			expect(decisions).not.toHaveAttribute("aria-current");
+			expect(boardFetches()).toBe(1);
+
+			await user.click(decisions);
+			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions" });
+		});
+
+		it("caps the visible count but names the exact number", async () => {
+			answerBoard({ data: board(120) });
+			renderSidebar();
+			const decisions = await screen.findByRole("button", { name: "Decisions, needs you: 120" });
+			expect(decisions).toHaveTextContent("99+");
+		});
+
+		it("hides the count at zero, while loading and when the board fails", async () => {
+			answerBoard({ data: board(0) });
+			renderSidebar();
+			await waitFor(() => expect(boardFetches()).toBe(1));
+			const decisions = screen.getByRole("button", { name: "Decisions" });
+			expect(decisions.textContent).toBe("Decisions");
+		});
+
+		it("does not present a failed board as zero", async () => {
+			answerBoard({ error: { error: { code: "DECISION_BOARD_FAILED", message: "Unable to load decisions" } } });
+			renderSidebar();
+			await waitFor(() => expect(boardFetches()).toBeGreaterThanOrEqual(1));
+			expect(screen.getByRole("button", { name: "Decisions" }).textContent).toBe("Decisions");
+		});
+
+		it("marks the row active on the Decisions page", () => {
+			mockLocation.pathname = "/decisions";
+			renderSidebar();
+			expect(screen.getByRole("button", { name: /^Decisions/ })).toHaveAttribute("aria-current", "page");
+		});
+	});
+
 	it("omits the Artifacts count when there are none and marks the row active on its route", () => {
 		mockLocation.pathname = "/artifacts";
 		renderSidebar();

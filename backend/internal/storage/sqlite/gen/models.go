@@ -471,6 +471,7 @@ type DecisionCall struct {
 	LastCounter     int64
 	Body            string
 	SearchText      string
+	OutcomeAt       sql.NullTime
 }
 
 type DecisionCallsFt struct {
