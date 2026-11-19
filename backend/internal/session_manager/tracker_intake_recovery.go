@@ -33,7 +33,9 @@ func (m *Manager) ReconcileTrackerIntakeClaims(ctx context.Context) error {
 			reconcileErr = errors.Join(reconcileErr, err)
 			continue
 		}
-		m.clearTrackerIntakeReaperFence(claim.SessionID)
+		if err := m.refreshTrackerIntakeReaperFence(ctx, claim.SessionID); err != nil {
+			reconcileErr = errors.Join(reconcileErr, err)
+		}
 	}
 	return reconcileErr
 }
@@ -61,7 +63,9 @@ func (m *Manager) ScheduleTrackerIntakeClaimReconciliation(ctx context.Context) 
 				m.logger.Warn("tracker intake: claim cleanup deferred", "sessionID", claim.SessionID, "projectID", claim.ProjectID, "error", err)
 				return
 			}
-			m.clearTrackerIntakeReaperFence(claim.SessionID)
+			if err := m.refreshTrackerIntakeReaperFence(m.backgroundContext, claim.SessionID); err != nil {
+				m.logger.Warn("tracker intake: reaper fence refresh deferred", "sessionID", claim.SessionID, "projectID", claim.ProjectID, "error", err)
+			}
 		})
 	}
 	return nil
@@ -114,8 +118,7 @@ func (m *Manager) reconcileStartupTrackerIntakeTerminalClaims(ctx context.Contex
 		rec, found := byID[claim.SessionID]
 		if !found || rec.IsTerminated || rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID ||
 			domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat ||
-			!trackerIntakeRuntimeFenceProbeable(rec, claim.Recovery) ||
-			!trackerIntakeRuntimeReservationMatchesSession(rec, claim.Recovery) {
+			!trackerIntakeRuntimeNeedsStartupHealth(rec, claim.Recovery) {
 			continue
 		}
 		candidates = append(candidates, claim)
@@ -139,7 +142,7 @@ func (m *Manager) reconcileStartupTrackerIntakeTerminalClaims(ctx context.Contex
 			defer wg.Done()
 			for claim := range jobs {
 				recoveryCtx, cancel := context.WithTimeout(ctx, m.statusVerificationLimit)
-				err := m.reconcileTrackerIntakeClaim(recoveryCtx, claim)
+				err := m.reconcileStartupTrackerIntakeTerminalClaim(recoveryCtx, claim)
 				cancel()
 				if err != nil {
 					m.logger.Warn("reconcile: pending terminal tracker intake owner remains fenced",
@@ -147,7 +150,10 @@ func (m *Manager) reconcileStartupTrackerIntakeTerminalClaims(ctx context.Contex
 					captureBackgroundFault(ctx, err, "reconcile", "tracker_intake_terminal")
 					continue
 				}
-				m.clearTrackerIntakeReaperFence(claim.SessionID)
+				if err := m.refreshTrackerIntakeReaperFence(ctx, claim.SessionID); err != nil {
+					m.logger.Warn("reconcile: pending terminal tracker intake fence refresh deferred",
+						"sessionID", claim.SessionID, "projectID", claim.ProjectID, "error", err)
+				}
 			}
 		}()
 	}
@@ -157,6 +163,49 @@ func (m *Manager) reconcileStartupTrackerIntakeTerminalClaims(ctx context.Contex
 	close(jobs)
 	wg.Wait()
 	return true
+}
+
+// reconcileStartupTrackerIntakeTerminalClaim performs only bounded owner
+// health transitions. Workspace teardown remains in the per-claim background
+// job because cleanup hooks are intentionally unbounded.
+func (m *Manager) reconcileStartupTrackerIntakeTerminalClaim(ctx context.Context, claim domain.TrackerIntakePendingClaim) error {
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
+	if err != nil {
+		return fmt.Errorf("recover tracker intake %s: inspect startup claim: %w", claim.SessionID, err)
+	}
+	if !pending {
+		return nil
+	}
+	rec, found, err := m.store.GetSession(ctx, claim.SessionID)
+	if err != nil {
+		return fmt.Errorf("recover tracker intake %s: inspect startup session: %w", claim.SessionID, err)
+	}
+	if !found || rec.IsTerminated || rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID ||
+		!trackerIntakeRuntimeNeedsStartupHealth(rec, reservation) {
+		return nil
+	}
+	if reservation.CapacityReleased {
+		if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
+			return fmt.Errorf("recover tracker intake %s: reserve startup release: %w", claim.SessionID, err)
+		}
+		defer m.endAgentOperation(claim.SessionID, agentOperationReconcile)
+		reservation, pending, err = m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
+		if err != nil {
+			return fmt.Errorf("recover tracker intake %s: reload startup claim: %w", claim.SessionID, err)
+		}
+		rec, found, err = m.store.GetSession(ctx, claim.SessionID)
+		if err != nil {
+			return fmt.Errorf("recover tracker intake %s: reload startup session: %w", claim.SessionID, err)
+		}
+		if !pending || !found || rec.IsTerminated || rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID ||
+			!reservation.CapacityReleased || !reservation.ReleasesCapacityFor(rec) ||
+			(rec.RuntimeReleased() && rec.Activity.State == domain.ActivityExited) {
+			return nil
+		}
+		return m.recordTerminalStoppedAtStartup(ctx, rec)
+	}
+	claim.Recovery = reservation
+	return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec, false)
 }
 
 func (m *Manager) setTrackerIntakeReaperFence(id domain.SessionID) {
@@ -179,6 +228,23 @@ func (m *Manager) trackerIntakeReaperFenceActive(id domain.SessionID) bool {
 	defer m.trackerIntakeRecoveryMu.Unlock()
 	_, fenced := m.trackerIntakeReaperFenced[id]
 	return fenced
+}
+
+// refreshTrackerIntakeReaperFence mirrors the durable pending state after a
+// reconciliation attempt. A successful owner probe does not necessarily
+// settle the claim: a live published owner, for example, must stay fenced from
+// the ordinary reaper until a later pass proves that exact generation stopped.
+func (m *Manager) refreshTrackerIntakeReaperFence(ctx context.Context, id domain.SessionID) error {
+	_, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+	if err != nil {
+		return fmt.Errorf("refresh tracker intake reaper fence %s: %w", id, err)
+	}
+	if pending {
+		m.setTrackerIntakeReaperFence(id)
+	} else {
+		m.clearTrackerIntakeReaperFence(id)
+	}
+	return nil
 }
 
 // syncTrackerIntakeReaperFences atomically fences every pending owner and
@@ -260,7 +326,7 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		// the session-operation fence, then acquire it and revalidate the durable
 		// generation before publishing or cleaning anything up. This lets an
 		// explicit Kill win while recovery is observing a stale owner.
-		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec)
+		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec, true)
 	}
 
 	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
@@ -375,6 +441,18 @@ func trackerIntakeRuntimeFenceProbeable(rec domain.SessionRecord, reservation do
 		len(uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)) != 0
 }
 
+func trackerIntakeRuntimeNeedsStartupHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
+	if rec.IsTerminated || domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat ||
+		!trackerIntakeRuntimeReservationMatchesSession(rec, reservation) {
+		return false
+	}
+	if reservation.CapacityReleased {
+		return reservation.ReleasesCapacityFor(rec) &&
+			(!rec.RuntimeReleased() || rec.Activity.State != domain.ActivityExited)
+	}
+	return trackerIntakeRuntimeFenceProbeable(rec, reservation)
+}
+
 func trackerIntakeRuntimeFenceMatches(left, right domain.TrackerIntakeRecoveryReservation) bool {
 	if strings.TrimSpace(left.RuntimeLaunchID) != strings.TrimSpace(right.RuntimeLaunchID) {
 		return false
@@ -451,7 +529,12 @@ func trackerIntakeChatReservationMatchesSession(rec domain.SessionRecord, reserv
 	return generation != "" && generation == strings.TrimSpace(rec.Metadata.ControllerGeneration)
 }
 
-func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim, rec domain.SessionRecord) error {
+func (m *Manager) reconcileLiveTrackerIntakeRuntime(
+	ctx context.Context,
+	claim domain.TrackerIntakePendingClaim,
+	rec domain.SessionRecord,
+	allowCleanup bool,
+) error {
 	reservation := claim.Recovery
 	handles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
 	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
@@ -498,12 +581,20 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim d
 	if found && (currentRec.ProjectID != claim.ProjectID || currentRec.IssueID != claim.IssueID) {
 		return nil
 	}
+	if !allowCleanup && (!found || currentRec.IsTerminated ||
+		domain.NormalizeSessionMode(currentRec.Mode) == domain.SessionModeChat ||
+		!trackerIntakeRuntimeReservationMatchesSession(currentRec, current)) {
+		// The startup pass may have queued this row before an explicit Kill or
+		// another session mutation changed it. Leave all teardown to the
+		// per-claim background job; startup gates must never wait on cleanup.
+		return nil
+	}
 	claim.Recovery = current
 	if len(alive) == 1 {
 		_, err = m.adoptTrackerIntakeRuntime(ctx, claim, alive[0])
 		return err
 	}
-	if found && !currentRec.IsTerminated && currentRec.Activity.State != domain.ActivityExited &&
+	if found && !currentRec.IsTerminated &&
 		domain.NormalizeSessionMode(currentRec.Mode) != domain.SessionModeChat &&
 		trackerIntakeRuntimeReservationMatchesSession(currentRec, current) {
 		// The exact published owner ended while AO was down. Record an intentional
@@ -522,6 +613,9 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim d
 	settled, err := m.settleExitedTrackerIntakeRuntime(ctx, claim)
 	if err != nil || settled {
 		return err
+	}
+	if !allowCleanup {
+		return nil
 	}
 	return m.settleAbsentTrackerIntakeRuntime(ctx, claim)
 }

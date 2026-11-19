@@ -130,6 +130,7 @@ type fakeStore struct {
 	trackerIntakeRecovery                          map[domain.SessionID]domain.TrackerIntakeRecoveryReservation
 	trackerIntakeReleaseErr                        error
 	trackerIntakeCommitStoppedErr                  error
+	trackerIntakeRecoveryErr                       error
 	trackerIntakeRecoveryHook                      func(domain.SessionID)
 	trackerIntakeCleanupConfirmedBeforeTermination bool
 	trackerIntakeLimits                            []domain.AutomatedSessionLimits
@@ -252,6 +253,9 @@ func (f *fakeStore) ReserveTrackerIntakeRecovery(_ context.Context, id domain.Se
 func (f *fakeStore) GetPendingTrackerIntakeRecovery(_ context.Context, id domain.SessionID) (domain.TrackerIntakeRecoveryReservation, bool, error) {
 	if f.trackerIntakeRecoveryHook != nil {
 		f.trackerIntakeRecoveryHook(id)
+	}
+	if f.trackerIntakeRecoveryErr != nil {
+		return domain.TrackerIntakeRecoveryReservation{}, false, f.trackerIntakeRecoveryErr
 	}
 	f.trackerIntakeMu.RLock()
 	defer f.trackerIntakeMu.RUnlock()

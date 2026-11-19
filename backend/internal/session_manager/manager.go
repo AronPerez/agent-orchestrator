@@ -5352,7 +5352,9 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 		}
 		reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
 		if err != nil {
+			m.finishStatusRecovery(ctx, rec, err)
 			m.logger.Warn("reconcile: tracker intake claim lookup failed, skipping live pass", "sessionID", rec.ID, "error", err)
+			captureBackgroundFault(ctx, err, "reconcile", "tracker_intake_claim")
 			continue
 		}
 		if pending && !trackerIntakeClaimNeedsStartupHealth(rec, reservation) {

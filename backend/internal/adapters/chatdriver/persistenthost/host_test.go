@@ -1125,6 +1125,25 @@ func TestLaunchProbeRechecksReadinessAfterLauncherExit(t *testing.T) {
 	}
 }
 
+func TestLaunchProbeClearsSameBootIntentWhenLauncherNeverStartedChild(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "abandoned-before-child"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := probeLaunchTokenWithExitProbe(dataDir, sessionID, token, func(int) bool { return true }); err != nil {
+		t.Fatalf("probe abandoned launch intent: %v", err)
+	}
+	if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned launch intent remains: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned launch readiness exists: %v", err)
+	}
+}
+
 func TestRunClearsLaunchIntentBeforeLateReadiness(t *testing.T) {
 	dataDir := t.TempDir()
 	sessionID := "late-readiness"

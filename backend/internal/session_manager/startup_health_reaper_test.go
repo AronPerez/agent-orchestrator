@@ -3,6 +3,8 @@ package sessionmanager
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -160,13 +162,110 @@ func TestStartupHealthSettlesMatchingTrackerIntakeTerminalBeforeTheReaper(t *tes
 	}
 }
 
+func TestStartupHealthCompletesReleasedTrackerIntakeTerminalBeforeTheReaper(t *testing.T) {
+	for _, tt := range []struct {
+		name               string
+		activity           domain.ActivityState
+		runtimePreReleased bool
+	}{
+		{name: "activity already exited", activity: domain.ActivityExited},
+		{name: "runtime release already recorded", activity: domain.ActivityIdle, runtimePreReleased: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assertStartupHealthRecordsReleasedTerminalBeforeTheReaper(t, tt.activity, tt.runtimePreReleased)
+		})
+	}
+}
+
+func assertStartupHealthRecordsReleasedTerminalBeforeTheReaper(
+	t *testing.T,
+	activity domain.ActivityState,
+	runtimePreReleased bool,
+) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := st.UpsertProject(ctx, domain.ProjectRecord{ID: "mer", Path: "/repo", Config: testRoleAgents(), RegisteredAt: now}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	created, err := st.CreateTrackerIntakeSession(ctx, domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: "github:acme/mer#420",
+		Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeTUI,
+		Activity:  domain.Activity{State: activity, LastActivityAt: now.Add(-time.Hour)},
+		CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour),
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/worker", Branch: "ao/mer-1/root",
+			RuntimeHandleID: "ptyhost-v1:mer-1", RuntimeLaunchID: "launch-before-reboot",
+		},
+	}, domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2})
+	if err != nil {
+		t.Fatalf("seed tracker intake session: %v", err)
+	}
+	if runtimePreReleased {
+		if released, err := st.SetSessionRuntimeReleased(ctx, created.ID, created.Metadata.RuntimeLaunchID); err != nil || !released {
+			t.Fatalf("seed runtime release: released=%v err=%v", released, err)
+		}
+	}
+	if err := st.ReserveTrackerIntakeRecovery(ctx, created.ID, domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: created.Metadata.WorkspacePath, RuntimeLaunchID: created.Metadata.RuntimeLaunchID,
+		RuntimeHandleIDs: []string{created.Metadata.RuntimeHandleID}, RelaunchPublished: true,
+		CapacityReleased: true, ReleasedRuntimeLaunchID: created.Metadata.RuntimeLaunchID,
+	}); err != nil {
+		t.Fatalf("reserve released tracker intake owner: %v", err)
+	}
+
+	runtime := &fakeRuntime{}
+	lcm := lifecycle.New(st, nil)
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: launchArgvAgent{argv: []string{"claude"}}},
+		Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm,
+		DataDir: t.TempDir(),
+	})
+	m.runBackground = func(work func()) { work() }
+
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if err := reaper.New(lcm, st, runtime, reaper.Config{}).Tick(ctx); err != nil {
+		t.Fatalf("reaper tick: %v", err)
+	}
+	rec, ok, err := st.GetSession(ctx, created.ID)
+	if err != nil || !ok {
+		t.Fatalf("read session: ok=%v err=%v", ok, err)
+	}
+	if rec.IsTerminated || rec.Activity.State != domain.ActivityExited || !rec.RuntimeReleased() {
+		t.Fatalf("released tracker intake terminal after reaper = terminated:%v activity:%s released:%q",
+			rec.IsTerminated, rec.Activity.State, rec.Metadata.RuntimeReleasedLaunchID)
+	}
+}
+
 func TestStartupHealthFencesUnresolvedTrackerIntakeTerminalFromTheReaper(t *testing.T) {
 	tests := []struct {
 		name          string
 		claimListFail bool
+		probe         ports.FencedProbeResult
 	}{
-		{name: "exact probe inconclusive"},
-		{name: "claim list unavailable", claimListFail: true},
+		{
+			name:  "exact probe inconclusive",
+			probe: ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+		},
+		{
+			name:  "exact owner alive",
+			probe: ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+		},
+		{
+			name: "claim list unavailable", claimListFail: true,
+			probe: ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -213,7 +312,7 @@ func TestStartupHealthFencesUnresolvedTrackerIntakeTerminalFromTheReaper(t *test
 			runtime := &fakeRuntime{
 				// Model a refused ConPTY listener: exact ownership remains unknown
 				// while the ordinary IsAlive path still reports false, nil.
-				fencedResult: ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+				fencedResult: tt.probe,
 			}
 			lcm := lifecycle.New(base, nil)
 			m := New(Deps{
@@ -248,5 +347,61 @@ func TestStartupHealthFencesUnresolvedTrackerIntakeTerminalFromTheReaper(t *test
 					rec.IsTerminated, rec.Activity.State, rec.RuntimeReleased())
 			}
 		})
+	}
+}
+
+func TestStartupTrackerIntakeHealthDoesNotRunCleanupForStaleCandidate(t *testing.T) {
+	m, st, rt, ws := newManager()
+	cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
+	defer cancelCleanup()
+	m.backgroundContext = cleanupCtx
+	workspace := t.TempDir()
+	project := st.projects["mer"]
+	project.Config.PreRemove = []string{"echo entered > cleanup-marker; while :; do sleep 1; done"}
+	st.projects["mer"] = project
+	id := domain.SessionID("stale-startup-owner")
+	issueID := domain.IssueID("github:acme/mer#44")
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeTUI,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: workspace, Branch: "ao/stale-startup-owner/root",
+			RuntimeHandleID: "conpty-v1:stale-startup-owner", RuntimeLaunchID: "launch-stale",
+		},
+	}
+	st.sessions[id] = rec
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	reservation := trackerIntakeRecoveryForWorkspace(workspaceInfo(rec))
+	reservation.RuntimeHandleIDs = []string{rec.Metadata.RuntimeHandleID}
+	reservation.RuntimeLaunchID = rec.Metadata.RuntimeLaunchID
+	reservation.RelaunchPublished = true
+	st.trackerIntakeRecovery[id] = reservation
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	rt.onFencedProbe = func(ports.FencedRuntimeRef, ports.FencedProbeResult) {
+		current := st.sessions[id]
+		current.IsTerminated = true
+		current.Activity = domain.Activity{State: domain.ActivityExited}
+		st.sessions[id] = current
+	}
+	claim := domain.TrackerIntakePendingClaim{ProjectID: "mer", IssueID: issueID, SessionID: id, Recovery: reservation}
+	done := make(chan error, 1)
+	go func() { done <- m.reconcileStartupTrackerIntakeTerminalClaim(context.Background(), claim) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("startup owner health: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		cancelCleanup()
+		<-done
+		t.Fatal("startup owner health entered unbounded cleanup")
+	}
+	if ws.destroyed != 0 {
+		t.Fatalf("startup owner health destroyed %d workspaces", ws.destroyed)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "cleanup-marker")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup owner health ran cleanup hook: %v", err)
 	}
 }
