@@ -1152,24 +1152,79 @@ func TestRunClearsLaunchIntentBeforeLateReadiness(t *testing.T) {
 	}
 }
 
-func TestPublishReadinessRechecksIntentAfterCancellation(t *testing.T) {
+func TestLaunchCancellationSerializesWithReadinessPublication(t *testing.T) {
 	dataDir := t.TempDir()
 	sessionID := "cancel-during-publication"
 	token, err := reserveLaunchIntent(dataDir, sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = publishLaunchReadyAfterIntentRead(dataDir, sessionID, token, os.Getpid(), func() {
+	published := make(chan struct{})
+	finishPublication := make(chan struct{})
+	publishDone := make(chan error, 1)
+	go func() {
+		publishDone <- publishLaunchReadyAfterWrite(dataDir, sessionID, token, os.Getpid(), func() {
+			close(published)
+			<-finishPublication
+		})
+	}()
+	select {
+	case <-published:
+	case <-time.After(3 * time.Second):
+		t.Fatal("readiness publication did not reach post-write checkpoint")
+	}
+	clearDone := make(chan struct{})
+	go func() {
 		clearLaunchIntent(dataDir, sessionID, token)
-	})
-	if err == nil {
-		t.Fatal("readiness publication succeeded after launch cancellation")
+		close(clearDone)
+	}()
+	select {
+	case <-clearDone:
+		t.Fatal("launch cancellation crossed in-flight readiness publication")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(finishPublication)
+	if err := <-publishDone; err != nil {
+		t.Fatalf("publish readiness: %v", err)
+	}
+	select {
+	case <-clearDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launch cancellation did not finish after publication released ownership")
 	}
 	if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canceled launch intent remains: %v", err)
 	}
 	if _, err := readLaunchReady(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("readiness published after cancellation: %v", err)
+	}
+}
+
+func TestPublishedReadinessRemainsFencedIfIntentDisappearsAfterWrite(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "intent-lost-after-publication"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	intentPath, err := launchIntentPath(dataDir, sessionID, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = publishLaunchReadyAfterWrite(dataDir, sessionID, token, os.Getpid(), func() {
+		if removeErr := os.Remove(intentPath); removeErr != nil {
+			t.Errorf("remove launch intent after readiness write: %v", removeErr)
+		}
+	})
+	if err != nil {
+		t.Fatalf("publish readiness after intent loss: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); err != nil {
+		t.Fatalf("published readiness was removed: %v", err)
+	}
+	if err := probeLaunchTokenWithExitProbe(dataDir, sessionID, token, func(int) bool { return false }); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("probe error = %v, want ownership fence", err)
 	}
 }
 
@@ -1273,10 +1328,32 @@ func TestPriorBootRetirementSerializesReplacementPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publishLaunchReady(dataDir, sessionID, newToken, os.Getpid()); err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, newToken) })
+	publishDone := make(chan error, 1)
+	go func() { publishDone <- publishLaunchReady(dataDir, sessionID, newToken, os.Getpid()) }()
+	select {
+	case err := <-publishDone:
+		t.Fatalf("replacement readiness crossed stale retirement: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(continueRetirement)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first retirement: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first retirement did not finish")
+	}
+	select {
+	case err := <-publishDone:
+		if err != nil {
+			t.Fatalf("publish replacement readiness: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement readiness did not publish after retirement")
+	}
 
 	type replacementResult struct {
 		release func()
@@ -1295,16 +1372,6 @@ func TestPriorBootRetirementSerializesReplacementPublication(t *testing.T) {
 	}()
 	secondDone := make(chan error, 1)
 	go func() { secondDone <- retirePriorBootHostOwnership(dataDir, sessionID) }()
-
-	close(continueRetirement)
-	select {
-	case err := <-firstDone:
-		if err != nil {
-			t.Fatalf("first retirement: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("first retirement did not finish")
-	}
 	var replacement replacementResult
 	select {
 	case replacement = <-replacementDone:

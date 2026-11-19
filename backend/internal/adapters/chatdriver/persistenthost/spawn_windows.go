@@ -4,6 +4,7 @@ package persistenthost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,6 +32,15 @@ func spawnDetached(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("spawn detached chat host: %w", err)
 	}
 	if err := publishLaunchReady(cfg.DataDir, cfg.SessionID, cfg.launchToken, cmd.Process.Pid); err != nil {
+		if errors.Is(err, ErrOwnershipInconclusive) {
+			// Readiness may already be visible. Preserve the detached host and its
+			// launch record so recovery can fence the provider tree.
+			releaseErr := cmd.Process.Release()
+			return errors.Join(
+				fmt.Errorf("publish detached chat host readiness: %w", err),
+				releaseErr,
+			)
+		}
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return fmt.Errorf("publish detached chat host readiness: %w", err)

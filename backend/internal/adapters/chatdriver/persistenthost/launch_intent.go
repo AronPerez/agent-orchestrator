@@ -93,23 +93,29 @@ func reserveLaunchIntent(dataDir, sessionID string) (string, error) {
 }
 
 func publishLaunchReady(dataDir, sessionID, token string, hostPID int) error {
-	return publishLaunchReadyAfterIntentRead(dataDir, sessionID, token, hostPID, nil)
+	return publishLaunchReadyAfterWrite(dataDir, sessionID, token, hostPID, nil)
 }
 
-func publishLaunchReadyAfterIntentRead(
+func publishLaunchReadyAfterWrite(
 	dataDir, sessionID, token string,
 	hostPID int,
-	afterIntentRead func(),
-) error {
+	afterWrite func(),
+) (retErr error) {
+	ownershipLock, err := acquireHostOwnershipMutationLock(dataDir, sessionID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releaseErr := ownershipLock.Release(); releaseErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("%w: release chat host readiness publication: %w", ErrOwnershipInconclusive, releaseErr))
+		}
+	}()
 	intent, err := readLaunchIntent(dataDir, sessionID, token)
 	if err != nil {
 		return err
 	}
 	if intent.Token != token || intent.ParentPID != os.Getpid() || hostPID <= 0 {
 		return errors.New("chat host launch intent ownership changed")
-	}
-	if afterIntentRead != nil {
-		afterIntentRead()
 	}
 	bootID, err := currentBootIdentity()
 	if err != nil {
@@ -119,20 +125,29 @@ func publishLaunchReadyAfterIntentRead(
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(launchReady{Token: token, HostPID: hostPID, BootID: bootID})
+	ready := launchReady{Token: token, HostPID: hostPID, BootID: bootID}
+	b, err := json.Marshal(ready)
 	if err != nil {
 		return err
 	}
-	if err := writeAtomicLaunchFile(path, b); err != nil {
-		return err
-	}
-	current, err := readLaunchIntent(dataDir, sessionID, token)
-	if err != nil || current != intent {
-		_ = os.Remove(path)
-		if err != nil {
-			return fmt.Errorf("confirm chat host launch intent: %w", err)
+	if writeErr := writeAtomicLaunchFile(path, b); writeErr != nil {
+		current, confirmErr := readLaunchReady(dataDir, sessionID, token)
+		switch {
+		case confirmErr == nil && current == ready:
+			// The filesystem reported an uncertain write outcome after publishing
+			// the exact record. The child may already have consumed it.
+		case errors.Is(confirmErr, os.ErrNotExist):
+			return writeErr
+		default:
+			return errors.Join(
+				fmt.Errorf("%w: confirm chat host readiness after write failure", ErrOwnershipInconclusive),
+				writeErr,
+				confirmErr,
+			)
 		}
-		return errors.New("chat host launch intent changed during readiness publication")
+	}
+	if afterWrite != nil {
+		afterWrite()
 	}
 	return nil
 }
@@ -210,8 +225,15 @@ func readLaunchJSON(path string, out any) error {
 }
 
 func clearLaunchIntent(dataDir, sessionID, token string) {
-	// Remove authorization first. A concurrent publisher rechecks this exact
-	// intent after writing readiness and removes any late readiness record.
+	ownershipLock, err := acquireHostOwnershipMutationLock(dataDir, sessionID)
+	if err != nil {
+		return
+	}
+	defer func() { _ = ownershipLock.Release() }()
+	clearLaunchIntentUnlocked(dataDir, sessionID, token)
+}
+
+func clearLaunchIntentUnlocked(dataDir, sessionID, token string) {
 	if path, err := launchIntentPath(dataDir, sessionID, token); err == nil {
 		_ = os.Remove(path)
 	}
@@ -339,7 +361,7 @@ func retirePriorBootHostOwnershipAfterValidation(dataDir, sessionID string, afte
 	for token := range tokens {
 		ready, readyErr := readLaunchReady(dataDir, sessionID, token)
 		if errors.Is(readyErr, os.ErrNotExist) {
-			if probeErr := probeLaunchToken(dataDir, sessionID, token); probeErr == nil {
+			if probeErr := probeLaunchTokenUnderOwnershipLock(dataDir, sessionID, token); probeErr == nil {
 				delete(tokens, token)
 				continue
 			}
@@ -386,7 +408,7 @@ func retirePriorBootHostOwnershipAfterValidation(dataDir, sessionID string, afte
 		return fmt.Errorf("retire prior-boot chat host lock: %w", err)
 	}
 	for token := range tokens {
-		clearLaunchIntent(dataDir, sessionID, token)
+		clearLaunchIntentUnlocked(dataDir, sessionID, token)
 	}
 	return nil
 }
@@ -472,6 +494,28 @@ func probeLaunchTokenWithProbes(
 	bootIdentity func() (string, error),
 	providerTreeDies bool,
 ) error {
+	return probeLaunchTokenWithProbesAndClear(
+		dataDir, sessionID, token,
+		exited, bootIdentity, providerTreeDies,
+		clearLaunchIntent,
+	)
+}
+
+func probeLaunchTokenUnderOwnershipLock(dataDir, sessionID, token string) error {
+	return probeLaunchTokenWithProbesAndClear(
+		dataDir, sessionID, token,
+		processalive.Exited, currentBootIdentity, providerTreeDiesWithHost(),
+		clearLaunchIntentUnlocked,
+	)
+}
+
+func probeLaunchTokenWithProbesAndClear(
+	dataDir, sessionID, token string,
+	exited func(int) bool,
+	bootIdentity func() (string, error),
+	providerTreeDies bool,
+	clearIntent func(string, string, string),
+) error {
 	intent, intentErr := readLaunchIntent(dataDir, sessionID, token)
 	ready, readyErr := readLaunchReady(dataDir, sessionID, token)
 	if intentErr != nil && !errors.Is(intentErr, os.ErrNotExist) {
@@ -483,13 +527,13 @@ func probeLaunchTokenWithProbes(
 	if readyErr == nil {
 		return settleAdmittedHostOwnership(
 			dataDir, sessionID, token, ready,
-			exited, bootIdentity, providerTreeDies,
+			exited, bootIdentity, providerTreeDies, clearIntent,
 		)
 	}
 	if intentErr == nil {
 		currentBootID, bootErr := bootIdentity()
 		if bootErr == nil && priorBootIdentity(intent.BootID, currentBootID) {
-			clearLaunchIntent(dataDir, sessionID, token)
+			clearIntent(dataDir, sessionID, token)
 			return nil
 		}
 		if !exited(intent.ParentPID) {
@@ -502,13 +546,13 @@ func probeLaunchTokenWithProbes(
 		if readyErr == nil {
 			return settleAdmittedHostOwnership(
 				dataDir, sessionID, token, ready,
-				exited, bootIdentity, providerTreeDies,
+				exited, bootIdentity, providerTreeDies, clearIntent,
 			)
 		}
 		if !errors.Is(readyErr, os.ErrNotExist) {
 			return fmt.Errorf("%w: re-read chat host launch readiness: %w", ErrOwnershipInconclusive, readyErr)
 		}
-		clearLaunchIntent(dataDir, sessionID, token)
+		clearIntent(dataDir, sessionID, token)
 	}
 	return nil
 }
@@ -519,11 +563,12 @@ func settleAdmittedHostOwnership(
 	exited func(int) bool,
 	bootIdentity func() (string, error),
 	providerTreeDies bool,
+	clearIntent func(string, string, string),
 ) error {
 	if err := admittedHostOwnershipError(ready, exited, bootIdentity, providerTreeDies); err != nil {
 		return err
 	}
-	clearLaunchIntent(dataDir, sessionID, token)
+	clearIntent(dataDir, sessionID, token)
 	return nil
 }
 
