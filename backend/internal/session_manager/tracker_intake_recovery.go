@@ -610,25 +610,26 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(
 		_, err = m.adoptTrackerIntakeRuntime(ctx, claim, alive[0])
 		return err
 	}
-	if found && !currentRec.IsTerminated &&
+	publishedOwner := found && !currentRec.IsTerminated &&
 		domain.NormalizeSessionMode(currentRec.Mode) != domain.SessionModeChat &&
-		trackerIntakeRuntimeReservationMatchesSession(currentRec, current) {
+		trackerIntakeRuntimeReservationMatchesSession(currentRec, current)
+	if publishedOwner {
 		// The exact published owner ended while AO was down. Record an intentional
 		// stop before releasing intake capacity so the boot reaper preserves the
 		// session and workspace as resumable instead of classifying a crash.
 		if err := m.recordTerminalStoppedAtStartup(ctx, currentRec); err != nil {
 			return fmt.Errorf("recover tracker intake %s: record stopped published runtime: %w", claim.SessionID, err)
 		}
-	}
-	// Every reserved candidate for this exact generation is absent. Persist the
-	// stopped-generation proof before workspace cleanup so the cleanup path does
-	// not probe the same owner again and unrelated issues can use the freed slot.
-	if err := m.markTrackerIntakeCapacityReleased(ctx, claim.SessionID); err != nil {
-		return fmt.Errorf("recover tracker intake %s: release stopped runtime capacity: %w", claim.SessionID, err)
-	}
-	settled, err := m.settleExitedTrackerIntakeRuntime(ctx, claim)
-	if err != nil || settled {
-		return err
+		if err := m.markTrackerIntakeCapacityReleased(ctx, claim.SessionID); err != nil {
+			return fmt.Errorf("recover tracker intake %s: release stopped runtime capacity: %w", claim.SessionID, err)
+		}
+		settled, err := m.settleExitedTrackerIntakeRuntime(ctx, claim)
+		if err != nil || settled {
+			return err
+		}
+		// A published owner is always preserved even if a concurrent durable-state
+		// change made settlement inapplicable.
+		return nil
 	}
 	if !allowCleanup {
 		return nil
