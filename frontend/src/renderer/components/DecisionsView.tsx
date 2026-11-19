@@ -8,6 +8,7 @@ import { apiErrorRequestId } from "../lib/api-client";
 import { buildDecisionBoard, DECISION_LANES } from "../lib/decision-board";
 import { DecisionCallPanel } from "./DecisionCallPanel";
 import { DecisionSearchResults } from "./DecisionSearchResults";
+import { DecisionSyncFooter } from "./DecisionSyncFooter";
 import { DecisionsBoard } from "./DecisionsBoard";
 import { ToolbarSearch } from "./PageToolbar";
 import { PageTopbar, PageTopbarTitle } from "./PageTopbar";
@@ -154,9 +155,9 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 				<ResizablePanel id="decisions-board" minSize="30%">
 					<div className="flex h-full min-w-0 flex-col">
 						<main className="min-h-0 flex-1 overflow-auto overscroll-contain">{body}</main>
-						{/* Slice 4 replaces this with sync freshness; until then it names whose ledger this is. */}
+						{/* Whose ledger this is, and how fresh each linked machine is. */}
 						<footer className="shrink-0 border-t border-border px-(--space-4_5) py-1.5 text-caption text-muted-foreground">
-							{t("decisions.footerLocal")}
+							<DecisionSyncFooter now={now} />
 						</footer>
 					</div>
 				</ResizablePanel>
