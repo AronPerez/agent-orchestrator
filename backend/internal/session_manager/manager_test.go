@@ -3448,6 +3448,43 @@ func TestReconcileTrackerIntakeClaimsKeepsPreStartSupervisorFenced(t *testing.T)
 	}
 }
 
+func TestReconcileTrackerIntakeClaimsSettlesExitedDirectChildWithRetainedHost(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("exited-direct-child")
+	issueID := domain.IssueID("github:acme/mer#10902")
+	key := "mer\x00" + string(issueID)
+	handleID := "direct-10902"
+	launchID := "launch-10902"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/exited-direct-child", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/exited-direct-child", RuntimeHandleID: handleID, RuntimeLaunchID: launchID,
+		},
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited || !got.RuntimeReleased() {
+		t.Fatalf("completed direct session = %+v, want stopped resumable row", got)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 {
+		t.Fatalf("completed direct session cleanup runtime=%d workspace=%d, want preserved", rt.destroyed, ws.destroyed)
+	}
+}
+
 func TestReconcileTrackerIntakeAdoptionRevalidatesAfterKill(t *testing.T) {
 	m, st, rt, _ := newManager()
 	lcm := &fakeLCM{store: st}

@@ -130,6 +130,7 @@ type FencedProbeReason string
 const (
 	FencedReasonExactMatch         FencedProbeReason = "exact_match"
 	FencedReasonExactAbsent        FencedProbeReason = "exact_absent"
+	FencedReasonExactExited        FencedProbeReason = "exact_exited"
 	FencedReasonIdentityMissing    FencedProbeReason = "identity_missing"
 	FencedReasonRegistryUnreadable FencedProbeReason = "registry_unreadable"
 	FencedReasonRegistryMalformed  FencedProbeReason = "registry_malformed"

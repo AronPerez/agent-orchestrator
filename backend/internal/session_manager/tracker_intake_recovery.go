@@ -553,7 +553,8 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(
 		case ports.FencedDead:
 			publishedExit := rec.Activity.State == domain.ActivityExited &&
 				trackerIntakeRuntimeReservationMatchesSession(rec, reservation)
-			if !publishedExit {
+			trackedExit := probe.Reason == ports.FencedReasonExactExited
+			if !publishedExit && !trackedExit {
 				// FencedDead proves only the managed child absent; its live terminal
 				// may still have a supervisor that can start that child.
 				terminalAlive, err := m.runtime.IsAlive(ctx, ports.RuntimeHandle{ID: handleID})
