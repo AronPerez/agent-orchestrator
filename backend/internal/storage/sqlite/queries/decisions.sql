@@ -27,9 +27,9 @@ ORDER BY stamp_wall, stamp_counter, origin, id;
 INSERT INTO decision_calls (
     call_id, origin, project_id, stream_session_id, stream_name,
     owner_session_id, state, delivery, retired, raised_at,
-    last_wall, last_counter, body, search_text
+    last_wall, last_counter, body, search_text, outcome_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(call_id) DO UPDATE SET
     origin = excluded.origin,
     project_id = excluded.project_id,
@@ -43,7 +43,8 @@ ON CONFLICT(call_id) DO UPDATE SET
     last_wall = excluded.last_wall,
     last_counter = excluded.last_counter,
     body = excluded.body,
-    search_text = excluded.search_text
+    search_text = excluded.search_text,
+    outcome_at = excluded.outcome_at
 RETURNING *;
 
 -- name: GetDecisionCall :one
@@ -68,6 +69,33 @@ FROM decision_calls
 WHERE state = ?
 ORDER BY raised_at, call_id
 LIMIT ?;
+
+-- name: ListDecisionCallsForBoard :many
+-- Every active call plus non-retired Done calls whose outcome landed at or
+-- after done_since. Grouping and display order belong to the client.
+SELECT *
+FROM decision_calls
+WHERE state IN ('needs_you', 'in_progress')
+   OR (state = 'done' AND retired = 0 AND outcome_at >= sqlc.arg(done_since))
+ORDER BY raised_at, call_id;
+
+-- name: ListDecisionStreamsForSessions :many
+-- The newest recorded name of each stream led by one of these sessions, on any
+-- origin. Uses decision_calls_by_stream, so it reads only those streams' calls.
+SELECT current.origin, current.stream_session_id, current.stream_name
+FROM decision_calls AS current
+WHERE current.stream_session_id IN (sqlc.slice('session_ids'))
+  AND current.call_id = (
+      SELECT latest.call_id
+      FROM decision_calls AS latest
+      JOIN decision_entries AS raised
+        ON raised.call_id = latest.call_id AND raised.kind = 'raised'
+      WHERE latest.stream_session_id = current.stream_session_id
+        AND latest.origin = current.origin
+      ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
+      LIMIT 1
+  )
+ORDER BY current.origin, current.stream_session_id;
 
 -- name: ListDecisionEntriesAwaitingDelivery :many
 SELECT pending.*

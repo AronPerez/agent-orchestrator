@@ -1563,6 +1563,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decisions/board": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the Decisions page board */
+        get: operations["getDecisionBoard"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/decisions/kinds": {
         parameters: {
             query?: never;
@@ -7464,6 +7481,18 @@ export interface components {
             type: string;
             /** Format: date-time */
             updatedAt: string;
+        };
+        DecisionBoardResponse: {
+            calls: components["schemas"]["DecisionCallResponse"][];
+            /**
+             * Format: date-time
+             * @description Oldest outcome time a Done call may have and still be on the board.
+             */
+            doneSince: string;
+            /** @description Exact number of calls in Needs you. */
+            needsYouCount: number;
+            /** @description Host id of the daemon that served this board; compare with each call's hostId. */
+            servingHostId: string;
         };
         DecisionCallResponse: {
             answerSurface?: string;
@@ -15373,6 +15402,8 @@ export interface operations {
                 scope?: "mine" | "needs_you";
                 /** @description Search words. When given, the response is the search result. */
                 q?: string;
+                /** @description Most search results to return. Defaults to 20; values above 100 are capped. Ignored when q is absent. */
+                limit?: number;
             };
             header?: never;
             path?: never;
@@ -15920,6 +15951,62 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getDecisionBoard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionBoardResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
