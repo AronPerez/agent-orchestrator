@@ -1,4 +1,4 @@
-import { Stack, useFocusEffect, type Href } from "expo-router";
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { useIsFocused } from "expo-router/react-navigation";
 import { useOpenPage } from "../../lib/pageNavigation";
 import { StackRootBack } from "../../lib/StackRootBack";
@@ -27,8 +27,10 @@ import { rowDividerWidth } from "../../lib/divider";
 import { haptics } from "../../lib/haptics";
 import { NotificationTypeIcon } from "../../lib/notification-type-icon";
 import {
+	decisionCallId,
 	notificationIdentity,
 	notificationsAcrossHosts,
+	notificationSources,
 	notificationSections,
 	notificationAction,
 	notificationTarget,
@@ -82,6 +84,10 @@ function NotificationsContent() {
 	const styles = useThemedStyles(makeStyles);
 	const openPage = useOpenPage();
 	const insets = useSafeAreaInsets();
+	const router = useRouter();
+	// A decision push opens this feed on its call until the phone can open calls.
+	const params = useLocalSearchParams<{ decisionCallId?: string; hostId?: string; hostUnavailable?: string }>();
+	const focusedCallId = params.decisionCallId?.trim() || undefined;
 	const { hostStates, cloud, configForHost, refreshHost, restore } = useApp();
 	// Orchestrator Cloud is one more feed here, beside each machine's.
 	const cloudState = useCloud();
@@ -130,7 +136,11 @@ function NotificationsContent() {
 			items: feed.items,
 		};
 	})), [feeds, hostStates]);
-	const sections = useMemo(() => notificationSections(items), [items]);
+	const visibleItems = useMemo(
+		() => focusedCallId ? items.filter((item) => decisionCallId(item) === focusedCallId) : items,
+		[items, focusedCallId],
+	);
+	const sections = useMemo(() => notificationSections(visibleItems), [visibleItems]);
 	const unavailableFeeds = useMemo(() => Object.values(feeds).filter((feed) => feed.error), [feeds]);
 	const hasMore = useMemo(() => Object.values(feeds).some((feed) => Boolean(feed.nextCursor)), [feeds]);
 	const knownHostIds = useMemo(() => new Set(hostStates.map((host) => host.hostId)), [hostStates]);
@@ -373,12 +383,19 @@ function NotificationsContent() {
 				unreadCount: notification.status === "unread" ? Math.max(0, feed.unreadCount - 1) : feed.unreadCount,
 			} };
 		});
-		if (notification.status === "unread") {
-			markNotificationRead(source, notification.id).catch(() => void load("refresh"));
-		}
 		// What a tap does depends on the session behind it, exactly as the renderer
 		// decides: a terminated agent waiting on input is restored, not opened.
 		const action = notificationAction(notification, sessionState(notification.hostId, notification.sessionId));
+		if (action.kind === "decision") {
+			// Reading acknowledges every machine's copy; it never answers the call.
+			markSourcesRead(notification);
+			haptics.warning();
+			notify("Answer this decision in Orchestrator on your desktop.");
+			return;
+		}
+		if (notification.status === "unread") {
+			markNotificationRead(source, notification.id).catch(() => void load("refresh"));
+		}
 		// Through openPage, which dismisses any sheet still up before pushing.
 		if (action.kind === "open") openPage({ pathname: "/session/[id]", params: { id: action.sessionId, hostId: notification.hostId } });
 		else if (action.kind === "review") openPage(notificationTarget(notification, knownHostIds) as Href);
@@ -389,6 +406,26 @@ function NotificationsContent() {
 		} else if (action.kind === "none") {
 			haptics.warning();
 			notify("That session is not available yet.");
+		}
+	}
+
+	/** Marks each unread daemon copy behind one feed item read on its own machine. */
+	function markSourcesRead(notification: FeedItem) {
+		for (const { hostId, id } of notificationSources(notification)) {
+			const feed = feedsRef.current[hostId];
+			const row = feed?.items.find((item) => item.id === id);
+			const source = configForHost(hostId);
+			if (!row || row.status !== "unread" || !source) continue;
+			updateFeeds((previous) => {
+				const current = previous[hostId];
+				if (!current) return previous;
+				return { ...previous, [hostId]: {
+					...current,
+					items: current.items.map((item) => item.id === id ? { ...item, status: "read" } : item),
+					unreadCount: Math.max(0, current.unreadCount - 1),
+				} };
+			});
+			markNotificationRead(source, id).catch(() => void load("refresh"));
 		}
 	}
 
@@ -583,7 +620,20 @@ function NotificationsContent() {
 				onEndReached={() => { if (hasMore) void load("more"); }}
 				onEndReachedThreshold={0.4}
 				ListHeaderComponent={
-					unavailableFeeds.length > 0 && items.length > 0 ? (
+					focusedCallId ? (
+						<View style={styles.inlineError}>
+							<AppSymbol name="info" size={iconSize.sm} color={t.textSecondary} />
+							<Text style={styles.inlineErrorText}>
+								{params.hostUnavailable
+									? "The machine that sent this decision is no longer paired, so it can't be shown here."
+									: visibleItems.length > 0 ? "Showing one decision." : "This decision is no longer in the feed."}
+							</Text>
+							<Button
+								title="Show all"
+								onPress={() => router.setParams({ decisionCallId: undefined, hostId: undefined, hostUnavailable: undefined })}
+							/>
+						</View>
+					) : unavailableFeeds.length > 0 && items.length > 0 ? (
 						<View style={styles.inlineError}>
 							<AppSymbol name="offline" size={iconSize.sm} color={t.textSecondary} />
 							<Text style={styles.inlineErrorText}>
@@ -602,7 +652,7 @@ function NotificationsContent() {
 				renderItem={({ item }) => (
 					<NotificationRow
 						item={item}
-						highlighted={highlightedIds.has(notificationIdentity(item.hostId, item.id))}
+						highlighted={notificationSources(item).some(({ hostId, id }) => highlightedIds.has(notificationIdentity(hostId, id)))}
 						now={now}
 						action={item.hostId === CLOUD_HOST_ID ? cloudAction(item) : notificationAction(item, sessionState(item.hostId, item.sessionId)).kind}
 						restoring={restoringId === notificationIdentity(item.hostId, item.sessionId)}
@@ -655,7 +705,7 @@ function NotificationRow({ item, highlighted, now, action, restoring, onPress, o
 	item: FeedItem;
 	highlighted: boolean;
 	now: number;
-	action: "open" | "review" | "restore" | "prs" | "none";
+	action: "open" | "review" | "restore" | "prs" | "decision" | "none";
 	restoring: boolean;
 	onPress: () => void;
 	onRestore: () => void;
