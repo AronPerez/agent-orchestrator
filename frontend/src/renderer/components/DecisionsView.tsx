@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -9,6 +10,7 @@ import { buildDecisionBoard, DECISION_LANES } from "../lib/decision-board";
 import { DecisionCallPanel } from "./DecisionCallPanel";
 import { DecisionSearchResults } from "./DecisionSearchResults";
 import { DecisionSyncFooter } from "./DecisionSyncFooter";
+import { decisionSyncKey, fetchDecisionSyncStatus } from "../lib/decision-sync";
 import { DecisionsBoard } from "./DecisionsBoard";
 import { ToolbarSearch } from "./PageToolbar";
 import { PageTopbar, PageTopbarTitle } from "./PageTopbar";
@@ -44,7 +46,8 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 	const navigate = useNavigate();
 	const board = useDecisionBoard();
 	const now = useMinuteClock();
-	const model = useMemo(() => buildDecisionBoard(board.data?.calls ?? []), [board.data]);
+	const model = useMemo(() => buildDecisionBoard(board.data?.calls ?? [], board.data?.servingHostId), [board.data]);
+	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
 	const search = useDecisionSearch(words);
 	// The URL owns the search: the field shows what the person is typing and
@@ -118,7 +121,7 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 						{t("decisions.nothingNeedsYou")}
 					</p>
 				) : null}
-				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} />
+				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} />
 			</>
 		);
 	} else if (board.data && !board.isError) {

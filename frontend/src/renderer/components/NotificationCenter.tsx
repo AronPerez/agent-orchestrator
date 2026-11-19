@@ -773,11 +773,11 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 	const unreadCallIds = useMemo(() => {
 		const ids = new Set<string>();
 		const groups = groupNotifications(entries);
-		for (const [callId, alert] of decisionAlertStateByCall(groups)) {
+		for (const [callId, alert] of decisionAlertStateByCall(groups, decisionInbox.localStates)) {
 			if (alert.unread || alert.sources.some(({ hostId, id }) => highlightedIds.has(notificationKey(hostId, id)))) ids.add(callId);
 		}
 		return ids;
-	}, [entries, highlightedIds]);
+	}, [entries, highlightedIds, decisionInbox.localStates]);
 	// Local, remote, and Cloud rows interleave by creation time.
 	const rows = useMemo(() => {
 		const merged = [
