@@ -213,6 +213,10 @@ type TrackerIntakeRecoveryReservation struct {
 	RuntimeTeardownHandleID        string `json:"runtimeTeardownHandleId,omitempty"`
 	RuntimeTeardownLaunchID        string `json:"runtimeTeardownLaunchId,omitempty"`
 	RuntimeTeardownRestoreCapacity bool   `json:"runtimeTeardownRestoreCapacity,omitempty"`
+	// RuntimeTeardownReservationOnly records that the teardown was scoped to
+	// reservation candidates because the session row already names a replacement
+	// owner. A restart must not absorb that newer row into the in-flight stop.
+	RuntimeTeardownReservationOnly bool `json:"runtimeTeardownReservationOnly,omitempty"`
 	// Completed teardown proof is separate from capacity-release identity: an
 	// unpublished candidate can be destroyed without ever becoming the row owner.
 	RuntimeTeardownCompletedLaunchID  string   `json:"runtimeTeardownCompletedLaunchId,omitempty"`

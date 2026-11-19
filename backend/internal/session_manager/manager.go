@@ -2942,6 +2942,7 @@ func (m *Manager) recordTrackerIntakeStoppedOwners(
 	reservation.RuntimeTeardownHandleID = ""
 	reservation.RuntimeTeardownLaunchID = ""
 	reservation.RuntimeTeardownRestoreCapacity = false
+	reservation.RuntimeTeardownReservationOnly = false
 	reservation.RuntimeTeardownCompletedLaunchID = ""
 	reservation.RuntimeTeardownCompletedHandleIDs = nil
 	if rowHandleID != "" {

@@ -161,6 +161,65 @@ func TestTrackerIntakeConfirmedCleanupReleasesMissingSessionClaim(t *testing.T) 
 	}
 }
 
+func TestTrackerIntakeConfirmedCleanupRetainsOutstandingRuntimeTeardown(t *testing.T) {
+	for _, ownerState := range []string{"missing", "terminated"} {
+		t.Run(ownerState, func(t *testing.T) {
+			store := newTestStore(t)
+			ctx := context.Background()
+			seedProject(t, store, "demo")
+
+			record := sampleRecord("demo")
+			record.Metadata = domain.SessionMetadata{}
+			issueID := domain.IssueID("github:acme/demo#130")
+			if ownerState == "terminated" {
+				issueID = "github:acme/demo#131"
+			}
+			record.IssueID = issueID
+			limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+			created, err := store.CreateTrackerIntakeSession(ctx, record, limits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reservation := domain.TrackerIntakeRecoveryReservation{
+				RuntimeLaunchID: "launch-130", RuntimeHandleIDs: []string{"runtime-130"},
+				RuntimeTeardownHandleID: "runtime-130", RuntimeTeardownLaunchID: "launch-130",
+				DeliveryPossible: true, CleanupConfirmed: true,
+			}
+			if err := store.ReserveTrackerIntakeRecovery(ctx, created.ID, reservation); err != nil {
+				t.Fatalf("ReserveTrackerIntakeRecovery(): %v", err)
+			}
+			switch ownerState {
+			case "missing":
+				if deleted, err := store.DeleteSession(ctx, created.ID); err != nil || !deleted {
+					t.Fatalf("DeleteSession() = %t, %v", deleted, err)
+				}
+			case "terminated":
+				created.IsTerminated = true
+				if err := store.UpdateSession(ctx, created); err != nil {
+					t.Fatalf("UpdateSession(terminated): %v", err)
+				}
+			}
+
+			if err := store.ReconcileTrackerIntakeSession(ctx, created.ID, time.Now()); err != nil {
+				t.Fatalf("ReconcileTrackerIntakeSession(): %v", err)
+			}
+			got, pending, err := store.GetPendingTrackerIntakeRecovery(ctx, created.ID)
+			if err != nil || !pending {
+				t.Fatalf("GetPendingTrackerIntakeRecovery() pending=%t err=%v", pending, err)
+			}
+			if got.RuntimeTeardownHandleID != reservation.RuntimeTeardownHandleID ||
+				got.RuntimeTeardownLaunchID != reservation.RuntimeTeardownLaunchID {
+				t.Fatalf("retained teardown = %+v", got)
+			}
+			retry := sampleRecord("demo")
+			retry.IssueID = record.IssueID
+			if _, err := store.CreateTrackerIntakeSession(ctx, retry, limits); !errors.Is(err, ports.ErrTrackerIntakeActive) {
+				t.Fatalf("CreateTrackerIntakeSession(retry) error = %v, want ErrTrackerIntakeActive", err)
+			}
+		})
+	}
+}
+
 func TestTrackerIntakeConfirmedCleanupPromotesPossibleDelivery(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -392,6 +451,7 @@ func TestTrackerIntakeRuntimeReservationAtomicallyCheckpointsRecoveryIdentity(t 
 		RuntimeTeardownHandleID:           " demo-1 ",
 		RuntimeTeardownLaunchID:           " launch-12 ",
 		RuntimeTeardownRestoreCapacity:    true,
+		RuntimeTeardownReservationOnly:    true,
 		RuntimeTeardownCompletedLaunchID:  " launch-11 ",
 		RuntimeTeardownCompletedHandleIDs: []string{" old-demo-1 ", "old-demo-1"},
 		CapacityReleased:                  true,
@@ -420,6 +480,9 @@ func TestTrackerIntakeRuntimeReservationAtomicallyCheckpointsRecoveryIdentity(t 
 	}
 	if !got.RuntimeTeardownRestoreCapacity {
 		t.Fatal("runtime teardown capacity restore bit was not preserved")
+	}
+	if !got.RuntimeTeardownReservationOnly {
+		t.Fatal("runtime teardown reservation-only scope was not preserved")
 	}
 	if got.RuntimeTeardownCompletedLaunchID != "launch-11" ||
 		!reflect.DeepEqual(got.RuntimeTeardownCompletedHandleIDs, []string{"old-demo-1"}) {

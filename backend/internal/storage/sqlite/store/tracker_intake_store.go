@@ -209,6 +209,9 @@ func (s *Store) reconcileTrackerIntakeSessionLocked(ctx context.Context, q *gen.
 		if recoveryErr != nil {
 			return recoveryErr
 		}
+		if pending && trackerIntakeRecoveryHasOutstandingRuntimeTeardown(reservation) {
+			return nil
+		}
 		if pending && reservation.CleanupConfirmed && reservation.DeliveryPossible {
 			return s.commitTrackerIntakeSessionLocked(ctx, q, id, handledAt)
 		}
@@ -225,6 +228,9 @@ func (s *Store) reconcileTrackerIntakeSessionLocked(ctx context.Context, q *gen.
 		reservation, pending, recoveryErr := getPendingTrackerIntakeRecovery(ctx, q, id)
 		if recoveryErr != nil {
 			return recoveryErr
+		}
+		if pending && trackerIntakeRecoveryHasOutstandingRuntimeTeardown(reservation) {
+			return nil
 		}
 		if pending && reservation.CleanupConfirmed && reservation.DeliveryPossible {
 			return s.commitTrackerIntakeSessionLocked(ctx, q, id, handledAt)
@@ -338,8 +344,15 @@ func getPendingTrackerIntakeRecovery(ctx context.Context, q *gen.Queries, id dom
 func trackerIntakeRecoveryNeedsFence(reservation domain.TrackerIntakeRecoveryReservation) bool {
 	return reservation.DeliveryPossible || reservation.ControllerPossible ||
 		strings.TrimSpace(reservation.WorkspacePath) != "" || len(reservation.RuntimeHandleIDs) != 0 ||
-		strings.TrimSpace(reservation.RuntimeTeardownHandleID) != "" ||
-		strings.TrimSpace(reservation.RuntimeTeardownLaunchID) != ""
+		trackerIntakeRecoveryHasOutstandingRuntimeTeardown(reservation)
+}
+
+func trackerIntakeRecoveryHasOutstandingRuntimeTeardown(reservation domain.TrackerIntakeRecoveryReservation) bool {
+	return strings.TrimSpace(reservation.RuntimeTeardownHandleID) != "" ||
+		strings.TrimSpace(reservation.RuntimeTeardownLaunchID) != "" ||
+		reservation.RuntimeTeardownReservationOnly ||
+		strings.TrimSpace(reservation.RuntimeTeardownCompletedLaunchID) != "" ||
+		len(reservation.RuntimeTeardownCompletedHandleIDs) != 0
 }
 
 func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryReservation) domain.TrackerIntakeRecoveryReservation {

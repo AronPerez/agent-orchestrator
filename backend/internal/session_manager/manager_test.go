@@ -296,6 +296,12 @@ func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.S
 			continue
 		}
 		reservation := f.trackerIntakeRecovery[id]
+		teardownOutstanding := reservation.RuntimeTeardownHandleID != "" || reservation.RuntimeTeardownLaunchID != "" ||
+			reservation.RuntimeTeardownReservationOnly || reservation.RuntimeTeardownCompletedLaunchID != "" ||
+			len(reservation.RuntimeTeardownCompletedHandleIDs) != 0
+		if teardownOutstanding {
+			return nil
+		}
 		if reservation.CleanupConfirmed && reservation.DeliveryPossible {
 			delete(f.trackerIntakePending, key)
 			delete(f.trackerIntakeRecovery, id)
@@ -304,7 +310,7 @@ func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.S
 		}
 		needsFence := reservation.DeliveryPossible || reservation.ControllerPossible ||
 			reservation.WorkspacePath != "" || len(reservation.RuntimeHandleIDs) != 0 ||
-			reservation.RuntimeTeardownHandleID != "" || reservation.RuntimeTeardownLaunchID != ""
+			teardownOutstanding
 		externalEffect := rec.Metadata.WorkspacePath != "" || rec.Metadata.RuntimeHandleID != "" || rec.Metadata.AgentSessionID != "" ||
 			rec.Metadata.ProviderConversationID != "" || rec.Metadata.ControllerGeneration != "" || rec.Metadata.NativeTranscriptPath != ""
 		if (!exists && (reservation.CleanupConfirmed || !needsFence)) ||
@@ -3563,6 +3569,16 @@ func TestReconcileTrackerIntakeClaimsStopsExitedUnpublishedHostBeforeCleanup(t *
 				if _, found := st.sessions[id]; !found {
 					t.Fatal("failed teardown removed the seed session")
 				}
+				if tt.cleanupConfirmed {
+					err = m.ReconcileTrackerIntakeClaims(context.Background())
+					if err == nil || !strings.Contains(err.Error(), tt.destroyErr.Error()) {
+						t.Fatalf("second ReconcileTrackerIntakeClaims() error = %v, want failed host teardown", err)
+					}
+					if rt.destroyed != 4 || ws.destroyed != 0 || st.trackerIntakePending[key] != id {
+						t.Fatalf("second failed teardown runtime=%d workspace=%d pending=%q",
+							rt.destroyed, ws.destroyed, st.trackerIntakePending[key])
+					}
+				}
 				return
 			}
 			if err != nil {
@@ -3841,6 +3857,97 @@ func TestReconcileTrackerIntakeClaimsPreservesReplacementDuringLegacyTeardown(t 
 	}
 	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
 		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsPreservesReplacementAcrossLegacyTeardownRetry(t *testing.T) {
+	tests := []struct {
+		name              string
+		destroyErr        error
+		checkpointErr     error
+		wantDestroyCalls  int
+		wantFirstAliveOld bool
+	}{
+		{
+			name: "destroy fails", destroyErr: errors.New("legacy host teardown failed"),
+			wantDestroyCalls: 3, wantFirstAliveOld: true,
+		},
+		{
+			name: "completion checkpoint fails", checkpointErr: errors.New("teardown completion unavailable"),
+			wantDestroyCalls: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, st, rt, ws := newManager()
+			id := domain.SessionID("released-owner-with-replacement-retry")
+			issueID := domain.IssueID("github:acme/mer#10911")
+			key := "mer\x00" + string(issueID)
+			oldHandleID := "direct-10911-old"
+			newHandleID := "tmux-10911-new"
+			oldLaunchID := "launch-10911-old"
+			newLaunchID := "launch-10911-new"
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/released-owner-with-replacement-retry", RuntimeLaunchID: oldLaunchID,
+				RuntimeHandleIDs: []string{oldHandleID}, DeliveryPossible: true, CapacityReleased: true,
+				ReleasedRuntimeLaunchID: oldLaunchID,
+			}
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+				Metadata: domain.SessionMetadata{RuntimeHandleID: newHandleID, RuntimeLaunchID: newLaunchID},
+			}
+			rt.fencedResults = map[string]ports.FencedProbeResult{
+				oldHandleID: {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited},
+				newHandleID: {Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+			}
+			rt.aliveByHandle = map[string]bool{oldHandleID: true, newHandleID: true}
+			rt.destroyErr = tt.destroyErr
+			if tt.checkpointErr != nil {
+				st.trackerIntakeReserveErrSequence = []error{nil, tt.checkpointErr}
+			}
+
+			err := m.ReconcileTrackerIntakeClaims(context.Background())
+			wantErr := tt.destroyErr
+			if wantErr == nil {
+				wantErr = tt.checkpointErr
+			}
+			if err == nil || !strings.Contains(err.Error(), wantErr.Error()) {
+				t.Fatalf("first ReconcileTrackerIntakeClaims() error = %v, want %v", err, wantErr)
+			}
+			checkpoint := st.trackerIntakeRecovery[id]
+			if !checkpoint.RuntimeTeardownReservationOnly || checkpoint.RuntimeTeardownHandleID != oldHandleID ||
+				checkpoint.RuntimeTeardownLaunchID != oldLaunchID {
+				t.Fatalf("replacement-scoped teardown checkpoint = %+v", checkpoint)
+			}
+			if rt.aliveByHandle[oldHandleID] != tt.wantFirstAliveOld || !rt.aliveByHandle[newHandleID] || ws.destroyed != 0 {
+				t.Fatalf("first pass oldAlive=%t newAlive=%t workspace=%d",
+					rt.aliveByHandle[oldHandleID], rt.aliveByHandle[newHandleID], ws.destroyed)
+			}
+
+			rt.destroyErr = nil
+			if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+				t.Fatalf("retry ReconcileTrackerIntakeClaims(): %v", err)
+			}
+			if len(rt.destroyedIDs) != tt.wantDestroyCalls {
+				t.Fatalf("destroyed runtimes = %v, want %d old-owner calls", rt.destroyedIDs, tt.wantDestroyCalls)
+			}
+			for _, handleID := range rt.destroyedIDs {
+				if handleID != oldHandleID {
+					t.Fatalf("destroyed replacement runtime %q in %v", handleID, rt.destroyedIDs)
+				}
+			}
+			if !rt.aliveByHandle[newHandleID] || ws.destroyed != 0 {
+				t.Fatalf("replacement after retry alive=%t workspace=%d", rt.aliveByHandle[newHandleID], ws.destroyed)
+			}
+			if got := st.sessions[id]; got.IsTerminated || got.Metadata.RuntimeHandleID != newHandleID ||
+				got.Metadata.RuntimeLaunchID != newLaunchID {
+				t.Fatalf("replacement session after retry = %+v", got)
+			}
+			if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+				t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+			}
+		})
 	}
 }
 
