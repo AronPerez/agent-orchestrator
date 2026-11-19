@@ -3,6 +3,7 @@ package decisionsync
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"time"
@@ -21,15 +22,44 @@ type ServerDeps struct {
 	// PageEntries caps the entries served per page; 0 means the protocol
 	// maximum. Tests use small pages.
 	PageEntries int
+	// Peers, when set, records each peer that exchanges with this machine.
+	Peers InboundRecorder
+	// StatusSource, when set, backs Status.
+	StatusSource StatusSource
+	// After is the wait timer; tests replace it. Defaults to time.After.
+	After func(time.Duration) <-chan time.Time
+	Log   *slog.Logger
 }
+
+// InboundRecorder records a peer that initiates exchanges with this machine.
+type InboundRecorder interface {
+	RecordInboundDecisionSyncPeer(ctx context.Context, hostID, label string, protocol int, at time.Time) error
+}
+
+// MaxWaitSeconds caps how long an exchange may wait for new entries. It stays
+// under common tunnel and proxy idle cuts.
+const MaxWaitSeconds = 25
+
+// inboundRecordInterval limits how often a busy peer's row is rewritten, so a
+// waiting exchange every 25 seconds does not churn the status table.
+const inboundRecordInterval = time.Minute
 
 // Server answers exchanges and pushes from linked peers. The caller has
 // already authenticated the peer and passes its host id.
 type Server struct {
 	deps ServerDeps
 
-	mu      sync.Mutex
-	changed chan struct{}
+	mu       sync.Mutex
+	changed  chan struct{}
+	recorded map[string]inboundMark
+
+	stopOnce sync.Once
+	stop     chan struct{}
+}
+
+type inboundMark struct {
+	label string
+	at    time.Time
 }
 
 // NewServer returns a Server over deps.
@@ -41,7 +71,19 @@ func NewServer(deps ServerDeps) *Server {
 		deps.MachineLabel = func() string { return "" }
 	}
 	deps.PageEntries = pageEntries(deps.PageEntries)
-	return &Server{deps: deps, changed: make(chan struct{})}
+	if deps.After == nil {
+		deps.After = time.After
+	}
+	if deps.Log == nil {
+		deps.Log = slog.Default()
+	}
+	return &Server{deps: deps, changed: make(chan struct{}), recorded: map[string]inboundMark{}, stop: make(chan struct{})}
+}
+
+// Stop ends every waiting exchange, which then answers with what it has. Call
+// it when the daemon shuts down.
+func (s *Server) Stop() {
+	s.stopOnce.Do(func() { close(s.stop) })
 }
 
 // Changed wakes every exchange waiting for new entries.
@@ -50,6 +92,35 @@ func (s *Server) Changed() {
 	close(s.changed)
 	s.changed = make(chan struct{})
 	s.mu.Unlock()
+}
+
+// changes returns a channel closed by the next Changed.
+func (s *Server) changes() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.changed
+}
+
+// recordInbound notes the peer in the status table, at most once a minute
+// unless its label changed. A failure is logged: it never fails the exchange.
+func (s *Server) recordInbound(ctx context.Context, peerHostID, label string, protocol int) {
+	if s.deps.Peers == nil {
+		return
+	}
+	now := s.deps.Now()
+	s.mu.Lock()
+	last, seen := s.recorded[peerHostID]
+	due := !seen || last.label != label || now.Sub(last.at) >= inboundRecordInterval
+	if due {
+		s.recorded[peerHostID] = inboundMark{label: label, at: now}
+	}
+	s.mu.Unlock()
+	if !due {
+		return
+	}
+	if err := s.deps.Peers.RecordInboundDecisionSyncPeer(ctx, peerHostID, label, protocol, now); err != nil {
+		s.deps.Log.Warn("decision sync: record inbound peer", "peer", peerHostID, "err", err)
+	}
 }
 
 func (s *Server) checkPeer(peerHostID, bodyHostID string) error {
@@ -69,10 +140,33 @@ func (s *Server) Exchange(ctx context.Context, peerHostID string, req ExchangeRe
 	if err := s.checkPeer(peerHostID, req.HostID); err != nil {
 		return ExchangeResponse{}, err
 	}
+	s.recordInbound(ctx, peerHostID, req.MachineLabel, req.Protocol)
 	if _, err := s.deps.Ledger.CheckDecisionHeads(ctx, peerHostID, req.Heads, s.deps.Now()); err != nil {
 		return ExchangeResponse{}, fmt.Errorf("check peer heads: %w", err)
 	}
-	return s.page(ctx, req.Have)
+	wait := min(max(req.WaitSeconds, 0), MaxWaitSeconds)
+	var timeout <-chan time.Time
+	if wait > 0 {
+		timeout = s.deps.After(time.Duration(wait) * time.Second)
+	}
+	for {
+		// Take the change signal before reading, so an entry stored between
+		// the read and the wait still wakes this exchange.
+		changed := s.changes()
+		resp, err := s.page(ctx, req.Have)
+		if err != nil || wait == 0 || len(resp.Entries) > 0 {
+			return resp, err
+		}
+		select {
+		case <-changed:
+		case <-timeout:
+			return resp, nil
+		case <-s.stop:
+			return resp, nil
+		case <-ctx.Done():
+			return ExchangeResponse{}, ctx.Err()
+		}
+	}
 }
 
 func (s *Server) page(ctx context.Context, have domain.DecisionVector) (ExchangeResponse, error) {
@@ -152,4 +246,12 @@ func pageEntries(n int) int {
 		return domain.MaxDecisionSyncPageEntries
 	}
 	return n
+}
+
+// Status returns this machine's sync freshness.
+func (s *Server) Status(ctx context.Context) (Status, error) {
+	if s.deps.StatusSource == nil {
+		return Status{HostID: s.deps.HostID, MachineLabel: s.deps.MachineLabel()}, nil
+	}
+	return ReadStatus(ctx, s.deps.StatusSource, s.deps.HostID, s.deps.MachineLabel())
 }

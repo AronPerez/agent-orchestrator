@@ -3686,6 +3686,120 @@ type DecisionSyncTokenResponse struct {
 	Scope    string `json:"scope" enum:"decision-sync"`
 }
 
+// DecisionSyncEntry is one decision ledger entry on the wire: the twelve
+// stored columns. Payload is a JSON string holding the stored payload text
+// byte for byte; Go re-encodes embedded raw JSON, which would change it.
+// The field set must stay identical to decisionsync.WireEntry (the controller
+// converts between them directly, so a mismatch does not compile).
+type DecisionSyncEntry struct {
+	ID            string    `json:"id"`
+	Origin        string    `json:"origin"`
+	OriginSeq     int64     `json:"originSeq"`
+	StampWall     int64     `json:"stampWall"`
+	StampCounter  int64     `json:"stampCounter"`
+	CallID        string    `json:"callId"`
+	Kind          string    `json:"kind"`
+	Payload       string    `json:"payload" description:"The entry's payload JSON as a string, exactly as stored."`
+	WrittenAt     time.Time `json:"writtenAt"`
+	AuthorKind    string    `json:"authorKind"`
+	AuthorSurface string    `json:"authorSurface"`
+	AuthorSession string    `json:"authorSession"`
+}
+
+// DecisionSyncHead is the newest entry a ledger holds for one origin.
+type DecisionSyncHead struct {
+	Seq       int64     `json:"seq"`
+	ID        string    `json:"id"`
+	WrittenAt time.Time `json:"writtenAt"`
+	Stopped   bool      `json:"stopped,omitempty" description:"The sender recorded a conflict for this origin and neither applies nor serves it past the conflict."`
+}
+
+// DecisionSyncExchangeRequest asks the peer for entries the sender lacks.
+type DecisionSyncExchangeRequest struct {
+	Protocol     int                         `json:"protocol"`
+	HostID       string                      `json:"hostId" description:"The sender's host id; must match the credential's peer."`
+	MachineLabel string                      `json:"machineLabel,omitempty"`
+	Have         map[string]int64            `json:"have" description:"Highest origin sequence the sender holds, per origin."`
+	Heads        map[string]DecisionSyncHead `json:"heads,omitempty"`
+	WaitSeconds  int                         `json:"waitSeconds,omitempty" description:"Hold the request up to this many seconds (at most 25) until there is something to send."`
+}
+
+// DecisionSyncExchangeResponse is one page of entries the sender lacks.
+type DecisionSyncExchangeResponse struct {
+	Protocol     int                         `json:"protocol"`
+	HostID       string                      `json:"hostId"`
+	MachineLabel string                      `json:"machineLabel"`
+	Entries      []DecisionSyncEntry         `json:"entries"`
+	More         bool                        `json:"more"`
+	Have         map[string]int64            `json:"have"`
+	Heads        map[string]DecisionSyncHead `json:"heads"`
+	ServerTime   time.Time                   `json:"serverTime"`
+}
+
+// DecisionSyncPushRequest sends the peer one page of entries it lacks.
+type DecisionSyncPushRequest struct {
+	Protocol int                         `json:"protocol"`
+	HostID   string                      `json:"hostId"`
+	Entries  []DecisionSyncEntry         `json:"entries"`
+	Heads    map[string]DecisionSyncHead `json:"heads,omitempty"`
+}
+
+// DecisionSyncGap is a received entry that did not follow the origin's highest.
+type DecisionSyncGap struct {
+	Origin string `json:"origin"`
+	Have   int64  `json:"have"`
+	Got    int64  `json:"got"`
+}
+
+// DecisionSyncConflict is two different entries claiming one identity.
+type DecisionSyncConflict struct {
+	Origin        string    `json:"origin"`
+	OriginSeq     int64     `json:"originSeq"`
+	LocalEntryID  string    `json:"localEntryId"`
+	RemoteEntryID string    `json:"remoteEntryId"`
+	PeerHostID    string    `json:"peerHostId"`
+	DetectedAt    time.Time `json:"detectedAt"`
+}
+
+// DecisionSyncPushResponse is what applying a pushed page did.
+type DecisionSyncPushResponse struct {
+	Applied    int                         `json:"applied"`
+	Duplicates int                         `json:"duplicates"`
+	Gaps       []DecisionSyncGap           `json:"gaps"`
+	Conflicts  []DecisionSyncConflict      `json:"conflicts"`
+	Have       map[string]int64            `json:"have"`
+	Heads      map[string]DecisionSyncHead `json:"heads"`
+}
+
+// DecisionSyncPeerStatus is one peer's freshness. It carries no URL or secret.
+type DecisionSyncPeerStatus struct {
+	HostID        string     `json:"hostId"`
+	Label         string     `json:"label"`
+	Direction     string     `json:"direction" enum:"outbound,inbound"`
+	LastSuccessAt *time.Time `json:"lastSuccessAt,omitempty"`
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
+	LastErrorCode string     `json:"lastErrorCode,omitempty"`
+	InSync        bool       `json:"inSync"`
+	ClockAheadMs  int64      `json:"clockAheadMs"`
+	State         string     `json:"state" enum:"linked_in_sync,linked_behind,unreachable,revoked,incompatible,identity_conflict,inbound"`
+}
+
+// DecisionSyncOriginStatus is a machine whose decisions this ledger holds.
+type DecisionSyncOriginStatus struct {
+	HostID       string    `json:"hostId"`
+	MachineLabel string    `json:"machineLabel"`
+	LastHeardAt  time.Time `json:"lastHeardAt" description:"When the newest entry from this machine was written, whichever peer relayed it."`
+}
+
+// DecisionSyncStatusResponse is this machine's decision sync freshness.
+type DecisionSyncStatusResponse struct {
+	HostID       string                     `json:"hostId"`
+	MachineLabel string                     `json:"machineLabel"`
+	Peers        []DecisionSyncPeerStatus   `json:"peers"`
+	Origins      []DecisionSyncOriginStatus `json:"origins"`
+	Conflicts    []DecisionSyncConflict     `json:"conflicts"`
+}
+
 // SetRequireDeviceCredentialsRequest turns the pairing password off or on.
 type SetRequireDeviceCredentialsRequest struct {
 	Enabled bool `json:"enabled"`

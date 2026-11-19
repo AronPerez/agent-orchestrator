@@ -185,6 +185,17 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersCoordinationTokenResponse":                 "CoordinationTokenResponse",
 	"ControllersIssueDecisionSyncTokenRequest":             "IssueDecisionSyncTokenRequest",
 	"ControllersDecisionSyncTokenResponse":                 "DecisionSyncTokenResponse",
+	"ControllersDecisionSyncEntry":                         "DecisionSyncEntry",
+	"ControllersDecisionSyncHead":                          "DecisionSyncHead",
+	"ControllersDecisionSyncExchangeRequest":               "DecisionSyncExchangeRequest",
+	"ControllersDecisionSyncExchangeResponse":              "DecisionSyncExchangeResponse",
+	"ControllersDecisionSyncPushRequest":                   "DecisionSyncPushRequest",
+	"ControllersDecisionSyncPushResponse":                  "DecisionSyncPushResponse",
+	"ControllersDecisionSyncGap":                           "DecisionSyncGap",
+	"ControllersDecisionSyncConflict":                      "DecisionSyncConflict",
+	"ControllersDecisionSyncPeerStatus":                    "DecisionSyncPeerStatus",
+	"ControllersDecisionSyncOriginStatus":                  "DecisionSyncOriginStatus",
+	"ControllersDecisionSyncStatusResponse":                "DecisionSyncStatusResponse",
 	"ControllersAgentAccountIDParam":                       "AgentAccountIDParam",
 	"ControllersAgentLoginActionRequest":                   "AgentLoginActionRequest",
 	"ControllersAgentAccountLoginIDParam":                  "AgentAccountLoginIDParam",
@@ -914,6 +925,7 @@ func operations() []operation {
 	ops = append(ops, notificationOperations()...)
 	ops = append(ops, reportOperations()...)
 	ops = append(ops, decisionOperations()...)
+	ops = append(ops, decisionSyncOperations()...)
 	ops = append(ops, usageOperations()...)
 	ops = append(ops, pushOperations()...)
 	ops = append(ops, importOperations()...)
@@ -1088,6 +1100,42 @@ func reportOperations() []operation {
 			{http.StatusNotImplemented, envelope.APIError{}},
 		},
 	}}
+}
+
+// decisionSyncOperations are the decision ledger sync routes. Exchange and
+// entries accept only a decision-sync device credential issued to a linked
+// machine; status serves this machine's own clients.
+func decisionSyncOperations() []operation {
+	syncErrors := []respUnit{
+		{http.StatusBadRequest, envelope.APIError{}},
+		{http.StatusForbidden, envelope.APIError{}},
+		{http.StatusConflict, envelope.APIError{}},
+		{http.StatusRequestEntityTooLarge, envelope.APIError{}},
+		{http.StatusInternalServerError, envelope.APIError{}},
+		{http.StatusNotImplemented, envelope.APIError{}},
+		{http.StatusServiceUnavailable, envelope.APIError{}},
+	}
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/decision-sync/exchange", id: "exchangeDecisionSync", tag: "decisions",
+			summary: "Return one page of decision ledger entries a linked machine lacks", reqBody: controllers.DecisionSyncExchangeRequest{},
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionSyncExchangeResponse{}}}, syncErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decision-sync/entries", id: "pushDecisionSyncEntries", tag: "decisions",
+			summary: "Apply one page of decision ledger entries from a linked machine", reqBody: controllers.DecisionSyncPushRequest{},
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionSyncPushResponse{}}}, syncErrors...),
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/decision-sync/status", id: "getDecisionSyncStatus", tag: "decisions",
+			summary: "Report decision sync freshness per linked machine and per origin",
+			resps: []respUnit{
+				{http.StatusOK, controllers.DecisionSyncStatusResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func decisionOperations() []operation {

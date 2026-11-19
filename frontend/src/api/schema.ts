@@ -1443,6 +1443,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decision-sync/entries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Apply one page of decision ledger entries from a linked machine */
+        post: operations["pushDecisionSyncEntries"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decision-sync/exchange": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Return one page of decision ledger entries a linked machine lacks */
+        post: operations["exchangeDecisionSync"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decision-sync/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Report decision sync freshness per linked machine and per origin */
+        get: operations["getDecisionSyncStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/decisions": {
         parameters: {
             query?: never;
@@ -7744,6 +7795,133 @@ export interface components {
             option: number;
             undo: string;
             why: string;
+        };
+        DecisionSyncConflict: {
+            /** Format: date-time */
+            detectedAt: string;
+            localEntryId: string;
+            origin: string;
+            /** Format: int64 */
+            originSeq: number;
+            peerHostId: string;
+            remoteEntryId: string;
+        };
+        DecisionSyncEntry: {
+            authorKind: string;
+            authorSession: string;
+            authorSurface: string;
+            callId: string;
+            id: string;
+            kind: string;
+            origin: string;
+            /** Format: int64 */
+            originSeq: number;
+            /** @description The entry's payload JSON as a string, exactly as stored. */
+            payload: string;
+            /** Format: int64 */
+            stampCounter: number;
+            /** Format: int64 */
+            stampWall: number;
+            /** Format: date-time */
+            writtenAt: string;
+        };
+        DecisionSyncExchangeRequest: {
+            /** @description Highest origin sequence the sender holds, per origin. */
+            have: {
+                [key: string]: number;
+            } | null;
+            heads?: {
+                [key: string]: components["schemas"]["DecisionSyncHead"];
+            };
+            /** @description The sender's host id; must match the credential's peer. */
+            hostId: string;
+            machineLabel?: string;
+            protocol: number;
+            /** @description Hold the request up to this many seconds (at most 25) until there is something to send. */
+            waitSeconds?: number;
+        };
+        DecisionSyncExchangeResponse: {
+            entries: components["schemas"]["DecisionSyncEntry"][];
+            have: {
+                [key: string]: number;
+            } | null;
+            heads: {
+                [key: string]: components["schemas"]["DecisionSyncHead"];
+            } | null;
+            hostId: string;
+            machineLabel: string;
+            more: boolean;
+            protocol: number;
+            /** Format: date-time */
+            serverTime: string;
+        };
+        DecisionSyncGap: {
+            /** Format: int64 */
+            got: number;
+            /** Format: int64 */
+            have: number;
+            origin: string;
+        };
+        DecisionSyncHead: {
+            id: string;
+            /** Format: int64 */
+            seq: number;
+            /** @description The sender recorded a conflict for this origin and neither applies nor serves it past the conflict. */
+            stopped?: boolean;
+            /** Format: date-time */
+            writtenAt: string;
+        };
+        DecisionSyncOriginStatus: {
+            hostId: string;
+            /**
+             * Format: date-time
+             * @description When the newest entry from this machine was written, whichever peer relayed it.
+             */
+            lastHeardAt: string;
+            machineLabel: string;
+        };
+        DecisionSyncPeerStatus: {
+            /** Format: int64 */
+            clockAheadMs: number;
+            /** @enum {string} */
+            direction: "outbound" | "inbound";
+            hostId: string;
+            inSync: boolean;
+            label: string;
+            /** Format: date-time */
+            lastAttemptAt?: null | string;
+            lastErrorCode?: string;
+            /** Format: date-time */
+            lastSuccessAt?: null | string;
+            /** @enum {string} */
+            state: "linked_in_sync" | "linked_behind" | "unreachable" | "revoked" | "incompatible" | "identity_conflict" | "inbound";
+        };
+        DecisionSyncPushRequest: {
+            entries: components["schemas"]["DecisionSyncEntry"][];
+            heads?: {
+                [key: string]: components["schemas"]["DecisionSyncHead"];
+            };
+            hostId: string;
+            protocol: number;
+        };
+        DecisionSyncPushResponse: {
+            applied: number;
+            conflicts: components["schemas"]["DecisionSyncConflict"][];
+            duplicates: number;
+            gaps: components["schemas"]["DecisionSyncGap"][];
+            have: {
+                [key: string]: number;
+            } | null;
+            heads: {
+                [key: string]: components["schemas"]["DecisionSyncHead"];
+            } | null;
+        };
+        DecisionSyncStatusResponse: {
+            conflicts: components["schemas"]["DecisionSyncConflict"][];
+            hostId: string;
+            machineLabel: string;
+            origins: components["schemas"]["DecisionSyncOriginStatus"][];
+            peers: components["schemas"]["DecisionSyncPeerStatus"][];
         };
         DecisionSyncTokenResponse: {
             deviceId: string;
@@ -15509,6 +15687,218 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    pushDecisionSyncEntries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionSyncPushRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionSyncPushResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    exchangeDecisionSync: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionSyncExchangeRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionSyncExchangeResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getDecisionSyncStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionSyncStatusResponse"];
                 };
             };
             /** @description Internal Server Error */

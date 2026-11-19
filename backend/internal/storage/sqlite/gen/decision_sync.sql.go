@@ -7,6 +7,7 @@ package gen
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -95,6 +96,46 @@ func (q *Queries) DecisionHeads(ctx context.Context) ([]DecisionHeadsRow, error)
 	return items, nil
 }
 
+const decisionOriginLabels = `-- name: DecisionOriginLabels :many
+SELECT calls.origin,
+       CAST(COALESCE(json_extract(calls.body, '$.raised.machineLabel'), '') AS TEXT) AS machine_label
+FROM decision_calls AS calls
+JOIN (
+    SELECT origin, MAX(raised_at) AS newest
+    FROM decision_calls
+    GROUP BY origin
+) AS latest ON latest.origin = calls.origin AND latest.newest = calls.raised_at
+ORDER BY calls.origin
+`
+
+type DecisionOriginLabelsRow struct {
+	Origin       string
+	MachineLabel string
+}
+
+func (q *Queries) DecisionOriginLabels(ctx context.Context) ([]DecisionOriginLabelsRow, error) {
+	rows, err := q.db.QueryContext(ctx, decisionOriginLabels)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DecisionOriginLabelsRow{}
+	for rows.Next() {
+		var i DecisionOriginLabelsRow
+		if err := rows.Scan(&i.Origin, &i.MachineLabel); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const decisionVector = `-- name: DecisionVector :many
 
 SELECT origin, CAST(MAX(origin_seq) AS INTEGER) AS max_seq
@@ -131,6 +172,18 @@ func (q *Queries) DecisionVector(ctx context.Context) ([]DecisionVectorRow, erro
 		return nil, err
 	}
 	return items, nil
+}
+
+const deleteDecisionSyncPeer = `-- name: DeleteDecisionSyncPeer :execrows
+DELETE FROM decision_sync_peers WHERE host_id = ?
+`
+
+func (q *Queries) DeleteDecisionSyncPeer(ctx context.Context, hostID string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDecisionSyncPeer, hostID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const getDecisionEntryByID = `-- name: GetDecisionEntryByID :one
@@ -182,6 +235,31 @@ func (q *Queries) GetDecisionEntryByOriginSeq(ctx context.Context, arg GetDecisi
 		&i.AuthorKind,
 		&i.AuthorSurface,
 		&i.AuthorSession,
+	)
+	return i, err
+}
+
+const getDecisionSyncPeer = `-- name: GetDecisionSyncPeer :one
+SELECT host_id, label, url, direction, device_id, created_at, last_attempt_at, last_success_at, last_error_code, in_sync, peer_vector, clock_ahead_ms, peer_protocol FROM decision_sync_peers WHERE host_id = ?
+`
+
+func (q *Queries) GetDecisionSyncPeer(ctx context.Context, hostID string) (DecisionSyncPeer, error) {
+	row := q.db.QueryRowContext(ctx, getDecisionSyncPeer, hostID)
+	var i DecisionSyncPeer
+	err := row.Scan(
+		&i.HostID,
+		&i.Label,
+		&i.URL,
+		&i.Direction,
+		&i.DeviceID,
+		&i.CreatedAt,
+		&i.LastAttemptAt,
+		&i.LastSuccessAt,
+		&i.LastErrorCode,
+		&i.InSync,
+		&i.PeerVector,
+		&i.ClockAheadMs,
+		&i.PeerProtocol,
 	)
 	return i, err
 }
@@ -310,4 +388,170 @@ func (q *Queries) ListDecisionSyncConflicts(ctx context.Context) ([]DecisionSync
 		return nil, err
 	}
 	return items, nil
+}
+
+const listDecisionSyncPeers = `-- name: ListDecisionSyncPeers :many
+SELECT host_id, label, url, direction, device_id, created_at, last_attempt_at, last_success_at, last_error_code, in_sync, peer_vector, clock_ahead_ms, peer_protocol FROM decision_sync_peers ORDER BY host_id
+`
+
+func (q *Queries) ListDecisionSyncPeers(ctx context.Context) ([]DecisionSyncPeer, error) {
+	rows, err := q.db.QueryContext(ctx, listDecisionSyncPeers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DecisionSyncPeer{}
+	for rows.Next() {
+		var i DecisionSyncPeer
+		if err := rows.Scan(
+			&i.HostID,
+			&i.Label,
+			&i.URL,
+			&i.Direction,
+			&i.DeviceID,
+			&i.CreatedAt,
+			&i.LastAttemptAt,
+			&i.LastSuccessAt,
+			&i.LastErrorCode,
+			&i.InSync,
+			&i.PeerVector,
+			&i.ClockAheadMs,
+			&i.PeerProtocol,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const recordDecisionSyncFailure = `-- name: RecordDecisionSyncFailure :execrows
+UPDATE decision_sync_peers
+SET last_attempt_at = ?1,
+    last_error_code = ?2,
+    in_sync = 0
+WHERE host_id = ?3
+`
+
+type RecordDecisionSyncFailureParams struct {
+	At        sql.NullTime
+	ErrorCode string
+	HostID    string
+}
+
+func (q *Queries) RecordDecisionSyncFailure(ctx context.Context, arg RecordDecisionSyncFailureParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordDecisionSyncFailure, arg.At, arg.ErrorCode, arg.HostID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const recordDecisionSyncSuccess = `-- name: RecordDecisionSyncSuccess :execrows
+UPDATE decision_sync_peers
+SET last_attempt_at = ?1,
+    last_success_at = ?1,
+    last_error_code = '',
+    in_sync = ?2,
+    peer_vector = ?3,
+    clock_ahead_ms = ?4,
+    peer_protocol = ?5,
+    label = COALESCE(NULLIF(CAST(?6 AS TEXT), ''), label)
+WHERE host_id = ?7
+`
+
+type RecordDecisionSyncSuccessParams struct {
+	At           sql.NullTime
+	InSync       int64
+	PeerVector   string
+	ClockAheadMs int64
+	PeerProtocol int64
+	Label        string
+	HostID       string
+}
+
+func (q *Queries) RecordDecisionSyncSuccess(ctx context.Context, arg RecordDecisionSyncSuccessParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordDecisionSyncSuccess,
+		arg.At,
+		arg.InSync,
+		arg.PeerVector,
+		arg.ClockAheadMs,
+		arg.PeerProtocol,
+		arg.Label,
+		arg.HostID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const recordInboundDecisionSyncPeer = `-- name: RecordInboundDecisionSyncPeer :execrows
+INSERT INTO decision_sync_peers (
+    host_id, label, direction, created_at, last_attempt_at, last_success_at, peer_protocol
+)
+VALUES (?1, ?2, 'inbound', ?3, ?3, ?3, ?4)
+ON CONFLICT (host_id) DO UPDATE SET
+    label = excluded.label,
+    last_attempt_at = excluded.last_attempt_at,
+    last_success_at = excluded.last_success_at,
+    peer_protocol = excluded.peer_protocol
+WHERE decision_sync_peers.direction = 'inbound'
+`
+
+type RecordInboundDecisionSyncPeerParams struct {
+	HostID       string
+	Label        string
+	At           time.Time
+	PeerProtocol int64
+}
+
+func (q *Queries) RecordInboundDecisionSyncPeer(ctx context.Context, arg RecordInboundDecisionSyncPeerParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordInboundDecisionSyncPeer,
+		arg.HostID,
+		arg.Label,
+		arg.At,
+		arg.PeerProtocol,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const upsertDecisionSyncPeer = `-- name: UpsertDecisionSyncPeer :exec
+INSERT INTO decision_sync_peers (host_id, label, url, direction, device_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (host_id) DO UPDATE SET
+    label = excluded.label,
+    url = excluded.url,
+    direction = excluded.direction,
+    device_id = excluded.device_id
+`
+
+type UpsertDecisionSyncPeerParams struct {
+	HostID    string
+	Label     string
+	URL       string
+	Direction string
+	DeviceID  string
+	CreatedAt time.Time
+}
+
+func (q *Queries) UpsertDecisionSyncPeer(ctx context.Context, arg UpsertDecisionSyncPeerParams) error {
+	_, err := q.db.ExecContext(ctx, upsertDecisionSyncPeer,
+		arg.HostID,
+		arg.Label,
+		arg.URL,
+		arg.Direction,
+		arg.DeviceID,
+		arg.CreatedAt,
+	)
+	return err
 }

@@ -3775,6 +3775,153 @@ paths:
         shell terminal
       tags:
       - cues
+  /api/v1/decision-sync/entries:
+    post:
+      operationId: pushDecisionSyncEntries
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionSyncPushRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionSyncPushResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Request Entity Too Large
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Apply one page of decision ledger entries from a linked machine
+      tags:
+      - decisions
+  /api/v1/decision-sync/exchange:
+    post:
+      operationId: exchangeDecisionSync
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionSyncExchangeRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionSyncExchangeResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Request Entity Too Large
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Return one page of decision ledger entries a linked machine lacks
+      tags:
+      - decisions
+  /api/v1/decision-sync/status:
+    get:
+      operationId: getDecisionSyncStatus
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionSyncStatusResponse'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Report decision sync freshness per linked machine and per origin
+      tags:
+      - decisions
   /api/v1/decisions:
     get:
       operationId: listDecisions
@@ -22421,6 +22568,320 @@ components:
       - option
       - why
       - undo
+      type: object
+    DecisionSyncConflict:
+      properties:
+        detectedAt:
+          format: date-time
+          type: string
+        localEntryId:
+          type: string
+        origin:
+          type: string
+        originSeq:
+          format: int64
+          type: integer
+        peerHostId:
+          type: string
+        remoteEntryId:
+          type: string
+      required:
+      - origin
+      - originSeq
+      - localEntryId
+      - remoteEntryId
+      - peerHostId
+      - detectedAt
+      type: object
+    DecisionSyncEntry:
+      properties:
+        authorKind:
+          type: string
+        authorSession:
+          type: string
+        authorSurface:
+          type: string
+        callId:
+          type: string
+        id:
+          type: string
+        kind:
+          type: string
+        origin:
+          type: string
+        originSeq:
+          format: int64
+          type: integer
+        payload:
+          description: The entry's payload JSON as a string, exactly as stored.
+          type: string
+        stampCounter:
+          format: int64
+          type: integer
+        stampWall:
+          format: int64
+          type: integer
+        writtenAt:
+          format: date-time
+          type: string
+      required:
+      - id
+      - origin
+      - originSeq
+      - stampWall
+      - stampCounter
+      - callId
+      - kind
+      - payload
+      - writtenAt
+      - authorKind
+      - authorSurface
+      - authorSession
+      type: object
+    DecisionSyncExchangeRequest:
+      properties:
+        have:
+          additionalProperties:
+            format: int64
+            type: integer
+          description: Highest origin sequence the sender holds, per origin.
+          type:
+          - object
+          - "null"
+        heads:
+          additionalProperties:
+            $ref: '#/components/schemas/DecisionSyncHead'
+          type: object
+        hostId:
+          description: The sender's host id; must match the credential's peer.
+          type: string
+        machineLabel:
+          type: string
+        protocol:
+          type: integer
+        waitSeconds:
+          description: Hold the request up to this many seconds (at most 25) until
+            there is something to send.
+          type: integer
+      required:
+      - protocol
+      - hostId
+      - have
+      type: object
+    DecisionSyncExchangeResponse:
+      properties:
+        entries:
+          items:
+            $ref: '#/components/schemas/DecisionSyncEntry'
+          type: array
+        have:
+          additionalProperties:
+            format: int64
+            type: integer
+          type:
+          - object
+          - "null"
+        heads:
+          additionalProperties:
+            $ref: '#/components/schemas/DecisionSyncHead'
+          type:
+          - object
+          - "null"
+        hostId:
+          type: string
+        machineLabel:
+          type: string
+        more:
+          type: boolean
+        protocol:
+          type: integer
+        serverTime:
+          format: date-time
+          type: string
+      required:
+      - protocol
+      - hostId
+      - machineLabel
+      - entries
+      - more
+      - have
+      - heads
+      - serverTime
+      type: object
+    DecisionSyncGap:
+      properties:
+        got:
+          format: int64
+          type: integer
+        have:
+          format: int64
+          type: integer
+        origin:
+          type: string
+      required:
+      - origin
+      - have
+      - got
+      type: object
+    DecisionSyncHead:
+      properties:
+        id:
+          type: string
+        seq:
+          format: int64
+          type: integer
+        stopped:
+          description: The sender recorded a conflict for this origin and neither
+            applies nor serves it past the conflict.
+          type: boolean
+        writtenAt:
+          format: date-time
+          type: string
+      required:
+      - seq
+      - id
+      - writtenAt
+      type: object
+    DecisionSyncOriginStatus:
+      properties:
+        hostId:
+          type: string
+        lastHeardAt:
+          description: When the newest entry from this machine was written, whichever
+            peer relayed it.
+          format: date-time
+          type: string
+        machineLabel:
+          type: string
+      required:
+      - hostId
+      - machineLabel
+      - lastHeardAt
+      type: object
+    DecisionSyncPeerStatus:
+      properties:
+        clockAheadMs:
+          format: int64
+          type: integer
+        direction:
+          enum:
+          - outbound
+          - inbound
+          type: string
+        hostId:
+          type: string
+        inSync:
+          type: boolean
+        label:
+          type: string
+        lastAttemptAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        lastErrorCode:
+          type: string
+        lastSuccessAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        state:
+          enum:
+          - linked_in_sync
+          - linked_behind
+          - unreachable
+          - revoked
+          - incompatible
+          - identity_conflict
+          - inbound
+          type: string
+      required:
+      - hostId
+      - label
+      - direction
+      - inSync
+      - clockAheadMs
+      - state
+      type: object
+    DecisionSyncPushRequest:
+      properties:
+        entries:
+          items:
+            $ref: '#/components/schemas/DecisionSyncEntry'
+          type: array
+        heads:
+          additionalProperties:
+            $ref: '#/components/schemas/DecisionSyncHead'
+          type: object
+        hostId:
+          type: string
+        protocol:
+          type: integer
+      required:
+      - protocol
+      - hostId
+      - entries
+      type: object
+    DecisionSyncPushResponse:
+      properties:
+        applied:
+          type: integer
+        conflicts:
+          items:
+            $ref: '#/components/schemas/DecisionSyncConflict'
+          type: array
+        duplicates:
+          type: integer
+        gaps:
+          items:
+            $ref: '#/components/schemas/DecisionSyncGap'
+          type: array
+        have:
+          additionalProperties:
+            format: int64
+            type: integer
+          type:
+          - object
+          - "null"
+        heads:
+          additionalProperties:
+            $ref: '#/components/schemas/DecisionSyncHead'
+          type:
+          - object
+          - "null"
+      required:
+      - applied
+      - duplicates
+      - gaps
+      - conflicts
+      - have
+      - heads
+      type: object
+    DecisionSyncStatusResponse:
+      properties:
+        conflicts:
+          items:
+            $ref: '#/components/schemas/DecisionSyncConflict'
+          type: array
+        hostId:
+          type: string
+        machineLabel:
+          type: string
+        origins:
+          items:
+            $ref: '#/components/schemas/DecisionSyncOriginStatus'
+          type: array
+        peers:
+          items:
+            $ref: '#/components/schemas/DecisionSyncPeerStatus'
+          type: array
+      required:
+      - hostId
+      - machineLabel
+      - peers
+      - origins
+      - conflicts
       type: object
     DecisionSyncTokenResponse:
       properties:

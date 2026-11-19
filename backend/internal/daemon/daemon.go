@@ -1217,14 +1217,19 @@ func Run(buildVersion string) (retErr error) {
 	// notification I/O.
 	decisionNotifications, decisionNotificationsDone := startDecisionNotifications(ctx, store, notificationWriter, log)
 	decisionMutationGate := &decisionsvc.MutationGate{}
+	wakeDecisionDeliverer := func() {
+		if decisionDeliverer != nil {
+			decisionDeliverer.Wake()
+		}
+	}
+	// Linked machines exchange ledger entries through this server on the
+	// remote listener. A pushed answer for a call this machine owns wakes the
+	// deliverer exactly as a local answer does.
+	decisionSync := newDecisionSyncServer(ctx, store, hostIdentity.HostID, log, wakeDecisionDeliverer, decisionNotifications.Wake)
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
 		MutationGate: decisionMutationGate,
-		OnAppended: decisionAppendHook(func() {
-			if decisionDeliverer != nil {
-				decisionDeliverer.Wake()
-			}
-		}, decisionNotifications.Wake),
+		OnAppended:   decisionAppendHook(wakeDecisionDeliverer, decisionNotifications.Wake, decisionSync.Changed),
 	})
 	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
 		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
@@ -1345,6 +1350,7 @@ func Run(buildVersion string) (retErr error) {
 		Notifications:               notifier,
 		Reports:                     reportSvc,
 		Decisions:                   decisionSvc,
+		DecisionSync:                decisionSync,
 		NotificationStream:          notificationHub,
 		Push:                        pushRegistry,
 		Presence:                    presenceTracker,
