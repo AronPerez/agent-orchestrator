@@ -1580,6 +1580,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decisions/observe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Report how often sessions predicted the person's answers in observe mode */
+        get: operations["observeDecisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/desktop/sessions/{sessionId}/artifacts": {
         parameters: {
             query?: never;
@@ -6054,6 +6071,11 @@ export interface components {
             /** @enum {string} */
             status: "pending" | "spawning" | "running" | "completed" | "failed";
         };
+        AutonomyConfig: {
+            /** @enum {string} */
+            mode?: "off" | "observe";
+            reserved?: string[];
+        };
         AwakeApplication: {
             id: string;
             identity: string;
@@ -7531,6 +7553,7 @@ export interface components {
             id: string;
             label: string;
             reserved: boolean;
+            reservedByDefault: boolean;
         };
         DecisionKindsResponse: {
             kinds: components["schemas"]["DecisionKindResponse"][];
@@ -7541,6 +7564,23 @@ export interface components {
         DecisionLinkPayload: {
             label: string;
             url: string;
+        };
+        DecisionObserveResponse: {
+            /** @enum {string} */
+            mode: "off" | "observe";
+            projectId?: string;
+            rows: components["schemas"]["DecisionObserveRowResponse"][];
+        };
+        DecisionObserveRowResponse: {
+            agreed: number;
+            /** @description Calls with both a prediction and the person's answer. */
+            answered: number;
+            /** @description Calls of this kind that were not withdrawn. */
+            calls: number;
+            differed: number;
+            kind: string;
+            label: string;
+            reserved: boolean;
         };
         DecisionOptionPayload: {
             consequence: string;
@@ -7636,11 +7676,6 @@ export interface components {
             /** Format: date-time */
             lastActivityAt: string;
             state: string;
-        };
-        DomainAutonomyConfig: {
-            /** @enum {string} */
-            mode?: "off" | "observe";
-            reserved?: string[];
         };
         DomainConversationBatchedDelivery: {
             deliveredWithTurnId: string;
@@ -8389,7 +8424,7 @@ export interface components {
             agentRules?: string;
             agentRulesFile?: string;
             autoReview?: boolean;
-            autonomy?: components["schemas"]["DomainAutonomyConfig"];
+            autonomy?: components["schemas"]["AutonomyConfig"];
             canonicalRepoURL?: string;
             collisionRadar?: components["schemas"]["CollisionRadarConfig"];
             containerReap?: components["schemas"]["ContainerReapConfig"];
@@ -15929,6 +15964,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DecisionKindsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    observeDecisions: {
+        parameters: {
+            query?: {
+                /** @description Project id. Required from the person's surfaces; a calling session always gets its own project. */
+                project?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionObserveResponse"];
                 };
             };
             /** @description Bad Request */

@@ -343,9 +343,10 @@ func policyRule(rule, message string) error {
 
 // KindPolicy is one decision kind and whether a project reserves it.
 type KindPolicy struct {
-	ID       domain.DecisionKindID
-	Label    string
-	Reserved bool
+	ID                domain.DecisionKindID
+	Label             string
+	Reserved          bool
+	ReservedByDefault bool
 }
 
 // Policy is a project's autonomy mode and its view of every decision kind.
@@ -358,31 +359,40 @@ type Policy struct {
 // Kinds returns the autonomy policy for the calling session's project, or
 // for the named project when the person asks.
 func (s *Service) Kinds(ctx context.Context, actor Actor, projectID domain.ProjectID) (Policy, error) {
-	if actor.Session != "" {
-		var err error
-		if projectID, _, err = s.actorProject(ctx, actor); err != nil {
-			return Policy{}, err
-		}
-	} else if projectID == "" {
-		return Policy{}, apierr.Invalid("DECISION_PROJECT_REQUIRED", "Name the project with --project.", nil)
-	}
-	var autonomy domain.AutonomyConfig
-	if projectID != "" {
-		project, found, err := s.store.GetProject(ctx, string(projectID))
-		if err != nil {
-			return Policy{}, err
-		}
-		if !found {
-			return Policy{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
-		}
-		autonomy = project.Config.Autonomy
+	projectID, autonomy, err := s.projectAutonomy(ctx, actor, projectID)
+	if err != nil {
+		return Policy{}, err
 	}
 	kinds := domain.DecisionKinds()
 	policy := Policy{ProjectID: projectID, Mode: autonomy.EffectiveMode(), Kinds: make([]KindPolicy, len(kinds))}
 	for i, kind := range kinds {
-		policy.Kinds[i] = KindPolicy{ID: kind.ID, Label: kind.Label, Reserved: autonomy.IsReserved(kind.ID)}
+		policy.Kinds[i] = KindPolicy{ID: kind.ID, Label: kind.Label, Reserved: autonomy.IsReserved(kind.ID), ReservedByDefault: kind.ReservedByDefault}
 	}
 	return policy, nil
+}
+
+// projectAutonomy resolves which project a policy read is about: a calling
+// session always gets its own project; the person must name one.
+func (s *Service) projectAutonomy(ctx context.Context, actor Actor, projectID domain.ProjectID) (domain.ProjectID, domain.AutonomyConfig, error) {
+	if actor.Session != "" {
+		var err error
+		if projectID, _, err = s.actorProject(ctx, actor); err != nil {
+			return "", domain.AutonomyConfig{}, err
+		}
+	} else if projectID == "" {
+		return "", domain.AutonomyConfig{}, apierr.Invalid("DECISION_PROJECT_REQUIRED", "Name the project with --project.", nil)
+	}
+	if projectID == "" {
+		return "", domain.AutonomyConfig{}, nil
+	}
+	project, found, err := s.store.GetProject(ctx, string(projectID))
+	if err != nil {
+		return "", domain.AutonomyConfig{}, err
+	}
+	if !found {
+		return "", domain.AutonomyConfig{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	}
+	return projectID, project.Config.Autonomy, nil
 }
 
 // Get returns one call and its ordered ledger history.

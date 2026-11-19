@@ -926,6 +926,72 @@ describe("ProjectSettingsForm", () => {
 		expect(request?.body.config.autoReview).toBe(false);
 	});
 
+	it("turns on observe mode and saves the reserved decision kinds", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "git@github.com:acme/project-one.git",
+			defaultBranch: "main",
+			config: { worker: { agent: "codex" }, orchestrator: { agent: "claude-code" } },
+		});
+		const projectGet = getMock.getMockImplementation()!;
+		getMock.mockImplementation(async (path: string, init?: unknown) => {
+			if (path === "/api/v1/decisions/kinds") {
+				return { data: { projectId: "proj-1", mode: "off", kinds: [
+					{ id: "production", label: "Production changes and deploys", reserved: true, reservedByDefault: true },
+					{ id: "pr_hygiene", label: "Pull request hygiene", reserved: false, reservedByDefault: false },
+					{ id: "other", label: "Anything else", reserved: true, reservedByDefault: true },
+				] }, error: undefined };
+			}
+			return projectGet(path, init);
+		});
+
+		renderSettings("proj-1", undefined, "general");
+		const mode = await screen.findByRole("button", { name: "Autonomy" });
+		expect(mode).toHaveTextContent("Off");
+		expect(screen.queryByRole("switch", { name: "Pull request hygiene" })).not.toBeInTheDocument();
+
+		await userEvent.click(mode);
+		await userEvent.click(screen.getByRole("menuitem", { name: "Observe" }));
+		expect(screen.getByRole("switch", { name: "Production changes and deploys" })).toBeChecked();
+		const prHygiene = screen.getByRole("switch", { name: "Pull request hygiene" });
+		expect(prHygiene).not.toBeChecked();
+		await userEvent.click(prHygiene);
+		expect(screen.getByRole("button", { name: "Reset to defaults" })).toBeInTheDocument();
+
+		submitSettings();
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+		expect(putMock.mock.calls[0]?.[1]?.body.config.autonomy).toEqual({ mode: "observe", reserved: ["production", "pr_hygiene", "other"] });
+	});
+
+	it("hides autonomy and keeps its stored config when the daemon does not serve decision kinds", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			config: { worker: { agent: "codex" }, orchestrator: { agent: "claude-code" }, autonomy: { mode: "observe" }, autoReview: false },
+		});
+		const projectGet = getMock.getMockImplementation()!;
+		getMock.mockImplementation(async (path: string, init?: unknown) => {
+			if (path === "/api/v1/decisions/kinds") return { data: undefined, error: { code: "NOT_FOUND", message: "Not found" } };
+			return projectGet(path, init);
+		});
+
+		renderSettings("proj-1", undefined, "general");
+		const toggle = await screen.findByRole("switch", { name: "Workers request a built-in review" });
+		await waitFor(() => expect(getMock).toHaveBeenCalledWith("/api/v1/decisions/kinds", expect.anything()));
+		expect(screen.queryByRole("button", { name: "Autonomy" })).not.toBeInTheDocument();
+		await userEvent.click(toggle);
+		submitSettings();
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+		expect(putMock.mock.calls[0]?.[1]?.body.config.autonomy).toEqual({ mode: "observe" });
+	});
+
 	it("loads and saves whether workers request an AO review", async () => {
 		mockProject({
 			id: "proj-1",
