@@ -50,7 +50,7 @@ func TestAutonomyInstructionsOnModeDecidesAndRecords(t *testing.T) {
 		"Reserved for the human:\n- Production changes and deploys (`production`)",
 		"Not reserved:\n- Ticket hygiene (`ticket_hygiene`)",
 		"`ao decision decide --kind <id> --what <what you decided> --why <why> --undo <how to undo it>`",
-		"Decided for you",
+		"`ao decision ls --decided`",
 		"record the decision before you act on it",
 		"`ao decision outcome <id> --text \"Not carried out: <why>\"`",
 		"confirm straight away with `ao decision carried-out <id>`",
@@ -63,5 +63,8 @@ func TestAutonomyInstructionsOnModeDecidesAndRecords(t *testing.T) {
 	}
 	if strings.Contains(got, "--would-decide") {
 		t.Error("on mode does not ask for predictions")
+	}
+	if strings.Contains(got, "Decisions page") || strings.Contains(got, "Decided for you") {
+		t.Error("the Decisions page does not list decided calls yet; point only at ao decision ls --decided")
 	}
 }

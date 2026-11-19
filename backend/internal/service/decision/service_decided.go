@@ -51,6 +51,16 @@ func (s *Service) Decide(ctx context.Context, actor Actor, input DecideInput) (d
 	if err := domain.ValidateDecisionDecided(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
+	// A session that retries after losing the response must not leave two
+	// records of one action, so an identical open record is returned as is.
+	unlock, err := s.mutationGate.acquire(ctx, "decide:"+string(session.ID))
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	defer unlock()
+	if existing, found, err := s.openIdenticalDecision(ctx, session.ID, payload); err != nil || found {
+		return existing, err
+	}
 	// The session has usually acted already, so a policy mismatch never
 	// loses the record: it is kept, flagged, and shown to the person.
 	switch {
@@ -112,6 +122,12 @@ func (s *Service) closeStandingDecision(ctx context.Context, actor Actor, call d
 	if actor.Session != "" && !s.owns(call, actor.Session) {
 		return domain.DecisionCall{}, notOwner()
 	}
+	// Once confirmed as carried out, the action happened: only the person
+	// may close the record, so a session cannot hide it from review.
+	if actor.Session != "" && call.Decided.CarriedOut {
+		return domain.DecisionCall{}, apierr.Conflict("DECISION_CARRIED_OUT",
+			"This decision was confirmed as carried out, so it stays for the person to review or overrule. Do not close it.", nil)
+	}
 	if input.ForEntry != "" && input.ForEntry != call.Decided.EntryID {
 		return domain.DecisionCall{}, answerChanged(call)
 	}
@@ -146,4 +162,18 @@ func (s *Service) CarriedOut(ctx context.Context, actor Actor, callID string) (d
 		return call, nil
 	}
 	return s.append(ctx, actor, call.ID, domain.DecisionKindCarriedOut, domain.DecisionCarriedOutPayload{ForEntry: call.Decided.EntryID})
+}
+
+func (s *Service) openIdenticalDecision(ctx context.Context, session domain.SessionID, payload domain.DecisionDecidedPayload) (domain.DecisionCall, bool, error) {
+	calls, err := s.store.ListDecisionCallsForSession(ctx, s.hostID, session, -1)
+	if err != nil {
+		return domain.DecisionCall{}, false, err
+	}
+	for _, call := range calls {
+		if call.Decided != nil && call.State == domain.DecisionStateDecided &&
+			call.Raised.Title == payload.What && call.Raised.Kind == payload.Kind && call.Decided.Undo == payload.Undo {
+			return call, true, nil
+		}
+	}
+	return domain.DecisionCall{}, false, nil
 }

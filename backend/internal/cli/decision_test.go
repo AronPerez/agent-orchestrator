@@ -725,3 +725,18 @@ func TestDecisionCarriedOut(t *testing.T) {
 		t.Fatalf("method=%s uri=%s out=%q", method, uri, out)
 	}
 }
+
+func TestDecisionListMarksOutsidePolicyDecisions(t *testing.T) {
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"calls":[{"id":"dec_5","state":"decided","stateLabel":"Decided for you","title":"Closed #12","decided":{"undo":"u","outsidePolicy":"kind_reserved","carriedOut":true}}]}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "")
+	out, _, err := executeCLI(t, deps, "decision", "ls", "--decided")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Outside policy: this kind of decision is now reserved for the person") || strings.Contains(out, "Not confirmed carried out") {
+		t.Fatalf("out = %q", out)
+	}
+}

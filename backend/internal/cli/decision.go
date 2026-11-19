@@ -658,13 +658,8 @@ func outsidePolicyNote(id string, decided *decisionDecidedAPI) string {
 	if decided == nil {
 		return ""
 	}
-	var why string
-	switch decided.OutsidePolicy {
-	case "autonomy_not_on":
-		why = "this project no longer lets sessions decide on the person's behalf"
-	case "kind_reserved":
-		why = "this kind of decision is now reserved for the person"
-	default:
+	why := outsidePolicyReason(decided.OutsidePolicy)
+	if why == "" {
 		return ""
 	}
 	return fmt.Sprintf("Kept, but %s.\n"+
@@ -693,6 +688,16 @@ func newDecisionCarriedOutCommand(ctx *commandContext) *cobra.Command {
 			return err
 		},
 	}
+}
+
+func outsidePolicyReason(reason string) string {
+	switch reason {
+	case "autonomy_not_on":
+		return "this project no longer lets sessions decide on the person's behalf"
+	case "kind_reserved":
+		return "this kind of decision is now reserved for the person"
+	}
+	return ""
 }
 
 func newDecisionOverruleCommand(ctx *commandContext) *cobra.Command {
@@ -908,6 +913,11 @@ func writeDecisionCall(w io.Writer, call decisionCallAPI, outcomeOwed bool) erro
 	}
 	if call.Retired {
 		if _, err := fmt.Fprintln(w, "  No longer applies"); err != nil {
+			return err
+		}
+	}
+	if call.Decided != nil && call.Decided.OutsidePolicy != "" {
+		if _, err := fmt.Fprintf(w, "  Outside policy: %s\n", outsidePolicyReason(call.Decided.OutsidePolicy)); err != nil {
 			return err
 		}
 	}

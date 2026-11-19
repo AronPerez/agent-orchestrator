@@ -121,8 +121,8 @@ it: confirm with `ao decision carried-out <id>` and tell the human, so they can
 overrule it. When you are unsure
 which kind applies, or whether it can be undone, raise a call instead.
 
-The human sees the decision on the Decisions page under Decided for you, or
-with `ao decision ls --decided`, and may overrule it. An overrule arrives as a
+The human reviews these with `ao decision ls --decided` and may overrule any
+of them. An overrule arrives as a
 message that begins "I overruled the decision you made for me", with the undo
 note and the human's note. Undo the decision, then record the outcome with
 the exact `ao decision outcome` command in the message. Only the human
