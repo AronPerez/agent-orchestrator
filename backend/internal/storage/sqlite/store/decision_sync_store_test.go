@@ -13,6 +13,8 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/cdc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync/ledgertest"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 )
@@ -375,4 +377,12 @@ func TestAuditDecisionOriginsReportsNoneForSlice1Data(t *testing.T) {
 	if err != nil || len(last) != 2 {
 		t.Fatalf("last heard = %v, %v", last, err)
 	}
+}
+
+// The SQLite store and the in-memory ledger the convergence tests use must
+// behave identically under the sync rules.
+func TestSQLiteLedgerConformance(t *testing.T) {
+	ledgertest.RunApplyConformance(t, func(t *testing.T, _ string) decisionsync.Ledger {
+		return newTestStore(t)
+	})
 }

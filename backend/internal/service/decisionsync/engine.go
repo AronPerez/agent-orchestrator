@@ -16,6 +16,9 @@ type EngineDeps struct {
 	Now          func() time.Time
 	// OnApplied runs after a pulled page stored at least one entry.
 	OnApplied func(peerHostID string, result domain.DecisionApplyResult)
+	// PageEntries caps the entries pushed per page; 0 means the protocol
+	// maximum. Tests use small pages.
+	PageEntries int
 }
 
 // Outcome is what one Sync did.
@@ -46,6 +49,7 @@ func NewEngine(deps EngineDeps) *Engine {
 	if deps.MachineLabel == nil {
 		deps.MachineLabel = func() string { return "" }
 	}
+	deps.PageEntries = pageEntries(deps.PageEntries)
 	return &Engine{deps: deps}
 }
 
@@ -60,7 +64,7 @@ func (e *Engine) Sync(ctx context.Context, expectedPeer string, remote Remote) (
 	if err != nil {
 		return out, err
 	}
-	peerHeads, err := e.push(ctx, expectedPeer, remote, peer, &out)
+	peerHeads, err := e.push(ctx, remote, peer, &out)
 	if err != nil {
 		return out, err
 	}
@@ -146,14 +150,14 @@ func (e *Engine) pull(ctx context.Context, peerID string, remote Remote, out *Ou
 
 // push sends pages the peer lacks until it holds everything this ledger
 // serves, or a page makes no progress.
-func (e *Engine) push(ctx context.Context, peerID string, remote Remote, last ExchangeResponse, out *Outcome) (domain.DecisionHeads, error) {
+func (e *Engine) push(ctx context.Context, remote Remote, last ExchangeResponse, out *Outcome) (domain.DecisionHeads, error) {
 	peerHave, peerHeads := last.Have, last.Heads
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		entries, _, err := e.deps.Ledger.ListDecisionEntriesAfter(ctx, skipStopped(peerHave, peerHeads),
-			domain.MaxDecisionSyncPageEntries, domain.MaxDecisionSyncPageBytes)
+			e.deps.PageEntries, domain.MaxDecisionSyncPageBytes)
 		if err != nil {
 			return nil, err
 		}

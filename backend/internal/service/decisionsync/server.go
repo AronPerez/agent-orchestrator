@@ -18,6 +18,9 @@ type ServerDeps struct {
 	Now          func() time.Time
 	// OnApplied runs after a pushed page stored at least one entry.
 	OnApplied func(peerHostID string, result domain.DecisionApplyResult)
+	// PageEntries caps the entries served per page; 0 means the protocol
+	// maximum. Tests use small pages.
+	PageEntries int
 }
 
 // Server answers exchanges and pushes from linked peers. The caller has
@@ -37,6 +40,7 @@ func NewServer(deps ServerDeps) *Server {
 	if deps.MachineLabel == nil {
 		deps.MachineLabel = func() string { return "" }
 	}
+	deps.PageEntries = pageEntries(deps.PageEntries)
 	return &Server{deps: deps, changed: make(chan struct{})}
 }
 
@@ -46,13 +50,6 @@ func (s *Server) Changed() {
 	close(s.changed)
 	s.changed = make(chan struct{})
 	s.mu.Unlock()
-}
-
-// changes returns a channel closed by the next Changed.
-func (s *Server) changes() <-chan struct{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.changed
 }
 
 func (s *Server) checkPeer(peerHostID, bodyHostID string) error {
@@ -79,7 +76,7 @@ func (s *Server) Exchange(ctx context.Context, peerHostID string, req ExchangeRe
 }
 
 func (s *Server) page(ctx context.Context, have domain.DecisionVector) (ExchangeResponse, error) {
-	entries, more, err := s.deps.Ledger.ListDecisionEntriesAfter(ctx, have, domain.MaxDecisionSyncPageEntries, domain.MaxDecisionSyncPageBytes)
+	entries, more, err := s.deps.Ledger.ListDecisionEntriesAfter(ctx, have, s.deps.PageEntries, domain.MaxDecisionSyncPageBytes)
 	if err != nil {
 		return ExchangeResponse{}, fmt.Errorf("read sync page: %w", err)
 	}
@@ -148,4 +145,11 @@ func skipStopped(have domain.DecisionVector, heads domain.DecisionHeads) domain.
 		out[origin] = math.MaxInt64
 	}
 	return out
+}
+
+func pageEntries(n int) int {
+	if n <= 0 || n > domain.MaxDecisionSyncPageEntries {
+		return domain.MaxDecisionSyncPageEntries
+	}
+	return n
 }

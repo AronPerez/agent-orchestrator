@@ -92,13 +92,9 @@ func (s *Store) ListDecisionEntriesAfter(ctx context.Context, have domain.Decisi
 
 // ApplyDecisionEntries stores entries received from peerHostID verbatim under
 // the sync apply rules (domain.ApplyDecisionSyncBatch), in one transaction,
-// then recomputes each affected call once in call id order.
+// then recomputes each affected call once in call id order. An invalid entry
+// fails the whole batch before anything is written.
 func (s *Store) ApplyDecisionEntries(ctx context.Context, peerHostID string, entries []domain.DecisionEntry, now time.Time) (domain.DecisionApplyResult, error) {
-	for _, e := range entries {
-		if err := domain.ValidateDecisionSyncEntry(e); err != nil {
-			return domain.DecisionApplyResult{}, fmt.Errorf("apply decision entries: entry %q: %w", e.ID, err)
-		}
-	}
 	if len(entries) == 0 {
 		return domain.DecisionApplyResult{}, nil
 	}
