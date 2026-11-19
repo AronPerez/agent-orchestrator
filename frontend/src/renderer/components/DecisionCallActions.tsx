@@ -23,8 +23,13 @@ function isWebUrl(url: string): boolean {
 	}
 }
 
-/** True when the panel offers an answer form for this state. */
+/**
+ * True when the panel offers an answer form for this call. A decision made
+ * for the person is never a question, even once overruled: the daemon refuses
+ * an answer to it.
+ */
 export function decisionAcceptsAnswer(call: DecisionCall): boolean {
+	if (call.decided) return false;
 	return call.state === "needs_you" || call.state === "in_progress" || call.state === "dismissed";
 }
 

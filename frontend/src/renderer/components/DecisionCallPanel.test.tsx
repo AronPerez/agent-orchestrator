@@ -441,6 +441,17 @@ describe("DecisionCallPanel", () => {
 			expect(screen.getByText(/^Carried out \S/)).toBeInTheDocument();
 		});
 
+		// The daemon refuses an answer to a decision made for the person, so an
+		// overruled one offers no answer form, only the outcome.
+		it("offers no answer form once a decision is overruled", async () => {
+			serve({ ...decidedCall, state: "in_progress", stateLabel: "In progress", note: "Keep #12 open", delivery: "pending", standingEntryId: "d3" }, decidedHistory);
+			renderPanel();
+			expect(await screen.findByRole("button", { name: "Record outcome" })).toBeInTheDocument();
+			expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: "Send decision" })).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: "Overrule" })).not.toBeInTheDocument();
+		});
+
 		it("overrules only with a note saying what to do instead", async () => {
 			serve(decidedCall, decidedHistory);
 			renderPanel();

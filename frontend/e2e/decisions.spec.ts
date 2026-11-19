@@ -245,4 +245,6 @@ test("decisions: a decision made for the person has its own lane and can be over
 	await panel.getByRole("button", { name: "Overrule" }).click();
 	await expect(states.getByRole("listitem")).toHaveText([/Needs you\s*0/, /Decided for you\s*1/, /In progress\s*1/, /Done\s*0/]);
 	await expect(panel.getByRole("list", { name: "History" }).getByText(/Overruled/)).toBeVisible();
+	await expect(panel.getByRole("button", { name: "Record outcome" })).toBeVisible();
+	await expect(panel.getByRole("button", { name: "Send decision" })).toHaveCount(0);
 });
