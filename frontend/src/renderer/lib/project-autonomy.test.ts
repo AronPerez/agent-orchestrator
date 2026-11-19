@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAutonomyConfig, effectiveReserved, initialAutonomyDraft, isDefaultReserved, toggleReserved, type DecisionKindOption } from "./project-autonomy";
+import { buildAutonomyConfig, decisionKindsFromResponse, effectiveReserved, initialAutonomyDraft, isDefaultReserved, toggleReserved, type DecisionKindOption } from "./project-autonomy";
 
 const kinds: DecisionKindOption[] = [
 	{ id: "production", label: "Production changes and deploys", reservedByDefault: true },
@@ -37,5 +37,22 @@ describe("project autonomy", () => {
 		expect(initialAutonomyDraft(undefined)).toEqual({ autonomyMode: "off", reservedKinds: undefined });
 		expect(initialAutonomyDraft({ mode: "observe", reserved: [] })).toEqual({ autonomyMode: "observe", reservedKinds: undefined });
 		expect(initialAutonomyDraft({ reserved: ["design"] })).toEqual({ autonomyMode: "off", reservedKinds: ["design"] });
+	});
+});
+
+describe("decisionKindsFromResponse", () => {
+	it("keeps kinds that carry their default reservation", () => {
+		expect(decisionKindsFromResponse([{ id: "production", label: "Production", reserved: true, reservedByDefault: true }])).toEqual([
+			{ id: "production", label: "Production", reservedByDefault: true },
+		]);
+	});
+
+	it("refuses a response from a daemon that does not report default reservations", () => {
+		// A daemon with autonomy levels but without reservedByDefault would make
+		// every default-reserved kind look unreserved and one click would save
+		// a list that drops them all.
+		expect(decisionKindsFromResponse([{ id: "production", label: "Production", reserved: true }])).toBeUndefined();
+		expect(decisionKindsFromResponse([])).toBeUndefined();
+		expect(decisionKindsFromResponse(undefined)).toBeUndefined();
 	});
 });

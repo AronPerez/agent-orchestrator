@@ -48,3 +48,15 @@ export function buildAutonomyConfig(mode: AutonomyMode, reserved: string[] | und
 	};
 	return Object.keys(config).length > 0 ? config : undefined;
 }
+
+/**
+ * The decision kinds from a daemon's response, or undefined when the daemon
+ * cannot back the settings controls. A daemon that serves kinds without
+ * `reservedByDefault` (the first autonomy release) would make every
+ * default-reserved kind look unreserved, and one switch would then save a
+ * list that silently drops them, so its response is refused.
+ */
+export function decisionKindsFromResponse(kinds: readonly { id: string; label: string; reserved?: boolean; reservedByDefault?: boolean }[] | undefined): DecisionKindOption[] | undefined {
+	if (!kinds || kinds.length === 0 || kinds.some((kind) => typeof kind.reservedByDefault !== "boolean")) return undefined;
+	return kinds.map((kind) => ({ id: kind.id, label: kind.label, reservedByDefault: kind.reservedByDefault as boolean }));
+}
