@@ -44,6 +44,70 @@ func TestReconcileSessionOutputType_ArtifactFilesPersistArtifactOutput(t *testin
 	}
 }
 
+func TestReconcileSessionOutputType_PlanFirstPlanIsNotADeliverable(t *testing.T) {
+	for _, state := range []domain.PlanFirstState{domain.PlanFirstPending, domain.PlanFirstApproved} {
+		t.Run(string(state), func(t *testing.T) {
+			m, st, _ := newManager()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "plan.md"), []byte("# Plan"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			st.sessions["mer-1"] = domain.SessionRecord{
+				ID: "mer-1", PlanFirstState: state,
+				Metadata: domain.SessionMetadata{ArtifactDir: dir},
+			}
+			registeredAt := time.Now()
+			st.artifacts["mer-1"] = []domain.SessionArtifactRecord{{
+				ID: "approval-plan", SessionID: "mer-1", Path: "plan.md",
+				Role: domain.SessionArtifactRolePlanApproval, RegisteredAt: &registeredAt,
+			}}
+
+			if err := m.ReconcileSessionOutputType(ctx, "mer-1"); err != nil {
+				t.Fatal(err)
+			}
+			if got := st.sessions["mer-1"].OutputType; got != domain.SessionOutputNone {
+				t.Fatalf("plan-only outputType = %q, want %q", got, domain.SessionOutputNone)
+			}
+
+			if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte("# Report"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.ReconcileSessionOutputType(ctx, "mer-1"); err != nil {
+				t.Fatal(err)
+			}
+			if got := st.sessions["mer-1"].OutputType; got != domain.SessionOutputArtifact {
+				t.Fatalf("deliverable outputType = %q, want %q", got, domain.SessionOutputArtifact)
+			}
+		})
+	}
+}
+
+func TestReconcileSessionOutputType_CountsApprovalPlanAsRequestedArtifactAfterDone(t *testing.T) {
+	m, st, _ := newManager()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "plan.md"), []byte("# Final plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registeredAt := time.Now()
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", PlanFirstState: domain.PlanFirstApproved,
+		RequestedOutput: domain.RequestedOutputArtifact,
+		Metadata:        domain.SessionMetadata{ArtifactDir: dir},
+	}
+	st.artifacts["mer-1"] = []domain.SessionArtifactRecord{{
+		ID: "approval-plan", SessionID: "mer-1", Path: "plan.md",
+		Role: domain.SessionArtifactRolePlanApproval, RegisteredAt: &registeredAt,
+	}}
+	st.done["mer-1"] = domain.SessionDoneReport{ID: "done-1"}
+
+	if err := m.ReconcileSessionOutputType(ctx, "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.sessions["mer-1"].OutputType; got != domain.SessionOutputArtifact {
+		t.Fatalf("outputType = %q, want %q", got, domain.SessionOutputArtifact)
+	}
+}
+
 func TestReconcileSessionOutputType_PRAndArtifactFilesCombine(t *testing.T) {
 	m, st, _ := newManager()
 	dir := t.TempDir()

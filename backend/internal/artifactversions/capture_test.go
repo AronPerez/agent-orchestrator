@@ -475,6 +475,75 @@ func TestTrackFromBatchedSessionRowsKeepsDestinationHistory(t *testing.T) {
 	}
 }
 
+func TestTrackRefreshesPlanApprovalPinAfterAtomicReplacement(t *testing.T) {
+	h := newHarness(t)
+	h.write("plan.md", "# First plan")
+	if updated, err := h.store.SetSessionPlanFirstState(h.ctx, h.sess.ID, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	svc := sessionsvc.NewWithDeps(sessionsvc.Deps{Store: h.store, DataDir: h.cap.dataDir})
+	if _, err := svc.RegisterArtifacts(h.ctx, h.sess.ID, []string{"plan.md"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := h.store.ListSessionArtifacts(h.ctx, h.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var approval domain.SessionArtifactRecord
+	for _, row := range rows {
+		if row.Path == "plan.md" {
+			approval = row
+		}
+	}
+	if approval.ID == "" || approval.Role != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("registered plan approval = %+v", approval)
+	}
+	if err := os.Remove(filepath.Join(h.dir, "plan.md")); err != nil {
+		t.Fatal(err)
+	}
+	h.write("plan.md", "# Replacement plan")
+	if _, err := h.cap.Track(h.ctx, h.sess, rows); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = h.store.ListSessionArtifacts(h.ctx, h.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planInfo, err := os.Stat(filepath.Join(h.dir, "plan.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinInfo, err := os.Stat(filepath.Join(h.dir, ".versions", "plan-approval-pins", approval.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(planInfo, pinInfo) {
+		t.Fatal("plan approval pin still names the pre-replacement inode")
+	}
+
+	if err := os.Rename(filepath.Join(h.dir, "plan.md"), filepath.Join(h.dir, "project-plan.md")); err != nil {
+		t.Fatal(err)
+	}
+	h.write("project-plan.md", "# Edited replacement plan")
+	for i := range rows {
+		if rows[i].ID == approval.ID {
+			rows[i].File.Birth = 0
+			rows[i].File.Generation = 0
+			rows[i].File.ModTime = planInfo.ModTime().UnixNano()
+		}
+	}
+	files, err := h.cap.Track(h.ctx, h.sess, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if file.Path == "project-plan.md" && file.ID == approval.ID && file.Role == domain.SessionArtifactRolePlanApproval && file.Registered {
+			return
+		}
+	}
+	t.Fatalf("renamed edited plan lost approval identity: %+v", files)
+}
+
 func TestRegistrationBeforeFirstScanKeepsRenamedDeliverable(t *testing.T) {
 	for _, tracked := range []bool{false, true} {
 		for _, bundle := range []bool{false, true} {

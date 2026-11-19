@@ -6620,7 +6620,15 @@ func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now t
 		AutoReviewEnabled: projectConfig.AutoReview,
 		AutoInjectReview:  true,
 		AutoInjectCI:      true,
+		PlanFirstState:    planFirstState(cfg.PlanFirst),
 	}
+}
+
+func planFirstState(enabled bool) domain.PlanFirstState {
+	if enabled {
+		return domain.PlanFirstPending
+	}
+	return ""
 }
 
 func validateSpawnContract(cfg ports.SpawnConfig) error {
@@ -6709,13 +6717,16 @@ func isDefaultDevDataDir(dataDir string) bool {
 	return filepath.Clean(got) == filepath.Clean(want)
 }
 
-func buildPrompt(cfg ports.SpawnConfig) string {
+func buildPrompt(cfg ports.SpawnConfig, sessionID domain.SessionID) string {
 	return buildTaskPrompt(taskPromptConfig{
 		Role:         promptRoleForKind(cfg.Kind),
 		Prompt:       cfg.Prompt,
 		IssueID:      string(cfg.IssueID),
 		IssueContext: cfg.IssueContext,
 		BaseBranch:   cfg.BaseBranch,
+		ProjectID:    string(cfg.ProjectID),
+		SessionID:    string(sessionID),
+		PlanFirst:    cfg.PlanFirst,
 	})
 }
 
@@ -6843,7 +6854,7 @@ func appendAttachmentReferences(prompt string, refs []string) string {
 // promptless spawn delivers no user prompt at all: the agent simply lands at an
 // empty input box rather than receiving an auto-generated kickoff turn.
 func (m *Manager) buildSpawnTexts(ctx context.Context, cfg ports.SpawnConfig, sessionID domain.SessionID) (prompt, systemPrompt string, err error) {
-	prompt = buildPrompt(cfg)
+	prompt = buildPrompt(cfg, sessionID)
 	if cfg.Fork != nil {
 		// The lineage row is written after spawn returns, so name the
 		// original here; restores read it from the lineage.

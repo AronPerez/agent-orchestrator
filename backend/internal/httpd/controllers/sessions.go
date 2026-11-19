@@ -404,6 +404,14 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	if in.Kind == "" {
 		in.Kind = domain.KindWorker
 	}
+	if in.PlanFirst && (in.Kind != domain.KindWorker || strings.TrimSpace(string(in.ProjectID)) == "") {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_PLAN_FIRST", "planFirst is supported only for worker sessions in registered projects", nil)
+		return
+	}
+	if in.PlanFirst && strings.TrimSpace(in.Prompt) == "" && strings.TrimSpace(string(in.IssueID)) == "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_PLAN_FIRST", "planFirst requires a prompt or issueId", nil)
+		return
+	}
 	goal, timebox, err := validateWorkerContract(in.Goal, in.TimeboxSeconds, in.Kind, in.ProjectID)
 	if err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_WORKER_CONTRACT", err.Error(), nil)
@@ -424,7 +432,7 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	// A standalone worker has no project to start in the background.
 	async := in.Async && in.ProjectID != ""
-	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentHostID: in.ParentHostID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, BaseBranch: strings.TrimSpace(in.BaseBranch), RequestedMode: in.Mode, Prompt: in.Prompt, Goal: goal, Timebox: timebox, RequestedOutput: in.RequestedOutput, DisplayName: displayName, DisplayNameExplicit: in.DisplayNameExplicit && displayName != "", Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, EffortOverride: strings.TrimSpace(in.Effort) != "", AgentAccountID: strings.TrimSpace(in.AccountID), ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash, Async: async})
+	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentHostID: in.ParentHostID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, BaseBranch: strings.TrimSpace(in.BaseBranch), RequestedMode: in.Mode, Prompt: in.Prompt, Goal: goal, Timebox: timebox, RequestedOutput: in.RequestedOutput, PlanFirst: in.PlanFirst, DisplayName: displayName, DisplayNameExplicit: in.DisplayNameExplicit && displayName != "", Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, EffortOverride: strings.TrimSpace(in.Effort) != "", AgentAccountID: strings.TrimSpace(in.AccountID), ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash, Async: async})
 	if err != nil {
 		writeSpawnError(w, r, err)
 		return

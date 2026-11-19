@@ -59,14 +59,19 @@ describe("decision inbox API", () => {
 		});
 	});
 
-	it("answers through the machine that supplied the call", async () => {
+	it("answers with an optional note through the machine that supplied the call", async () => {
 		const answered = { ...call("dec_1", "2026-11-18T10:00:00Z"), state: "in_progress" as const, stateLabel: "In progress" };
 		postMock.mockResolvedValue({ data: answered });
 
-		await expect(answerDecisionInboxCall({ sourceHostId: "remote-a", callId: "dec_1", option: 2 })).resolves.toEqual(answered);
+		await expect(answerDecisionInboxCall({
+			sourceHostId: "remote-a",
+			callId: "dec_1",
+			option: 2,
+			note: "Add a rollback step.",
+		})).resolves.toEqual(answered);
 		expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
 			params: { path: { id: "dec_1" } },
-			body: { choice: "option", option: 2 },
+			body: { choice: "option", option: 2, note: "Add a rollback step." },
 		});
 	});
 });

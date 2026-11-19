@@ -42,6 +42,7 @@ export type DecisionInboxAnswer = {
 	sourceHostId: HostId;
 	callId: string;
 	option: number;
+	note?: string;
 };
 
 export async function fetchDecisionInboxCalls(hostId: HostId = LOCAL_HOST, signal?: AbortSignal): Promise<DecisionCall[]> {
@@ -56,7 +57,7 @@ export async function fetchDecisionInboxCalls(hostId: HostId = LOCAL_HOST, signa
 export async function answerDecisionInboxCall(input: DecisionInboxAnswer): Promise<DecisionCall> {
 	const { data, error } = await clientForSessionHost(input.sourceHostId).POST("/api/v1/decisions/{id}/answer", {
 		params: { path: { id: input.callId } },
-		body: { choice: "option", option: input.option },
+		body: { choice: "option", option: input.option, ...(input.note ? { note: input.note } : {}) },
 	});
 	if (error || !data) throw apiErrorException(error, "Could not send decision");
 	return data;

@@ -59,11 +59,12 @@ export function useDecisionInbox(enabled: boolean) {
 		},
 	});
 
-	const answer = useCallback((entry: DecisionInboxEntry, option: number) => {
+	const answer = useCallback((entry: DecisionInboxEntry, option: number, note?: string) => {
 		answerMutation.mutate({
 			sourceHostId: entry.sourceHostId,
 			callId: entry.call.id,
 			option,
+			note,
 		});
 	}, [answerMutation.mutate]);
 	const retry = useCallback(() => {

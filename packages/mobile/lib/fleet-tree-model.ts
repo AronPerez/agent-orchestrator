@@ -133,7 +133,9 @@ export function buildMobileFleetTree({
 			},
 			sessions: rows,
 		};
-	}));
+	}), {
+		knownMachines: hosts.map((host) => ({ id: host.hostId, reachable: host.connection === "open" })),
+	});
 	return tree.flatMap((project) => {
 		const machines = project.machines.filter((machine) => machine.sessions.length > 0);
 		return machines.length > 0 ? [{ ...project, machines }] : [];

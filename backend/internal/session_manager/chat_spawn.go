@@ -65,6 +65,10 @@ type chatEnvironmentPreflighter interface {
 	PreflightChatWithEnv(context.Context, domain.AgentHarness, ports.PermissionMode, map[string]string) error
 }
 
+type decisionChatSender interface {
+	SendIfIdle(context.Context, domain.SessionID, ports.ChatUserMessage) (bool, error)
+}
+
 func (m *Manager) preflightChat(ctx context.Context, harness domain.AgentHarness, permissions ports.PermissionMode, env map[string]string) error {
 	if preflighter, ok := m.chat.(chatEnvironmentPreflighter); ok {
 		return preflighter.PreflightChatWithEnv(ctx, harness, permissions, env)
@@ -483,6 +487,50 @@ func (m *Manager) sendChat(ctx context.Context, id domain.SessionID, message, cl
 		return true, fmt.Errorf("send %s: %w", id, relayErr)
 	}
 	return true, nil
+}
+
+// DeliverDecisionAnswer delivers a ledger answer as the person's own turn.
+// Chat answers are never queued behind a running turn: a queued approval could
+// be cancelled by Stop after the ledger had already opened the gate. The
+// standing entry ID makes an accepted retry idempotent across daemon restarts.
+func (m *Manager) DeliverDecisionAnswer(ctx context.Context, id domain.SessionID, message, deliveryID string, at time.Time) error {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return fmt.Errorf("send %s: session: %w", id, err)
+	}
+	if !ok {
+		return fmt.Errorf("send %s: %w", id, ErrNotFound)
+	}
+	if domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
+		return m.SendWithOptions(ctx, id, message, nil, ports.MessageDeliveryOptions{InteractionAt: at, AuthoredByUser: true})
+	}
+	if rec.IsTerminated {
+		return fmt.Errorf("send %s: %w", id, ErrTerminated)
+	}
+	if m.chat == nil {
+		return fmt.Errorf("send %s: %w: chat mode is not available in this build", id, ports.ErrChatUnsupported)
+	}
+	if rec.Activity.State == domain.ActivityExited && !m.chat.HasLiveChatController(id) {
+		if m.agentOperationIs(id, agentOperationResume) {
+			return fmt.Errorf("send %s: %w", id, ErrResumeInProgress)
+		}
+		return fmt.Errorf("send %s: %w", id, ErrAgentExited)
+	}
+	sender, ok := m.chat.(decisionChatSender)
+	if !ok {
+		return fmt.Errorf("send %s: %w: chat mode cannot confirm immediate delivery", id, ports.ErrChatUnsupported)
+	}
+	sent, err := sender.SendIfIdle(ctx, id, ports.ChatUserMessage{
+		Text: message, ClientMessageID: "decision:" + deliveryID,
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true, InteractionAt: at,
+	})
+	if err != nil {
+		return fmt.Errorf("send %s: %w", id, err)
+	}
+	if !sent {
+		return fmt.Errorf("send %s: %w", id, ErrDeliveryUnconfirmed)
+	}
+	return nil
 }
 
 // SessionModeDefaults supplies the daemon-owned default session interface.
