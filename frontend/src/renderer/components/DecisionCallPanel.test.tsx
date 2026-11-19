@@ -7,6 +7,12 @@ import type { DecisionCall, DecisionHistoryEntry } from "../lib/decision-inbox";
 const { getMock, postMock, openExternalMock } = vi.hoisted(() => ({ getMock: vi.fn(), postMock: vi.fn(), openExternalMock: vi.fn() }));
 vi.mock("../lib/host-clients", () => ({ clientForSessionHost: () => ({ GET: getMock, POST: postMock }) }));
 vi.mock("../lib/external-link-policy", () => ({ openLinkInSystemBrowser: openExternalMock }));
+const { navigateMock, sessionTarget } = vi.hoisted(() => ({
+	navigateMock: vi.fn(),
+	sessionTarget: { current: { kind: "checking" } as import("../lib/decision-session-target").DecisionSessionTarget },
+}));
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigateMock }));
+vi.mock("../hooks/useDecisionSessionTarget", () => ({ useDecisionSessionTarget: () => sessionTarget.current }));
 
 import { DecisionCallPanel } from "./DecisionCallPanel";
 
@@ -75,6 +81,8 @@ function renderPanel(callId = "dec_1", onClose = vi.fn()) {
 beforeEach(() => {
 	getMock.mockReset().mockResolvedValue({ data: { call, history }, response: { status: 200 } });
 	postMock.mockReset().mockResolvedValue({ data: call });
+	navigateMock.mockReset();
+	sessionTarget.current = { kind: "checking" };
 	openExternalMock.mockReset();
 });
 
@@ -304,6 +312,41 @@ describe("DecisionCallPanel", () => {
 			expect(alert).toHaveTextContent("Request req-9");
 			expect(postMock).toHaveBeenCalledTimes(1);
 			await vi.waitFor(() => expect(getMock.mock.calls.length).toBeGreaterThan(reads));
+		});
+	});
+
+	describe("open session", () => {
+		it("opens exactly the owning session on its machine", async () => {
+			sessionTarget.current = { kind: "open", host: "h_laptop", projectId: "shop", sessionId: "w-5512", terminated: false };
+			renderPanel();
+			await userEvent.click(await screen.findByRole("button", { name: "Open session" }));
+			expect(navigateMock).toHaveBeenCalledWith({
+				to: "/host/$hostId/project/$projectId/session/$sessionId",
+				params: { hostId: "h_laptop", projectId: "shop", sessionId: "w-5512" },
+			});
+		});
+
+		it("opens a finished call's ended session without restarting it", async () => {
+			serve({ ...call, state: "done", stateLabel: "Done", outcome: "Shipped" });
+			sessionTarget.current = { kind: "open", host: "local", projectId: "shop", sessionId: "w-5512", terminated: true };
+			renderPanel();
+			await userEvent.click(await screen.findByRole("button", { name: "Open session" }));
+			expect(navigateMock).toHaveBeenCalledWith({ to: "/projects/$projectId/sessions/$sessionId", params: { projectId: "shop", sessionId: "w-5512" } });
+			expect(postMock).not.toHaveBeenCalled();
+		});
+
+		it.each([
+			[{ kind: "checking" } as const, "Checking session…"],
+			[{ kind: "offline", machine: "laptop" } as const, "Connect to laptop to open this session."],
+			[{ kind: "missing" } as const, "This session is no longer available."],
+			[{ kind: "error" } as const, "Could not check this session."],
+		])("is disabled and says why: %o", async (target, reason) => {
+			sessionTarget.current = target;
+			renderPanel();
+			const open = await screen.findByRole("button", { name: "Open session" });
+			expect(open).toBeDisabled();
+			expect(open).toHaveAccessibleDescription(reason);
+			expect(screen.getByText(reason)).toBeInTheDocument();
 		});
 	});
 });
