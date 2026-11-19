@@ -34,6 +34,10 @@ const (
 	// {"callId": ...}; ProjectID is empty when the call's recorded project does
 	// not exist on this machine.
 	EventDecisionUpdated EventType = "decision_updated"
+	// EventDecisionSyncUpdated invalidates decision sync freshness views. Its
+	// payload is {"hostId": ...} for a peer row or {"origin": ...} for a
+	// conflict row; it never carries a project or session.
+	EventDecisionSyncUpdated EventType = "decision_sync_updated"
 )
 
 // Event is one CDC change read from change_log. Seq is the monotonic ordering +
