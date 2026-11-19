@@ -26,6 +26,16 @@ type NotificationIntent struct {
 	PRTargetBranch     string
 	Provider           string
 	Repo               string
+
+	// Decision identity and recorded labels for decision_needed. The labels
+	// come from the call's immutable raised entry, so a remote call needs no
+	// local session or project lookup. Context, options, and notes are never
+	// part of this contract: only the title may reach a lock screen.
+	DecisionCallID       string
+	DecisionOriginHostID string
+	DecisionProjectName  string
+	DecisionStreamName   string
+	DecisionTitle        string
 }
 
 // NotificationResolution is the lifecycle-to-notification-producer contract for
@@ -33,11 +43,14 @@ type NotificationIntent struct {
 // after the durable fact that resolves the issue is written — the session left
 // the needs-input family, the PR stopped waiting on a merge.
 //
-// PRURL wins when set (a PR-scoped notification can outlive its session's
-// activity churn); otherwise the resolution is scoped to SessionID.
+// DecisionCallID targets one decision call and is exclusive: it cannot be
+// combined with a session or PR. Otherwise PRURL wins when set (a PR-scoped
+// notification can outlive its session's activity churn), and the resolution
+// is scoped to SessionID.
 type NotificationResolution struct {
-	Type       domain.NotificationType
-	SessionID  domain.SessionID
-	PRURL      string
-	ResolvedAt time.Time
+	Type           domain.NotificationType
+	SessionID      domain.SessionID
+	PRURL          string
+	DecisionCallID string
+	ResolvedAt     time.Time
 }

@@ -30,16 +30,18 @@ func (s *Store) CreateNotification(ctx context.Context, rec domain.NotificationR
 		return existing, false, nil
 	}
 	row, err := s.qw.CreateNotification(ctx, gen.CreateNotificationParams{
-		ID:        rec.ID,
-		SessionID: rec.SessionID,
-		ProjectID: optionalProjectID(rec.ProjectID),
-		PRURL:     rec.PRURL,
-		Type:      rec.Type,
-		Title:     rec.Title,
-		Body:      rec.Body,
-		Status:    rec.Status,
-		CreatedAt: rec.CreatedAt,
-		SourceKey: rec.SourceKey,
+		ID:                   rec.ID,
+		SessionID:            notificationSessionID(rec.SessionID),
+		ProjectID:            optionalProjectID(rec.ProjectID),
+		PRURL:                rec.PRURL,
+		Type:                 rec.Type,
+		Title:                rec.Title,
+		Body:                 rec.Body,
+		Status:               rec.Status,
+		CreatedAt:            rec.CreatedAt,
+		SourceKey:            rec.SourceKey,
+		DecisionCallID:       rec.DecisionCallID,
+		DecisionOriginHostID: rec.DecisionOriginHostID,
 	})
 	if err != nil {
 		if isSQLiteUnique(err) {
@@ -134,29 +136,21 @@ func (s *Store) ResolveSessionNotifications(
 	typ domain.NotificationType,
 	at time.Time,
 ) ([]domain.NotificationRecord, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	var rows []gen.Notification
-	err := s.inTx(ctx, "resolve session notifications", func(q *gen.Queries) error {
-		var err error
-		rows, err = q.ResolveSessionNotificationsByType(ctx, gen.ResolveSessionNotificationsByTypeParams{
-			ResolvedAt: nullTime(at),
-			SessionID:  id,
-			Type:       typ,
+	rows, err := s.resolveNotifications(ctx, "resolve session notifications",
+		func(q *gen.Queries) ([]gen.Notification, error) {
+			return q.ResolveSessionNotificationsByType(ctx, gen.ResolveSessionNotificationsByTypeParams{
+				ResolvedAt: nullTime(at), SessionID: &id, Type: typ,
+			})
+		},
+		func(q *gen.Queries) (int64, error) {
+			return q.DeleteDismissedSessionNotificationsByType(ctx, gen.DeleteDismissedSessionNotificationsByTypeParams{
+				SessionID: &id, Type: typ,
+			})
 		})
-		if err != nil {
-			return err
-		}
-		_, err = q.DeleteDismissedSessionNotificationsByType(ctx, gen.DeleteDismissedSessionNotificationsByTypeParams{
-			SessionID: id,
-			Type:      typ,
-		})
-		return err
-	})
 	if err != nil {
 		return nil, fmt.Errorf("resolve session notifications %s/%s: %w", id, typ, err)
 	}
-	return notificationsFromGen(rows), nil
+	return rows, nil
 }
 
 // ResolvePRNotifications marks every open notification of one type on a PR
@@ -167,35 +161,79 @@ func (s *Store) ResolvePRNotifications(
 	typ domain.NotificationType,
 	at time.Time,
 ) ([]domain.NotificationRecord, error) {
+	rows, err := s.resolveNotifications(ctx, "resolve pr notifications",
+		func(q *gen.Queries) ([]gen.Notification, error) {
+			return q.ResolvePRNotificationsByType(ctx, gen.ResolvePRNotificationsByTypeParams{
+				ResolvedAt: nullTime(at), PRURL: prURL, Type: typ,
+			})
+		},
+		func(q *gen.Queries) (int64, error) {
+			return q.DeleteDismissedPRNotificationsByType(ctx, gen.DeleteDismissedPRNotificationsByTypeParams{
+				PRURL: prURL, Type: typ,
+			})
+		})
+	if err != nil {
+		return nil, fmt.Errorf("resolve pr notifications %s/%s: %w", prURL, typ, err)
+	}
+	return rows, nil
+}
+
+// ResolveDecisionNotifications marks a call's open notification resolved and
+// returns the rows it changed. A dismissed tombstone for the call is deleted:
+// once the call leaves Needs you it has no dedupe purpose left.
+func (s *Store) ResolveDecisionNotifications(
+	ctx context.Context,
+	callID string,
+	typ domain.NotificationType,
+	at time.Time,
+) ([]domain.NotificationRecord, error) {
+	rows, err := s.resolveNotifications(ctx, "resolve decision notifications",
+		func(q *gen.Queries) ([]gen.Notification, error) {
+			return q.ResolveDecisionNotificationsByCall(ctx, gen.ResolveDecisionNotificationsByCallParams{
+				ResolvedAt: nullTime(at), DecisionCallID: callID, Type: typ,
+			})
+		},
+		func(q *gen.Queries) (int64, error) {
+			return q.DeleteDismissedDecisionNotificationsByCall(ctx, gen.DeleteDismissedDecisionNotificationsByCallParams{
+				DecisionCallID: callID, Type: typ,
+			})
+		})
+	if err != nil {
+		return nil, fmt.Errorf("resolve decision notifications %s/%s: %w", callID, typ, err)
+	}
+	return rows, nil
+}
+
+// resolveNotifications resolves visible open rows and deletes their dismissed
+// tombstones in one transaction, so a resolved issue never leaves dedupe state.
+func (s *Store) resolveNotifications(
+	ctx context.Context,
+	op string,
+	resolve func(*gen.Queries) ([]gen.Notification, error),
+	deleteDismissed func(*gen.Queries) (int64, error),
+) ([]domain.NotificationRecord, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	var rows []gen.Notification
-	err := s.inTx(ctx, "resolve pr notifications", func(q *gen.Queries) error {
+	err := s.inTx(ctx, op, func(q *gen.Queries) error {
 		var err error
-		rows, err = q.ResolvePRNotificationsByType(ctx, gen.ResolvePRNotificationsByTypeParams{
-			ResolvedAt: nullTime(at),
-			PRURL:      prURL,
-			Type:       typ,
-		})
-		if err != nil {
+		if rows, err = resolve(q); err != nil {
 			return err
 		}
-		_, err = q.DeleteDismissedPRNotificationsByType(ctx, gen.DeleteDismissedPRNotificationsByTypeParams{
-			PRURL: prURL,
-			Type:  typ,
-		})
+		_, err = deleteDismissed(q)
 		return err
 	})
 	if err != nil {
-		return nil, fmt.Errorf("resolve pr notifications %s/%s: %w", prURL, typ, err)
+		return nil, err
 	}
 	return notificationsFromGen(rows), nil
 }
 
 // ReconcileResolvedNotifications closes open notifications whose resolving
 // transition happened while the daemon was down, by re-reading the durable
-// session and PR facts. Without it a restart can strand a needs-input row in
-// the unresolved list forever.
+// session, PR, and decision-call facts. Without it a restart can strand a
+// needs-input row in the unresolved list forever, or keep announcing a call
+// that was answered, dismissed, or withdrawn while the daemon was down.
 //
 // Ready-to-merge is judged in Go rather than SQL: readiness is more than
 // open/closed, and the SCM observer persists PR facts before it asks lifecycle
@@ -250,6 +288,14 @@ func (s *Store) ReconcileResolvedNotifications(ctx context.Context, at time.Time
 			return fmt.Errorf("delete dismissed needs-input notifications: %w", err)
 		}
 		resolved = notificationsFromGen(needsInput)
+		decisions, err := q.ResolveStaleDecisionNotifications(ctx, nullTime(at))
+		if err != nil {
+			return fmt.Errorf("reconcile decision notifications: %w", err)
+		}
+		if _, err := q.DeleteStaleDismissedDecisionNotifications(ctx); err != nil {
+			return fmt.Errorf("delete dismissed decision notifications: %w", err)
+		}
+		resolved = append(resolved, notificationsFromGen(decisions)...)
 		for _, prURL := range stalePRs {
 			rows, err := q.ResolvePRNotificationsByType(ctx, gen.ResolvePRNotificationsByTypeParams{
 				ResolvedAt: nullTime(at),
@@ -365,7 +411,7 @@ func (s *Store) DeleteNotification(ctx context.Context, id string) (domain.Notif
 
 func (s *Store) getOpenNotificationByDedupe(ctx context.Context, rec domain.NotificationRecord) (domain.NotificationRecord, bool, error) {
 	row, err := s.qw.GetOpenNotificationByDedupe(ctx, gen.GetOpenNotificationByDedupeParams{
-		SessionID: rec.SessionID,
+		SessionID: notificationSessionID(rec.SessionID),
 		Type:      rec.Type,
 		PRURL:     rec.PRURL,
 	})
@@ -385,18 +431,37 @@ func isSQLiteUnique(err error) bool {
 
 func notificationFromGen(row gen.Notification) domain.NotificationRecord {
 	return domain.NotificationRecord{
-		ID:         row.ID,
-		SessionID:  row.SessionID,
-		ProjectID:  projectIDValue(row.ProjectID),
-		PRURL:      row.PRURL,
-		Type:       row.Type,
-		Title:      row.Title,
-		Body:       row.Body,
-		Status:     row.Status,
-		CreatedAt:  row.CreatedAt,
-		ResolvedAt: timeFromNull(row.ResolvedAt),
-		SourceKey:  row.SourceKey,
+		ID:                   row.ID,
+		SessionID:            notificationSessionIDValue(row.SessionID),
+		ProjectID:            projectIDValue(row.ProjectID),
+		PRURL:                row.PRURL,
+		Type:                 row.Type,
+		Title:                row.Title,
+		Body:                 row.Body,
+		Status:               row.Status,
+		CreatedAt:            row.CreatedAt,
+		ResolvedAt:           timeFromNull(row.ResolvedAt),
+		SourceKey:            row.SourceKey,
+		DecisionCallID:       row.DecisionCallID,
+		DecisionOriginHostID: row.DecisionOriginHostID,
 	}
+}
+
+// notificationSessionID stores a decision notification's empty session as
+// NULL: a call may have no local session, and an empty string would violate
+// the sessions foreign key.
+func notificationSessionID(id domain.SessionID) *domain.SessionID {
+	if id == "" {
+		return nil
+	}
+	return &id
+}
+
+func notificationSessionIDValue(id *domain.SessionID) domain.SessionID {
+	if id == nil {
+		return ""
+	}
+	return *id
 }
 
 func notificationsFromGen(rows []gen.Notification) []domain.NotificationRecord {

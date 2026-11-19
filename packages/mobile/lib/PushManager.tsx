@@ -12,7 +12,7 @@ import { markNotificationRead } from "./api";
 import { shouldPoll } from "./appStatePoll";
 import { getInstallId } from "./installId";
 import { findHost } from "./hosts";
-import { notificationTarget } from "./notificationView";
+import { notificationOpenKind, notificationTarget } from "./notificationView";
 import { announcePairedDevice, configurePushHandler, ensureAndroidChannel, onManualPushRegistration, registerForPush, retryPendingUnpairs } from "./push";
 import { useApp } from "./store";
 import { useCloud } from "./cloud/CloudProvider";
@@ -30,6 +30,9 @@ type PushData = {
 	projectId?: string;
 	prUrl?: string;
 	notificationId?: string;
+	/** A decision_needed push names its call and the machine that raised it. */
+	decisionCallId?: string;
+	decisionOriginHostId?: string;
 	/** "cloud" for a notification Orchestrator Cloud sent rather than a paired machine. */
 	source?: string;
 	orgId?: string;
@@ -138,23 +141,23 @@ export function PushManager(): null {
 		// saved pairing is the authority for whether this host may be opened.
 		const paired = data.hostId ? await findHost(data.hostId).catch(() => null) : null;
 		const hosts = hostsRef.current;
-		const destination = notificationTarget({ type: data.type ?? "", sessionId: data.sessionId, prUrl: data.prUrl, hostId: data.hostId }, paired?.id);
+		const destination = notificationTarget({ type: data.type ?? "", sessionId: data.sessionId, prUrl: data.prUrl, hostId: data.hostId, decisionCallId: data.decisionCallId }, paired?.id);
 		if (destination === "/") {
 			// Legacy or forgotten-machine push has no safe destination here.
 			router.navigate("/");
 			return;
 		}
 		const source = hosts.find(({ hostId }) => hostId === data.hostId);
-		const target = destination.startsWith("/review")
-			? "review"
-			: destination.startsWith("/session") ? "session" : "prs";
+		const target = notificationOpenKind(destination);
 		mobileTelemetry()?.capture(MOBILE_EVENTS.notificationOpened, { target, cold_start: coldStart });
 		// Best-effort mark-read so unread counts stay consistent with the dashboard.
 		if (source?.config && source.connection === "open" && data.notificationId) {
 			markNotificationRead(source.config, data.notificationId).catch(() => {});
 		}
 		// A review opens as a page even when a sheet is up when the tap arrives.
+		// A decision lands on its row in the notification feed, a page as well.
 		if (target === "review") openPage(destination as Href);
+		else if (target === "notifications") openPage(destination as Href);
 		else router.navigate(destination);
 	}
 

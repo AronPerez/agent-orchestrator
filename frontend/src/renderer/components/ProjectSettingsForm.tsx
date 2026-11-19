@@ -5,6 +5,8 @@ import { useEffect, useRef } from "react";
 import { ProjectSettingsSection as SettingsSection } from "@aoagents/product-ui";
 import type { components } from "../../api/schema";
 import { useAgentReadinessQuery, useEnsureAgentReadiness } from "../hooks/useAgentReadinessQuery";
+import { useDecisionKindsQuery } from "../hooks/useDecisionKindsQuery";
+import { buildAutonomyConfig, initialAutonomyDraft } from "../lib/project-autonomy";
 import { useRemoteProjectQuery, workspaceQueryKeyForHost, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
 import { useSettings } from "../hooks/useSettings";
 import { projectQueryKey, useProjectSettingsQuery } from "../hooks/useProjectSettingsQuery";
@@ -144,6 +146,9 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 	const activeOrchestrator = newestActiveOrchestrator(workspace?.sessions ?? []);
 	const openProjectImport = useSessionImportStore((state) => state.openProjectImport);
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
+	// A daemon that serves decision kinds also accepts the autonomy config block.
+	const decisionKindsQuery = useDecisionKindsQuery(projectId, hostId, hostConnected && !isScratchProject);
+	const decisionKinds = decisionKindsQuery.isSuccess ? decisionKindsQuery.data : undefined;
 	const initialValues: ProjectSettingsDraft = {
 		displayName: project.name,
 		defaultBranch: config.defaultBranch ?? DEFAULT_BRANCH_AUTO,
@@ -170,6 +175,7 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 				: 15,
 		),
 		workersRequestReview: config.workersRequestReview ?? false,
+		...initialAutonomyDraft(config.autonomy),
 		intakeEnabled: intake.enabled ?? false,
 		intakeRepo: intake.repo ?? "",
 		intakeAssignee: intake.assignee ?? "",
@@ -260,6 +266,7 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 					),
 					autoReview: values.autoReview,
 					workersRequestReview: values.workersRequestReview || undefined,
+					autonomy: decisionKinds ? buildAutonomyConfig(values.autonomyMode ?? "off", values.reservedKinds) : config.autonomy,
 					...(workerContractsSupported ? {
 						workerContracts: {
 							...config.workerContracts,
@@ -342,6 +349,7 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 		modelScope={() => projectId} defaultReviewer={(draft) => WORKER_DEFAULT_REVIEWERS[draft.workerAgent] ?? "claude-code"}
 		reviewerWarning={reviewerTrustWarning} save={save} saveUnchanged onSaveState={onSaveState}
 		modelHostId={hostId}
+		decisionKinds={decisionKinds}
 		generalExtra={workspace && importableProject(workspace) ? <SettingsSection title={t("sessionImport.settingsTitle")} grouped>
 			<SettingsRow label={t("sessionImport.settingsLabel")} description={t("sessionImport.settingsDescription")}>
 				<Button type="button" variant="quiet" size="sm" onClick={() => openProjectImport(projectId)}>{t("sessionImport.menuItem")}</Button>

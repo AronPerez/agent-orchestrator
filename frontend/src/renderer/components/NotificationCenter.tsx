@@ -34,9 +34,16 @@ import { aoBridge } from "../lib/bridge";
 import { formatTimeCompact } from "../lib/format-time";
 import { LOCAL_HOST, parseRefKey, refKey, sessionUiKey, type HostId } from "../lib/hosts";
 import {
+	claimDecisionToast,
 	createNotificationsTransport,
+	decisionAlertStateByCall,
+	decisionCallIdOf,
+	decisionToastId,
+	decisionUnreadDuplicates,
 	getCachedNotifications,
 	getCachedUnreadCount,
+	groupNotifications,
+	type HostedNotification,
 	isNotificationsCacheFromClear,
 	keepLatestNotificationsPage,
 	type NotificationDTO,
@@ -73,6 +80,23 @@ const REMOTE_NOTIFICATION_PREFIX = "remote-notification:";
 const CLOUD_NOTIFICATION_PREFIX = "cloud-notification:";
 const EMPTY_CLOUD_NOTIFICATIONS: CloudCpNotification[] = [];
 const notificationKey = (hostId: HostId, id: string) => refKey({ host: hostId, id });
+
+/**
+ * The bell's count: every machine's unread total plus Cloud's, counting a
+ * decision call once even when several machines announce it.
+ */
+function bellUnreadCount(
+	localUnread: NotificationsCache | undefined,
+	remoteUnread: { hosts: { hostId: HostId; data?: NotificationsPage }[]; totalUnreadCount: number },
+	cloudUnread: number | undefined,
+): number {
+	const unreadItems: HostedNotification[] = [
+		...getCachedNotifications(localUnread).map((notification) => ({ hostId: LOCAL_HOST, notification })),
+		...remoteUnread.hosts.flatMap((host) => (host.data?.notifications ?? []).map((notification) => ({ hostId: host.hostId, notification }))),
+	];
+	const total = getCachedUnreadCount(localUnread) + remoteUnread.totalUnreadCount + (cloudUnread ?? 0);
+	return Math.max(0, total - decisionUnreadDuplicates(unreadItems));
+}
 
 function useNotificationTargetNavigation() {
 	const navigateToSession = useNavigateToSession();
@@ -207,7 +231,7 @@ export function NotificationRuntime() {
 	// Whose Cloud inbox is loaded; a new account or organization is a new inbox.
 	const cloudScope = cloudAll.data ? `${cloudUserId}:${cloudOrg?.id ?? ""}` : undefined;
 	// The same count as the bell's.
-	const unreadCount = getCachedUnreadCount(unreadQuery.data) + remoteUnread.totalUnreadCount + (cloudAll.data?.unreadCount ?? 0);
+	const unreadCount = bellUnreadCount(unreadQuery.data, remoteUnread, cloudAll.data?.unreadCount);
 	const params = useParams({ strict: false }) as { hostId?: string; sessionId?: string };
 	const routeRef = useRef(params);
 	routeRef.current = params;
@@ -250,7 +274,10 @@ export function NotificationRuntime() {
 			}
 			for (const notification of host.data.notifications) {
 				if (previousIds.has(notification.id)) continue;
-				const id = `${REMOTE_NOTIFICATION_PREFIX}${notificationKey(host.hostId, notification.id)}`;
+				// One toast per decision call, whichever machine announces it first.
+				const callId = decisionCallIdOf(notification);
+				if (callId && !claimDecisionToast(callId)) continue;
+				const id = callId ? decisionToastId(callId) : `${REMOTE_NOTIFICATION_PREFIX}${notificationKey(host.hostId, notification.id)}`;
 				shownRemoteNotifications.current.set(id, notification);
 				if (shownRemoteNotifications.current.size > 256) {
 					shownRemoteNotifications.current.delete(shownRemoteNotifications.current.keys().next().value!);
@@ -311,6 +338,8 @@ export function NotificationRuntime() {
 
 	useEffect(() => {
 		return aoBridge.notifications.onClick((id) => {
+			// A decision toast only brings the app forward; the bell's card owns the call.
+			if (id.startsWith(decisionToastId(""))) return;
 			if (id.startsWith(CLOUD_NOTIFICATION_PREFIX)) {
 				const notificationId = id.slice(CLOUD_NOTIFICATION_PREFIX.length);
 				const notification = shownCloudNotifications.current.get(id) ??
@@ -420,7 +449,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 			hostId: host.hostId, label: host.label, notification,
 		}))),
 	].sort((a, b) => b.notification.createdAt.localeCompare(a.notification.createdAt)), [notifications, remoteItems]);
-	const unreadCount = getCachedUnreadCount(unreadQuery.data) + remoteUnread.totalUnreadCount + (cloudAll.data?.unreadCount ?? 0);
+	const unreadCount = bellUnreadCount(unreadQuery.data, remoteUnread, cloudAll.data?.unreadCount);
 	const confirmedClearSnapshot = isNotificationsCacheFromClear(queryClient);
 	const { openSession } = useNotificationTargetNavigation();
 	const navigateToSession = useNavigateToSession();
@@ -739,10 +768,20 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 	const localLoading = allQuery.isLoading && localEmpty;
 	const remoteLoadFailed = remoteAll.hosts.some((host) => host.isError);
 	const remoteLoading = remoteAll.hosts.some((host) => host.isLoading);
+	// A decision alert is metadata on the Attention inbox card, never a row of
+	// its own: not beside the card, and not as a ghost after the call is answered.
+	const unreadCallIds = useMemo(() => {
+		const ids = new Set<string>();
+		const groups = groupNotifications(entries);
+		for (const [callId, alert] of decisionAlertStateByCall(groups)) {
+			if (alert.unread || alert.sources.some(({ hostId, id }) => highlightedIds.has(notificationKey(hostId, id)))) ids.add(callId);
+		}
+		return ids;
+	}, [entries, highlightedIds]);
 	// Local, remote, and Cloud rows interleave by creation time.
 	const rows = useMemo(() => {
 		const merged = [
-			...entries.map((entry) => ({ kind: "host" as const, ...entry })),
+			...entries.filter(({ notification }) => !decisionCallIdOf(notification)).map((entry) => ({ kind: "host" as const, ...entry })),
 			...visibleCloudItems.map((item) => ({ kind: "cloud" as const, item })),
 		];
 		return merged.sort((a, b) => Date.parse(b.kind === "cloud" ? b.item.createdAt : b.notification.createdAt) - Date.parse(a.kind === "cloud" ? a.item.createdAt : a.notification.createdAt));
@@ -889,6 +928,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 							onAnswer={decisionInbox.answer}
 							onRetry={decisionInbox.retry}
 							pending={decisionInbox.pending}
+							unreadCallIds={unreadCallIds}
 						/>
 						{rows.map((row) => {
 							if (row.kind === "cloud") {
