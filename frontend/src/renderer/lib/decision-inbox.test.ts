@@ -12,11 +12,14 @@ vi.mock("./host-clients", () => ({ clientForSessionHost: clientForSessionHostMoc
 import {
 	answerDecisionInboxCall,
 	decisionKeys,
+	dismissDecisionCall,
 	fetchDecisionBoard,
 	fetchDecisionDetail,
 	fetchDecisionInboxCalls,
 	fetchDecisionSearch,
 	mergeDecisionInboxSources,
+	recordDecisionOutcome,
+	retireDecisionCall,
 } from "./decision-inbox";
 
 const call = (id: string, raisedAt: string) => ({
@@ -137,5 +140,42 @@ describe("decision page API", () => {
 
 		await expect(fetchDecisionSearch("auth scheme", 50, signal)).resolves.toEqual(calls);
 		expect(getMock).toHaveBeenCalledWith("/api/v1/decisions", { params: { query: { q: "auth scheme", limit: 50 } }, signal });
+	});
+});
+
+describe("decision actions API", () => {
+	it("answers with Something else and a note through the same answer request", async () => {
+		postMock.mockResolvedValue({ data: call("dec_1", "2026-11-18T10:00:00Z") });
+		await answerDecisionInboxCall({ sourceHostId: "local", callId: "dec_1", choice: "other", note: "Use the vault" });
+		expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
+			params: { path: { id: "dec_1" } },
+			body: { choice: "other", note: "Use the vault" },
+		});
+		await answerDecisionInboxCall({ sourceHostId: "local", callId: "dec_1", option: 2, note: "  " });
+		expect(postMock).toHaveBeenLastCalledWith("/api/v1/decisions/{id}/answer", {
+			params: { path: { id: "dec_1" } },
+			body: { choice: "option", option: 2 },
+		});
+	});
+
+	it("dismisses, records an outcome and retires on this computer", async () => {
+		postMock.mockResolvedValue({ data: call("dec_1", "2026-11-18T10:00:00Z") });
+		await dismissDecisionCall("dec_1", "Not needed");
+		expect(postMock).toHaveBeenLastCalledWith("/api/v1/decisions/{id}/dismiss", { params: { path: { id: "dec_1" } }, body: { note: "Not needed" } });
+		await dismissDecisionCall("dec_1", " ");
+		expect(postMock).toHaveBeenLastCalledWith("/api/v1/decisions/{id}/dismiss", { params: { path: { id: "dec_1" } }, body: {} });
+		await recordDecisionOutcome("dec_1", { forEntry: "dent_9", text: "Shipped", link: "https://example.com/pr/1" });
+		expect(postMock).toHaveBeenLastCalledWith("/api/v1/decisions/{id}/outcome", {
+			params: { path: { id: "dec_1" } },
+			body: { forEntry: "dent_9", text: "Shipped", link: "https://example.com/pr/1" },
+		});
+		await retireDecisionCall("dec_1", false);
+		expect(postMock).toHaveBeenLastCalledWith("/api/v1/decisions/{id}/retire", { params: { path: { id: "dec_1" } }, body: { retired: false } });
+		expect(clientForSessionHostMock).toHaveBeenCalledWith("local");
+	});
+
+	it("surfaces the daemon's refusal", async () => {
+		postMock.mockResolvedValue({ error: { code: "DECISION_WRONG_STATE", message: "Only a call in \"Needs you\" can be dismissed." } });
+		await expect(dismissDecisionCall("dec_1", "")).rejects.toThrow("Only a call in \"Needs you\" can be dismissed.");
 	});
 });

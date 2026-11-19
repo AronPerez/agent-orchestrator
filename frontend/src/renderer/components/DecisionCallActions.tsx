@@ -1,0 +1,285 @@
+import { useId, useState, type FormEvent, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import { useDecisionAction, useDecisionAnswer } from "../hooks/useDecisionInbox";
+import { apiErrorRequestId } from "../lib/api-client";
+import type { DecisionCall } from "../lib/decision-inbox";
+import { LOCAL_HOST } from "../lib/hosts";
+import { cn } from "../lib/utils";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import { Label } from "./ui/label";
+import { RadioGroup, RadioGroupItem } from "./ui/radio-group";
+import { Textarea } from "./ui/textarea";
+
+const OUTCOME_MAX = 300;
+const OTHER = "other";
+
+function isWebUrl(url: string): boolean {
+	try {
+		const parsed = new URL(url);
+		return parsed.protocol === "https:" || parsed.protocol === "http:";
+	} catch {
+		return false;
+	}
+}
+
+/** True when the panel offers an answer form for this state. */
+export function decisionAcceptsAnswer(call: DecisionCall): boolean {
+	return call.state === "needs_you" || call.state === "in_progress" || call.state === "dismissed";
+}
+
+/**
+ * The person's actions on one call. Answers go through the bell's shared
+ * answer mutation; dismiss, outcome and retire through the matching ledger
+ * action. One request at a time, nothing changes before the daemon agrees,
+ * and every result refetches the call.
+ */
+export function DecisionCallActions({ call, extraActions }: { call: DecisionCall; extraActions?: ReactNode }) {
+	const answer = useDecisionAnswer();
+	const action = useDecisionAction();
+	const busy = answer.isPending || action.isPending;
+	const failure = answer.isError ? answer.error : action.isError ? action.error : undefined;
+	const reset = () => {
+		answer.reset();
+		action.reset();
+	};
+	return (
+		<div className="flex flex-col gap-4">
+			{decisionAcceptsAnswer(call) ? (
+				<AnswerForm
+					// A changed standing answer or state starts the form over from the new facts.
+					key={`${call.state}:${call.standingEntryId ?? ""}`}
+					call={call}
+					busy={busy}
+					extraActions={extraActions}
+					onAnswer={(choice, note) => {
+						reset();
+						answer.mutate({
+							sourceHostId: LOCAL_HOST,
+							callId: call.id,
+							choice: choice === OTHER ? "other" : "option",
+							option: choice === OTHER ? undefined : Number(choice),
+							note,
+						});
+					}}
+					onDismiss={(note) => {
+						reset();
+						action.mutate({ kind: "dismiss", callId: call.id, note });
+					}}
+				/>
+			) : extraActions ? <div className="flex flex-wrap items-center gap-2">{extraActions}</div> : null}
+			{call.state === "in_progress" ? (
+				<OutcomeForm
+					key={call.standingEntryId ?? ""}
+					busy={busy}
+					onRecord={(text, link) => {
+						reset();
+						action.mutate({ kind: "outcome", callId: call.id, forEntry: call.standingEntryId, text, link });
+					}}
+				/>
+			) : null}
+			{call.state === "done" ? <RetireAction call={call} busy={busy} onRetire={(retired) => {
+				reset();
+				action.mutate({ kind: "retire", callId: call.id, retired });
+			}} /> : null}
+			{failure ? <ActionError error={failure} /> : null}
+		</div>
+	);
+}
+
+function ActionError({ error }: { error: unknown }) {
+	const { t } = useTranslation();
+	const requestId = apiErrorRequestId(error instanceof Error ? error.cause : undefined);
+	return (
+		<p role="alert" className="flex flex-wrap gap-x-2 text-sm text-destructive">
+			<span>{error instanceof Error ? error.message : t("decisions.loadFailedOne")}</span>
+			{requestId ? <span className="font-mono text-caption text-muted-foreground">{t("decisions.requestId", { id: requestId })}</span> : null}
+		</p>
+	);
+}
+
+function AnswerForm({
+	call,
+	busy,
+	extraActions,
+	onAnswer,
+	onDismiss,
+}: {
+	call: DecisionCall;
+	busy: boolean;
+	extraActions?: ReactNode;
+	onAnswer: (choice: string, note: string) => void;
+	onDismiss: (note: string) => void;
+}) {
+	const { t } = useTranslation();
+	const id = useId();
+	const standing = call.state === "in_progress" && call.choice
+		? call.choice === "other" ? OTHER : String(call.option ?? "")
+		: "";
+	const [choice, setChoice] = useState(standing);
+	const [note, setNote] = useState(call.state === "in_progress" ? call.note ?? "" : "");
+	const [noteMissing, setNoteMissing] = useState(false);
+	const [dismissing, setDismissing] = useState(false);
+	const [dismissNote, setDismissNote] = useState("");
+
+	const submit = (event: FormEvent) => {
+		event.preventDefault();
+		if (busy || !choice) return;
+		if (choice === OTHER && !note.trim()) {
+			setNoteMissing(true);
+			return;
+		}
+		onAnswer(choice, note);
+	};
+	const noteErrorId = `${id}-note-error`;
+	const hintId = `${id}-hint`;
+	const hint = call.state === "in_progress" ? t("decisions.changeHint") : call.state === "dismissed" ? t("decisions.reopenHint") : undefined;
+
+	return (
+		<form noValidate onSubmit={submit} className="flex flex-col gap-3" aria-describedby={hint ? hintId : undefined}>
+			<fieldset className="flex flex-col gap-2">
+				<legend className="sr-only">{t("decisions.answerLegend")}</legend>
+				<RadioGroup
+					aria-label={t("decisions.answerLegend")}
+					value={choice}
+					onValueChange={(value) => {
+						setChoice(value);
+						setNoteMissing(false);
+					}}
+					disabled={busy}
+					className="gap-0 overflow-hidden rounded-lg bg-card"
+				>
+					{call.options.map((option, index) => {
+						const value = String(index + 1);
+						const itemId = `${id}-option-${value}`;
+						return (
+							<label key={value} htmlFor={itemId} className="flex cursor-pointer items-start gap-2.5 border-border px-3 py-2 not-first:border-t has-[:disabled]:cursor-not-allowed">
+								<RadioGroupItem id={itemId} value={value} className="mt-0.5" />
+								<span className="min-w-0 flex-1">
+									<span className="block text-sm font-medium text-foreground">{option.label}</span>
+									{option.consequence ? <span className="block text-caption text-muted-foreground">{option.consequence}</span> : null}
+									{option.recommended ? <span className="mt-0.5 block text-caption text-muted-foreground">{t("decisionInbox.recommended")}</span> : null}
+								</span>
+							</label>
+						);
+					})}
+					<label htmlFor={`${id}-option-other`} className="flex cursor-pointer items-start gap-2.5 border-t border-border px-3 py-2 has-[:disabled]:cursor-not-allowed">
+						<RadioGroupItem id={`${id}-option-other`} value={OTHER} className="mt-0.5" />
+						<span className="text-sm font-medium text-foreground">{t("decisions.somethingElse")}</span>
+					</label>
+				</RadioGroup>
+			</fieldset>
+			<div className="flex flex-col gap-1.5">
+				<Label htmlFor={`${id}-note`}>{t("decisions.noteLabel")}</Label>
+				<Textarea
+					id={`${id}-note`}
+					value={note}
+					maxLength={1000}
+					disabled={busy}
+					aria-invalid={noteMissing || undefined}
+					aria-describedby={noteMissing ? noteErrorId : undefined}
+					onChange={(event) => {
+						setNote(event.target.value);
+						if (event.target.value.trim()) setNoteMissing(false);
+					}}
+				/>
+				{noteMissing ? <p id={noteErrorId} className="text-caption text-destructive">{t("decisions.noteRequired")}</p> : null}
+			</div>
+			{hint ? <p id={hintId} className="text-caption text-muted-foreground">{hint}</p> : null}
+			<div className="flex flex-wrap items-center gap-2">
+				<Button type="submit" variant="primary" size="sm" disabled={busy || !choice} aria-busy={busy || undefined}>
+					{t("decisions.send")}
+				</Button>
+				{extraActions}
+				{call.state === "needs_you" && !dismissing ? (
+					<Button type="button" variant="quiet" size="sm" disabled={busy} className="ml-auto" onClick={() => setDismissing(true)}>
+						{t("decisions.dismiss")}
+					</Button>
+				) : null}
+			</div>
+			{call.state === "needs_you" && dismissing ? (
+				<div className="flex flex-col gap-2 rounded-lg bg-card px-3 py-2.5">
+					<Label htmlFor={`${id}-dismiss-note`}>{t("decisions.dismissNoteLabel")}</Label>
+					<Textarea id={`${id}-dismiss-note`} value={dismissNote} maxLength={1000} disabled={busy} className="min-h-12" onChange={(event) => setDismissNote(event.target.value)} />
+					<div className="flex items-center gap-2">
+						<Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => onDismiss(dismissNote)}>
+							{t("decisions.dismissConfirm")}
+						</Button>
+						<Button type="button" variant="quiet" size="sm" disabled={busy} onClick={() => setDismissing(false)}>
+							{t("decisions.cancel")}
+						</Button>
+					</div>
+				</div>
+			) : null}
+		</form>
+	);
+}
+
+function OutcomeForm({ busy, onRecord }: { busy: boolean; onRecord: (text: string, link: string) => void }) {
+	const { t } = useTranslation();
+	const id = useId();
+	const [text, setText] = useState("");
+	const [link, setLink] = useState("");
+	const [errors, setErrors] = useState<{ text?: string; link?: string }>({});
+	const submit = (event: FormEvent) => {
+		event.preventDefault();
+		if (busy) return;
+		const next: { text?: string; link?: string } = {};
+		const trimmed = text.trim();
+		if (!trimmed || /[\r\n]/.test(trimmed)) next.text = t("decisions.outcomeRequired");
+		if (link.trim() && !isWebUrl(link.trim())) next.link = t("decisions.linkInvalid");
+		setErrors(next);
+		if (next.text || next.link) return;
+		onRecord(trimmed, link.trim());
+	};
+	return (
+		<form noValidate onSubmit={submit} className="flex flex-col gap-2 border-t border-border pt-3">
+			<fieldset className="flex flex-col gap-2">
+				<legend className="mb-1 text-caption font-medium text-muted-foreground">{t("decisions.outcomeLegend")}</legend>
+				<div className="flex flex-col gap-1.5">
+					<Label htmlFor={`${id}-text`}>{t("decisions.outcomeText")}</Label>
+					<Input
+						id={`${id}-text`}
+						value={text}
+						maxLength={OUTCOME_MAX}
+						disabled={busy}
+						aria-invalid={errors.text ? true : undefined}
+						aria-describedby={errors.text ? `${id}-text-error` : undefined}
+						onChange={(event) => setText(event.target.value)}
+					/>
+					{errors.text ? <p id={`${id}-text-error`} className="text-caption text-destructive">{errors.text}</p> : null}
+				</div>
+				<div className="flex flex-col gap-1.5">
+					<Label htmlFor={`${id}-link`}>{t("decisions.outcomeLink")}</Label>
+					<Input
+						id={`${id}-link`}
+						type="url"
+						inputMode="url"
+						value={link}
+						disabled={busy}
+						aria-invalid={errors.link ? true : undefined}
+						aria-describedby={errors.link ? `${id}-link-error` : undefined}
+						onChange={(event) => setLink(event.target.value)}
+					/>
+					{errors.link ? <p id={`${id}-link-error`} className="text-caption text-destructive">{errors.link}</p> : null}
+				</div>
+			</fieldset>
+			<div>
+				<Button type="submit" variant="secondary" size="sm" disabled={busy} aria-busy={busy || undefined}>
+					{t("decisions.recordOutcome")}
+				</Button>
+			</div>
+		</form>
+	);
+}
+
+function RetireAction({ call, busy, onRetire }: { call: DecisionCall; busy: boolean; onRetire: (retired: boolean) => void }) {
+	const { t } = useTranslation();
+	return (
+		<div className={cn("flex items-center gap-2")}>
+			<Button type="button" variant="secondary" size="sm" disabled={busy} aria-busy={busy || undefined} onClick={() => onRetire(!call.retired)}>
+				{call.retired ? t("decisions.unretire") : t("decisions.retire")}
+			</Button>
+		</div>
+	);
+}

@@ -9,6 +9,8 @@ import {
 	fetchDecisionInboxCalls,
 	fetchDecisionSearch,
 	mergeDecisionInboxSources,
+	runDecisionAction,
+	type DecisionAction,
 	type DecisionCall,
 	type DecisionInboxEntry,
 } from "../lib/decision-inbox";
@@ -18,8 +20,42 @@ import { useConnectedHosts } from "./useHostConnection";
 
 export const decisionInboxQueryKey = (hostId: HostId) => decisionKeys.needsYou(hostId);
 
-export function useDecisionInbox(enabled: boolean) {
+/**
+ * The one answer mutation for every decision surface (bell and page). On
+ * success the answered call leaves the needs-you list at once and every
+ * decision view refetches; on failure the source host refetches, so a call
+ * answered elsewhere drops out instead of being sent again.
+ */
+export function useDecisionAnswer() {
 	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: answerDecisionInboxCall,
+		onSuccess: async (_call, input) => {
+			queryClient.setQueryData<DecisionCall[]>(decisionInboxQueryKey(input.sourceHostId), (current) =>
+				current?.filter((call) => call.id !== input.callId),
+			);
+			await queryClient.invalidateQueries({ queryKey: decisionKeys.all });
+		},
+		onError: (_error, input) => {
+			void queryClient.invalidateQueries({ queryKey: decisionKeys.host(input.sourceHostId) });
+		},
+	});
+}
+
+/**
+ * Dismiss, record an outcome, or mark a call (no longer) applying, on this
+ * computer's ledger. Success or failure refetches this computer's decision
+ * views before anything is sent again; nothing changes before the daemon says so.
+ */
+export function useDecisionAction() {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (action: DecisionAction) => runDecisionAction(action),
+		onSettled: () => queryClient.invalidateQueries({ queryKey: decisionKeys.host(LOCAL_HOST) }),
+	});
+}
+
+export function useDecisionInbox(enabled: boolean) {
 	const connectedHosts = useConnectedHosts();
 	const localQuery = useQuery({
 		queryKey: decisionInboxQueryKey(LOCAL_HOST),
@@ -46,18 +82,7 @@ export function useDecisionInbox(enabled: boolean) {
 		})),
 	]), [connectedHosts, localQuery.data, remoteQueries]);
 
-	const answerMutation = useMutation({
-		mutationFn: answerDecisionInboxCall,
-		onSuccess: async (_call, input) => {
-			queryClient.setQueryData<DecisionCall[]>(decisionInboxQueryKey(input.sourceHostId), (current) =>
-				current?.filter((call) => call.id !== input.callId),
-			);
-			await queryClient.invalidateQueries({ queryKey: decisionKeys.all });
-		},
-		onError: (_error, input) => {
-			void queryClient.invalidateQueries({ queryKey: decisionInboxQueryKey(input.sourceHostId) });
-		},
-	});
+	const answerMutation = useDecisionAnswer();
 
 	const answer = useCallback((entry: DecisionInboxEntry, option: number) => {
 		answerMutation.mutate({

@@ -4,8 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DecisionCall, DecisionHistoryEntry } from "../lib/decision-inbox";
 
-const { getMock, openExternalMock } = vi.hoisted(() => ({ getMock: vi.fn(), openExternalMock: vi.fn() }));
-vi.mock("../lib/host-clients", () => ({ clientForSessionHost: () => ({ GET: getMock }) }));
+const { getMock, postMock, openExternalMock } = vi.hoisted(() => ({ getMock: vi.fn(), postMock: vi.fn(), openExternalMock: vi.fn() }));
+vi.mock("../lib/host-clients", () => ({ clientForSessionHost: () => ({ GET: getMock, POST: postMock }) }));
 vi.mock("../lib/external-link-policy", () => ({ openLinkInSystemBrowser: openExternalMock }));
 
 import { DecisionCallPanel } from "./DecisionCallPanel";
@@ -74,8 +74,13 @@ function renderPanel(callId = "dec_1", onClose = vi.fn()) {
 
 beforeEach(() => {
 	getMock.mockReset().mockResolvedValue({ data: { call, history }, response: { status: 200 } });
+	postMock.mockReset().mockResolvedValue({ data: call });
 	openExternalMock.mockReset();
 });
+
+function serve(next: DecisionCall, entries: DecisionHistoryEntry[] = history) {
+	getMock.mockResolvedValue({ data: { call: next, history: entries }, response: { status: 200 } });
+}
 
 describe("DecisionCallPanel", () => {
 	it("names the project, work stream, machine and session before the call itself", async () => {
@@ -91,14 +96,13 @@ describe("DecisionCallPanel", () => {
 		expect(screen.getByRole("complementary", { name: "Decision" })).toBeInTheDocument();
 	});
 
-	it("lists the options with the recommendation in words and the standing pick", async () => {
+	it("offers the options with the recommendation in words and the standing pick selected", async () => {
 		renderPanel();
-		const options = await screen.findByRole("list", { name: "Options" });
-		const items = within(options).getAllByRole("listitem");
-		expect(items[0]).toHaveTextContent("OAuth client credentials");
-		expect(items[0]).toHaveTextContent("Recommended");
-		expect(items[0]).toHaveTextContent("Chosen");
-		expect(items[1]).not.toHaveTextContent("Chosen");
+		const group = await screen.findByRole("radiogroup", { name: "Your decision" });
+		const radios = within(group).getAllByRole("radio");
+		expect(radios.map((radio) => radio.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+		expect(within(group).getByText("Recommended")).toBeInTheDocument();
+		expect(within(group).getByRole("radio", { name: /Something else/ })).toBeInTheDocument();
 	});
 
 	it("opens only web links, through the system browser", async () => {
@@ -179,5 +183,127 @@ describe("DecisionCallPanel", () => {
 		expect(await screen.findByRole("heading", { level: 2, name: call.title })).toBeInTheDocument();
 		resolve({ data: { call: { ...call, state: "done", stateLabel: "Done", outcome: "Shipped" }, history }, response: { status: 200 } });
 		expect(await screen.findByText("Done")).toBeInTheDocument();
+	});
+
+	describe("actions", () => {
+		const needsYou: DecisionCall = { ...call, state: "needs_you", stateLabel: "Needs you", choice: undefined, option: undefined, chosenLabel: undefined, delivery: undefined, changedAfterClose: false, standingEntryId: undefined };
+		const inProgress: DecisionCall = { ...call, changedAfterClose: false, standingEntryId: "dent_answer" };
+		const done: DecisionCall = { ...call, state: "done", stateLabel: "Done", outcome: "Shipped", changedAfterClose: false };
+
+		it("sends the picked option, with an optional note, through the shared answer request", async () => {
+			serve(needsYou);
+			renderPanel();
+			const send = await screen.findByRole("button", { name: "Send decision" });
+			expect(send).toBeDisabled();
+			await userEvent.click(screen.getByRole("radio", { name: /Per-tenant API keys/ }));
+			await userEvent.type(screen.getByLabelText("Note for the session"), "Rotate monthly");
+			await userEvent.click(send);
+			expect(postMock).toHaveBeenCalledTimes(1);
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
+				params: { path: { id: "dec_1" } },
+				body: { choice: "option", option: 2, note: "Rotate monthly" },
+			});
+		});
+
+		it("requires a note for Something else and says so beside the field", async () => {
+			serve(needsYou);
+			renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Something else/ }));
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).not.toHaveBeenCalled();
+			const note = screen.getByLabelText("Note for the session");
+			expect(note).toHaveAttribute("aria-invalid", "true");
+			expect(note).toHaveAccessibleDescription("Say what to do instead.");
+			await userEvent.type(note, "Use the shared vault");
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
+				params: { path: { id: "dec_1" } },
+				body: { choice: "other", note: "Use the shared vault" },
+			});
+		});
+
+		it("changes a standing pick and explains it reaches the session as an update", async () => {
+			serve(inProgress);
+			renderPanel();
+			expect(await screen.findByText("Sending a different pick delivers it to the session as an update.")).toBeInTheDocument();
+			await userEvent.click(screen.getByRole("radio", { name: /Per-tenant API keys/ }));
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", expect.objectContaining({ body: { choice: "option", option: 2 } }));
+		});
+
+		it("records an outcome for the standing answer, checking the text and link first", async () => {
+			serve(inProgress);
+			renderPanel();
+			const record = await screen.findByRole("button", { name: "Record outcome" });
+			await userEvent.click(record);
+			expect(screen.getByLabelText("What happened")).toHaveAccessibleDescription("Say what happened, in one line.");
+			await userEvent.type(screen.getByLabelText("What happened"), "Shipped in PR 412");
+			await userEvent.type(screen.getByLabelText("Link (optional)"), "ftp://nope");
+			await userEvent.click(record);
+			expect(screen.getByLabelText("Link (optional)")).toHaveAccessibleDescription("Use an http or https link.");
+			expect(postMock).not.toHaveBeenCalled();
+			await userEvent.clear(screen.getByLabelText("Link (optional)"));
+			await userEvent.type(screen.getByLabelText("Link (optional)"), "https://github.com/acme/app/pull/412");
+			await userEvent.click(record);
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/outcome", {
+				params: { path: { id: "dec_1" } },
+				body: { forEntry: "dent_answer", text: "Shipped in PR 412", link: "https://github.com/acme/app/pull/412" },
+			});
+		});
+
+		it("dismisses only after a confirmation that takes an optional note", async () => {
+			serve(needsYou);
+			renderPanel();
+			await userEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
+			expect(postMock).not.toHaveBeenCalled();
+			await userEvent.type(screen.getByLabelText("Why (optional)"), "Not needed");
+			await userEvent.click(screen.getByRole("button", { name: "Dismiss call" }));
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/dismiss", { params: { path: { id: "dec_1" } }, body: { note: "Not needed" } });
+		});
+
+		it("marks a finished call as no longer applying, and back", async () => {
+			serve(done);
+			const { unmount } = renderPanel();
+			await userEvent.click(await screen.findByRole("button", { name: "Mark no longer applies" }));
+			expect(postMock).toHaveBeenLastCalledWith("/api/v1/decisions/{id}/retire", { params: { path: { id: "dec_1" } }, body: { retired: true } });
+			expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+			unmount();
+			serve({ ...done, retired: true });
+			renderPanel();
+			await userEvent.click(await screen.findByRole("button", { name: "Mark applies again" }));
+			expect(postMock).toHaveBeenLastCalledWith("/api/v1/decisions/{id}/retire", { params: { path: { id: "dec_1" } }, body: { retired: false } });
+		});
+
+		it("lets a dismissed call be answered to reopen it, and leaves a withdrawn call read-only", async () => {
+			serve({ ...needsYou, state: "dismissed", stateLabel: "Dismissed" });
+			const { unmount } = renderPanel();
+			expect(await screen.findByText("Answering reopens this dismissed call.")).toBeInTheDocument();
+			expect(screen.getByRole("radiogroup", { name: "Your decision" })).toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+			unmount();
+			serve({ ...needsYou, state: "withdrawn", stateLabel: "Withdrawn" });
+			renderPanel();
+			await screen.findByRole("heading", { level: 2, name: call.title });
+			expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: /Send decision|Dismiss|Record outcome|Mark/ })).not.toBeInTheDocument();
+		});
+
+		it("allows one action at a time and shows the daemon's refusal with its request id", async () => {
+			serve(inProgress);
+			let finish!: (value: unknown) => void;
+			postMock.mockReturnValue(new Promise((done) => { finish = done; }));
+			renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(screen.getByRole("button", { name: "Send decision" })).toBeDisabled();
+			expect(screen.getByRole("button", { name: "Record outcome" })).toBeDisabled();
+			const reads = getMock.mock.calls.length;
+			finish({ error: { code: "DECISION_WRONG_STATE", message: "This call is closed. Its state is \"Done\".", requestId: "req-9" } });
+			const alert = await screen.findByRole("alert");
+			expect(alert).toHaveTextContent("This call is closed.");
+			expect(alert).toHaveTextContent("Request req-9");
+			expect(postMock).toHaveBeenCalledTimes(1);
+			await vi.waitFor(() => expect(getMock.mock.calls.length).toBeGreaterThan(reads));
+		});
 	});
 });

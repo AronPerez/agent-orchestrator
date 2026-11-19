@@ -16,7 +16,7 @@ vi.mock("../lib/host-clients", () => ({
 vi.mock("./useHostConnection", () => ({ useConnectedHosts: () => connectedHostsMock() }));
 
 import { decisionKeys } from "../lib/decision-inbox";
-import { decisionInboxQueryKey, useDecisionBoard, useDecisionDetail, useDecisionInbox, useDecisionSearch } from "./useDecisionInbox";
+import { decisionInboxQueryKey, useDecisionAction, useDecisionAnswer, useDecisionBoard, useDecisionDetail, useDecisionInbox, useDecisionSearch } from "./useDecisionInbox";
 
 const decisionCall = (id: string, raisedAt: string) => ({
 	id,
@@ -187,5 +187,44 @@ describe("decision page hooks", () => {
 		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(localBoard + 1));
 		expect(pathCalls(local, "/api/v1/decisions")).toBe(localList + 1);
 		expect(pathCalls(remote, "/api/v1/decisions")).toBe(remoteList + 1);
+	});
+});
+
+describe("decision page mutations", () => {
+	it("shares the bell's answer mutation and refreshes the board after it", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		local.POST.mockResolvedValue({ data: { ...decisionCall("dec_1", "2026-11-18T09:00:00Z"), state: "in_progress" } });
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({ board: useDecisionBoard(), answer: useDecisionAnswer() }), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.board.data).toBeDefined());
+		const before = pathCalls(local, "/api/v1/decisions/board");
+
+		await act(() => result.current.answer.mutateAsync({ sourceHostId: "local", callId: "dec_1", choice: "other", note: "Vault" }));
+		expect(local.POST).toHaveBeenCalledTimes(1);
+		expect(local.POST).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", { params: { path: { id: "dec_1" } }, body: { choice: "other", note: "Vault" } });
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(before + 1));
+	});
+
+	it("runs dismiss, outcome and retire against this computer and refreshes after success or failure", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		local.POST.mockResolvedValue({ data: decisionCall("dec_1", "2026-11-18T09:00:00Z") });
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({ board: useDecisionBoard(), action: useDecisionAction() }), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.board.data).toBeDefined());
+
+		await act(() => result.current.action.mutateAsync({ kind: "dismiss", callId: "dec_1", note: "No" }));
+		await act(() => result.current.action.mutateAsync({ kind: "outcome", callId: "dec_1", forEntry: "dent_2", text: "Done", link: "" }));
+		await act(() => result.current.action.mutateAsync({ kind: "retire", callId: "dec_1", retired: true }));
+		expect(local.POST.mock.calls.map(([path]) => path)).toEqual([
+			"/api/v1/decisions/{id}/dismiss",
+			"/api/v1/decisions/{id}/outcome",
+			"/api/v1/decisions/{id}/retire",
+		]);
+		const before = pathCalls(local, "/api/v1/decisions/board");
+		local.POST.mockResolvedValue({ error: { code: "DECISION_WRONG_STATE", message: "Closed." } });
+		await act(async () => {
+			await expect(result.current.action.mutateAsync({ kind: "retire", callId: "dec_1", retired: true })).rejects.toThrow("Closed.");
+		});
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBeGreaterThan(before));
 	});
 });
