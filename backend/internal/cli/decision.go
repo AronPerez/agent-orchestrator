@@ -217,6 +217,8 @@ func newDecisionCommand(ctx *commandContext) *cobra.Command {
 		newDecisionDecideCommand(ctx),
 		newDecisionOverruleCommand(ctx),
 		newDecisionCarriedOutCommand(ctx),
+		newDecisionLinkCommand(ctx),
+		newDecisionSyncCommand(ctx),
 	)
 	return cmd
 }

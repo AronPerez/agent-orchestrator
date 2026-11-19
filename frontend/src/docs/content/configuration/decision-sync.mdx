@@ -1,0 +1,59 @@
+---
+title: Sync decisions between machines
+description: Link your machines so each one holds the same decision ledger, and answer a call from whichever machine is in front of you.
+---
+
+Every decision call, answer, outcome and history entry lives in a ledger on the machine where it was written. Linking your machines makes each of them hold the same ledger: a call raised on one appears on every linked machine's **Decisions** page, in `ao decision search`, and in agents' searches, and an answer given on any of them reaches the session that raised the call.
+
+If you use one machine, there is nothing to set up.
+
+## What syncs
+
+- Every call and its whole history: raised, answered, dismissed, delivered, outcome, withdrawn, retired, decided, overruled and carried out.
+- Story pages do not sync yet. A later version carries them.
+
+Removing a link stops syncing but keeps every decision already copied, on both machines.
+
+## Before you link
+
+The machine you link **to** needs remote access turned on (**Settings → Connect Mobile**, or **Allow access from your devices** in **Settings → Remote hosts**), because the other machine connects to its authenticated remote listener. A machine that only links out, such as a laptop nothing can reach, does not need remote access: each sync moves decisions in both directions.
+
+Link every machine to your always-on machine and they all converge: a machine passes on decisions it received from others.
+
+## Link a machine
+
+From the desktop, a later version adds a **Sync decisions** switch for each machine saved in **Settings → Remote hosts**.
+
+From your own shell (not from inside an agent session):
+
+```bash
+# A machine saved in the desktop app, whose password the CLI can read
+ao decision link add --host mac-mini
+
+# Any machine by its remote-access address; the password is read once from standard input
+printf '%s\n' "$PASSWORD" | ao decision link add http://mac-mini.local:3011 --password-stdin --label mac-mini
+
+ao decision link ls        # each machine, its state and when it last synced
+ao decision sync           # sync every linked machine now
+ao decision link rm mac-mini
+```
+
+The password is used once: the other machine issues this machine a credential that can only exchange decisions, and that credential is what this machine keeps, in an owner-only file under `~/.ao`. You can revoke it on the other machine in its device list, where it shows as **Decision sync from** this machine's name.
+
+## When it syncs
+
+Shortly after any decision is written, about once a minute while idle, when Orchestrator starts, and when you run `ao decision sync`. A machine that does not answer is retried after 1, 2, 5, 10 and then every 15 minutes, and never slows anything else down.
+
+An answer given on the machine that owns the call's session is delivered at once. An answer given elsewhere reaches the owning machine on its next sync, and the call reads **Not delivered yet** until the owning machine records delivery. Only the owning machine ever delivers an answer.
+
+## Trust
+
+A linked machine can write any entry, including answers. **Link only machines you own.**
+
+## Phones
+
+A phone push for a call comes only from the machine where the call was raised. A phone paired only with another machine sees the call in its lists but gets no push for it. Pair your phone with your always-on machine, and raise calls there, to get pushes for everything.
+
+## When two machines share one identity
+
+If you copied a data directory from one machine to another, both machines write decisions under one identity. Orchestrator notices when the two histories disagree, stops syncing decisions from that identity, and says that two machines share one identity. Other machines' decisions keep syncing, and nothing already stored is changed. A repair step is not available yet; until it is, unlink the copy from your other machines.
