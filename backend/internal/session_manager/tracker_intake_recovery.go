@@ -469,9 +469,6 @@ func trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(
 		return domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat &&
 			trackerIntakeRuntimeTeardownOutstanding(reservation)
 	}
-	if _, ok := trackerIntakeLegacyTerminatedRuntimeTeardown(rec, reservation); ok {
-		return false
-	}
 	return reservation.CapacityReleased &&
 		domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat &&
 		strings.TrimSpace(reservation.RuntimeLaunchID) != "" &&
@@ -496,22 +493,6 @@ func trackerIntakeLegacyTerminatedRuntimeTeardown(
 		return "", false
 	}
 	return rowHandleID, true
-}
-
-func (m *Manager) upgradeLegacyTerminatedRuntimeTeardown(
-	ctx context.Context,
-	rec domain.SessionRecord,
-	reservation domain.TrackerIntakeRecoveryReservation,
-) (domain.TrackerIntakeRecoveryReservation, error) {
-	handleID, ok := trackerIntakeLegacyTerminatedRuntimeTeardown(rec, reservation)
-	if !ok {
-		return reservation, nil
-	}
-	reservation.ReleasedRuntimeHandleIDs = []string{handleID}
-	if err := m.store.ReserveTrackerIntakeRecovery(ctx, rec.ID, reservation); err != nil {
-		return reservation, fmt.Errorf("upgrade prior tracker intake teardown proof: %w", err)
-	}
-	return reservation, nil
 }
 
 func trackerIntakeUnreleasedRuntimeHandles(reservation domain.TrackerIntakeRecoveryReservation) []string {
@@ -1141,6 +1122,8 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 		return fmt.Errorf("pending tracker intake Chat controller remains unresolved")
 	}
 	checkpoint := reservation
+	legacyHandleID, legacyUnverified := trackerIntakeLegacyTerminatedRuntimeTeardown(rec, reservation)
+	legacyLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
 	if pendingOwner, pending, err := trackerIntakePendingRuntimeTeardown(checkpoint); err != nil {
 		return err
 	} else if pending {
@@ -1219,8 +1202,16 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 			Generation: owner.launchID, NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
 		}
 		probe := m.runtime.ProbeFencedRuntime(ctx, ref)
-		switch probe.Liveness {
-		case ports.FencedDead, ports.FencedAlive:
+		shouldDestroy := probe.Liveness == ports.FencedDead || probe.Liveness == ports.FencedAlive
+		if probe.Liveness == ports.FencedUnknown && probe.Reason == ports.FencedReasonProbeFailed &&
+			legacyUnverified && owner.handleID == legacyHandleID && owner.launchID == legacyLaunchID {
+			// The prior release format cannot distinguish a successful Kill from a
+			// dead child whose terminal host survived. Destroy is idempotent and is
+			// the only operation that can prove the outer owner gone; checkpoint its
+			// exact identity first and fail closed if teardown cannot confirm it.
+			shouldDestroy = true
+		}
+		if shouldDestroy {
 			// FencedDead proves the exact managed child absent, not the terminal
 			// host absent. Destroy is idempotent and must settle that outer owner
 			// before Kill releases capacity or touches the workspace.
@@ -1236,9 +1227,9 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 			if err != nil {
 				return err
 			}
-		default:
-			return fmt.Errorf("pending tracker intake runtime %s remains unresolved: %s", owner.handleID, probe.Reason)
+			continue
 		}
+		return fmt.Errorf("pending tracker intake runtime %s remains unresolved: %s", owner.handleID, probe.Reason)
 	}
 	return nil
 }
@@ -1254,10 +1245,6 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 ) error {
 	persistedOwner := rec
 	var err error
-	reservation, err = m.upgradeLegacyTerminatedRuntimeTeardown(ctx, persistedOwner, reservation)
-	if err != nil {
-		return fmt.Errorf("check session %s: %w", rec.ID, err)
-	}
 	if trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(persistedOwner, reservation) {
 		reservation, err = m.retireReleasedUnpublishedTrackerIntakeRuntime(ctx, persistedOwner, reservation)
 		if err != nil {

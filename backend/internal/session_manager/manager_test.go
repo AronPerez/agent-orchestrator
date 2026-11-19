@@ -299,6 +299,17 @@ func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.S
 		teardownOutstanding := reservation.RuntimeTeardownHandleID != "" || reservation.RuntimeTeardownLaunchID != "" ||
 			reservation.RuntimeTeardownReservationOnly || reservation.RuntimeTeardownCompletedLaunchID != "" ||
 			len(reservation.RuntimeTeardownCompletedHandleIDs) != 0
+		runtimeLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+		runtimeHandles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
+		if !teardownOutstanding && runtimeLaunchID != "" {
+			teardownOutstanding = len(runtimeHandles) == 0 || !reservation.CapacityReleased ||
+				strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) != runtimeLaunchID
+			for _, handleID := range runtimeHandles {
+				if !trackerIntakeHandleReserved(reservation.ReleasedRuntimeHandleIDs, handleID) {
+					teardownOutstanding = true
+				}
+			}
+		}
 		if teardownOutstanding {
 			return nil
 		}
@@ -3633,7 +3644,7 @@ func TestReconcileTrackerIntakeClaimsTrustsConclusiveTerminatedHandleTeardown(t 
 	}
 }
 
-func TestReconcileTrackerIntakeClaimsUpgradesPriorSuccessfulKillTeardown(t *testing.T) {
+func TestReconcileTrackerIntakeClaimsRevalidatesPriorSuccessfulKillTeardown(t *testing.T) {
 	m, st, rt, ws := newManager()
 	id := domain.SessionID("terminated-owner-with-prior-version-proof")
 	issueID := domain.IssueID("github:acme/mer#10908")
@@ -3641,9 +3652,9 @@ func TestReconcileTrackerIntakeClaimsUpgradesPriorSuccessfulKillTeardown(t *test
 	handleID := "tmux-10908"
 	launchID := "launch-10908"
 	st.trackerIntakePending[key] = id
-	// This is the exact recovery JSON shape written by the version before
-	// ReleasedRuntimeHandleIDs existed: Kill stopped the matching published
-	// runtime, recorded capacity and generation, then dirty cleanup preserved it.
+	// This is the ambiguous recovery JSON shape written before per-handle proof:
+	// it can mean Kill succeeded, or only that an exact child exited. The
+	// idempotent outer-host teardown must establish the missing proof.
 	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
 		WorkspacePath: "/ws/terminated-owner-with-prior-version-proof", RuntimeLaunchID: launchID,
 		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
@@ -3661,16 +3672,53 @@ func TestReconcileTrackerIntakeClaimsUpgradesPriorSuccessfulKillTeardown(t *test
 	if err == nil || !strings.Contains(err.Error(), "workspace cleanup remains unresolved") {
 		t.Fatalf("first ReconcileTrackerIntakeClaims() error = %v, want dirty workspace retry", err)
 	}
-	if got := st.trackerIntakeRecovery[id].ReleasedRuntimeHandleIDs; !reflect.DeepEqual(got, []string{handleID}) {
-		t.Fatalf("upgraded released handles = %v, want [%s]", got, handleID)
+	if got := st.trackerIntakeRecovery[id]; got.RuntimeLaunchID != "" || len(got.RuntimeHandleIDs) != 0 {
+		t.Fatalf("revalidated legacy owner was not retired: %+v", got)
 	}
-	if len(rt.fencedRefs) != 0 || rt.destroyed != 0 {
-		t.Fatalf("prior successful teardown was re-probed: probes=%v destroys=%d", rt.fencedRefs, rt.destroyed)
+	if len(rt.fencedRefs) != 1 || rt.destroyed != 1 {
+		t.Fatalf("prior successful teardown probes=%v destroys=%d, want one idempotent teardown", rt.fencedRefs, rt.destroyed)
 	}
 
 	ws.destroyErr = nil
 	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
 		t.Fatalf("retry ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || rt.destroyed != 1 {
+		t.Fatalf("cleanup retry revalidated runtime again: probes=%v destroys=%d", rt.fencedRefs, rt.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsStopsLegacyExitedHostBeforeTrustingRelease(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-owner-with-live-legacy-host")
+	issueID := domain.IssueID("github:acme/mer#10912")
+	key := "mer\x00" + string(issueID)
+	handleID := "direct-10912"
+	launchID := "launch-10912"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-owner-with-live-legacy-host", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		IsTerminated: true,
+		Metadata:     domain.SessionMetadata{RuntimeHandleID: handleID, RuntimeLaunchID: launchID},
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || !reflect.DeepEqual(rt.destroyedIDs, []string{handleID}) ||
+		rt.aliveByHandle[handleID] || ws.destroyed != 1 {
+		t.Fatalf("legacy host cleanup probes=%v destroys=%v alive=%t workspace=%d",
+			rt.fencedRefs, rt.destroyedIDs, rt.aliveByHandle[handleID], ws.destroyed)
 	}
 	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
 		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])

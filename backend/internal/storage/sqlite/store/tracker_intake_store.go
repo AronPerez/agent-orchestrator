@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -348,11 +349,29 @@ func trackerIntakeRecoveryNeedsFence(reservation domain.TrackerIntakeRecoveryRes
 }
 
 func trackerIntakeRecoveryHasOutstandingRuntimeTeardown(reservation domain.TrackerIntakeRecoveryReservation) bool {
-	return strings.TrimSpace(reservation.RuntimeTeardownHandleID) != "" ||
+	if strings.TrimSpace(reservation.RuntimeTeardownHandleID) != "" ||
 		strings.TrimSpace(reservation.RuntimeTeardownLaunchID) != "" ||
 		reservation.RuntimeTeardownReservationOnly ||
 		strings.TrimSpace(reservation.RuntimeTeardownCompletedLaunchID) != "" ||
-		len(reservation.RuntimeTeardownCompletedHandleIDs) != 0
+		len(reservation.RuntimeTeardownCompletedHandleIDs) != 0 {
+		return true
+	}
+	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+	handles := normalizeTrackerIntakeRuntimeHandles(reservation.RuntimeHandleIDs)
+	if launchID == "" {
+		return len(handles) != 0
+	}
+	if len(handles) == 0 || !reservation.CapacityReleased ||
+		strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) != launchID {
+		return true
+	}
+	released := normalizeTrackerIntakeRuntimeHandles(reservation.ReleasedRuntimeHandleIDs)
+	for _, handleID := range handles {
+		if !slices.Contains(released, handleID) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryReservation) domain.TrackerIntakeRecoveryReservation {
