@@ -56,7 +56,8 @@ import { fenceOf, textOf } from "../../lib/markdown-fence";
 import { EMOJI_GRAPHEME, rehypeStreamFade } from "../../lib/rehype-stream-fade";
 import { isInlineMath, remarkMath } from "../../lib/remark-math";
 import { useUiStore } from "../../stores/ui-store";
-import { artifactLinkForPath, artifactLinkForTarget, findSessionLinks, hasArtifactDirectorySegment, isAoLink, isSessionLink, remarkSessionLinks, sessionArtifactPath } from "../../lib/session-links";
+import { artifactLinkForPath, artifactLinkForTarget, findSessionLinks, hasArtifactDirectorySegment, isAoLink, isSessionLink, parseArtifactLink, remarkSessionLinks, sessionArtifactPath } from "../../lib/session-links";
+import { parseDecisionLink } from "../../lib/decision-links";
 import { useSessionLinkSource } from "../../lib/use-session-link-navigation";
 import type { WorkspaceSummary } from "../../types/workspace";
 import {
@@ -71,6 +72,7 @@ import { useCachedLinkFavicons } from "../../hooks/useLinkPreview";
 import { canLoadLinkFavicon, preloadLinkFavicon } from "../../lib/link-preload";
 import { ChatPathMenu, ChatPathMenuContext } from "../ChatPathMenu";
 import { ArtifactLinkPreviewCard, SessionLinkPreviewCard } from "../SessionLinkPreviewCard";
+import { DecisionLinkPreviewCard } from "../DecisionLinkPreviewCard";
 import {
 	explicitWorkspaceFilePath,
 	createWorkspaceFileLookup,
@@ -534,9 +536,12 @@ function MarkdownLinkTarget({ href, children, className, menuPath, node }: Markd
 			menuPath={menuPath ?? (href && (filePath || isPotentialWorkspaceFileLink(href)) ? normalizeWorkspaceFileReference(href) : undefined)}
 			onFileOpen={onFileOpen}
 			hoverPreview={sessionLink
-				? () => isSessionLink(href!)
-					? <SessionLinkPreviewCard href={href!} sourceHostId={sessionLinkHostId} sourceKind={sessionLinkSourceKind} onOpen={onSessionLinkOpen && (() => onSessionLinkOpen(href!))} />
-					: <ArtifactLinkPreviewCard href={href!} sourceHostId={sessionLinkHostId} sourceKind={sessionLinkSourceKind} />
+				? () => parseDecisionLink(href!)
+					// A decision is read from this computer's ledger, whichever chat names it.
+					? <DecisionLinkPreviewCard href={href!} onOpen={onSessionLinkOpen && (() => onSessionLinkOpen(href!))} />
+					: isSessionLink(href!)
+						? <SessionLinkPreviewCard href={href!} sourceHostId={sessionLinkHostId} sourceKind={sessionLinkSourceKind} onOpen={onSessionLinkOpen && (() => onSessionLinkOpen(href!))} />
+						: <ArtifactLinkPreviewCard href={href!} sourceHostId={sessionLinkHostId} sourceKind={sessionLinkSourceKind} />
 				: undefined}
 			onClick={(event) => {
 				if (href && sessionLink) {
@@ -563,7 +568,7 @@ function MarkdownLinkTarget({ href, children, className, menuPath, node }: Markd
 			{href && !sessionLink && isWebLink(href) && !linksImage(node) ? <InlineLinkFavicon href={href} /> : null}
 			<ChatImageLinkScope>
 				<InsideMarkdownLink.Provider value>
-					<InsideArtifactLink.Provider value={sessionLink && !isSessionLink(href!)}>{children}</InsideArtifactLink.Provider>
+					<InsideArtifactLink.Provider value={Boolean(href && parseArtifactLink(href))}>{children}</InsideArtifactLink.Provider>
 				</InsideMarkdownLink.Provider>
 			</ChatImageLinkScope>
 		</AppLink>

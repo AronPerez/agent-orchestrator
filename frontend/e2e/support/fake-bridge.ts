@@ -602,6 +602,8 @@ export type FakeAgentController = {
 	setSnapshotFailures: (count: number) => void;
 	snapshotCallCount: () => number;
 	notify: (n: { id: string; type: string; title: string; body?: string; sessionId?: string }) => void;
+	/** Pushes one project-level CDC frame, e.g. `decision_updated` with `{ callId }`. */
+	emitCdc: (type: string, payload: Record<string, unknown>) => void;
 };
 
 /** The current (or last) CDC gap replay: `remaining` frames are still queued,
@@ -1067,6 +1069,9 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				continuousWorkspaceEvents: () => ({ sent: pressureSent(), delivered: state.pressure.delivered }),
 				setSnapshotFailures: (count) => { state.snapshotFailures = Math.max(0, Math.floor(count)); },
 				snapshotCallCount: () => state.snapshotCalls,
+				emitCdc: (type, payload) => {
+					emit("/api/v1/events", type, JSON.stringify({ seq: (state.cdcSeq += 1), projectId: "", type, payload, createdAt: new Date().toISOString() }));
+				},
 				notify: (n) => {
 					const payload = JSON.stringify({
 						id: n.id,

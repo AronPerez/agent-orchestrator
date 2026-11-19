@@ -471,6 +471,7 @@ type DecisionCall struct {
 	LastCounter     int64
 	Body            string
 	SearchText      string
+	OutcomeAt       sql.NullTime
 }
 
 type DecisionCallsFt struct {
@@ -550,18 +551,20 @@ type ModelUsageEvent struct {
 }
 
 type Notification struct {
-	ID          string
-	SessionID   domain.SessionID
-	ProjectID   *domain.ProjectID
-	PRURL       string
-	Type        domain.NotificationType
-	Title       string
-	Body        string
-	Status      domain.NotificationStatus
-	CreatedAt   time.Time
-	ResolvedAt  sql.NullTime
-	DismissedAt sql.NullTime
-	SourceKey   string
+	ID                   string
+	SessionID            *domain.SessionID
+	ProjectID            *domain.ProjectID
+	PRURL                string
+	Type                 domain.NotificationType
+	Title                string
+	Body                 string
+	Status               domain.NotificationStatus
+	CreatedAt            time.Time
+	ResolvedAt           sql.NullTime
+	DismissedAt          sql.NullTime
+	SourceKey            string
+	DecisionCallID       string
+	DecisionOriginHostID string
 }
 
 type PR struct {

@@ -3797,6 +3797,15 @@ paths:
         schema:
           description: Search words. When given, the response is the search result.
           type: string
+      - description: Most search results to return. Defaults to 20; values above 100
+          are capped. Ignored when q is absent.
+        in: query
+        name: limit
+        schema:
+          description: Most search results to return. Defaults to 20; values above
+            100 are capped. Ignored when q is absent.
+          minimum: 1
+          type: integer
       responses:
         "200":
           content:
@@ -4344,6 +4353,43 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
       summary: Withdraw a decision call
+      tags:
+      - decisions
+  /api/v1/decisions/board:
+    get:
+      operationId: getDecisionBoard
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionBoardResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Get the Decisions page board
       tags:
       - decisions
   /api/v1/decisions/decided:
@@ -21892,6 +21938,30 @@ components:
       - why
       - undo
       type: object
+    DecisionBoardResponse:
+      properties:
+        calls:
+          items:
+            $ref: '#/components/schemas/DecisionCallResponse'
+          type: array
+        doneSince:
+          description: Oldest outcome time a Done call may have and still be on the
+            board.
+          format: date-time
+          type: string
+        needsYouCount:
+          description: Exact number of calls in Needs you.
+          type: integer
+        servingHostId:
+          description: Host id of the daemon that served this board; compare with
+            each call's hostId.
+          type: string
+      required:
+      - calls
+      - needsYouCount
+      - servingHostId
+      - doneSince
+      type: object
     DecisionCallResponse:
       properties:
         answerSurface:
@@ -24047,6 +24117,7 @@ components:
           - pr_closed_unmerged
           - review_completed
           - review_changes_requested
+          - decision_needed
           type: string
       required:
       - id
@@ -24062,10 +24133,15 @@ components:
       type: object
     NotificationTarget:
       properties:
+        callId:
+          type: string
         kind:
           enum:
           - session
           - pr
+          - decision
+          type: string
+        originHostId:
           type: string
         prUrl:
           type: string

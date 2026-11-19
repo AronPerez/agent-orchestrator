@@ -117,7 +117,9 @@ func TestTimestampRepairTriggerInventory(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	const reviewed = "6ffb8340975452c70323b7e9c90a677a6bbb2e33eb80a3c241b533fd130ecca8"
+	// 2026-11-18: decision_calls_cdc_{insert,update,delete} write change_log,
+	// which PreserveRepresentation removes; see TestRepairDoesNotPublishDecisionEvents.
+	const reviewed = "ed6a2e5de2f761d0d169d0603ac6f12831ca2613b5a382422c7b2dbca21b3544"
 	if got := fmt.Sprintf("%x", hash.Sum(nil)); got != reviewed {
 		t.Fatalf("timestamp trigger inventory changed; review preservation logic before updating fingerprint: %s", got)
 	}

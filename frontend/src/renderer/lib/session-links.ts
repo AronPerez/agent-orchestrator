@@ -1,5 +1,6 @@
 import { artifactAtPath } from "../../../../packages/shared/artifacts/deliverables";
 import { decodePath } from "./workspace-file-path";
+import { parseDecisionLink } from "./decision-links";
 
 export type SessionLinkTarget = { projectId: string; sessionId: string };
 export type ArtifactLinkTarget = SessionLinkTarget & { path: string };
@@ -11,7 +12,7 @@ export type SessionLinkWorkspace = {
 
 const SESSION_LINK_PREFIX = "ao://sessions/";
 const ARTIFACT_SEGMENT = "artifacts";
-const RAW_SESSION_LINK = /ao:\/\/sessions\/\S+/g;
+const RAW_SESSION_LINK = /ao:\/\/(?:sessions|decisions)\/\S+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
 const TRAILING_DELIMITERS = [
 	["(", ")"],
@@ -145,9 +146,9 @@ export function sessionArtifactPath(path: string, sessionId: string): string | u
 	return artifact.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..") ? artifact : undefined;
 }
 
-/** True for either in-app route: a session or one of its artifacts. */
+/** True for an in-app route: a session, one of its artifacts, or a decision call. */
 export function isAoLink(value: string): boolean {
-	return parseSessionLink(value) !== undefined || parseArtifactLink(value) !== undefined;
+	return parseSessionLink(value) !== undefined || parseArtifactLink(value) !== undefined || parseDecisionLink(value) !== undefined;
 }
 
 function linkSegments(value: string): string[] | undefined {
@@ -189,7 +190,7 @@ export function resolveSessionLink(value: string, workspaces: SessionLinkWorkspa
 	return undefined;
 }
 
-/** Find raw session and artifact links without swallowing prose punctuation adjacent to them. */
+/** Find raw session, artifact and decision links without swallowing prose punctuation adjacent to them. */
 export function findSessionLinks(text: string): Array<{ start: number; end: number; text: string }> {
 	const matches: Array<{ start: number; end: number; text: string }> = [];
 	for (const match of text.matchAll(RAW_SESSION_LINK)) {
@@ -228,7 +229,7 @@ type TextMatch = { start: number; end: number; node: MarkdownNode };
 
 const linkNode = (url: string, text: string): MarkdownNode => ({ type: "link", url, children: [{ type: "text", value: text }] });
 
-/** remark plugin that linkifies only raw canonical session and artifact URLs outside code. */
+/** remark plugin that linkifies only raw canonical session, artifact and decision URLs outside code. */
 export function remarkSessionLinks() {
 	return (tree: MarkdownNode) =>
 		visitMarkdown(tree, (text) => findSessionLinks(text).map((link) => ({ ...link, node: linkNode(link.text, link.text) })));

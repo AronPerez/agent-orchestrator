@@ -21,6 +21,14 @@ vi.mock("../SessionLinkPreviewCard", () => ({
 	},
 }));
 
+const decisionPreview = vi.hoisted(() => vi.fn());
+vi.mock("../DecisionLinkPreviewCard", () => ({
+	DecisionLinkPreviewCard: (props: unknown) => {
+		decisionPreview(props);
+		return <div data-testid="decision-link-preview" />;
+	},
+}));
+
 const linkSource = vi.hoisted(() => ({ reads: 0, workspaces: [] as Array<{ id: string; sessions: Array<{ id: string; artifactFiles?: Array<{ path: string }> }> }> }));
 // Like the real source, this reads through the query client, so a render
 // without one fails here as it would in the app.
@@ -373,6 +381,31 @@ describe("ChatMarkdown", () => {
 		// The card opens the session through the same handler as the link click.
 		(sessionPreview.mock.calls.at(-1)![0] as { onOpen: () => void }).onOpen();
 		expect(onSessionLinkOpen).toHaveBeenCalledExactlyOnceWith("ao://sessions/project/session");
+	});
+
+	it("previews and opens a decision link through the chat's in-app opener", async () => {
+		decisionPreview.mockClear();
+		const onSessionLinkOpen = vi.fn();
+		render(
+			<ChatLinkProvider onSessionLinkOpen={onSessionLinkOpen} sessionLinkHostId="box-a">
+				<ChatMarkdown text="Waiting on ao://decisions/dec_1." />
+			</ChatLinkProvider>,
+		);
+
+		const link = screen.getByRole("link", { name: "ao://decisions/dec_1" });
+		fireEvent.pointerOver(link, { pointerType: "mouse" });
+		await waitFor(() => expect(screen.getByTestId("decision-link-preview")).toBeInTheDocument());
+		expect(screen.queryByTestId("artifact-link-preview")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("session-link-preview")).not.toBeInTheDocument();
+		expect(decisionPreview).toHaveBeenCalledWith({ href: "ao://decisions/dec_1", onOpen: expect.any(Function) });
+
+		await userEvent.click(link);
+		expect(onSessionLinkOpen).toHaveBeenCalledExactlyOnceWith("ao://decisions/dec_1");
+	});
+
+	it("leaves a malformed decision link as plain text", () => {
+		render(<ChatLinkProvider onSessionLinkOpen={vi.fn()}><ChatMarkdown text="See ao://decisions/a/b for details" /></ChatLinkProvider>);
+		expect(screen.queryByRole("link")).not.toBeInTheDocument();
 	});
 
 	it("renders remote workspace paths as text while keeping external links working", async () => {

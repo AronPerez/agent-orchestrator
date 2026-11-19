@@ -623,6 +623,7 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersDecisionCallResponse":             "DecisionCallResponse",
 	"ControllersListDecisionsQuery":               "ListDecisionsQuery",
 	"ControllersListDecisionsResponse":            "ListDecisionsResponse",
+	"ControllersDecisionBoardResponse":            "DecisionBoardResponse",
 	"ControllersDecisionIDParam":                  "DecisionIDParam",
 	"ControllersDecisionEntryResponse":            "DecisionEntryResponse",
 	"ControllersDecisionDetailResponse":           "DecisionDetailResponse",
@@ -1127,6 +1128,11 @@ func decisionOperations() []operation {
 			summary: "Overrule a decision made on the person's behalf", pathParams: []any{controllers.DecisionIDParam{}},
 			reqBody: controllers.OverruleDecisionRequest{},
 			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/decisions/board", id: "getDecisionBoard", tag: "decisions",
+			summary: "Get the Decisions page board",
+			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionBoardResponse{}}}, commonErrors...),
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/decisions/kinds", id: "listDecisionKinds", tag: "decisions",

@@ -236,6 +236,16 @@ type DecisionObserveResponse struct {
 type ListDecisionsQuery struct {
 	Scope string `query:"scope,omitempty" enum:"mine,needs_you,decided" description:"Which calls to list. Defaults to needs_you. Ignored when q is given."`
 	Q     string `query:"q,omitempty" description:"Search words. When given, the response is the search result."`
+	Limit int    `query:"limit,omitempty" minimum:"1" description:"Most search results to return. Defaults to 20; values above 100 are capped. Ignored when q is absent."`
+}
+
+// DecisionBoardResponse is the Decisions page snapshot: every active call plus
+// non-retired Done calls whose outcome landed at or after doneSince.
+type DecisionBoardResponse struct {
+	Calls         []DecisionCallResponse `json:"calls"`
+	NeedsYouCount int                    `json:"needsYouCount" description:"Exact number of calls in Needs you."`
+	ServingHostID string                 `json:"servingHostId" description:"Host id of the daemon that served this board; compare with each call's hostId."`
+	DoneSince     time.Time              `json:"doneSince" description:"Oldest outcome time a Done call may have and still be on the board."`
 }
 
 // ListDecisionsResponse contains ordered decision projections.
@@ -3084,9 +3094,13 @@ type NotificationIDParam struct {
 
 // NotificationTarget is the dashboard navigation target for a notification.
 type NotificationTarget struct {
-	Kind      string `json:"kind" enum:"session,pr"`
+	Kind      string `json:"kind" enum:"session,pr,decision"`
 	SessionID string `json:"sessionId"`
 	PRURL     string `json:"prUrl,omitempty"`
+	// CallID and OriginHostID identify a decision-ledger call. Set only when
+	// kind is decision; a decision target has no session.
+	CallID       string `json:"callId,omitempty"`
+	OriginHostID string `json:"originHostId,omitempty"`
 }
 
 // NotificationResponse is one stored notification returned by the API.
@@ -3095,7 +3109,7 @@ type NotificationResponse struct {
 	SessionID string    `json:"sessionId"`
 	ProjectID string    `json:"projectId"`
 	PRURL     string    `json:"prUrl"`
-	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
+	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested,decision_needed"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	Status    string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`

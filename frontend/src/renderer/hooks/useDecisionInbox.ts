@@ -1,9 +1,17 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import {
 	answerDecisionInboxCall,
+	DECISION_SEARCH_LIMIT,
+	decisionKeys,
+	fetchDecisionBoard,
+	fetchDecisionDetail,
 	fetchDecisionInboxCalls,
+	fetchDecisionSearch,
 	mergeDecisionInboxSources,
+	runDecisionAction,
+	type DecisionAction,
+	type DecisionBoard,
 	type DecisionCall,
 	type DecisionInboxEntry,
 } from "../lib/decision-inbox";
@@ -11,10 +19,44 @@ import { labelForHost } from "../lib/host-clients";
 import { LOCAL_HOST, type HostId } from "../lib/hosts";
 import { useConnectedHosts } from "./useHostConnection";
 
-export const decisionInboxQueryKey = (hostId: HostId) => ["decision-inbox", hostId] as const;
+export const decisionInboxQueryKey = (hostId: HostId) => decisionKeys.needsYou(hostId);
+
+/**
+ * The one answer mutation for every decision surface (bell and page). On
+ * success the answered call leaves the needs-you list at once and every
+ * decision view refetches; on failure the source host refetches, so a call
+ * answered elsewhere drops out instead of being sent again.
+ */
+export function useDecisionAnswer() {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: answerDecisionInboxCall,
+		onSuccess: async (_call, input) => {
+			queryClient.setQueryData<DecisionCall[]>(decisionInboxQueryKey(input.sourceHostId), (current) =>
+				current?.filter((call) => call.id !== input.callId),
+			);
+			await queryClient.invalidateQueries({ queryKey: decisionKeys.all });
+		},
+		onError: (_error, input) => {
+			void queryClient.invalidateQueries({ queryKey: decisionKeys.host(input.sourceHostId) });
+		},
+	});
+}
+
+/**
+ * Dismiss, record an outcome, or mark a call (no longer) applying, on this
+ * computer's ledger. Success or failure refetches this computer's decision
+ * views before anything is sent again; nothing changes before the daemon says so.
+ */
+export function useDecisionAction() {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (action: DecisionAction) => runDecisionAction(action),
+		onSettled: () => queryClient.invalidateQueries({ queryKey: decisionKeys.host(LOCAL_HOST) }),
+	});
+}
 
 export function useDecisionInbox(enabled: boolean) {
-	const queryClient = useQueryClient();
 	const connectedHosts = useConnectedHosts();
 	const localQuery = useQuery({
 		queryKey: decisionInboxQueryKey(LOCAL_HOST),
@@ -41,18 +83,7 @@ export function useDecisionInbox(enabled: boolean) {
 		})),
 	]), [connectedHosts, localQuery.data, remoteQueries]);
 
-	const answerMutation = useMutation({
-		mutationFn: answerDecisionInboxCall,
-		onSuccess: async (_call, input) => {
-			queryClient.setQueryData<DecisionCall[]>(decisionInboxQueryKey(input.sourceHostId), (current) =>
-				current?.filter((call) => call.id !== input.callId),
-			);
-			await queryClient.invalidateQueries({ queryKey: ["decision-inbox"] });
-		},
-		onError: (_error, input) => {
-			void queryClient.invalidateQueries({ queryKey: decisionInboxQueryKey(input.sourceHostId) });
-		},
-	});
+	const answerMutation = useDecisionAnswer();
 
 	const answer = useCallback((entry: DecisionInboxEntry, option: number, note?: string) => {
 		answerMutation.mutate({
@@ -80,4 +111,60 @@ export function useDecisionInbox(enabled: boolean) {
 		answer,
 		retry,
 	};
+}
+
+/**
+ * This computer's Decisions board. The sidebar count and the page share this
+ * one query; live `decision_updated` events refresh it through the local host
+ * branch, so it does not poll.
+ */
+export function useDecisionBoard() {
+	return useQuery({
+		queryKey: decisionKeys.board(),
+		queryFn: ({ signal }) => fetchDecisionBoard(signal),
+		retry: 1,
+		// No event fires when a Done card ages out of the seven-day window, so
+		// refetch at the next such moment.
+		refetchInterval: (query) => nextDoneExpiryDelay(query.state.data),
+	});
+}
+
+const DONE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_TIMER_MS = 24 * 60 * 60 * 1000;
+
+/** Milliseconds until the oldest board Done card passes the window, or false. */
+export function nextDoneExpiryDelay(board: DecisionBoard | undefined, now = Date.now()): number | false {
+	let soonest = Number.POSITIVE_INFINITY;
+	for (const call of board?.calls ?? []) {
+		if (call.state !== "done" || call.retired || !call.outcomeAt) continue;
+		const expires = Date.parse(call.outcomeAt) + DONE_WINDOW_MS;
+		if (Number.isFinite(expires)) soonest = Math.min(soonest, expires);
+	}
+	if (!Number.isFinite(soonest)) return false;
+	const delay = soonest - now;
+	// Past due means the daemon's clock has not dropped it yet; look again in a minute.
+	if (delay <= 0) return 60_000;
+	return Math.min(MAX_TIMER_MS, Math.max(1_000, delay + 250));
+}
+
+/** One call and its full history; `null` data means it no longer exists. */
+export function useDecisionDetail(callId: string | undefined) {
+	return useQuery({
+		queryKey: decisionKeys.detail(callId ?? ""),
+		queryFn: ({ signal }) => fetchDecisionDetail(callId!, signal),
+		enabled: Boolean(callId),
+		retry: 1,
+	});
+}
+
+/** Full-ledger search. Earlier results stay visible while a new query loads. */
+export function useDecisionSearch(query: string) {
+	const words = query.trim();
+	return useQuery({
+		queryKey: decisionKeys.search(words, DECISION_SEARCH_LIMIT),
+		queryFn: ({ signal }) => fetchDecisionSearch(words, DECISION_SEARCH_LIMIT, signal),
+		enabled: words.length > 0,
+		placeholderData: keepPreviousData,
+		retry: 1,
+	});
 }

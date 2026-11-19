@@ -15,7 +15,8 @@ vi.mock("../lib/host-clients", () => ({
 
 vi.mock("./useHostConnection", () => ({ useConnectedHosts: () => connectedHostsMock() }));
 
-import { useDecisionInbox } from "./useDecisionInbox";
+import { decisionKeys } from "../lib/decision-inbox";
+import { decisionInboxQueryKey, nextDoneExpiryDelay, useDecisionAction, useDecisionAnswer, useDecisionBoard, useDecisionDetail, useDecisionInbox, useDecisionSearch } from "./useDecisionInbox";
 
 const decisionCall = (id: string, raisedAt: string) => ({
 	id,
@@ -108,5 +109,146 @@ describe("useDecisionInbox", () => {
 		}));
 		await waitFor(() => expect(result.current.entries).toEqual([]));
 		expect(remote.GET.mock.calls.length).toBeGreaterThan(1);
+	});
+});
+
+/** A daemon that answers every decision route this page reads. */
+function setupLedger(hostId: string, calls: ReturnType<typeof decisionCall>[]) {
+	const client = {
+		GET: vi.fn().mockImplementation((path: string, request?: { params?: { path?: { id?: string }; query?: { q?: string } } }) => {
+			if (path === "/api/v1/decisions/board") {
+				return Promise.resolve({ data: { calls, needsYouCount: calls.length, servingHostId: "h_local", doneSince: "2026-11-11T10:00:00Z" } });
+			}
+			if (path === "/api/v1/decisions/{id}") {
+				const found = calls.find((call) => call.id === request?.params?.path?.id);
+				return Promise.resolve(found
+					? { data: { call: found, history: [] }, response: { status: 200 } }
+					: { error: { error: { code: "DECISION_NOT_FOUND", message: "Unknown decision" } }, response: { status: 404 } });
+			}
+			const q = request?.params?.query?.q;
+			return Promise.resolve({ data: { calls: q ? calls.filter((call) => call.title.includes(q)) : calls } });
+		}),
+		POST: vi.fn(),
+	};
+	clients.set(hostId, client);
+	return client;
+}
+
+const pathCalls = (client: { GET: ReturnType<typeof vi.fn> }, path: string) =>
+	client.GET.mock.calls.filter(([called]) => called === path).length;
+
+describe("decision page hooks", () => {
+	it("keeps the bell's needs-you key on the shared host branch", () => {
+		expect(decisionInboxQueryKey("remote-a")).toEqual(decisionKeys.needsYou("remote-a"));
+	});
+
+	it("loads the board, one call's detail and search results from this computer", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({
+			board: useDecisionBoard(),
+			detail: useDecisionDetail("dec_1"),
+			missing: useDecisionDetail("dec_gone"),
+			search: useDecisionSearch("Question"),
+		}), { wrapper: wrapper(queryClient) });
+
+		await waitFor(() => expect(result.current.board.data?.calls).toHaveLength(1));
+		await waitFor(() => expect(result.current.detail.data?.call.id).toBe("dec_1"));
+		await waitFor(() => expect(result.current.missing.isSuccess).toBe(true));
+		expect(result.current.missing.data).toBeNull();
+		await waitFor(() => expect(result.current.search.data?.map((call) => call.id)).toEqual(["dec_1"]));
+		expect(local.GET).toHaveBeenCalledWith("/api/v1/decisions", expect.objectContaining({ params: { query: { q: "Question", limit: 50 } } }));
+	});
+
+	it("does not fetch detail without a call or search without words", () => {
+		const local = setupLedger("local", []);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		renderHook(() => ({ detail: useDecisionDetail(undefined), search: useDecisionSearch("   ") }), { wrapper: wrapper(queryClient) });
+		expect(local.GET).not.toHaveBeenCalled();
+	});
+
+	it("refreshes this computer's bell list and board together, and a remote host alone", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		const remote = setupLedger("remote-a", [decisionCall("dec_2", "2026-11-18T08:00:00Z")]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({ inbox: useDecisionInbox(true), board: useDecisionBoard() }), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.inbox.entries).toHaveLength(2));
+		await waitFor(() => expect(result.current.board.data).toBeDefined());
+		const localList = pathCalls(local, "/api/v1/decisions");
+		const localBoard = pathCalls(local, "/api/v1/decisions/board");
+		const remoteList = pathCalls(remote, "/api/v1/decisions");
+
+		await act(() => queryClient.invalidateQueries({ queryKey: decisionKeys.host("remote-a") }));
+		await waitFor(() => expect(pathCalls(remote, "/api/v1/decisions")).toBe(remoteList + 1));
+		expect(pathCalls(local, "/api/v1/decisions/board")).toBe(localBoard);
+		expect(pathCalls(local, "/api/v1/decisions")).toBe(localList);
+
+		await act(() => queryClient.invalidateQueries({ queryKey: decisionKeys.host("local") }));
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(localBoard + 1));
+		expect(pathCalls(local, "/api/v1/decisions")).toBe(localList + 1);
+		expect(pathCalls(remote, "/api/v1/decisions")).toBe(remoteList + 1);
+	});
+});
+
+describe("decision page mutations", () => {
+	it("shares the bell's answer mutation and refreshes the board after it", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		local.POST.mockResolvedValue({ data: { ...decisionCall("dec_1", "2026-11-18T09:00:00Z"), state: "in_progress" } });
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({ board: useDecisionBoard(), answer: useDecisionAnswer() }), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.board.data).toBeDefined());
+		const before = pathCalls(local, "/api/v1/decisions/board");
+
+		await act(() => result.current.answer.mutateAsync({ sourceHostId: "local", callId: "dec_1", choice: "other", note: "Vault" }));
+		expect(local.POST).toHaveBeenCalledTimes(1);
+		expect(local.POST).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", { params: { path: { id: "dec_1" } }, body: { choice: "other", note: "Vault" } });
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(before + 1));
+	});
+
+	it("runs dismiss, outcome and retire against this computer and refreshes after success or failure", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		local.POST.mockResolvedValue({ data: decisionCall("dec_1", "2026-11-18T09:00:00Z") });
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({ board: useDecisionBoard(), action: useDecisionAction() }), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.board.data).toBeDefined());
+
+		await act(() => result.current.action.mutateAsync({ kind: "dismiss", callId: "dec_1", note: "No" }));
+		await act(() => result.current.action.mutateAsync({ kind: "outcome", callId: "dec_1", forEntry: "dent_2", text: "Done", link: "" }));
+		await act(() => result.current.action.mutateAsync({ kind: "retire", callId: "dec_1", retired: true }));
+		expect(local.POST.mock.calls.map(([path]) => path)).toEqual([
+			"/api/v1/decisions/{id}/dismiss",
+			"/api/v1/decisions/{id}/outcome",
+			"/api/v1/decisions/{id}/retire",
+		]);
+		const before = pathCalls(local, "/api/v1/decisions/board");
+		local.POST.mockResolvedValue({ error: { code: "DECISION_WRONG_STATE", message: "Closed." } });
+		await act(async () => {
+			await expect(result.current.action.mutateAsync({ kind: "retire", callId: "dec_1", retired: true })).rejects.toThrow("Closed.");
+		});
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBeGreaterThan(before));
+	});
+
+describe("board freshness", () => {
+	it("refetches the board when its oldest Done card leaves the seven-day window, with no event", async () => {
+		const outcomeAt = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000 + 1_200).toISOString();
+		const local = setupLedger("local", [{ ...decisionCall("dec_done", "2026-11-01T09:00:00Z"), state: "done", stateLabel: "Done", outcomeAt } as unknown as ReturnType<typeof decisionCall>]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		renderHook(() => useDecisionBoard(), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(1));
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(2), { timeout: 4_000 });
+	});
+});
+
+	it("times the refresh from the oldest non-retired Done card only", () => {
+		const now = Date.parse("2026-11-18T12:00:00Z");
+		const week = 7 * 24 * 60 * 60 * 1000;
+		const done = (outcomeAt: string, retired = false) => ({ ...decisionCall("d", "2026-11-01T00:00:00Z"), state: "done" as const, outcomeAt, retired });
+		const boardOf = (calls: unknown[]) => ({ calls, needsYouCount: 0, servingHostId: "h", doneSince: "" }) as never;
+		expect(nextDoneExpiryDelay(undefined, now)).toBe(false);
+		expect(nextDoneExpiryDelay(boardOf([decisionCall("n", "2026-11-18T00:00:00Z")]), now)).toBe(false);
+		expect(nextDoneExpiryDelay(boardOf([done(new Date(now - week + 60_000).toISOString(), true)]), now)).toBe(false);
+		expect(nextDoneExpiryDelay(boardOf([done(new Date(now - week + 60_000).toISOString()), done(new Date(now - week + 120_000).toISOString())]), now)).toBe(60_250);
+		expect(nextDoneExpiryDelay(boardOf([done(new Date(now - week - 1).toISOString())]), now)).toBe(60_000);
+		expect(nextDoneExpiryDelay(boardOf([done(new Date(now).toISOString())]), now)).toBe(24 * 60 * 60 * 1000);
 	});
 });

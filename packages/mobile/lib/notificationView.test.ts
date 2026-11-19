@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { notificationAction, notificationsAcrossHosts, notificationRowsForHost, notificationSections, notificationTarget, notificationVisual, relativeTime } from "./notificationView";
+import { notificationAction, notificationGroupKey, notificationOpenKind, notificationsAcrossHosts, notificationSources, notificationRowsForHost, notificationSections, notificationTarget, notificationVisual, relativeTime } from "./notificationView";
 import { darkTheme } from "./theme";
 
 describe("notificationVisual", () => {
@@ -209,5 +209,69 @@ describe("notificationAction", () => {
 		expect(notificationAction({ type: "review_completed", sessionId: "s1" }, ready)).toEqual({ kind: "prs" });
 		expect(notificationAction({ type: "review_changes_requested", prUrl: "https://github.com/acme/repo/pull/42" }, ready))
 			.toEqual({ kind: "prs" });
+	});
+});
+
+describe("decision notifications", () => {
+	const decision = (id: string, overrides: Record<string, unknown> = {}) => ({
+		id, type: "decision_needed", sessionId: "", projectId: "", prUrl: "",
+		title: "Decision needed · Shop", body: "Ship it?", status: "read", createdAt: "2026-11-18T10:00:00Z",
+		target: { kind: "decision", sessionId: "", callId: "dec_1", originHostId: "host-a" },
+		...overrides,
+	});
+
+	it("is an amber Decision needed alert", () => {
+		const visual = notificationVisual(darkTheme, "decision_needed");
+		expect(visual).toEqual({ icon: "bell", color: darkTheme.amber, label: "Decision needed" });
+	});
+
+	it("groups one call by its call id and every other row by host and id", () => {
+		expect(notificationGroupKey("host-a", decision("n1"))).toBe("decision:dec_1");
+		expect(notificationGroupKey("host-b", decision("n9"))).toBe("decision:dec_1");
+		expect(notificationGroupKey("host-a", { id: "n1", type: "needs_input" })).toBe("host-a:n1");
+		// A malformed or old decision row never shares one malformed key.
+		expect(notificationGroupKey("host-a", decision("n2", { target: { kind: "session", sessionId: "" } }))).toBe("host-a:n2");
+	});
+
+	it("shows one row for a call two machines announce, unread if either is, led by the origin", () => {
+		const rows = notificationsAcrossHosts([
+			{ hostId: "host-b", hostName: "B", items: [decision("b-1", { status: "unread", createdAt: "2026-11-18T10:00:05Z" })] },
+			{ hostId: "host-a", hostName: "A", items: [decision("a-1")] },
+		]);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({ id: "a-1", hostId: "host-a", status: "unread" });
+		expect(rows[0].sources).toEqual([{ hostId: "host-a", id: "a-1" }, { hostId: "host-b", id: "b-1" }]);
+	});
+
+	it("keeps same-id rows from different machines apart for every other type", () => {
+		const row = { id: "n1", type: "needs_input", status: "unread", createdAt: "2026-11-18T10:00:00Z" };
+		const rows = notificationsAcrossHosts([
+			{ hostId: "host-a", hostName: "A", items: [row] },
+			{ hostId: "host-b", hostName: "B", items: [row] },
+		]);
+		expect(rows.map((r) => r.hostId)).toEqual(["host-a", "host-b"]);
+		expect(notificationSources(rows[0])).toEqual([{ hostId: "host-a", id: "n1" }]);
+	});
+
+	it("never routes a decision to a session or the PR list", () => {
+		expect(notificationAction(decision("n1"), { terminated: false, sessionsReady: true })).toEqual({ kind: "decision", callId: "dec_1" });
+		expect(notificationAction(decision("n1", { target: undefined }), { terminated: false, sessionsReady: true })).toEqual({ kind: "none" });
+	});
+
+	it("opens a decision push in the notification feed for its call", () => {
+		expect(notificationTarget({ type: "decision_needed", decisionCallId: "dec 1", hostId: "host-a" }, "host-a"))
+			.toBe("/notifications?decisionCallId=dec%201&hostId=host-a");
+		expect(notificationTarget({ type: "decision_needed", decisionCallId: "dec_1", hostId: "forgotten" }, new Set(["host-a"])))
+			.toBe("/notifications?decisionCallId=dec_1&hostUnavailable=1");
+		expect(notificationTarget({ type: "decision_needed", hostId: "host-a" }, "host-a")).toBe("/");
+	});
+});
+
+describe("notificationOpenKind", () => {
+	it("names where a push tap lands so the tray and history agree", () => {
+		expect(notificationOpenKind("/review/s?prUrl=x&hostId=h")).toBe("review");
+		expect(notificationOpenKind("/session/s?hostId=h")).toBe("session");
+		expect(notificationOpenKind("/notifications?decisionCallId=dec_1&hostId=h")).toBe("notifications");
+		expect(notificationOpenKind("/prs?hostId=h")).toBe("prs");
 	});
 });

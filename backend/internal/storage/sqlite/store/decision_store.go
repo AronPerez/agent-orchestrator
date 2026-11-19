@@ -107,7 +107,7 @@ func appendDecisionEntry(ctx context.Context, q *gen.Queries, entry domain.Decis
 		OwnerSessionID: string(call.Raised.OwnerSessionID), State: string(call.State),
 		Delivery: string(call.Delivery), Retired: boolInt(call.Retired), RaisedAt: call.RaisedAt,
 		LastWall: call.LastStamp.WallMS, LastCounter: call.LastStamp.Counter,
-		Body: string(body), SearchText: call.SearchText(),
+		Body: string(body), SearchText: call.SearchText(), OutcomeAt: decisionOutcomeAt(call),
 	})
 	if err != nil {
 		return domain.DecisionEntry{}, domain.DecisionCall{}, err
@@ -163,6 +163,18 @@ func (s *Store) ListDecisionCallsByState(ctx context.Context, state domain.Decis
 	return decisionCallsFromGen(rows)
 }
 
+// ListDecisionCallsForBoard returns every Needs-you and In-progress call plus
+// non-retired Done calls whose outcome landed at or after doneSince, ordered by
+// raise time. Dismissed, withdrawn, retired and older Done calls stay
+// history-only.
+func (s *Store) ListDecisionCallsForBoard(ctx context.Context, doneSince time.Time) ([]domain.DecisionCall, error) {
+	rows, err := s.qr.ListDecisionCallsForBoard(ctx, sql.NullTime{Time: doneSince.UTC(), Valid: true})
+	if err != nil {
+		return nil, fmt.Errorf("list decision board calls: %w", err)
+	}
+	return decisionCallsFromGen(rows)
+}
+
 // ListDecisionCallsAwaitingDelivery returns one ledger snapshot for every
 // undelivered answer or dismissal raised on origin.
 func (s *Store) ListDecisionCallsAwaitingDelivery(ctx context.Context, origin string) ([]domain.DecisionCall, error) {
@@ -206,6 +218,38 @@ func (s *Store) ListDecisionStreams(ctx context.Context) ([]domain.DecisionStrea
 		}
 	}
 	return streams, nil
+}
+
+// ListDecisionStreamsFor returns the newest recorded name of every stream led
+// by one of sessions, on any origin. It reads only those streams' calls.
+func (s *Store) ListDecisionStreamsFor(ctx context.Context, sessions []domain.SessionID) ([]domain.DecisionStream, error) {
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(sessions))
+	for i, session := range sessions {
+		ids[i] = string(session)
+	}
+	rows, err := s.qr.ListDecisionStreamsForSessions(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list decision streams for sessions: %w", err)
+	}
+	streams := make([]domain.DecisionStream, len(rows))
+	for i, row := range rows {
+		streams[i] = domain.DecisionStream{
+			Origin: row.Origin, SessionID: domain.SessionID(row.StreamSessionID), Name: row.StreamName,
+		}
+	}
+	return streams, nil
+}
+
+// decisionOutcomeAt is the rebuildable board filter column. It is always UTC so
+// stored values compare correctly as text.
+func decisionOutcomeAt(call domain.DecisionCall) sql.NullTime {
+	if call.OutcomeAt.IsZero() {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: call.OutcomeAt.UTC(), Valid: true}
 }
 
 func decisionEntryFromGen(row gen.DecisionEntry) domain.DecisionEntry {

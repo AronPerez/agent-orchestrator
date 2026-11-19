@@ -344,7 +344,7 @@ func TestSearchPutsRetiredDecisionsLast(t *testing.T) {
 	}
 	current := raiseDecision(t, fixture, fixture.w2)
 
-	calls, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "auth scheme")
+	calls, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "auth scheme", 0)
 	if err != nil || callIDs(calls) != current.ID+","+old.ID {
 		t.Fatalf("search = %q, err=%v", callIDs(calls), err)
 	}
