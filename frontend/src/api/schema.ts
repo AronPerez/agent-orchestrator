@@ -16311,6 +16311,8 @@ export interface operations {
                 q?: string;
                 /** @description Most search results to return. Defaults to 20; values above 100 are capped. Ignored when q is absent. */
                 limit?: number;
+                /** @description Comma-separated call ids to look up, at most 100; unknown ids are left out. Takes precedence over q and scope. */
+                ids?: string;
             };
             header?: never;
             path?: never;

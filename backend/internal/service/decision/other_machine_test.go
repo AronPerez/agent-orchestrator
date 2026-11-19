@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -116,4 +117,26 @@ func TestPersonMayAnswerAndOverruleAnotherMachinesCall(t *testing.T) {
 	if overruled.Origin != "h_b" || overruled.Delivery != domain.DecisionDeliveryPending {
 		t.Fatalf("overruled = origin %s delivery %s, want h_b and pending until the owner delivers", overruled.Origin, overruled.Delivery)
 	}
+}
+
+func TestDecisionLookupByIDs(t *testing.T) {
+	fixture := newDecisionService(t)
+	local, err := fixture.service.Raise(context.Background(), Actor{Session: fixture.w1}, validRaiseInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := remoteRaised(t, fixture)
+	calls, err := fixture.service.Lookup(context.Background(), []string{remote.ID, "dec_unknown", local.ID, remote.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 || calls[0].ID != remote.ID || calls[1].ID != local.ID {
+		t.Fatalf("lookup = %d calls %+v", len(calls), calls)
+	}
+	ids := make([]string, MaxDecisionLookupIDs+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("dec_%d", i)
+	}
+	_, err = fixture.service.Lookup(context.Background(), ids)
+	assertAPICode(t, err, "DECISION_IDS_TOO_MANY")
 }
