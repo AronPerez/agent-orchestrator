@@ -57,6 +57,70 @@ func (q *Queries) CountUnresolvedNotifications(ctx context.Context) (int64, erro
 	return count, err
 }
 
+const createDecisionNotification = `-- name: CreateDecisionNotification :one
+INSERT INTO notifications (
+    id, session_id, project_id, pr_url, type, title, body, status, created_at, source_key,
+    decision_call_id, decision_origin_host_id
+)
+SELECT ?1, NULL, NULL, '', ?2, ?3, ?4, ?5,
+       ?6, ?7, ?8, ?9
+WHERE NOT EXISTS (
+    SELECT 1 FROM decision_calls c
+    WHERE c.call_id = ?8
+      AND c.state <> 'needs_you'
+)
+RETURNING id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at, dismissed_at, source_key, decision_call_id, decision_origin_host_id
+`
+
+type CreateDecisionNotificationParams struct {
+	ID                   string
+	Type                 domain.NotificationType
+	Title                string
+	Body                 string
+	Status               domain.NotificationStatus
+	CreatedAt            time.Time
+	SourceKey            string
+	DecisionCallID       string
+	DecisionOriginHostID string
+}
+
+// A decision alert is written only while its call has not been seen to leave
+// Needs you. The check and the insert are one statement, so a call answered,
+// dismissed, or withdrawn after the projector's scan never gets an alert (and
+// so never a toast or push). A call with no read-model row yet is allowed:
+// notifications deliberately do not depend on ledger row order.
+func (q *Queries) CreateDecisionNotification(ctx context.Context, arg CreateDecisionNotificationParams) (Notification, error) {
+	row := q.db.QueryRowContext(ctx, createDecisionNotification,
+		arg.ID,
+		arg.Type,
+		arg.Title,
+		arg.Body,
+		arg.Status,
+		arg.CreatedAt,
+		arg.SourceKey,
+		arg.DecisionCallID,
+		arg.DecisionOriginHostID,
+	)
+	var i Notification
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.ProjectID,
+		&i.PRURL,
+		&i.Type,
+		&i.Title,
+		&i.Body,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ResolvedAt,
+		&i.DismissedAt,
+		&i.SourceKey,
+		&i.DecisionCallID,
+		&i.DecisionOriginHostID,
+	)
+	return i, err
+}
+
 const createNotification = `-- name: CreateNotification :one
 INSERT INTO notifications (
     id, session_id, project_id, pr_url, type, title, body, status, created_at, source_key,
