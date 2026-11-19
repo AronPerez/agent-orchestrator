@@ -876,18 +876,19 @@ func TestNotificationStore_ReconcileResolvesStaleDecisionNotifications(t *testin
 			t.Fatal("dismissed decision tombstone survived reconcile")
 		}
 	}
-	if _, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_dec_hidden_2", "dec_hidden", later)); err != nil || !inserted {
-		t.Fatalf("tombstone still blocks the call: inserted=%v err=%v", inserted, err)
+	// A surviving tombstone would be returned by the source-key lookup; once it
+	// is deleted the answered call simply gets no new alert.
+	probe, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_dec_hidden_2", "dec_hidden", later))
+	if err != nil || inserted || probe.ID != "" {
+		t.Fatalf("after reconcile: probe=%+v inserted=%v err=%v; want no tombstone and no new alert", probe, inserted, err)
 	}
 
 	again, err := s.ReconcileResolvedNotifications(ctx, later.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rec := range again {
-		if rec.ID != "ntf_dec_hidden_2" {
-			t.Fatalf("second reconcile re-resolved %s", rec.ID)
-		}
+	if len(again) != 0 {
+		t.Fatalf("second reconcile re-resolved %+v", again)
 	}
 }
 
@@ -907,5 +908,32 @@ func TestNotificationStore_ResolveDecisionNotificationsByCall(t *testing.T) {
 	again, err := s.ResolveDecisionNotifications(ctx, "dec_1", domain.NotificationDecisionNeeded, now)
 	if err != nil || len(again) != 0 {
 		t.Fatalf("second resolve rows=%+v err=%v", again, err)
+	}
+}
+
+func TestNotificationStore_DecisionNotificationNotCreatedAfterCallLeavesNeedsYou(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_000_000).UTC()
+	appendDecision(t, s, decisionRaised("dent_r", "h_a", "dec_race", "w-1", "", "", at), at)
+	// The projector's scan sees the call waiting...
+	waiting, err := s.ListDecisionCallsByState(ctx, domain.DecisionStateNeedsYou, -1)
+	if err != nil || len(waiting) != 1 {
+		t.Fatalf("scan = %+v err=%v", waiting, err)
+	}
+	// ...then the person answers before the notification write lands.
+	later := at.Add(time.Second)
+	appendDecision(t, s, decisionAnswered("dent_a", "h_a", "dec_race", 1, later), later)
+
+	created, inserted, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_race", "dec_race", later))
+	if err != nil {
+		t.Fatalf("CreateNotification: %v", err)
+	}
+	if inserted || created.ID != "" {
+		t.Fatalf("alert created for a call that already left Needs you: inserted=%v created=%+v", inserted, created)
+	}
+	rows, err := s.ListNotifications(ctx, domain.NotificationListAll, time.Time{}, "", 10)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 }

@@ -5,6 +5,25 @@ INSERT INTO notifications (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
+-- A decision alert is written only while its call has not been seen to leave
+-- Needs you. The check and the insert are one statement, so a call answered,
+-- dismissed, or withdrawn after the projector's scan never gets an alert (and
+-- so never a toast or push). A call with no read-model row yet is allowed:
+-- notifications deliberately do not depend on ledger row order.
+-- name: CreateDecisionNotification :one
+INSERT INTO notifications (
+    id, session_id, project_id, pr_url, type, title, body, status, created_at, source_key,
+    decision_call_id, decision_origin_host_id
+)
+SELECT sqlc.arg(id), NULL, NULL, '', sqlc.arg(type), sqlc.arg(title), sqlc.arg(body), sqlc.arg(status),
+       sqlc.arg(created_at), sqlc.arg(source_key), sqlc.arg(decision_call_id), sqlc.arg(decision_origin_host_id)
+WHERE NOT EXISTS (
+    SELECT 1 FROM decision_calls c
+    WHERE c.call_id = sqlc.arg(decision_call_id)
+      AND c.state <> 'needs_you'
+)
+RETURNING *;
+
 -- name: GetNotificationBySourceKey :one
 SELECT * FROM notifications WHERE source_key = ? LIMIT 1;
 
