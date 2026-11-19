@@ -252,3 +252,39 @@ describe("board freshness", () => {
 		expect(nextDoneExpiryDelay(boardOf([done(new Date(now).toISOString())]), now)).toBe(24 * 60 * 60 * 1000);
 	});
 });
+
+describe("answer reconciliation", () => {
+	it("stays pending after a failed answer until this computer's calls are re-read", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({ board: useDecisionBoard(), answer: useDecisionAnswer() }), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.board.data).toBeDefined());
+		let finishRead!: () => void;
+		const plain = local.GET.getMockImplementation()!;
+		local.GET.mockImplementation((path: string, request?: unknown) => path === "/api/v1/decisions/board"
+			? new Promise((done) => { finishRead = () => done(plain(path, request)); })
+			: plain(path, request));
+		// The daemon may have committed the answer even though its response was lost.
+		local.POST.mockRejectedValue(new Error("connection reset"));
+		act(() => { result.current.answer.mutate({ sourceHostId: "local", callId: "dec_1", option: 1 }); });
+		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(2));
+		expect(result.current.answer.isPending).toBe(true);
+		await act(async () => { finishRead(); });
+		await waitFor(() => expect(result.current.answer.isError).toBe(true));
+	});
+
+	it("keeps the confirmed call when the re-read after an answer fails", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({ detail: useDecisionDetail("dec_1"), answer: useDecisionAnswer(), action: useDecisionAction() }), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.detail.data?.call.state).toBe("needs_you"));
+		local.POST.mockResolvedValue({ data: { ...decisionCall("dec_1", "2026-11-18T09:00:00Z"), state: "in_progress", stateLabel: "In progress" } });
+		local.GET.mockResolvedValue({ error: { code: "DECISION_GET_FAILED", message: "Unable to get decision" }, response: { status: 500 } });
+		await act(() => result.current.answer.mutateAsync({ sourceHostId: "local", callId: "dec_1", option: 1 }));
+		await waitFor(() => expect(result.current.detail.data?.call.state).toBe("in_progress"));
+
+		local.POST.mockResolvedValue({ data: { ...decisionCall("dec_1", "2026-11-18T09:00:00Z"), state: "done", stateLabel: "Done" } });
+		await act(() => result.current.action.mutateAsync({ kind: "outcome", callId: "dec_1", text: "Shipped" }));
+		await waitFor(() => expect(result.current.detail.data?.call.state).toBe("done"));
+	});
+});
