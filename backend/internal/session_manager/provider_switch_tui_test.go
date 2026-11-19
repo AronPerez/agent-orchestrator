@@ -251,6 +251,53 @@ func TestSwitchTUIProviderRetainsPublishedRuntimeStop(t *testing.T) {
 	}
 }
 
+func TestSwitchTUIProviderDoesNotReleaseTrackerIntakeWhenDestroyFailsAndExactProbeIsUnknown(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	rec := mkLive("mer-1")
+	rec.Harness, rec.Mode, rec.Kind = domain.HarnessCodex, domain.SessionModeTUI, domain.KindWorker
+	rec.Activity.State = domain.ActivityIdle
+	rec.IssueID = "github:acme/mer#uncertain-stop"
+	rec.Metadata.AgentSessionID = "source-native"
+	rec.Metadata.RuntimeLaunchID = "source-generation"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: rec.Metadata.RuntimeLaunchID, RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID},
+		DeliveryPossible: true,
+	}
+	runtime := &fakeRuntime{
+		destroyErr:    errors.New("pty-host still alive"),
+		aliveByHandle: map[string]bool{rec.Metadata.RuntimeHandleID: false},
+		fencedResults: map[string]ports.FencedProbeResult{
+			rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+		},
+	}
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: &recordingAgent{}}, Store: &launchOptionsFakeStore{fakeStore: st},
+		Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	err := m.SwitchTUIProvider(context.Background(), rec.ID, domain.ProviderSwitchRequest{
+		TargetHarness: domain.HarnessClaudeCode, HandoffNote: "handoff",
+	})
+	var switchErr *domain.ProviderSwitchError
+	if !errors.As(err, &switchErr) || switchErr.Kind != domain.ProviderSwitchRefusalRecoveryRequired {
+		t.Fatalf("SwitchTUIProvider() error = %v, want recovery required", err)
+	}
+	if reservation := st.trackerIntakeRecovery[rec.ID]; reservation.CapacityReleased {
+		t.Fatalf("tracker intake reservation = %+v, want ownership fence retained", reservation)
+	}
+	if runtime.created != 0 {
+		t.Fatalf("started target runtime while source ownership remained unresolved: %d", runtime.created)
+	}
+	if len(runtime.fencedRefs) != 2 {
+		t.Fatalf("exact source probes = %+v, want one after each failed destroy", runtime.fencedRefs)
+	}
+}
+
 func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

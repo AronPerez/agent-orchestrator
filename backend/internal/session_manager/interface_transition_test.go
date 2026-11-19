@@ -3278,6 +3278,44 @@ func TestInterfaceTransitionDoesNotStartTargetWhenSourceStopRemainsAmbiguous(t *
 	}
 }
 
+func TestInterfaceTransitionDoesNotReleaseTrackerIntakeWhenDestroyFailsAndExactProbeIsUnknown(t *testing.T) {
+	manager, store, runtime, chat, _ := newTransitionManager(t, domain.SessionModeTUI)
+	rec := store.sessions["session-1"]
+	rec.IssueID = "github:acme/repo#uncertain-stop"
+	store.sessions[rec.ID] = rec
+	store.trackerIntakePending["proj\x00"+string(rec.IssueID)] = rec.ID
+	store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: rec.Metadata.RuntimeLaunchID, RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID},
+		DeliveryPossible: true,
+	}
+	runtime.stopErrors = []error{errors.New("pty-host still alive"), errors.New("pty-host still alive")}
+	runtime.aliveByHandle = map[string]bool{rec.Metadata.RuntimeHandleID: false}
+	runtime.fencedResults = map[string]ports.FencedProbeResult{
+		rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+	}
+
+	transition, err := manager.StartInterfaceTransition(
+		context.Background(), rec.ID, domain.SessionModeChat,
+		domain.SessionInterfaceTransitionDrain, domain.SessionInterfaceTransitionHistoryStrict,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := awaitTransition(t, store, transition.ID)
+	if settled.Phase != domain.SessionInterfaceTransitionRecovery || settled.ErrorCode != "SOURCE_STOP_UNCERTAIN" {
+		t.Fatalf("transition = %+v, want uncertain source stop recovery", settled)
+	}
+	if reservation := store.trackerIntakeRecovery[rec.ID]; reservation.CapacityReleased {
+		t.Fatalf("tracker intake reservation = %+v, want ownership fence retained", reservation)
+	}
+	if chat.start.SessionID != "" {
+		t.Fatalf("target Chat controller started for %s", chat.start.SessionID)
+	}
+	if len(runtime.fencedRefs) != 2 {
+		t.Fatalf("exact source probes = %+v, want one after each failed destroy", runtime.fencedRefs)
+	}
+}
+
 func TestRecoverInterruptedTUIToChatRollsBackCommittedModeBeforeReconcile(t *testing.T) {
 	manager, store, _, _, _ := newTransitionManager(t, domain.SessionModeChat)
 	now := time.Now()

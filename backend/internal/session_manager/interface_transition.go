@@ -1411,10 +1411,10 @@ func (m *Manager) stopSourceController(ctx context.Context, rec domain.SessionRe
 }
 
 // stopSourceControllerConclusive makes one retry because both shipped runtime
-// teardown and Chat stop are idempotent. A TUI liveness probe can turn a failed
-// tmux command into a conclusive success when the process did in fact exit. Chat
-// Service retains a controller whose event stream has not stopped, so its retry
-// waits for the same process rather than losing the only handle to it.
+// teardown and Chat stop are idempotent. An exact TUI ownership probe can turn
+// a failed teardown into a conclusive success when that launch did in fact exit.
+// Chat Service retains a controller whose event stream has not stopped, so its
+// retry waits for the same process rather than losing the only handle to it.
 func (m *Manager) stopSourceControllerConclusive(rec domain.SessionRecord) error {
 	var failures []error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -1427,13 +1427,18 @@ func (m *Manager) stopSourceControllerConclusive(rec domain.SessionRecord) error
 		failures = append(failures, err)
 		if domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
 			probeCtx, probeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			alive, probeErr := m.runtime.IsAlive(probeCtx, runtimeHandle(rec.Metadata))
+			probe := m.runtime.ProbeFencedRuntime(probeCtx, ports.FencedRuntimeRef{
+				Handle: runtimeHandle(rec.Metadata), SessionID: rec.ID,
+				Generation:     strings.TrimSpace(rec.Metadata.RuntimeLaunchID),
+				NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
+			})
 			probeCancel()
-			if probeErr == nil && !alive {
+			if probe.Liveness == ports.FencedDead {
 				return nil
 			}
-			if probeErr != nil {
-				failures = append(failures, fmt.Errorf("verify terminal controller stopped: %w", probeErr))
+			if probe.Liveness == ports.FencedUnknown {
+				failures = append(failures, fmt.Errorf("verify terminal controller stopped (%s): %w",
+					probe.Reason, ports.ErrRuntimeProbeInconclusive))
 			}
 		}
 	}
