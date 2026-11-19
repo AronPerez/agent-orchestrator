@@ -61,6 +61,16 @@ const (
 	DecisionKindOutcome   DecisionEntryKind = "outcome"
 	DecisionKindWithdrawn DecisionEntryKind = "withdrawn"
 	DecisionKindRetired   DecisionEntryKind = "retired"
+	// DecisionKindDecided records a decision a session made on the person's
+	// behalf in autonomy mode on. It starts its own call, in place of raised.
+	DecisionKindDecided DecisionEntryKind = "decided"
+	// DecisionKindOverruled records the person overruling a decided call. It
+	// stands like an answer and is delivered to the owning session.
+	DecisionKindOverruled DecisionEntryKind = "overruled"
+	// DecisionKindCarriedOut records the owning session confirming it did
+	// what a decided entry recorded. Sessions record before acting, so a
+	// decision without it is an intent that may not have happened.
+	DecisionKindCarriedOut DecisionEntryKind = "carried_out"
 )
 
 // DecisionAuthorKind identifies who wrote a ledger entry.
@@ -293,10 +303,17 @@ func ValidateDecisionRaise(p DecisionRaisedPayload) error {
 	if recommended != 1 {
 		return decisionRule("recommended_count", fmt.Sprintf("Mark exactly one option as recommended; this call marks %d.", recommended))
 	}
-	if len(p.Links) > MaxDecisionLinks {
-		return decisionRule("links_count", fmt.Sprintf("A call can carry at most five links; this one has %d.", len(p.Links)))
+	if err := validateDecisionLinksAndReference(p.Links, p.Reference); err != nil {
+		return err
 	}
-	for i, link := range p.Links {
+	return validateDecisionAutonomy(p)
+}
+
+func validateDecisionLinksAndReference(links []DecisionLink, reference string) error {
+	if len(links) > MaxDecisionLinks {
+		return decisionRule("links_count", fmt.Sprintf("A call can carry at most five links; this one has %d.", len(links)))
+	}
+	for i, link := range links {
 		label := strings.TrimSpace(link.Label)
 		target := strings.TrimSpace(link.URL)
 		if label == "" || !validDecisionURL(target) {
@@ -309,10 +326,10 @@ func ValidateDecisionRaise(p DecisionRaisedPayload) error {
 			return decisionRule("link_url_too_long", fmt.Sprintf("Link %d's URL is %d characters; the limit is 2048.", i+1, n))
 		}
 	}
-	if n := utf8.RuneCountInString(strings.TrimSpace(p.Reference)); n > MaxDecisionReference {
+	if n := utf8.RuneCountInString(strings.TrimSpace(reference)); n > MaxDecisionReference {
 		return decisionRule("reference_too_long", fmt.Sprintf("The reference is %d characters; the limit is 64.", n))
 	}
-	return validateDecisionAutonomy(p)
+	return nil
 }
 
 func validateDecisionAutonomy(p DecisionRaisedPayload) error {

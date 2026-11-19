@@ -42,3 +42,30 @@ func TestAutonomyInstructionsFollowTheProjectList(t *testing.T) {
 		t.Fatalf("custom list not applied:\n%s", got)
 	}
 }
+
+func TestAutonomyInstructionsOnModeDecidesAndRecords(t *testing.T) {
+	got := AutonomyInstructions(AutonomyConfig{Mode: AutonomyOn})
+	for _, want := range []string{
+		"## Reserved Decisions (on)",
+		"Reserved for the human:\n- Production changes and deploys (`production`)",
+		"Not reserved:\n- Ticket hygiene (`ticket_hygiene`)",
+		"`ao decision decide --key <your short name for this action> --kind <id> --what <what you decided> --why <why> --undo <how to undo it>`",
+		"run it again with the same key",
+		"`ao decision ls --decided`",
+		"record the decision before you act on it",
+		"`ao decision outcome <id> --text \"Not carried out: <why>\"`",
+		"confirm straight away with `ao decision carried-out <id>`",
+		`"I overruled the decision you made for me"`,
+		"When you are unsure which kind applies, or whether it can be undone, raise a call instead.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instructions missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "--would-decide") {
+		t.Error("on mode does not ask for predictions")
+	}
+	if strings.Contains(got, "Decisions page") || strings.Contains(got, "Decided for you") {
+		t.Error("the Decisions page does not list decided calls yet; point only at ao decision ls --decided")
+	}
+}

@@ -1495,6 +1495,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decisions/{id}/carried-out": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm a decision made on the person's behalf was carried out */
+        post: operations["carriedOutDecision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/decisions/{id}/dismiss": {
         parameters: {
             query?: never;
@@ -1523,6 +1540,23 @@ export interface paths {
         put?: never;
         /** Record the outcome of a decision call */
         post: operations["recordDecisionOutcome"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decisions/{id}/overrule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Overrule a decision made on the person's behalf */
+        post: operations["overruleDecision"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1574,6 +1608,23 @@ export interface paths {
         get: operations["getDecisionBoard"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decisions/decided": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a decision a session made on the person's behalf */
+        post: operations["decideDecision"];
         delete?: never;
         options?: never;
         head?: never;
@@ -6090,7 +6141,7 @@ export interface components {
         };
         AutonomyConfig: {
             /** @enum {string} */
-            mode?: "off" | "observe";
+            mode?: "off" | "observe" | "on";
             reserved?: string[];
         };
         AwakeApplication: {
@@ -7482,6 +7533,20 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        DecideRequest: {
+            /** @description The session's own name for this one intended action. A retry with the same key returns the existing record in its current state; without a key, nothing is merged. */
+            key?: string;
+            /** @description Decision kind id; must not be reserved by the project. */
+            kind: string;
+            links?: components["schemas"]["DecisionLinkPayload"][];
+            reference?: string;
+            /** @description How the person can undo it. Required. */
+            undo: string;
+            /** @description How to tell it worked. */
+            verify?: string;
+            what: string;
+            why: string;
+        };
         DecisionBoardResponse: {
             calls: components["schemas"]["DecisionCallResponse"][];
             /**
@@ -7502,12 +7567,13 @@ export interface components {
              * @description The project's autonomy mode when the call was raised.
              * @enum {string}
              */
-            autonomyMode?: "off" | "observe";
+            autonomyMode?: "off" | "observe" | "on";
             changedAfterClose?: boolean;
             /** @enum {string} */
             choice?: "option" | "other";
             chosenLabel?: string;
             context: string;
+            decided?: components["schemas"]["DecisionDecidedResponse"];
             deliveredFallback?: boolean;
             deliveredTo?: string;
             deliveredToName?: string;
@@ -7541,7 +7607,7 @@ export interface components {
             retired: boolean;
             standingEntryId?: string;
             /** @enum {string} */
-            state: "needs_you" | "in_progress" | "done" | "dismissed" | "withdrawn";
+            state: "needs_you" | "in_progress" | "done" | "dismissed" | "withdrawn" | "decided";
             stateLabel: string;
             streamName?: string;
             streamSessionId?: string;
@@ -7551,6 +7617,16 @@ export interface components {
              * @enum {string}
              */
             urgency?: "blocking" | "can_wait";
+        };
+        DecisionDecidedResponse: {
+            carriedOut: boolean;
+            /** Format: date-time */
+            carriedOutAt?: null | string;
+            key?: string;
+            /** @enum {string} */
+            outsidePolicy?: "autonomy_not_on" | "kind_reserved";
+            undo: string;
+            verify?: string;
         };
         DecisionDetailResponse: {
             call: components["schemas"]["DecisionCallResponse"];
@@ -7587,7 +7663,7 @@ export interface components {
         DecisionKindsResponse: {
             kinds: components["schemas"]["DecisionKindResponse"][];
             /** @enum {string} */
-            mode: "off" | "observe";
+            mode: "off" | "observe" | "on";
             projectId?: string;
         };
         DecisionLinkPayload: {
@@ -7596,7 +7672,7 @@ export interface components {
         };
         DecisionObserveResponse: {
             /** @enum {string} */
-            mode: "off" | "observe";
+            mode: "off" | "observe" | "on";
             projectId?: string;
             rows: components["schemas"]["DecisionObserveRowResponse"][];
         };
@@ -8329,6 +8405,10 @@ export interface components {
             id: string;
             projectId: string;
             projectName?: string;
+        };
+        OverruleDecisionRequest: {
+            /** @description What to do instead. Required. */
+            note: string;
         };
         PRAttachmentAccessResponse: {
             allowed: boolean;
@@ -15399,7 +15479,7 @@ export interface operations {
         parameters: {
             query?: {
                 /** @description Which calls to list. Defaults to needs_you. Ignored when q is given. */
-                scope?: "mine" | "needs_you";
+                scope?: "mine" | "needs_you" | "decided";
                 /** @description Search words. When given, the response is the search result. */
                 q?: string;
                 /** @description Most search results to return. Defaults to 20; values above 100 are capped. Ignored when q is absent. */
@@ -15658,6 +15738,83 @@ export interface operations {
             };
         };
     };
+    carriedOutDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Call identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionCallResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     dismissDecision: {
         parameters: {
             query?: never;
@@ -15752,6 +15909,87 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["DecisionOutcomeRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionCallResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    overruleDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Call identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OverruleDecisionRequest"];
             };
         };
         responses: {
@@ -16007,6 +16245,84 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    decideDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecideRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionCallResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

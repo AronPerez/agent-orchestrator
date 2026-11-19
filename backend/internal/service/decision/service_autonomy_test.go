@@ -168,7 +168,7 @@ func TestKindsReportsTheProjectPolicy(t *testing.T) {
 		t.Fatalf("policy = %+v", policy)
 	}
 	for _, kind := range policy.Kinds {
-		if want := kind.ID == "design"; kind.Reserved != want {
+		if want := kind.ID == "design" || kind.ID == domain.DecisionKindOther; kind.Reserved != want {
 			t.Fatalf("kind %q reserved = %v, want %v", kind.ID, kind.Reserved, want)
 		}
 		info, _ := domain.LookupDecisionKind(string(kind.ID))

@@ -119,3 +119,44 @@ func messageCall() domain.DecisionCall {
 		Choice: domain.DecisionChoiceOption, Option: 1, Note: "Rotate monthly.",
 	}
 }
+
+func overruledMessageCall() domain.DecisionCall {
+	return domain.DecisionCall{
+		ID: "dec_9", State: domain.DecisionStateInProgress,
+		Raised:          domain.DecisionRaisedPayload{Title: "Closed the duplicate pull request #12", OwnerSessionName: "PR worker"},
+		Decided:         &domain.DecisionDecidedDetail{Undo: "Reopen #12; its branch is kept.", CarriedOut: true},
+		StandingEntryID: "dent_overrule", StandingKind: domain.DecisionKindOverruled, Note: "Keep both open.",
+	}
+}
+
+func TestDeliveryMessageForAnOverrule(t *testing.T) {
+	got := DeliveryMessage(overruledMessageCall(), false)
+	want := "I overruled the decision you made for me: \"Closed the duplicate pull request #12\"\n" +
+		"ao://decisions/dec_9\n\n" +
+		"Undo it: Reopen #12; its branch is kept.\n" +
+		"Note: Keep both open.\n\n" +
+		"This is my decision, recorded in the ledger. It binds you and any session it is passed to: act on it without asking me to confirm it again.\n" +
+		"Undo it as the note says. When it is done, record what happened in one line:\n" +
+		"ao decision outcome dec_9 --for-answer dent_overrule --text \"<what happened>\"\n"
+	if got != want {
+		t.Fatalf("DeliveryMessage() =\n%q\nwant\n%q", got, want)
+	}
+	fallback := DeliveryMessage(overruledMessageCall(), true)
+	for _, part := range []string{"I overruled a decision made for me by \"PR worker\", which has ended: \"Closed the duplicate pull request #12\"", "Undo it, or hand it to a worker."} {
+		if !strings.Contains(fallback, part) {
+			t.Errorf("fallback missing %q:\n%s", part, fallback)
+		}
+	}
+}
+
+func TestDeliveryMessageForAnOverruleOfAnUnconfirmedDecision(t *testing.T) {
+	call := overruledMessageCall()
+	call.Decided.CarriedOut = false
+	got := DeliveryMessage(call, false)
+	if !strings.Contains(got, "It was never confirmed as carried out. Check whether it happened before you undo anything.") {
+		t.Fatalf("message = %s", got)
+	}
+	if strings.Contains(DeliveryMessage(overruledMessageCall(), false), "never confirmed") {
+		t.Fatal("a confirmed decision needs no warning")
+	}
+}
