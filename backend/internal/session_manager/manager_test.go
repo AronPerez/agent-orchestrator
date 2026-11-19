@@ -3720,6 +3720,38 @@ func TestReconcileTrackerIntakeClaimsRevalidatesMissingLegacyOwnerWhenBackendAbs
 	}
 }
 
+func TestReconcileTrackerIntakeClaimsRevalidatesMissingLegacyOwnerWithoutReleasedLaunchWhenBackendAbsent(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("missing-owner-without-released-launch")
+	issueID := domain.IssueID("github:acme/mer#10919")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10919"
+	launchID := "launch-10919"
+	st.trackerIntakePending[key] = id
+	// Older capacity-release checkpoints could omit the released launch ID when
+	// the session row had not been published. A conclusively absent backend
+	// still permits an idempotent outer-host teardown for this single candidate.
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/missing-owner-without-released-launch", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		CleanupConfirmed: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || !reflect.DeepEqual(rt.destroyedIDs, []string{handleID}) {
+		t.Fatalf("missing legacy owner probes=%v destroys=%v", rt.fencedRefs, rt.destroyedIDs)
+	}
+	if ws.destroyed != 0 {
+		t.Fatalf("cleanup-confirmed missing owner destroyed workspace %d times", ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 func TestReconcileTrackerIntakeClaimsKeepsLegacyOwnerFencedWhenGenerationProbeFails(t *testing.T) {
 	m, st, rt, ws := newManager()
 	id := domain.SessionID("terminated-owner-with-inconclusive-legacy-host")

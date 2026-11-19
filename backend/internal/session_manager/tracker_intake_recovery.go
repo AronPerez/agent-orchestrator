@@ -489,8 +489,9 @@ func trackerIntakeLegacyRuntimeTeardown(
 	rowLaunchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
 	handles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
 	reservationLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+	releasedLaunchID := strings.TrimSpace(reservation.ReleasedRuntimeLaunchID)
 	if reservationLaunchID == "" || len(handles) != 1 ||
-		strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) != reservationLaunchID {
+		(releasedLaunchID != "" && releasedLaunchID != reservationLaunchID) {
 		return "", false
 	}
 	if rowHandleID == "" && rowLaunchID == "" {
