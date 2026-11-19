@@ -140,7 +140,7 @@ func (c *DecisionPeersController) sync(w http.ResponseWriter, r *http.Request) {
 	out := SyncDecisionPeersResponse{Results: make([]DecisionPeerSyncResult, 0, len(results))}
 	for _, res := range results {
 		out.Results = append(out.Results, DecisionPeerSyncResult{
-			HostID: res.HostID, Label: res.Outcome.PeerLabel, Pulled: res.Outcome.Pulled, Pushed: res.Outcome.Pushed,
+			HostID: res.HostID, Label: res.Label, Pulled: res.Outcome.Pulled, Pushed: res.Outcome.Pushed,
 			InSync: res.Outcome.InSync, ErrorCode: res.ErrorCode,
 		})
 	}

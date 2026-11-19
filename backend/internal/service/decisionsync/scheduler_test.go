@@ -278,8 +278,8 @@ func TestSchedulerBacksOff(t *testing.T) {
 	f.clock.waitAsked(t, len(want)+1)
 	f.setFailure(nil)
 	results, err := f.sched.SyncNow(context.Background(), "h_a")
-	if err != nil || len(results) != 1 || results[0].ErrorCode != "" {
-		t.Fatalf("SyncNow = %+v, %v", results, err)
+	if err != nil || len(results) != 1 || results[0].ErrorCode != "" || results[0].Label != "h_a-label" {
+		t.Fatalf("SyncNow = %+v, %v (an unlabelled link reports the peer's own name)", results, err)
 	}
 	got := f.clock.waitAsked(t, len(want)+2)
 	if last := got[len(got)-1]; last != time.Minute {

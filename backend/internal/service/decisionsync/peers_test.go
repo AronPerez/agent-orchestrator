@@ -97,7 +97,7 @@ func (s *memPeerStore) RecordDecisionSyncAttempt(_ context.Context, hostID strin
 	p.LastAttemptAt, p.LastErrorCode = a.At, a.ErrorCode
 	if a.ErrorCode == "" {
 		p.LastSuccessAt, p.InSync, p.PeerVector, p.ClockAheadMS, p.PeerProtocol = a.At, a.InSync, a.PeerVector, a.ClockAheadMS, a.PeerProtocol
-		if a.PeerLabel != "" {
+		if p.Label == "" {
 			p.Label = a.PeerLabel
 		}
 	} else {

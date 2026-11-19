@@ -52,7 +52,9 @@ type SchedulerDeps struct {
 
 // SyncResult is one peer's outcome from SyncNow.
 type SyncResult struct {
-	HostID  string
+	HostID string
+	// Label is the name the person gave the link, else the peer's own name.
+	Label   string
 	Outcome Outcome
 	// ErrorCode is empty on success.
 	ErrorCode string
@@ -246,7 +248,10 @@ func (w *peerWorker) sync(ctx context.Context) SyncResult {
 	syncCtx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
 	out, err := w.s.deps.Engine.Sync(syncCtx, w.hostID, w.s.deps.Remote(peer))
-	result.Outcome = out
+	result.Outcome, result.Label = out, peer.Label
+	if result.Label == "" {
+		result.Label = out.PeerLabel
+	}
 	if ctx.Err() != nil {
 		// Shutting down or unlinked: record nothing.
 		return result

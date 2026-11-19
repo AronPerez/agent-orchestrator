@@ -83,7 +83,8 @@ SET last_attempt_at = sqlc.arg(at),
     peer_vector = sqlc.arg(peer_vector),
     clock_ahead_ms = sqlc.arg(clock_ahead_ms),
     peer_protocol = sqlc.arg(peer_protocol),
-    label = COALESCE(NULLIF(CAST(sqlc.arg(label) AS TEXT), ''), label)
+    -- The peer's own name fills an empty label; a name the person chose stays.
+    label = CASE WHEN label = '' THEN CAST(sqlc.arg(label) AS TEXT) ELSE label END
 WHERE host_id = sqlc.arg(host_id);
 
 -- name: RecordDecisionSyncFailure :execrows

@@ -111,11 +111,9 @@ func (m *Peers) Link(ctx context.Context, in LinkInput) (PeerStatus, []SecretWar
 	if err != nil {
 		return PeerStatus{}, nil, linkError(err)
 	}
+	// An empty label is filled with the machine's own name on its first sync.
 	label := strings.TrimSpace(in.Label)
-	if label == "" {
-		label = defaultPeerLabel(base)
-	}
-	if existing, ok := m.deps.Secrets.Get(hostID); ok && strings.TrimSpace(in.Label) == "" && existing.Label != "" {
+	if existing, ok := m.deps.Secrets.Get(hostID); ok && label == "" {
 		label = existing.Label
 	}
 	stored := StoredPeer{HostID: hostID, URL: base, Label: label, DeviceID: minted.DeviceID, Token: minted.Token}
@@ -131,6 +129,9 @@ func (m *Peers) Link(ctx context.Context, in LinkInput) (PeerStatus, []SecretWar
 	}
 	if m.deps.OnChange != nil {
 		m.deps.OnChange()
+	}
+	if peer.Label == "" {
+		peer.Label = defaultPeerLabel(base)
 	}
 	return PeerStatus{DecisionSyncPeer: peer, State: PeerLinkedBehind}, nil, nil
 }

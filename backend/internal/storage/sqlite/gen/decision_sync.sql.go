@@ -462,7 +462,8 @@ SET last_attempt_at = ?1,
     peer_vector = ?3,
     clock_ahead_ms = ?4,
     peer_protocol = ?5,
-    label = COALESCE(NULLIF(CAST(?6 AS TEXT), ''), label)
+    -- The peer's own name fills an empty label; a name the person chose stays.
+    label = CASE WHEN label = '' THEN CAST(?6 AS TEXT) ELSE label END
 WHERE host_id = ?7
 `
 

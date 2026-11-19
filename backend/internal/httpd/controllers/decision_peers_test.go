@@ -42,7 +42,7 @@ func (f *fakePeerService) Unlink(_ context.Context, hostID string) error {
 
 func (f *fakePeerService) SyncNow(_ context.Context, hostID string) ([]decisionsync.SyncResult, error) {
 	f.synced = append(f.synced, hostID)
-	return []decisionsync.SyncResult{{HostID: "h_mini", Outcome: decisionsync.Outcome{Pulled: 2, Pushed: 1, InSync: true, PeerLabel: "mac-mini"}}}, nil
+	return []decisionsync.SyncResult{{HostID: "h_mini", Label: "mac-mini", Outcome: decisionsync.Outcome{Pulled: 2, Pushed: 1, InSync: true, PeerLabel: "mac-mini"}}}, nil
 }
 
 func peersRouter(svc controllers.DecisionPeerService) http.Handler {
@@ -89,7 +89,7 @@ func TestDecisionPeerRoutesArePersonOnly(t *testing.T) {
 		t.Fatalf("list: %d %s", rec.Code, rec.Body)
 	}
 	rec = peerRequest(h, http.MethodPost, "/api/v1/decision-peers/sync", `{"hostId":"h_mini"}`, nil)
-	if rec.Code != http.StatusOK || len(svc.synced) != 1 || svc.synced[0] != "h_mini" || !strings.Contains(rec.Body.String(), `"pulled":2`) {
+	if rec.Code != http.StatusOK || len(svc.synced) != 1 || svc.synced[0] != "h_mini" || !strings.Contains(rec.Body.String(), `"pulled":2`) || !strings.Contains(rec.Body.String(), `"label":"mac-mini"`) {
 		t.Fatalf("sync: %d %s", rec.Code, rec.Body)
 	}
 	if rec = peerRequest(h, http.MethodDelete, "/api/v1/decision-peers/h_mini", "", nil); rec.Code != http.StatusNoContent || svc.unlinked[0] != "h_mini" {
