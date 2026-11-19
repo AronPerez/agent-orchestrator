@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1226,12 +1227,18 @@ func Run(buildVersion string) (retErr error) {
 	// Linked machines exchange ledger entries through this server on the
 	// remote listener. A pushed answer for a call this machine owns wakes the
 	// deliverer exactly as a local answer does.
-	decisionSync := startDecisionSync(ctx, cfg.DataDir, store, hostIdentity.HostID, log, wakeDecisionDeliverer, decisionNotifications.Wake)
+	var syncRuntime atomic.Pointer[decisionSyncRuntime]
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
 		MutationGate: decisionMutationGate,
-		OnAppended:   decisionAppendHook(wakeDecisionDeliverer, decisionNotifications.Wake, decisionSync.changed),
+		OnAppended: decisionAppendHook(wakeDecisionDeliverer, decisionNotifications.Wake, func() {
+			if rt := syncRuntime.Load(); rt != nil {
+				rt.changed()
+			}
+		}),
 	})
+	decisionSync := startDecisionSync(ctx, cfg.DataDir, store, decisionSvc, hostIdentity.HostID, log, wakeDecisionDeliverer, decisionNotifications.Wake)
+	syncRuntime.Store(decisionSync)
 	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
 		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
 		MutationGate:       decisionMutationGate,
