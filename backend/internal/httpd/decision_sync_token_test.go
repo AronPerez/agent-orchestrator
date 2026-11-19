@@ -175,8 +175,9 @@ func TestRevokeDecisionSyncTokenOnlyRevokesSyncTokens(t *testing.T) {
 	coordinationID, _ := issued["deviceId"].(string)
 
 	path := decisionSyncTokenPath + "/"
-	if status, body := h.remote(http.MethodDelete, path+syncID, token, nil); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
-		t.Fatalf("sync token revoked itself: status=%d body=%v", status, body)
+	_, other := h.mustIssueDecisionSync(full, "h_other")
+	if status, body := h.remote(http.MethodDelete, path+syncID, other, nil); status != http.StatusForbidden || body["code"] != "DECISION_SYNC_TOKEN_ISSUER" {
+		t.Fatalf("sync token revoked another peer's token: status=%d body=%v", status, body)
 	}
 	for _, other := range []string{fullID, coordinationID} {
 		if status, body := h.remote(http.MethodDelete, path+other, full, nil); status != http.StatusNotFound || body["code"] != "DECISION_SYNC_TOKEN_NOT_FOUND" {
@@ -188,5 +189,24 @@ func TestRevokeDecisionSyncTokenOnlyRevokesSyncTokens(t *testing.T) {
 	}
 	if status, _ := h.remote(http.MethodPost, "/api/v1/decision-sync/exchange", token, map[string]string{}); status != http.StatusUnauthorized {
 		t.Fatalf("revoked sync token still authenticates: %d", status)
+	}
+}
+
+func TestDecisionSyncTokenRevokesItself(t *testing.T) {
+	h := newDecisionSyncHost(t)
+	id, token := h.mustIssueDecisionSync("secret12", "h_laptop")
+	_, coordination := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", "secret12", map[string]string{"clientId": "h_agent"})
+	coordinationID, _ := coordination["deviceId"].(string)
+	if status, body := h.remote(http.MethodDelete, decisionSyncTokenPath+"/"+coordinationID, token, nil); status != http.StatusForbidden {
+		t.Fatalf("sync token reached another device: status=%d body=%v", status, body)
+	}
+	if status, body := h.remote(http.MethodDelete, "/api/v1/remote-host/coordination-token/"+coordinationID, token, nil); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
+		t.Fatalf("sync token reached the coordination revoke route: status=%d body=%v", status, body)
+	}
+	if status, body := h.remote(http.MethodDelete, decisionSyncTokenPath+"/"+id, token, nil); status != http.StatusNoContent {
+		t.Fatalf("self revoke: status=%d body=%v", status, body)
+	}
+	if status, _ := h.remote(http.MethodPost, "/api/v1/decision-sync/exchange", token, map[string]string{}); status != http.StatusUnauthorized {
+		t.Fatalf("self-revoked token still authenticates: %d", status)
 	}
 }

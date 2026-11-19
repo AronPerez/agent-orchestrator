@@ -1443,6 +1443,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decision-peers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List machines linked for decision sync (loopback only, person only) */
+        get: operations["listDecisionPeers"];
+        put?: never;
+        /** Link a machine for decision sync with a one-time full credential (loopback only, person only) */
+        post: operations["linkDecisionPeer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decision-peers/{hostId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Unlink a machine; entries stay on both machines (loopback only, person only) */
+        delete: operations["unlinkDecisionPeer"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decision-peers/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sync one linked machine, or all, now (loopback only, person only) */
+        post: operations["syncDecisionPeers"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/decision-sync/entries": {
         parameters: {
             query?: never;
@@ -7789,12 +7841,41 @@ export interface components {
             link?: string;
             text: string;
         };
+        DecisionPeer: {
+            /** Format: int64 */
+            clockAheadMs: number;
+            /** @enum {string} */
+            direction: "outbound" | "inbound";
+            hostId: string;
+            inSync: boolean;
+            label: string;
+            /** Format: date-time */
+            lastAttemptAt?: null | string;
+            lastErrorCode?: string;
+            /** Format: date-time */
+            lastSuccessAt?: null | string;
+            /** @enum {string} */
+            state: "linked_in_sync" | "linked_behind" | "unreachable" | "revoked" | "incompatible" | "identity_conflict" | "inbound";
+            url?: string;
+        };
+        DecisionPeerSyncResult: {
+            errorCode?: string;
+            hostId: string;
+            inSync: boolean;
+            label: string;
+            pulled: number;
+            pushed: number;
+        };
         DecisionPredictionPayload: {
             /** @description Label of the predicted option. Set in responses only. */
             label?: string;
             option: number;
             undo: string;
             why: string;
+        };
+        DecisionSecretWarning: {
+            callId: string;
+            field: string;
         };
         DecisionSyncConflict: {
             /** Format: date-time */
@@ -8308,6 +8389,19 @@ export interface components {
             ok: boolean;
             sessionId: string;
         };
+        LinkDecisionPeerRequest: {
+            /** @description The machine's password, account token or device token. Used once; not stored. */
+            credential: string;
+            /** @description Refuse the link if the address answers with another host id. */
+            expectedHostId?: string;
+            label?: string;
+            /** @description The machine's remote-access address, for example http://mac-mini.local:3011. */
+            url: string;
+        };
+        LinkDecisionPeerResponse: {
+            peer: components["schemas"]["DecisionPeer"];
+            warnings: components["schemas"]["DecisionSecretWarning"][];
+        };
         LinkPreviewResponse: {
             description?: string;
             faviconDarkUrl?: string;
@@ -8356,6 +8450,9 @@ export interface components {
         };
         ListCuesResponse: {
             cues: components["schemas"]["CueResponse"][];
+        };
+        ListDecisionPeersResponse: {
+            peers: components["schemas"]["DecisionPeer"][];
         };
         ListDecisionsResponse: {
             calls: components["schemas"]["DecisionCallResponse"][];
@@ -10213,6 +10310,12 @@ export interface components {
         SyncArtifactVersionsRequest: {
             /** @description Artifact-directory-relative file path, as listed in the session's artifactFiles. */
             path: string;
+        };
+        SyncDecisionPeersRequest: {
+            hostId?: string;
+        };
+        SyncDecisionPeersResponse: {
+            results: components["schemas"]["DecisionPeerSyncResult"][];
         };
         SystemMemoryResponse: {
             /** @description What the kernel would hand out without swapping (MemAvailable). */
@@ -15700,6 +15803,257 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listDecisionPeers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListDecisionPeersResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    linkDecisionPeer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LinkDecisionPeerRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LinkDecisionPeerResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    unlinkDecisionPeer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The linked machine's host id. */
+                hostId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    syncDecisionPeers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["SyncDecisionPeersRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncDecisionPeersResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

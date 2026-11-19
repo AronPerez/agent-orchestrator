@@ -58,6 +58,7 @@ type APIDeps struct {
 	Reports            controllers.ReportService
 	Decisions          controllers.DecisionService
 	DecisionSync       controllers.DecisionSyncService
+	DecisionPeers      controllers.DecisionPeerService
 	NotificationStream controllers.NotificationStream
 	Push               controllers.PushRegistry
 	Import             controllers.ImportService
@@ -181,6 +182,7 @@ type API struct {
 	reports       *controllers.ReportsController
 	decisions     *controllers.DecisionsController
 	decisionSync  *controllers.DecisionSyncController
+	decisionPeers *controllers.DecisionPeersController
 	push          *controllers.PushController
 	imports       *controllers.ImportController
 	sessionImport *controllers.SessionImportController
@@ -252,6 +254,7 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 		reports:       &controllers.ReportsController{Svc: deps.Reports},
 		decisions:     &controllers.DecisionsController{Svc: deps.Decisions},
 		decisionSync:  &controllers.DecisionSyncController{Svc: deps.DecisionSync},
+		decisionPeers: &controllers.DecisionPeersController{Svc: deps.DecisionPeers},
 		push:          &controllers.PushController{Registry: deps.Push, Devices: deps.AccessDevices, Access: requestDeviceRevoker(deps.DeviceAccess)},
 		imports:       &controllers.ImportController{Svc: deps.Import},
 		sessionImport: &controllers.SessionImportController{Svc: deps.SessionImport},
@@ -407,6 +410,7 @@ func (a *API) Register(root chi.Router) {
 			a.reports.Register(r)
 			a.decisions.Register(r)
 			a.decisionSync.Register(r)
+			a.decisionPeers.Register(r)
 			a.push.Register(r)
 			a.imports.Register(r)
 			a.sessionImport.Register(r)

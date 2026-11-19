@@ -74,6 +74,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/computeruse"
 	cuesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/cue"
 	decisionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/decision"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
 	fsbrowsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/fsbrowser"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubpat"
@@ -1225,11 +1226,11 @@ func Run(buildVersion string) (retErr error) {
 	// Linked machines exchange ledger entries through this server on the
 	// remote listener. A pushed answer for a call this machine owns wakes the
 	// deliverer exactly as a local answer does.
-	decisionSync := newDecisionSyncServer(ctx, store, hostIdentity.HostID, log, wakeDecisionDeliverer, decisionNotifications.Wake)
+	decisionSync := startDecisionSync(ctx, cfg.DataDir, store, hostIdentity.HostID, log, wakeDecisionDeliverer, decisionNotifications.Wake)
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
 		MutationGate: decisionMutationGate,
-		OnAppended:   decisionAppendHook(wakeDecisionDeliverer, decisionNotifications.Wake, decisionSync.Changed),
+		OnAppended:   decisionAppendHook(wakeDecisionDeliverer, decisionNotifications.Wake, decisionSync.changed),
 	})
 	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
 		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
@@ -1241,6 +1242,7 @@ func Run(buildVersion string) (retErr error) {
 		stop()
 		<-decisionDeliveryDone
 		<-decisionNotificationsDone
+		<-decisionSync.done
 	}()
 
 	// Managed remote-access connector. Reap first: a daemon that died without
@@ -1350,7 +1352,8 @@ func Run(buildVersion string) (retErr error) {
 		Notifications:               notifier,
 		Reports:                     reportSvc,
 		Decisions:                   decisionSvc,
-		DecisionSync:                decisionSync,
+		DecisionSync:                decisionSync.server,
+		DecisionPeers:               decisionsync.PeerService{Peers: decisionSync.peers, Scheduler: decisionSync.scheduler},
 		NotificationStream:          notificationHub,
 		Push:                        pushRegistry,
 		Presence:                    presenceTracker,

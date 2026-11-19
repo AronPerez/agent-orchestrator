@@ -66,3 +66,88 @@ func FromWireEntries(entries []WireEntry) []domain.DecisionEntry {
 	}
 	return out
 }
+
+// The wire messages below mirror the controller DTOs field for field (a
+// parity test in controllers checks the JSON names). The HTTP client uses
+// them because this package cannot import the controllers.
+
+// WireHead is DecisionSyncHead on the wire.
+type WireHead struct {
+	Seq       int64     `json:"seq"`
+	ID        string    `json:"id"`
+	WrittenAt time.Time `json:"writtenAt"`
+	Stopped   bool      `json:"stopped,omitempty"`
+}
+
+// WireExchangeRequest is DecisionSyncExchangeRequest on the wire.
+type WireExchangeRequest struct {
+	Protocol     int                 `json:"protocol"`
+	HostID       string              `json:"hostId"`
+	MachineLabel string              `json:"machineLabel,omitempty"`
+	Have         map[string]int64    `json:"have"`
+	Heads        map[string]WireHead `json:"heads,omitempty"`
+	WaitSeconds  int                 `json:"waitSeconds,omitempty"`
+}
+
+// WireExchangeResponse is DecisionSyncExchangeResponse on the wire.
+type WireExchangeResponse struct {
+	Protocol     int                 `json:"protocol"`
+	HostID       string              `json:"hostId"`
+	MachineLabel string              `json:"machineLabel"`
+	Entries      []WireEntry         `json:"entries"`
+	More         bool                `json:"more"`
+	Have         map[string]int64    `json:"have"`
+	Heads        map[string]WireHead `json:"heads"`
+	ServerTime   time.Time           `json:"serverTime"`
+}
+
+// WirePushRequest is DecisionSyncPushRequest on the wire.
+type WirePushRequest struct {
+	Protocol int                 `json:"protocol"`
+	HostID   string              `json:"hostId"`
+	Entries  []WireEntry         `json:"entries"`
+	Heads    map[string]WireHead `json:"heads,omitempty"`
+}
+
+// WireGap is DecisionSyncGap on the wire.
+type WireGap struct {
+	Origin string `json:"origin"`
+	Have   int64  `json:"have"`
+	Got    int64  `json:"got"`
+}
+
+// WireConflict is DecisionSyncConflict on the wire.
+type WireConflict struct {
+	Origin        string    `json:"origin"`
+	OriginSeq     int64     `json:"originSeq"`
+	LocalEntryID  string    `json:"localEntryId"`
+	RemoteEntryID string    `json:"remoteEntryId"`
+	PeerHostID    string    `json:"peerHostId"`
+	DetectedAt    time.Time `json:"detectedAt"`
+}
+
+// WirePushResponse is DecisionSyncPushResponse on the wire.
+type WirePushResponse struct {
+	Applied    int                 `json:"applied"`
+	Duplicates int                 `json:"duplicates"`
+	Gaps       []WireGap           `json:"gaps"`
+	Conflicts  []WireConflict      `json:"conflicts"`
+	Have       map[string]int64    `json:"have"`
+	Heads      map[string]WireHead `json:"heads"`
+}
+
+func headsToWire(heads domain.DecisionHeads) map[string]WireHead {
+	out := make(map[string]WireHead, len(heads))
+	for origin, h := range heads {
+		out[origin] = WireHead{Seq: h.Seq, ID: h.ID, WrittenAt: h.WrittenAt.UTC(), Stopped: h.Stopped}
+	}
+	return out
+}
+
+func headsFromWire(heads map[string]WireHead) domain.DecisionHeads {
+	out := make(domain.DecisionHeads, len(heads))
+	for origin, h := range heads {
+		out[origin] = domain.DecisionHead{Seq: h.Seq, ID: h.ID, WrittenAt: h.WrittenAt, Stopped: h.Stopped}
+	}
+	return out
+}
