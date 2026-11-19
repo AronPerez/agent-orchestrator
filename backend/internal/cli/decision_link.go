@@ -62,9 +62,13 @@ type decisionSyncAPIResponse struct {
 	Results []decisionSyncResultAPI `json:"results"`
 }
 
-// sealedPasswordMessage explains why --host cannot link a machine whose saved
-// password only the desktop app can unseal.
-const sealedPasswordMessage = "That machine's password is stored by the desktop app. Turn on Sync decisions for it in Settings › Remote hosts, or give its address with --password-stdin"
+// sealedPasswordError explains why --host cannot link a machine whose saved
+// password only the desktop app can unseal. It is shown to the person as is.
+type sealedPasswordError struct{}
+
+func (sealedPasswordError) Error() string {
+	return "That machine's password is stored by the desktop app. Turn on Sync decisions for it in Settings › Remote hosts, or give its address with --password-stdin."
+}
 
 // refuseDecisionLinkRemote keeps link and sync on this computer's daemon: it
 // is the daemon that holds the links and talks to the other machines.
@@ -109,7 +113,7 @@ func newDecisionLinkAddCommand(ctx *commandContext) *cobra.Command {
 					return err
 				}
 				if strings.TrimSpace(entry.Password) == "" {
-					return usageError{errors.New(sealedPasswordMessage)}
+					return usageError{sealedPasswordError{}}
 				}
 				req.URL, req.ExpectedHostID, req.Credential = entry.URL, entry.HostID, entry.Password
 				if req.Label == "" {
