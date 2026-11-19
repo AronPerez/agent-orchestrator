@@ -173,3 +173,40 @@ type DecisionApplyResult struct {
 	// raised or decided entry, in call id order.
 	Calls []DecisionCall
 }
+
+// DecisionHead is the newest entry a ledger holds for one origin. Exchanges
+// carry heads so each side can compare the other's newest entry with its own
+// entry at that sequence: a different id there is a forked origin, which a
+// sequence-only vector cannot see.
+type DecisionHead struct {
+	Seq       int64
+	ID        string
+	WrittenAt time.Time
+	// Stopped is true when this ledger recorded a conflict for the origin. It
+	// neither applies nor serves that origin past the conflict, so the other
+	// side should not send it.
+	Stopped bool
+}
+
+// DecisionHeads maps an origin host id to its head on one ledger.
+type DecisionHeads map[string]DecisionHead
+
+// Vector returns the highest sequence held for every origin in h.
+func (h DecisionHeads) Vector() DecisionVector {
+	v := make(DecisionVector, len(h))
+	for origin, head := range h {
+		v[origin] = head.Seq
+	}
+	return v
+}
+
+// Stopped returns the origins h marks as stopped.
+func (h DecisionHeads) Stopped() []string {
+	var out []string
+	for origin, head := range h {
+		if head.Stopped {
+			out = append(out, origin)
+		}
+	}
+	return out
+}

@@ -77,6 +77,23 @@ func appendDecisionEntry(ctx context.Context, q *gen.Queries, entry domain.Decis
 	}
 	entry.OriginSeq = sequence
 	entry.Stamp = newest.Next(now.UnixMilli())
+	stored, err := insertDecisionEntry(ctx, q, entry)
+	if err != nil {
+		return domain.DecisionEntry{}, domain.DecisionCall{}, err
+	}
+	call, ok, err := reprojectDecisionCall(ctx, q, entry.CallID)
+	if err != nil {
+		return domain.DecisionEntry{}, domain.DecisionCall{}, err
+	}
+	if !ok {
+		return stored, domain.DecisionCall{}, nil
+	}
+	return stored, call, nil
+}
+
+// insertDecisionEntry stores entry exactly as given: ordering must already be
+// assigned, locally by appendDecisionEntry or by the origin for synced entries.
+func insertDecisionEntry(ctx context.Context, q *gen.Queries, entry domain.DecisionEntry) (domain.DecisionEntry, error) {
 	row, err := q.CreateDecisionEntry(ctx, gen.CreateDecisionEntryParams{
 		ID: entry.ID, Origin: entry.Origin, OriginSeq: entry.OriginSeq,
 		StampWall: entry.Stamp.WallMS, StampCounter: entry.Stamp.Counter,
@@ -85,21 +102,26 @@ func appendDecisionEntry(ctx context.Context, q *gen.Queries, entry domain.Decis
 		AuthorSurface: string(entry.AuthorSurface), AuthorSession: string(entry.AuthorSession),
 	})
 	if err != nil {
-		return domain.DecisionEntry{}, domain.DecisionCall{}, err
+		return domain.DecisionEntry{}, err
 	}
-	stored := decisionEntryFromGen(row)
-	rows, err := q.ListDecisionEntries(ctx, entry.CallID)
+	return decisionEntryFromGen(row), nil
+}
+
+// reprojectDecisionCall recomputes one call's read model from all its entries.
+// It reports false, and writes nothing, while the call has no raised or decided
+// entry yet (a synced answer can arrive before the call it answers).
+func reprojectDecisionCall(ctx context.Context, q *gen.Queries, callID string) (domain.DecisionCall, bool, error) {
+	rows, err := q.ListDecisionEntries(ctx, callID)
 	if err != nil {
-		return domain.DecisionEntry{}, domain.DecisionCall{}, err
+		return domain.DecisionCall{}, false, err
 	}
-	entries := decisionEntriesFromGen(rows)
-	call, ok := domain.ReduceDecisionCall(entries)
+	call, ok := domain.ReduceDecisionCall(decisionEntriesFromGen(rows))
 	if !ok {
-		return stored, domain.DecisionCall{}, nil
+		return domain.DecisionCall{}, false, nil
 	}
 	body, err := json.Marshal(call)
 	if err != nil {
-		return domain.DecisionEntry{}, domain.DecisionCall{}, fmt.Errorf("encode decision call: %w", err)
+		return domain.DecisionCall{}, false, fmt.Errorf("encode decision call: %w", err)
 	}
 	_, err = q.UpsertDecisionCall(ctx, gen.UpsertDecisionCallParams{
 		CallID: call.ID, Origin: call.Origin, ProjectID: string(call.Raised.ProjectID),
@@ -110,9 +132,9 @@ func appendDecisionEntry(ctx context.Context, q *gen.Queries, entry domain.Decis
 		Body: string(body), SearchText: call.SearchText(), OutcomeAt: decisionOutcomeAt(call),
 	})
 	if err != nil {
-		return domain.DecisionEntry{}, domain.DecisionCall{}, err
+		return domain.DecisionCall{}, false, err
 	}
-	return stored, call, nil
+	return call, true, nil
 }
 
 // GetDecisionCall returns a call's materialized read model when it exists.
