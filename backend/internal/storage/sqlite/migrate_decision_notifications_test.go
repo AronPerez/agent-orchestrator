@@ -95,7 +95,9 @@ INSERT INTO notifications (
 	}
 
 	// Deleting the session cascades its own notifications but never a call's.
-	if _, err := db.Exec(`DELETE FROM sessions WHERE id = 'standalone-1'`); err != nil {
+	// change_log rows reference the session without cascade; production clears
+	// them first (Store.DeleteSession), so the test does too.
+	if _, err := db.Exec(`DELETE FROM change_log WHERE session_id = 'standalone-1'; DELETE FROM sessions WHERE id = 'standalone-1'`); err != nil {
 		t.Fatal(err)
 	}
 	var remaining []string

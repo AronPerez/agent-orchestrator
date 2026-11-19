@@ -766,11 +766,15 @@ func TestNotificationStore_SessionDeleteKeepsDecisionNotifications(t *testing.T)
 	s := newTestStore(t)
 	ctx := context.Background()
 	seedProject(t, s, "mer")
-	sess, err := s.CreateSession(ctx, sampleRecord("mer"))
+	now := time.Now().UTC().Truncate(time.Second)
+	// DeleteSession only removes seed-state rows, so cascade is observable on one.
+	sess, err := s.CreateSession(ctx, domain.SessionRecord{
+		ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}, CreatedAt: now, UpdatedAt: now,
+	})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	now := time.Now().UTC().Truncate(time.Second)
 	if _, _, err := s.CreateNotification(ctx, domain.NotificationRecord{
 		ID: "ntf_session", SessionID: sess.ID, ProjectID: sess.ProjectID, Type: domain.NotificationNeedsInput,
 		Title: "needs input", Status: domain.NotificationUnread, CreatedAt: now,
@@ -780,8 +784,8 @@ func TestNotificationStore_SessionDeleteKeepsDecisionNotifications(t *testing.T)
 	if _, _, err := s.CreateNotification(ctx, decisionNotificationRecord("ntf_dec", "dec_1", now)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DeleteSession(ctx, sess.ID); err != nil {
-		t.Fatalf("DeleteSession: %v", err)
+	if deleted, err := s.DeleteSession(ctx, sess.ID); err != nil || !deleted {
+		t.Fatalf("DeleteSession deleted=%v err=%v", deleted, err)
 	}
 	rows, err := s.ListNotifications(ctx, domain.NotificationListAll, time.Time{}, "", 10)
 	if err != nil || len(rows) != 1 || rows[0].ID != "ntf_dec" {
