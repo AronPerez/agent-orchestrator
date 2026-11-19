@@ -30,6 +30,29 @@ func TestDir_EmptyDataDirReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestDeliverableCountExcludesOnlyThePlanApprovalArtifact(t *testing.T) {
+	files := []domain.SessionArtifactFile{
+		{ID: "approval", Path: "project-plan.md", Role: domain.SessionArtifactRolePlanApproval},
+		{ID: "deliverable", Path: "plan.md"},
+	}
+	if got := DeliverableCount(files, false, false); got != 1 {
+		t.Fatalf("deliverables while plan is evidence = %d, want 1", got)
+	}
+	if got := DeliverableCount(files, false, true); got != 2 {
+		t.Fatalf("deliverables when approval plan is final output = %d, want 2", got)
+	}
+}
+
+func TestDeliverableCountTreatsPendingUnregisteredPlanAsProvisionalApproval(t *testing.T) {
+	files := []domain.SessionArtifactFile{{Path: "plan.md"}}
+	if got := DeliverableCount(files, true, false); got != 0 {
+		t.Fatalf("pending plan deliverables = %d, want 0", got)
+	}
+	if got := DeliverableCount(files, false, false); got != 1 {
+		t.Fatalf("ordinary plan deliverables = %d, want 1", got)
+	}
+}
+
 func TestList_ClassifiesByExtensionAndSortsByPath(t *testing.T) {
 	dir := t.TempDir()
 	for name, body := range map[string]string{"b.html": "<p>x</p>", "a.md": "# x", "c.bin": "x", "noext": "<!doctype html><html></html>"} {

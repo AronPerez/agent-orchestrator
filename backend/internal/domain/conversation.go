@@ -100,6 +100,21 @@ func (s TurnState) Terminal() bool {
 	}
 }
 
+// ProviderDeliveryState records how far AO durably progressed across the
+// provider boundary for a turn. It is separate from TurnState: a failed turn
+// may be known pre-provider, ambiguous after an attempt, or accepted and later
+// failed by the provider.
+type ProviderDeliveryState string
+
+const (
+	// ProviderDeliveryNone means AO has not crossed the provider boundary.
+	ProviderDeliveryNone ProviderDeliveryState = "none"
+	// ProviderDeliveryAttempted means provider acceptance is uncertain.
+	ProviderDeliveryAttempted ProviderDeliveryState = "attempted"
+	// ProviderDeliveryAccepted means the provider accepted the turn.
+	ProviderDeliveryAccepted ProviderDeliveryState = "accepted"
+)
+
 // MessageRole distinguishes what the reader sees as their own text from the
 // agent's.
 type MessageRole string
@@ -563,6 +578,9 @@ type ConversationTurn struct {
 	HandledByReviewID string `json:"handledByReviewId,omitempty"`
 	// ProviderTurnID correlates back to the provider's own turn. Opaque.
 	ProviderTurnID string `json:"providerTurnId,omitempty"`
+	// ProviderDeliveryState is AO's durable provider-boundary fact. Internal:
+	// clients render the ordinary turn state, not dispatch bookkeeping.
+	ProviderDeliveryState ProviderDeliveryState `json:"-"`
 	// ProviderInputText identifies a combined native prompt during history replay.
 	// The public transcript continues to use the individual message rows.
 	ProviderInputText string `json:"-"`

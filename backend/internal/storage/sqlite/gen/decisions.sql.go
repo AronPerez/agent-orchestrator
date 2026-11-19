@@ -198,14 +198,16 @@ func (q *Queries) ListDecisionCallsForBoard(ctx context.Context, doneSince sql.N
 }
 
 const listDecisionCallsForSession = `-- name: ListDecisionCallsForSession :many
-SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text, outcome_at
-FROM decision_calls
-WHERE origin = ?1
+SELECT calls.call_id, calls.origin, calls.project_id, calls.stream_session_id, calls.stream_name, calls.owner_session_id, calls.state, calls.delivery, calls.retired, calls.raised_at, calls.last_wall, calls.last_counter, calls.body, calls.search_text, calls.outcome_at
+FROM decision_calls AS calls
+JOIN decision_entries AS raised
+  ON raised.call_id = calls.call_id AND raised.kind = 'raised'
+WHERE calls.origin = ?1
   AND (
-    owner_session_id = ?2
-    OR json_extract(body, '$.deliveredTo') = ?2
+    calls.owner_session_id = ?2
+    OR json_extract(calls.body, '$.deliveredTo') = ?2
   )
-ORDER BY raised_at DESC, call_id DESC
+ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
 LIMIT ?3
 `
 

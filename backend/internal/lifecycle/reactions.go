@@ -136,6 +136,12 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	if mergeabilityClearsConflict(o.Mergeability) {
 		rearmErr = m.rearmMergeConflict(ctx, o.URL)
 	}
+	// A plan-first worker may already own a PR with failing checks or review
+	// feedback. Hold those implementation nudges without consuming their dedup
+	// signatures until the approving ledger answer has reached the worker.
+	if rec.PlanFirstState.BlocksAutomation() {
+		return rearmErr
+	}
 	// A genuinely dead session — terminated, or its pane already exited to a
 	// shell — has nowhere to deliver any nudge, merge-conflict included, so
 	// return once the non-delivery re-arm above has run.

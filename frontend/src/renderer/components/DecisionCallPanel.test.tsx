@@ -230,6 +230,28 @@ describe("DecisionCallPanel", () => {
 			});
 		});
 
+		it("requires a note before approving a plan with changes, as the bell does", async () => {
+			serve({
+				...needsYou,
+				reference: "plan-first",
+				options: [
+					{ label: "Approve", consequence: "Start as planned.", recommended: true },
+					{ label: "Approve with changes", consequence: "Start after the changes." },
+				],
+			});
+			renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Approve with changes/ }));
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).not.toHaveBeenCalled();
+			expect(screen.getByLabelText("Note for the session")).toHaveAccessibleDescription("Describe the changes you want.");
+			await userEvent.type(screen.getByLabelText("Note for the session"), "Split the migration first");
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
+				params: { path: { id: "dec_1" } },
+				body: { choice: "option", option: 2, note: "Split the migration first" },
+			});
+		});
+
 		it("changes a standing pick and explains it reaches the session as an update", async () => {
 			serve(inProgress);
 			renderPanel();

@@ -2,7 +2,7 @@ import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useDecisionAction, useDecisionAnswer } from "../hooks/useDecisionInbox";
 import { apiErrorRequestId } from "../lib/api-client";
-import type { DecisionCall } from "../lib/decision-inbox";
+import { decisionOptionRequiresNote, type DecisionCall } from "../lib/decision-inbox";
 import { LOCAL_HOST } from "../lib/hosts";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
@@ -125,7 +125,7 @@ function AnswerForm({
 	const submit = (event: FormEvent) => {
 		event.preventDefault();
 		if (busy || !choice) return;
-		if (choice === OTHER && !note.trim()) {
+		if (!note.trim() && (choice === OTHER || decisionOptionRequiresNote(call, Number(choice)))) {
 			setNoteMissing(true);
 			return;
 		}
@@ -183,7 +183,11 @@ function AnswerForm({
 						if (event.target.value.trim()) setNoteMissing(false);
 					}}
 				/>
-				{noteMissing ? <p id={noteErrorId} className="text-caption text-destructive">{t("decisions.noteRequired")}</p> : null}
+				{noteMissing ? (
+					<p id={noteErrorId} className="text-caption text-destructive">
+						{choice === OTHER ? t("decisions.noteRequired") : t("decisions.changesRequired")}
+					</p>
+				) : null}
 			</div>
 			{hint ? <p id={hintId} className="text-caption text-muted-foreground">{hint}</p> : null}
 			<div className="flex flex-wrap items-center gap-2">

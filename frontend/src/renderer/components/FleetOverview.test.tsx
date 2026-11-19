@@ -357,6 +357,74 @@ describe("FleetOverview", () => {
 		expect(row).not.toHaveAccessibleName(/No sessions/);
 	});
 
+	it("draws a remote worker under its orchestrator on this computer by exact address", async () => {
+		const onOpen = vi.fn();
+		const orchestrator = session("orch", "Coordinator", "working", { kind: "orchestrator" });
+		const sameId = session("orch", "Remote namesake", "idle", { hostId: "build-box" });
+		const worker = session("worker", "Remote worker", "needs_input", {
+			hostId: "build-box",
+			parentHostId: "h_local",
+			parentSessionId: "orch",
+		});
+		render(
+			<FleetOverview
+				localHostId="h_local"
+				localWorkspaces={[workspace("project", "Alpha", [orchestrator])]}
+				onOpen={onOpen}
+				remoteHosts={[host("build-box", "Build box", "connected")]}
+				remoteWorkspaces={[
+					workspace("remote-project", "Alpha box", [worker], { hostId: "build-box" }),
+					workspace("other", "Other", [sameId], { hostId: "build-box" }),
+				]}
+			/>,
+		);
+
+		const parent = screen.getByRole("treeitem", { name: /^Coordinator/ });
+		const child = screen.getByRole("treeitem", { name: /^Remote worker/ });
+		expect(parent).toHaveAttribute("aria-level", "3");
+		expect(child).toHaveAttribute("aria-level", "4");
+		expect(child).toHaveAccessibleName(/On Build box/);
+		expect(child).not.toHaveAccessibleName(/Parent/);
+		expect(within(child).getByText("On Build box")).toBeInTheDocument();
+		expect(screen.queryByText("Alpha box")).not.toBeInTheDocument();
+		expect(screen.getByRole("treeitem", { name: /^Remote namesake/ })).toHaveAttribute("aria-level", "3");
+
+		await userEvent.click(child);
+		expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: "worker" }), "build-box");
+	});
+
+	it("keeps a remote child as a marked root when its parent machine is offline or unknown", () => {
+		const parent = session("orch", "Cached coordinator", "working", { kind: "orchestrator", hostId: "parent-box" });
+		const offlineChild = session("offline-child", "Waiting worker", "working", {
+			hostId: "build-box",
+			parentHostId: "parent-box",
+			parentSessionId: "orch",
+		});
+		const unknownChild = session("unknown-child", "Stranger worker", "working", {
+			hostId: "build-box",
+			parentHostId: "h_unpaired",
+			parentSessionId: "orch",
+		});
+		render(
+			<FleetOverview
+				localWorkspaces={[]}
+				onOpen={vi.fn()}
+				remoteHosts={[host("build-box", "Build box", "connected"), host("parent-box", "Parent box", "offline")]}
+				remoteWorkspaces={[
+					workspace("parents", "Parents", [parent], { hostId: "parent-box" }),
+					workspace("children", "Children", [offlineChild, unknownChild], { hostId: "build-box" }),
+				]}
+			/>,
+		);
+
+		const offline = screen.getByRole("treeitem", { name: /^Waiting worker/ });
+		expect(offline).toHaveAttribute("aria-level", "3");
+		expect(within(offline).getByText("Parent's machine not connected")).toBeInTheDocument();
+		const unknown = screen.getByRole("treeitem", { name: /^Stranger worker/ });
+		expect(unknown).toHaveAttribute("aria-level", "3");
+		expect(unknown).toHaveAccessibleName(/Parent on an unknown machine/);
+	});
+
 	it("uses tree keyboard navigation and opens sessions with Enter", () => {
 		const onOpen = vi.fn();
 		const worker = session("worker", "Keyboard worker");

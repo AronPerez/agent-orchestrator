@@ -934,6 +934,9 @@ type SpawnSessionRequest struct {
 	// write a file in its artifact directory instead of opening a PR. Omitted is
 	// the ordinary task flow.
 	RequestedOutput domain.RequestedOutput `json:"requestedOutput,omitempty" enum:"artifact"`
+	// PlanFirst makes a project worker raise a Decision Ledger approval call for
+	// its artifact plan before implementation.
+	PlanFirst bool `json:"planFirst,omitempty"`
 
 	// DisplayName is the sidebar label for the session, capped at 100 characters.
 	// `ao spawn --name` always sets it; other clients (e.g. the desktop new-task

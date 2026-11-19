@@ -260,8 +260,15 @@ func (s *Service) SendIfIdle(
 		return false, err
 	}
 	if _, writerErr := s.checkOtherWriter(ctx, record); writerErr != nil {
-		if found, retryErr := s.sentMessageRetry(ctx, id, msg); found || retryErr != nil {
-			return found, retryErr
+		accepted, found, receiptErr := s.sendIfIdleReceipt(ctx, id, msg)
+		if receiptErr != nil {
+			return false, receiptErr
+		}
+		if found {
+			if accepted {
+				return true, nil
+			}
+			return false, writerErr
 		}
 		return false, writerErr
 	}
@@ -271,6 +278,24 @@ func (s *Service) SendIfIdle(
 	}
 	defer release()
 	return controller.SendIfIdle(ctx, msg)
+}
+
+func (s *Service) sendIfIdleReceipt(ctx context.Context, id domain.SessionID, msg ports.ChatUserMessage) (bool, bool, error) {
+	conversation, err := s.store.ConversationForSession(ctx, id)
+	if err != nil {
+		return false, false, fmt.Errorf("recover idle-send conversation: %w", err)
+	}
+	turn, found, err := sentMessageReceipt(ctx, s.store, conversation.ID, msg, false)
+	if err != nil || !found {
+		return false, found, err
+	}
+	if turn.ProviderDeliveryState == domain.ProviderDeliveryAccepted {
+		return true, true, nil
+	}
+	if turn.ProviderDeliveryState == domain.ProviderDeliveryAttempted {
+		return false, true, ErrSteerDeliveryUncertain
+	}
+	return false, true, nil
 }
 
 // PromoteQueuedTurn delivers one already queued turn into the active turn. The
@@ -711,11 +736,45 @@ func (c *Controller) SteerOrSend(
 // check and dispatch. A duplicate accepted delivery remains successful even if
 // the controller is busy by the time its caller retries.
 func (c *Controller) SendIfIdle(ctx context.Context, msg ports.ChatUserMessage) (bool, error) {
-	c.sendMu.Lock()
+	if err := c.lockSend(ctx); err != nil {
+		return false, err
+	}
 	defer c.sendMu.Unlock()
 
-	if _, found, err := sentMessageReceipt(ctx, c.store, c.conversation.ID, msg, false); found || err != nil {
-		return found, err
+	if turn, found, err := sentMessageReceipt(ctx, c.store, c.conversation.ID, msg, false); err != nil {
+		return false, err
+	} else if found {
+		if turn.ProviderDeliveryState == domain.ProviderDeliveryAccepted {
+			return true, nil
+		}
+		if turn.ProviderDeliveryState == domain.ProviderDeliveryAttempted {
+			return false, ErrSteerDeliveryUncertain
+		}
+		if turn.State != domain.TurnStateFailed && turn.State != domain.TurnStateCancelled {
+			return false, nil
+		}
+		if c.busy() {
+			return false, nil
+		}
+		if _, queueErr := c.store.NextQueuedTurn(ctx, c.conversation.ID); queueErr == nil {
+			return false, nil
+		} else if !errors.Is(queueErr, domain.ErrNoQueuedTurn) {
+			return false, queueErr
+		}
+		reopened, reopenErr := c.store.ReopenUndispatchedTurn(ctx, turn.ID)
+		if reopenErr != nil {
+			return false, reopenErr
+		}
+		if !reopened {
+			return false, ErrSteerDeliveryUncertain
+		}
+		c.setSendingTurn(turn.ID)
+		retried, retryErr := c.dispatch(ctx, turn.ID, msg, turn.RequestedAt, false, nil)
+		if retryErr != nil {
+			c.clearSendingTurn(turn.ID)
+			return false, retryErr
+		}
+		return retried.ProviderDeliveryState == domain.ProviderDeliveryAccepted, nil
 	}
 	if c.busy() {
 		return false, nil
@@ -729,7 +788,7 @@ func (c *Controller) SendIfIdle(ctx context.Context, msg ports.ChatUserMessage) 
 	if err != nil {
 		return false, err
 	}
-	return turn.ID != "", nil
+	return turn.ProviderDeliveryState == domain.ProviderDeliveryAccepted, nil
 }
 
 func steerOrSendReceipt(

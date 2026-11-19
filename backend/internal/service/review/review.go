@@ -666,6 +666,16 @@ func firstNonEmpty(values ...string) string {
 
 // TriggerAuto starts a daemon-initiated review pass.
 func (s *Service) TriggerAuto(ctx context.Context, workerID domain.SessionID, harness domain.ReviewerHarness) (reviewcore.TriggerResult, error) {
+	worker, found, err := s.store.GetSession(ctx, workerID)
+	if err != nil {
+		return reviewcore.TriggerResult{}, err
+	}
+	if !found {
+		return reviewcore.TriggerResult{SkipReason: "session_not_found"}, nil
+	}
+	if worker.PlanFirstState.BlocksAutomation() {
+		return reviewcore.TriggerResult{SkipReason: "plan_first_pending"}, nil
+	}
 	return s.triggerWithOptions(ctx, workerID, reviewcore.TriggerOptions{Harness: harness, Source: domain.ReviewTriggerAuto})
 }
 
