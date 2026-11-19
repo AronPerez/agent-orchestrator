@@ -216,16 +216,19 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 
 // checkRaisePolicy applies the project's autonomy policy, already snapshotted
 // into the payload, to a call that passed the shape rules.
+//
+// A call without a kind is accepted in every mode. Standing instructions are
+// built when a session starts, so a session that started before the project
+// switched to observe mode has never been told to pass one; refusing its
+// calls would block it on a policy it cannot see. Sessions that know the
+// policy always pass a kind, and the observe readout skips calls without one.
 func checkRaisePolicy(p domain.DecisionRaisedPayload) error {
 	observe := p.AutonomyMode == domain.AutonomyObserve
-	if observe && p.Kind == "" {
-		return policyRule("kind_required", "This project records the kind of every call. Pass --kind; use other if none fits. Run ao decision kinds to list them.")
-	}
 	if p.Reserved && p.Prediction != nil {
 		kind, _ := domain.LookupDecisionKind(string(p.Kind))
 		return policyRule("prediction_on_reserved", fmt.Sprintf("%q is reserved for the person in this project. Drop --would-decide.", kind.Label))
 	}
-	if observe && !p.Reserved && p.Prediction == nil {
+	if observe && p.Kind != "" && !p.Reserved && p.Prediction == nil {
 		return policyRule("prediction_required", "This project is in observe mode. Say what you would have decided with --would-decide, --why and --undo.")
 	}
 	return nil

@@ -71,11 +71,19 @@ func TestRaiseDefaultsUrgencyToCanWait(t *testing.T) {
 	}
 }
 
-func TestRaiseObserveModeNeedsAKind(t *testing.T) {
+// A session started before the project switched to observe mode never saw
+// the observe instructions, so its calls carry no kind. They must still go
+// through; they are simply left out of the observe readout.
+func TestRaiseObserveModeAcceptsACallWithoutAKind(t *testing.T) {
 	fixture := newDecisionService(t)
 	setShopAutonomy(t, fixture, domain.AutonomyConfig{Mode: domain.AutonomyObserve})
-	_, err := fixture.service.Raise(context.Background(), Actor{Session: fixture.w1}, validRaiseInput())
-	assertRaiseRule(t, err, "kind_required")
+	call, err := fixture.service.Raise(context.Background(), Actor{Session: fixture.w1}, validRaiseInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Raised.Kind != "" || call.Raised.Reserved || call.Raised.Prediction != nil {
+		t.Fatalf("raised = %+v", call.Raised)
+	}
 }
 
 func TestRaiseObserveModeNeedsAPredictionForOpenKinds(t *testing.T) {
