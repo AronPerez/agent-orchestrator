@@ -139,6 +139,57 @@ func TestSwitchTargetWithoutANativeSessionYetRestoresFromTheHandoff(t *testing.T
 	}
 }
 
+func TestSwitchTUIProviderKeepsReservedReplacementFenced(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		probe ports.FencedProbeResult
+	}{
+		{name: "live", probe: ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}},
+		{name: "unknown", probe: ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+			rec := mkLive("mer-1")
+			rec.Harness, rec.Mode, rec.Kind = domain.HarnessCodex, domain.SessionModeTUI, domain.KindWorker
+			rec.Activity.State = domain.ActivityIdle
+			rec.IssueID = "github:acme/mer#reserved"
+			rec.Metadata.RuntimeLaunchID = "published-generation"
+			st.sessions[rec.ID] = rec
+			key := "mer\x00" + string(rec.IssueID)
+			st.trackerIntakePending[key] = rec.ID
+			st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+				RuntimeLaunchID: "replacement-generation", RuntimeHandleIDs: []string{"runtime-replacement"},
+				DeliveryPossible: true,
+			}
+			runtime := &fakeRuntime{
+				aliveByHandle: map[string]bool{rec.Metadata.RuntimeHandleID: true},
+				fencedResults: map[string]ports.FencedProbeResult{"runtime-replacement": tc.probe},
+			}
+			m := New(Deps{
+				Runtime: runtime, Agents: singleAgent{agent: &recordingAgent{}}, Store: &launchOptionsFakeStore{fakeStore: st},
+				Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+				LookPath: func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			err := m.SwitchTUIProvider(context.Background(), rec.ID, domain.ProviderSwitchRequest{
+				TargetHarness: domain.HarnessClaudeCode, HandoffNote: "handoff",
+			})
+			var switchErr *domain.ProviderSwitchError
+			if !errors.As(err, &switchErr) || switchErr.Kind != domain.ProviderSwitchRefusalRecoveryRequired {
+				t.Fatalf("SwitchTUIProvider() error = %v, want recovery required", err)
+			}
+			reservation := st.trackerIntakeRecovery[rec.ID]
+			if reservation.CapacityReleased || reservation.RuntimeLaunchID != "replacement-generation" {
+				t.Fatalf("tracker intake reservation = %+v, want replacement owner still fenced", reservation)
+			}
+			if runtime.created != 0 {
+				t.Fatalf("started another runtime while replacement remained unresolved: %d", runtime.created)
+			}
+		})
+	}
+}
+
 func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

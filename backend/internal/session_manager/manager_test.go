@@ -3071,6 +3071,11 @@ func TestSpawnTrackerIntakeFailedLaunchCanRetryAndSuccessfulLaunchCommits(t *tes
 
 func TestSpawnTrackerIntakeAmbiguousInCommandDeliveryRemainsFencedAfterRuntimeDies(t *testing.T) {
 	m, st, rt, _ := newManager()
+	lcm := lifecycle.New(&transitionLifecycleStore{transitionStore: &transitionStore{fakeStore: st}}, nil)
+	m.lcm = lcm
+	lcm.SetSessionOperationGate(m)
+	old := time.Now().Add(-2 * time.Minute)
+	m.clock = func() time.Time { return old }
 	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
 	cfg := ports.SpawnConfig{
 		ProjectID:           "mer",
@@ -3086,6 +3091,19 @@ func TestSpawnTrackerIntakeAmbiguousInCommandDeliveryRemainsFencedAfterRuntimeDi
 		handle:  ports.RuntimeHandle{ID: "partial-runtime"},
 		effect:  ports.RuntimeEffectPossible,
 		cleanup: ports.RuntimeCleanupFailed,
+	}
+	rt.onCreate = func() {
+		if !m.SessionObservationInProgress("mer-1") {
+			t.Fatal("new tracker intake claim was not fenced before runtime creation")
+		}
+		if err := lcm.ApplyRuntimeObservation(context.Background(), "mer-1", ports.RuntimeFacts{
+			Runtime: ports.ProbeDead, Workload: ports.ProbeFailed,
+		}); err != nil {
+			t.Fatalf("runtime observation during spawn: %v", err)
+		}
+		if st.sessions["mer-1"].IsTerminated {
+			t.Fatal("runtime observation terminated a newly pending tracker intake owner")
+		}
 	}
 
 	_, _, _, err := m.Spawn(ctx, cfg)
@@ -3105,6 +3123,9 @@ func TestSpawnTrackerIntakeAmbiguousInCommandDeliveryRemainsFencedAfterRuntimeDi
 	}
 	if got := st.trackerIntakeHandled[key]; got != "" {
 		t.Fatalf("uncertain runtime was marked handled by metadata: %q", got)
+	}
+	if !m.SessionObservationInProgress(rec.ID) {
+		t.Fatal("uncertain tracker intake owner lost its reaper fence after Spawn returned")
 	}
 	if _, _, _, err := m.Spawn(ctx, cfg); !errors.Is(err, ports.ErrTrackerIntakeActive) {
 		t.Fatalf("Spawn(while uncertain) error = %v, want ErrTrackerIntakeActive", err)
@@ -3127,6 +3148,9 @@ func TestSpawnTrackerIntakeAmbiguousInCommandDeliveryRemainsFencedAfterRuntimeDi
 	}
 	if got := st.trackerIntakeHandled[key]; got != rec.ID {
 		t.Fatalf("handled claim after exact dead proof = %q, want fenced owner %q", got, rec.ID)
+	}
+	if m.SessionObservationInProgress(rec.ID) {
+		t.Fatal("settled tracker intake owner retained its reaper fence")
 	}
 	if _, _, _, err := m.Spawn(ctx, cfg); !errors.Is(err, ports.ErrTrackerIntakeHandled) {
 		t.Fatalf("Spawn(retry after dead proof) error = %v, want ErrTrackerIntakeHandled", err)
@@ -3300,7 +3324,7 @@ func TestReconcileTrackerIntakeClaimsSettlesPossibleDeliveryAfterTermination(t *
 	if got := st.trackerIntakeHandled[key]; got != id {
 		t.Fatalf("handled delivery claim = %q, want %q", got, id)
 	}
-	if len(rt.fencedRefs) != 1 || rt.destroyed != 0 || ws.destroyed != 1 {
+	if len(rt.fencedRefs) == 0 || rt.destroyed != 0 || ws.destroyed != 1 {
 		t.Fatalf("settled delivery cleanup: probes=%+v runtimeDestroy=%d workspaceDestroy=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
 	}
 }
@@ -9339,10 +9363,12 @@ func TestReconcileTrackerIntakeUndeliveredRelaunchUsesReservedGeneration(t *test
 			if len(rt.fencedRefs) == 0 {
 				t.Fatal("reserved runtime was not probed")
 			}
+			seen := map[string]bool{}
 			for _, ref := range rt.fencedRefs {
-				if ref.Generation != "new-launch" {
-					t.Fatalf("runtime probe = %+v, want reserved generation new-launch", ref)
-				}
+				seen[ref.Handle.ID+"\x00"+ref.Generation] = true
+			}
+			if !seen["new-runtime\x00new-launch"] || !seen["old-runtime\x00old-launch"] {
+				t.Fatalf("runtime probes = %+v, want both reserved and stale row generations", rt.fencedRefs)
 			}
 			if st.trackerIntakePending[key] != "" {
 				t.Fatalf("undelivered stopped claim remained pending: %q", st.trackerIntakePending[key])

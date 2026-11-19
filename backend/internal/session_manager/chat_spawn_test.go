@@ -469,6 +469,9 @@ func TestChatTrackerIntakeTurnErrorPreservesPossibleDelivery(t *testing.T) {
 	if !reservation.ControllerPossible || !reservation.DeliveryPossible {
 		t.Fatalf("Chat recovery reservation = %+v, want controller and delivery fences", reservation)
 	}
+	if got, want := reservation.ControllerGeneration, st.sessions[id].Metadata.ControllerGeneration; got == "" || got != want {
+		t.Fatalf("Chat recovery controller generation = %q, want published generation %q", got, want)
+	}
 }
 
 func TestChatTrackerIntakePreSendErrorReleasesClaimForRetry(t *testing.T) {

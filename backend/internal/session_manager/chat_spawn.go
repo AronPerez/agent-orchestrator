@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/agentlaunch"
@@ -336,6 +337,23 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 			return launchEnv, nil
 		},
 		ControllerReady: func(started ChatStarted) (ChatControllerCommit, error) {
+			if in.cfg.TrackerIntakeLimits != nil {
+				reservation, pending, reserveErr := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+				if reserveErr != nil {
+					return ChatControllerCommit{}, fmt.Errorf("load tracker intake Chat owner: %w", reserveErr)
+				}
+				if !pending {
+					return ChatControllerCommit{}, fmt.Errorf("load tracker intake Chat owner: pending claim is missing")
+				}
+				reservation.ControllerPossible = true
+				reservation.ControllerGeneration = strings.TrimSpace(started.ControllerGeneration)
+				if reservation.ControllerGeneration == "" {
+					return ChatControllerCommit{}, fmt.Errorf("reserve tracker intake Chat owner: controller generation is empty")
+				}
+				if reserveErr := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); reserveErr != nil {
+					return ChatControllerCommit{}, fmt.Errorf("reserve tracker intake Chat owner: %w", reserveErr)
+				}
+			}
 			metadata := domain.SessionMetadata{
 				Permissions:       in.record.Metadata.Permissions,
 				Branch:            in.workspace.Branch,

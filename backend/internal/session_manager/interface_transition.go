@@ -590,7 +590,11 @@ func (m *Manager) runInterfaceTransition(
 		return
 	}
 	sourceStopped = true
-	if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+	markStopped := m.markTrackerIntakeCapacityReleased
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		markStopped = m.markTrackerIntakeCapacityReleasedAfterControllerStop
+	}
+	if err := markStopped(ctx, rec.ID); err != nil {
 		fail("TRACKER_INTAKE_FENCE_FAILED", fmt.Errorf("record stopped source ownership: %w", err))
 		return
 	}

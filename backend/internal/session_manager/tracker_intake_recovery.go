@@ -722,6 +722,7 @@ func (m *Manager) ensureTrackerIntakePriorRuntimeStopped(
 	ctx context.Context,
 	rec domain.SessionRecord,
 	reservation domain.TrackerIntakeRecoveryReservation,
+	controllerStopped bool,
 ) error {
 	type candidate struct {
 		handleID string
@@ -771,7 +772,9 @@ func (m *Manager) ensureTrackerIntakePriorRuntimeStopped(
 			return err
 		}
 	}
-	if len(candidates) == 0 && (reservation.DeliveryPossible || reservation.RelaunchPublished) &&
+	chatOwnerStopped := controllerStopped && reservation.ControllerPossible
+	if len(candidates) == 0 && ((!controllerStopped && reservation.ControllerPossible) ||
+		(!chatOwnerStopped && (reservation.DeliveryPossible || reservation.RelaunchPublished))) &&
 		!reservedRuntimeReleased && !reservedControllerReleased {
 		return fmt.Errorf("pending tracker intake runtime has no probeable owner: %w", ports.ErrRuntimeProbeInconclusive)
 	}
@@ -804,28 +807,60 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 	rec domain.SessionRecord,
 	reservation domain.TrackerIntakeRecoveryReservation,
 ) error {
-	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
-	if launchID == "" {
-		launchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	controllerGeneration := strings.TrimSpace(reservation.ControllerGeneration)
+	controllerReleased := reservation.CapacityReleased && controllerGeneration != "" &&
+		strings.TrimSpace(reservation.ReleasedControllerGeneration) == controllerGeneration
+	if reservation.ControllerPossible && !controllerReleased {
+		return fmt.Errorf("pending tracker intake Chat controller remains unresolved")
 	}
-	handleIDs := append([]string(nil), reservation.RuntimeHandleIDs...)
-	if handleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID); handleID != "" {
-		handleIDs = append([]string{handleID}, handleIDs...)
+	type candidate struct {
+		handleID string
+		launchID string
 	}
-	handleIDs = uniqueTrackerIntakeHandles(handleIDs)
-	if len(handleIDs) == 0 {
-		if reservation.DeliveryPossible || launchID != "" {
+	owners := make([]candidate, 0, len(reservation.RuntimeHandleIDs)+1)
+	seen := make(map[string]struct{}, len(reservation.RuntimeHandleIDs)+1)
+	add := func(handleID, launchID string) error {
+		handleID = strings.TrimSpace(handleID)
+		launchID = strings.TrimSpace(launchID)
+		if handleID == "" || launchID == "" {
+			return fmt.Errorf("pending tracker intake runtime has incomplete ownership evidence")
+		}
+		key := handleID + "\x00" + launchID
+		if _, ok := seen[key]; ok {
+			return nil
+		}
+		seen[key] = struct{}{}
+		owners = append(owners, candidate{handleID: handleID, launchID: launchID})
+		return nil
+	}
+
+	reservedLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+	reservedHandles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
+	if len(reservedHandles) == 0 && reservedLaunchID != "" {
+		return fmt.Errorf("pending tracker intake runtime has no handle fence")
+	}
+	for _, handleID := range reservedHandles {
+		if err := add(handleID, reservedLaunchID); err != nil {
+			return err
+		}
+	}
+	rowHandleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
+	rowLaunchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	if (rowHandleID != "" || rowLaunchID != "") && !rec.RuntimeReleased() {
+		if err := add(rowHandleID, rowLaunchID); err != nil {
+			return err
+		}
+	}
+	if len(owners) == 0 {
+		if reservation.DeliveryPossible || reservedLaunchID != "" {
 			return fmt.Errorf("pending tracker intake native identity has no runtime fence")
 		}
 		return nil
 	}
-	if launchID == "" {
-		return fmt.Errorf("pending tracker intake runtime has no generation fence")
-	}
-	for _, handleID := range handleIDs {
+	for _, owner := range owners {
 		ref := ports.FencedRuntimeRef{
-			Handle: ports.RuntimeHandle{ID: handleID}, SessionID: rec.ID,
-			Generation: launchID, NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
+			Handle: ports.RuntimeHandle{ID: owner.handleID}, SessionID: rec.ID,
+			Generation: owner.launchID, NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
 		}
 		probe := m.runtime.ProbeFencedRuntime(ctx, ref)
 		switch probe.Liveness {
@@ -833,10 +868,10 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 			continue
 		case ports.FencedAlive:
 			if err := m.stopSourceRuntime(ctx, ref); err != nil {
-				return fmt.Errorf("stop pending tracker intake runtime %s: %w", handleID, err)
+				return fmt.Errorf("stop pending tracker intake runtime %s: %w", owner.handleID, err)
 			}
 		default:
-			return fmt.Errorf("pending tracker intake runtime %s remains unresolved: %s", handleID, probe.Reason)
+			return fmt.Errorf("pending tracker intake runtime %s remains unresolved: %s", owner.handleID, probe.Reason)
 		}
 	}
 	return nil
@@ -851,6 +886,7 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 	rec domain.SessionRecord,
 	reservation domain.TrackerIntakeRecoveryReservation,
 ) error {
+	persistedOwner := rec
 	rec = applyTrackerIntakeRecovery(rec, reservation)
 	if reservation.CleanupConfirmed {
 		m.rollbackSpawnSeedRow(ctx, rec.ID)
@@ -866,7 +902,7 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 			}
 		}
 		if !reservation.CapacityReleased {
-			if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+			if err := m.markTrackerIntakeCapacityReleasedAfterControllerStop(ctx, rec.ID); err != nil {
 				return err
 			}
 			reservation.CapacityReleased = true
@@ -874,47 +910,15 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 		return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
 	}
 
-	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
-	if launchID == "" {
-		launchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
-	}
-	handleIDs := append([]string(nil), reservation.RuntimeHandleIDs...)
-	if handleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID); handleID != "" {
-		handleIDs = append([]string{handleID}, handleIDs...)
-	}
-	handleIDs = uniqueTrackerIntakeHandles(handleIDs)
-	if !reservation.CapacityReleased && len(handleIDs) != 0 && launchID == "" {
-		return fmt.Errorf("check session %s: pending tracker intake runtime has no generation fence", rec.ID)
-	}
 	if !reservation.CapacityReleased {
-		for _, handleID := range handleIDs {
-			ref := ports.FencedRuntimeRef{
-				Handle:         ports.RuntimeHandle{ID: handleID},
-				SessionID:      rec.ID,
-				Generation:     launchID,
-				NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
-			}
-			probe := m.runtime.ProbeFencedRuntime(ctx, ref)
-			switch probe.Liveness {
-			case ports.FencedDead:
-				// Exact absence is sufficient proof that no duplicate worker survives.
-			case ports.FencedAlive:
-				if err := m.stopSourceRuntime(ctx, ref); err != nil {
-					return fmt.Errorf("check session %s: stop pending tracker intake runtime: %w", rec.ID, err)
-				}
-			default:
-				return fmt.Errorf("check session %s: pending tracker intake runtime remains unresolved: %s", rec.ID, probe.Reason)
-			}
+		if err := m.stopTrackerIntakeRuntimeOwners(ctx, persistedOwner, reservation); err != nil {
+			return fmt.Errorf("check session %s: %w", rec.ID, err)
 		}
-	}
-	if !reservation.CapacityReleased && len(handleIDs) == 0 && (reservation.DeliveryPossible || trackerIntakeHasTerminalEffect(rec) || launchID != "") {
-		return fmt.Errorf("check session %s: pending tracker intake native identity has no runtime fence", rec.ID)
-	}
-	if !reservation.CapacityReleased {
-		if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+		var err error
+		reservation, err = m.recordTrackerIntakeStoppedOwners(ctx, persistedOwner, reservation)
+		if err != nil {
 			return err
 		}
-		reservation.CapacityReleased = true
 	}
 
 	return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
@@ -1061,11 +1065,6 @@ func trackerIntakeHandleReserved(handles []string, candidate string) bool {
 		}
 	}
 	return false
-}
-
-func trackerIntakeHasTerminalEffect(rec domain.SessionRecord) bool {
-	return strings.TrimSpace(rec.Metadata.AgentSessionID) != "" ||
-		strings.TrimSpace(rec.Metadata.NativeTranscriptPath) != ""
 }
 
 func trackerIntakeHasChatEffect(rec domain.SessionRecord) bool {

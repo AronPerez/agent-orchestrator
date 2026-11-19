@@ -306,6 +306,10 @@ func (g fixedSessionOperationGate) SessionMutationInProgress(domain.SessionID) b
 	return bool(g)
 }
 
+func (g fixedSessionOperationGate) SessionObservationInProgress(domain.SessionID) bool {
+	return bool(g)
+}
+
 type telemetrySink struct {
 	events []ports.TelemetryEvent
 }
@@ -728,6 +732,23 @@ func TestRuntimeObservation_ExitedWorkloadKeepsSessionLive(t *testing.T) {
 	got := st.sessions["mer-1"]
 	if got.IsTerminated || got.Activity.State != domain.ActivityExited {
 		t.Fatalf("want live/exited, got %+v", got)
+	}
+}
+
+func TestRuntimeObservation_ExitedWorkloadIsSuppressedDuringSessionObservation(t *testing.T) {
+	m, st, _ := newManager()
+	m.SetSessionOperationGate(fixedSessionOperationGate(true))
+	rec := working("mer-1")
+	rec.Metadata.RuntimeLaunchID = "launch-1"
+	st.sessions[rec.ID] = rec
+
+	if err := m.ApplyRuntimeObservation(ctx, rec.ID, ports.RuntimeFacts{
+		Runtime: ports.ProbeAlive, Workload: ports.ProbeDead, LaunchID: "launch-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.sessions[rec.ID]; !reflect.DeepEqual(got, rec) {
+		t.Fatalf("fenced workload observation mutated session: got %+v, want %+v", got, rec)
 	}
 }
 

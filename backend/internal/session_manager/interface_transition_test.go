@@ -1174,6 +1174,48 @@ func TestInterfaceTransitionTUIToChatStopsBeforeStartingAndReusesNativeConversat
 	}
 }
 
+func TestInterfaceTransitionTUIToChatKeepsReservedReplacementFenced(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		probe ports.FencedProbeResult
+	}{
+		{name: "live", probe: ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}},
+		{name: "unknown", probe: ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, store, runtime, chat, _ := newTransitionManager(t, domain.SessionModeTUI)
+			rec := store.sessions["session-1"]
+			rec.IssueID = "github:acme/repo#reserved"
+			store.sessions[rec.ID] = rec
+			store.trackerIntakePending["proj\x00"+string(rec.IssueID)] = rec.ID
+			store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+				RuntimeLaunchID: "replacement-generation", RuntimeHandleIDs: []string{"runtime-replacement"},
+				DeliveryPossible: true,
+			}
+			runtime.fencedResults = map[string]ports.FencedProbeResult{"runtime-replacement": tc.probe}
+
+			transition, err := manager.StartInterfaceTransition(
+				context.Background(), rec.ID, domain.SessionModeChat,
+				domain.SessionInterfaceTransitionDrain, domain.SessionInterfaceTransitionHistoryStrict,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settled := awaitTransition(t, store, transition.ID)
+			if settled.Phase != domain.SessionInterfaceTransitionRecovery {
+				t.Fatalf("transition = %+v, want recovery while replacement owner is unresolved", settled)
+			}
+			reservation := store.trackerIntakeRecovery[rec.ID]
+			if reservation.CapacityReleased || reservation.RuntimeLaunchID != "replacement-generation" {
+				t.Fatalf("tracker intake reservation = %+v, want replacement owner still fenced", reservation)
+			}
+			if runtime.created != 0 || chat.start.SessionID != "" {
+				t.Fatalf("started another owner: terminal creates=%d chat session=%q", runtime.created, chat.start.SessionID)
+			}
+		})
+	}
+}
+
 func TestInterfaceTransitionRollbackClearsStaleTUIRuntimeBeforeRestore(t *testing.T) {
 	manager, store, runtime, chat, log := newTransitionManager(t, domain.SessionModeTUI)
 	runtime.runtimeOccupied = true

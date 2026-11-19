@@ -150,7 +150,15 @@ func (m *Manager) SwitchTUIProvider(ctx context.Context, id domain.SessionID, re
 		return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalUnavailable, Detail: what + ": " + cause.Error(), Cause: cause}
 	}
 	if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
-		return restoreSource(err, "could not record stopped tracker intake ownership")
+		// A pending intake reservation may name a replacement generation that was
+		// never published to the row. If that owner is live or inconclusive, putting
+		// the old source back would create a second writer and discard its only
+		// durable fence. Leave the stopped row and claim for recovery instead.
+		return &domain.ProviderSwitchError{
+			Kind:   domain.ProviderSwitchRefusalRecoveryRequired,
+			Detail: "could not prove that every tracker intake owner stopped: " + err.Error(),
+			Cause:  err,
+		}
 	}
 
 	targetRecord := source

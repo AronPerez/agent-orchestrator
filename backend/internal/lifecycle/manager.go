@@ -618,6 +618,9 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 		} else {
 			delete(m.unreachableRuntimes, id)
 		}
+		if m.runtimeObservationInProgress(id) {
+			return cur, false
+		}
 		currentLaunch := cur.Metadata.RuntimeLaunchID
 		if currentLaunch != "" && f.Runtime == ports.ProbeAlive && f.Workload == ports.ProbeDead {
 			if cur.Activity.State == domain.ActivityExited {
@@ -634,9 +637,6 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 			return cur, false
 		}
 		if !runtimeClearlyDead(f, cur.Activity, now, m.window) {
-			return cur, false
-		}
-		if m.runtimeObservationInProgress(id) {
 			return cur, false
 		}
 		finalizer = m.usageFinalizer

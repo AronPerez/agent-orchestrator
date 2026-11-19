@@ -134,7 +134,7 @@ func (m *Manager) reconnectReservedTrackerIntakeChat(
 			if recordErr := m.recordAgentExited(ctx, rec); recordErr != nil {
 				return recordErr
 			}
-			if releaseErr := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); releaseErr != nil {
+			if releaseErr := m.markTrackerIntakeCapacityReleasedAfterControllerStop(ctx, rec.ID); releaseErr != nil {
 				return fmt.Errorf("check session %s: release stopped published tracker intake chat: %w", rec.ID, releaseErr)
 			}
 			return nil
