@@ -116,4 +116,19 @@ describe("DecisionsBoard", () => {
 		const { container } = renderBoard();
 		expect(container.querySelectorAll(".rounded-md.border")).toHaveLength(calls.length);
 	});
+
+	it("tells same-named streams on two machines apart", () => {
+		render(<DecisionsBoard
+			model={buildDecisionBoard([
+				call({ id: "here", projectId: "shop", projectName: "Shop", streamSessionId: "epic", streamName: "Checkout" }),
+				call({ id: "there", projectId: "shop", projectName: "Shop", streamSessionId: "epic", streamName: "Checkout", hostId: "h_b", machineLabel: "laptop" }),
+			])}
+			now={NOW}
+			onSelect={vi.fn()}
+		/>);
+		expect(screen.getAllByRole("group").map((row) => row.getAttribute("aria-label")).filter((label) => label?.startsWith("Checkout"))).toEqual([
+			"Checkout · mac-mini",
+			"Checkout · laptop",
+		]);
+	});
 });

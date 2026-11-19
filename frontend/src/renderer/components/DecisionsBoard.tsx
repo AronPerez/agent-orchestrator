@@ -143,7 +143,9 @@ function DecisionBand({
 
 function DecisionRow({ row, selectedId, onSelect, now }: { row: DecisionStreamRow; selectedId?: string; onSelect: (callId: string) => void; now: number }) {
 	const { t } = useTranslation();
-	const name = row.projectWide ? t("decisions.projectWide") : row.name ?? "";
+	const name = row.projectWide
+		? t("decisions.projectWide")
+		: [row.name ?? "", row.machine].filter(Boolean).join(" · ");
 	return (
 		<div role="group" aria-label={name} className="contents">
 			<div

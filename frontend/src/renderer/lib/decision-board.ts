@@ -43,6 +43,11 @@ export type DecisionStreamRow = {
 	name?: string;
 	/** Origin host id of a named stream. */
 	origin?: string;
+	/**
+	 * The stream's machine, set only when another row in the band has the same
+	 * name, so two machines' streams are told apart.
+	 */
+	machine?: string;
 	projectWide: boolean;
 	lanes: DecisionLaneCards;
 	needsYouCount: number;
@@ -138,7 +143,7 @@ function offerLabel(current: Label, value: string | undefined, call: DecisionCal
 	return current;
 }
 
-type RowDraft = { row: DecisionStreamRow; label: Label; fallbackName?: string };
+type RowDraft = { row: DecisionStreamRow; label: Label; machine: Label; fallbackName?: string };
 type BandDraft = { band: DecisionProjectBand; label: Label; rows: Map<string, RowDraft> };
 
 const collator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
@@ -182,11 +187,15 @@ export function buildDecisionBoard(calls: readonly DecisionCall[]): DecisionBoar
 					needsYouCount: 0,
 				},
 				label: { at: Number.NEGATIVE_INFINITY, id: "" },
+				machine: { at: Number.NEGATIVE_INFINITY, id: "" },
 				fallbackName: streamId,
 			};
 			band.rows.set(rowKey, row);
 		}
-		if (streamId) row.label = offerLabel(row.label, call.streamName, call);
+		if (streamId) {
+			row.label = offerLabel(row.label, call.streamName, call);
+			row.machine = offerLabel(row.machine, call.machineLabel || call.hostId, call);
+		}
 
 		const card: DecisionCardModel = {
 			id: call.id,
@@ -209,12 +218,20 @@ export function buildDecisionBoard(calls: readonly DecisionCall[]): DecisionBoar
 
 	const ordered = [...bands.values()].map(({ band, label, rows }) => {
 		band.name = band.projectless ? undefined : label.value ?? band.key;
-		band.rows = [...rows.values()]
-			.map(({ row, label: rowLabel, fallbackName }) => {
-				if (!row.projectWide) row.name = rowLabel.value ?? fallbackName;
-				for (const lane of DECISION_LANES) row.lanes[lane].sort(compareCards(lane));
-				return row;
-			})
+		const drafts = [...rows.values()];
+		for (const { row, label: rowLabel, fallbackName } of drafts) {
+			if (!row.projectWide) row.name = rowLabel.value ?? fallbackName;
+			for (const lane of DECISION_LANES) row.lanes[lane].sort(compareCards(lane));
+		}
+		const nameCounts = new Map<string, number>();
+		for (const { row } of drafts) {
+			if (row.name !== undefined) nameCounts.set(row.name, (nameCounts.get(row.name) ?? 0) + 1);
+		}
+		for (const { row, machine } of drafts) {
+			if (row.name !== undefined && (nameCounts.get(row.name) ?? 0) > 1) row.machine = machine.value;
+		}
+		band.rows = drafts
+			.map(({ row }) => row)
 			.sort((a, b) => {
 				if (a.projectWide !== b.projectWide) return a.projectWide ? -1 : 1;
 				const needs = Number(b.needsYouCount > 0) - Number(a.needsYouCount > 0);

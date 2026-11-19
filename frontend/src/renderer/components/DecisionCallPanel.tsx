@@ -183,7 +183,7 @@ function DecisionCallDetail({ call, history }: { call: DecisionCall; history: De
 							<p data-slot="history-what" className="text-sm text-foreground">{historyWhat(item, call, t)}</p>
 							{item.note ? <p className="whitespace-pre-wrap break-words text-muted-foreground">{item.note}</p> : null}
 							{item.kind === "outcome" && item.link ? <SafeLink url={item.link}>{item.link}</SafeLink> : null}
-							<p className="text-passive">
+							<p className="text-muted-foreground">
 								{historyWho(item, call, t)} · <time dateTime={item.writtenAt}>{exactTime(item.writtenAt)}</time>
 							</p>
 						</li>

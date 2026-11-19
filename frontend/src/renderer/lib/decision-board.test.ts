@@ -193,4 +193,18 @@ describe("buildDecisionBoard", () => {
 		]);
 		expect(board.cardById.get("s1")).toMatchObject({ bandKey: "p", rowKey: "h_a:s" });
 	});
+
+	it("names the machine on rows whose stream names would otherwise look the same", () => {
+		const board = buildDecisionBoard([
+			call({ id: "here", projectId: "shop", streamSessionId: "epic", streamName: "Checkout", hostId: "h_a", machineLabel: "mac-mini" }),
+			call({ id: "there", projectId: "shop", streamSessionId: "epic", streamName: "Checkout", hostId: "h_b", machineLabel: "laptop" }),
+			call({ id: "solo", projectId: "shop", streamSessionId: "other", streamName: "Docs", hostId: "h_b", machineLabel: "laptop" }),
+		]);
+		const rows = board.bands[0].rows;
+		expect(rows.map((row) => [row.name, row.machine])).toEqual([
+			["Checkout", "mac-mini"],
+			["Checkout", "laptop"],
+			["Docs", undefined],
+		]);
+	});
 });
