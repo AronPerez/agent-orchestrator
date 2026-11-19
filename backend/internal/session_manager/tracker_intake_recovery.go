@@ -476,23 +476,30 @@ func trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(
 		(rec.IsTerminated || !trackerIntakeRuntimeReservationMatchesSession(rec, reservation))
 }
 
-func trackerIntakeLegacyTerminatedRuntimeTeardown(
+func trackerIntakeLegacyRuntimeTeardown(
 	rec domain.SessionRecord,
 	reservation domain.TrackerIntakeRecoveryReservation,
 ) (string, bool) {
-	if !rec.IsTerminated || !reservation.CapacityReleased || trackerIntakeRuntimeTeardownOutstanding(reservation) ||
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || !reservation.CapacityReleased ||
+		trackerIntakeRuntimeTeardownOutstanding(reservation) ||
 		len(uniqueTrackerIntakeHandles(reservation.ReleasedRuntimeHandleIDs)) != 0 {
 		return "", false
 	}
 	rowHandleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
 	rowLaunchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
 	handles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
-	if rowHandleID == "" || rowLaunchID == "" || len(handles) != 1 || handles[0] != rowHandleID ||
-		strings.TrimSpace(reservation.RuntimeLaunchID) != rowLaunchID ||
-		strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) != rowLaunchID {
+	reservationLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+	if reservationLaunchID == "" || len(handles) != 1 ||
+		strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) != reservationLaunchID {
 		return "", false
 	}
-	return rowHandleID, true
+	if rowHandleID == "" && rowLaunchID == "" {
+		return handles[0], true
+	}
+	if rowHandleID != handles[0] || rowLaunchID != reservationLaunchID {
+		return "", false
+	}
+	return handles[0], true
 }
 
 func trackerIntakeUnreleasedRuntimeHandles(reservation domain.TrackerIntakeRecoveryReservation) []string {
@@ -1122,7 +1129,7 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 		return fmt.Errorf("pending tracker intake Chat controller remains unresolved")
 	}
 	checkpoint := reservation
-	legacyHandleID, legacyUnverified := trackerIntakeLegacyTerminatedRuntimeTeardown(rec, reservation)
+	legacyHandleID, legacyUnverified := trackerIntakeLegacyRuntimeTeardown(rec, reservation)
 	legacyLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
 	if pendingOwner, pending, err := trackerIntakePendingRuntimeTeardown(checkpoint); err != nil {
 		return err
@@ -1203,7 +1210,7 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 		}
 		probe := m.runtime.ProbeFencedRuntime(ctx, ref)
 		shouldDestroy := probe.Liveness == ports.FencedDead || probe.Liveness == ports.FencedAlive
-		if probe.Liveness == ports.FencedUnknown && probe.Reason == ports.FencedReasonProbeFailed &&
+		if probe.Liveness == ports.FencedUnknown && probe.Reason == ports.FencedReasonBackendAbsent &&
 			legacyUnverified && owner.handleID == legacyHandleID && owner.launchID == legacyLaunchID {
 			// The prior release format cannot distinguish a successful Kill from a
 			// dead child whose terminal host survived. Destroy is idempotent and is

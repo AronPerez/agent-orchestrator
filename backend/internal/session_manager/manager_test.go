@@ -3665,7 +3665,7 @@ func TestReconcileTrackerIntakeClaimsRevalidatesPriorSuccessfulKillTeardown(t *t
 		IsTerminated: true,
 		Metadata:     domain.SessionMetadata{RuntimeHandleID: handleID, RuntimeLaunchID: launchID},
 	}
-	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent}
 	ws.destroyErr = ports.ErrWorkspaceDirty
 
 	err := m.ReconcileTrackerIntakeClaims(context.Background())
@@ -3688,6 +3688,69 @@ func TestReconcileTrackerIntakeClaimsRevalidatesPriorSuccessfulKillTeardown(t *t
 	}
 	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
 		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsRevalidatesMissingLegacyOwnerWhenBackendAbsent(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("missing-owner-with-prior-version-proof")
+	issueID := domain.IssueID("github:acme/mer#10913")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10913"
+	launchID := "launch-10913"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/missing-owner-with-prior-version-proof", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID, CleanupConfirmed: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || !reflect.DeepEqual(rt.destroyedIDs, []string{handleID}) {
+		t.Fatalf("missing legacy owner probes=%v destroys=%v", rt.fencedRefs, rt.destroyedIDs)
+	}
+	if ws.destroyed != 0 {
+		t.Fatalf("cleanup-confirmed missing owner destroyed workspace %d times", ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsKeepsLegacyOwnerFencedWhenGenerationProbeFails(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-owner-with-inconclusive-legacy-host")
+	issueID := domain.IssueID("github:acme/mer#10914")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10914"
+	launchID := "launch-10914"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-owner-with-inconclusive-legacy-host", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID, CleanupConfirmed: true,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		IsTerminated: true,
+		Metadata:     domain.SessionMetadata{RuntimeHandleID: handleID, RuntimeLaunchID: launchID},
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if err == nil || !strings.Contains(err.Error(), string(ports.FencedReasonProbeFailed)) {
+		t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want inconclusive probe", err)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || !rt.aliveByHandle[handleID] {
+		t.Fatalf("inconclusive legacy owner cleanup runtime=%d workspace=%d alive=%t",
+			rt.destroyed, ws.destroyed, rt.aliveByHandle[handleID])
+	}
+	if st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("fenced claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
 	}
 }
 
