@@ -113,7 +113,7 @@ type RetireDecisionRequest struct {
 type DecisionCallResponse struct {
 	ID                string                  `json:"id"`
 	Link              string                  `json:"link"`
-	State             string                  `json:"state" enum:"needs_you,in_progress,done,dismissed,withdrawn"`
+	State             string                  `json:"state" enum:"needs_you,in_progress,done,dismissed,withdrawn,decided"`
 	StateLabel        string                  `json:"stateLabel"`
 	Title             string                  `json:"title"`
 	Context           string                  `json:"context"`
@@ -149,12 +149,39 @@ type DecisionCallResponse struct {
 	Kind              string                  `json:"kind,omitempty"`
 	KindLabel         string                  `json:"kindLabel,omitempty"`
 	Reserved          bool                    `json:"reserved,omitempty" description:"The project reserved this kind for the person when the call was raised."`
-	AutonomyMode      string                  `json:"autonomyMode,omitempty" enum:"off,observe" description:"The project's autonomy mode when the call was raised."`
+	AutonomyMode      string                  `json:"autonomyMode,omitempty" enum:"off,observe,on" description:"The project's autonomy mode when the call was raised."`
 	// Prediction is what the session would have decided on its own.
 	Prediction *DecisionPredictionPayload `json:"prediction,omitempty"`
 	// PredictionAgreed is set once a predicted call has an answer: true when
 	// the person chose the predicted option.
 	PredictionAgreed *bool `json:"predictionAgreed,omitempty"`
+	// Decided is set when the call is a decision a session made on the
+	// person's behalf. Its title is what was decided and its context why.
+	Decided *DecisionDecidedResponse `json:"decided,omitempty"`
+}
+
+// DecisionDecidedResponse is what a decision made on the person's behalf
+// carries beyond an ordinary call.
+type DecisionDecidedResponse struct {
+	Undo   string `json:"undo"`
+	Verify string `json:"verify,omitempty"`
+}
+
+// DecideRequest records a decision the calling session made on the person's
+// behalf, in a project whose autonomy mode is on.
+type DecideRequest struct {
+	Kind      string                `json:"kind" description:"Decision kind id; must not be reserved by the project."`
+	What      string                `json:"what" maxLength:"120"`
+	Why       string                `json:"why" maxLength:"1000"`
+	Undo      string                `json:"undo" maxLength:"300" description:"How the person can undo it. Required."`
+	Verify    string                `json:"verify,omitempty" maxLength:"300" description:"How to tell it worked."`
+	Links     []DecisionLinkPayload `json:"links,omitempty"`
+	Reference string                `json:"reference,omitempty" maxLength:"64"`
+}
+
+// OverruleDecisionRequest records the person overruling a decision made for them.
+type OverruleDecisionRequest struct {
+	Note string `json:"note" maxLength:"1000" description:"What to do instead. Required."`
 }
 
 // DecisionKindsQuery names the project whose decision kinds the person wants.
@@ -173,7 +200,7 @@ type DecisionKindResponse struct {
 // DecisionKindsResponse is a project's autonomy mode and decision kinds.
 type DecisionKindsResponse struct {
 	ProjectID string                 `json:"projectId,omitempty"`
-	Mode      string                 `json:"mode" enum:"off,observe"`
+	Mode      string                 `json:"mode" enum:"off,observe,on"`
 	Kinds     []DecisionKindResponse `json:"kinds"`
 }
 
@@ -192,13 +219,13 @@ type DecisionObserveRowResponse struct {
 // answer, per decision kind, for calls raised in observe mode.
 type DecisionObserveResponse struct {
 	ProjectID string                       `json:"projectId,omitempty"`
-	Mode      string                       `json:"mode" enum:"off,observe"`
+	Mode      string                       `json:"mode" enum:"off,observe,on"`
 	Rows      []DecisionObserveRowResponse `json:"rows"`
 }
 
 // ListDecisionsQuery selects a decision scope or full-text search.
 type ListDecisionsQuery struct {
-	Scope string `query:"scope,omitempty" enum:"mine,needs_you" description:"Which calls to list. Defaults to needs_you. Ignored when q is given."`
+	Scope string `query:"scope,omitempty" enum:"mine,needs_you,decided" description:"Which calls to list. Defaults to needs_you. Ignored when q is given."`
 	Q     string `query:"q,omitempty" description:"Search words. When given, the response is the search result."`
 }
 

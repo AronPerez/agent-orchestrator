@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +37,32 @@ type fakeDecisionService struct {
 	retired  bool
 	project  domain.ProjectID
 	call     *domain.DecisionCall
+	decide   decisionsvc.DecideInput
 	err      error
+}
+
+func (f *fakeDecisionService) Decide(_ context.Context, actor decisionsvc.Actor, input decisionsvc.DecideInput) (domain.DecisionCall, error) {
+	f.actor, f.decide = actor, input
+	if f.err != nil {
+		return domain.DecisionCall{}, f.err
+	}
+	return decidedSampleCall(), nil
+}
+
+func (f *fakeDecisionService) Overrule(_ context.Context, actor decisionsvc.Actor, id, note string) (domain.DecisionCall, error) {
+	f.actor, f.id, f.action, f.note = actor, id, "overrule", note
+	return f.actionResult()
+}
+
+func decidedSampleCall() domain.DecisionCall {
+	return domain.DecisionCall{
+		ID: "dec_2", Origin: "h_a", State: domain.DecisionStateDecided,
+		Raised: domain.DecisionRaisedPayload{
+			Title: "Closed the duplicate pull request #12", Context: "It repeats #11.", Kind: "pr_hygiene",
+			AutonomyMode: domain.AutonomyOn, MachineLabel: "mac-mini", OwnerSessionID: "w-1", OwnerSessionName: "Worker one",
+		},
+		Decided: &domain.DecisionDecidedDetail{Undo: "Reopen #12.", Verify: "One open PR remains."},
+	}
 }
 
 func (f *fakeDecisionService) Observe(_ context.Context, actor decisionsvc.Actor, project domain.ProjectID) (decisionsvc.ObserveReport, error) {
@@ -463,5 +489,35 @@ func TestDecisionsAPI_Observe(t *testing.T) {
 	want := controllers.DecisionObserveRowResponse{Kind: "pr_hygiene", Label: "Pull request hygiene", Calls: 4, Answered: 3, Agreed: 1, Differed: 2}
 	if got.ProjectID != "shop" || got.Mode != "observe" || len(got.Rows) != 1 || got.Rows[0] != want {
 		t.Fatalf("observe = %+v", got)
+	}
+}
+
+func TestDecisionsAPI_DecideAndOverrule(t *testing.T) {
+	svc := &fakeDecisionService{}
+	srv := newDecisionServer(t, svc)
+	body := `{"kind":"pr_hygiene","what":"Closed the duplicate pull request #12","why":"It repeats #11.","undo":"Reopen #12.","verify":"One open PR remains.","links":[{"label":"PR","url":"https://example.com/12"}],"reference":"SKY-1"}`
+	response, status := decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/decided", body, "w-1")
+	if status != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", status, response)
+	}
+	want := decisionsvc.DecideInput{Kind: "pr_hygiene", What: "Closed the duplicate pull request #12", Why: "It repeats #11.", Undo: "Reopen #12.", Verify: "One open PR remains.",
+		Links: []domain.DecisionLink{{Label: "PR", URL: "https://example.com/12"}}, Reference: "SKY-1"}
+	if svc.actor.Session != "w-1" || !reflect.DeepEqual(svc.decide, want) {
+		t.Fatalf("decide=%+v actor=%+v", svc.decide, svc.actor)
+	}
+	var got controllers.DecisionCallResponse
+	if err := json.Unmarshal(response, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "decided" || got.StateLabel != "Decided for you" || got.Decided == nil || got.Decided.Undo != "Reopen #12." || got.Decided.Verify != "One open PR remains." || got.AutonomyMode != "on" {
+		t.Fatalf("response = %+v", got)
+	}
+
+	if body, status := decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_2/overrule", `{"note":"Keep both open."}`, ""); status != http.StatusOK ||
+		svc.action != "overrule" || svc.id != "dec_2" || svc.note != "Keep both open." || svc.actor.Session != "" {
+		t.Fatalf("overrule status=%d body=%s svc=%+v", status, body, svc)
+	}
+	if body, status := decisionRequest(t, srv, http.MethodGet, "/api/v1/decisions?scope=decided", "", ""); status != http.StatusOK || svc.scope != decisionsvc.ScopeDecided {
+		t.Fatalf("decided scope status=%d body=%s scope=%q", status, body, svc.scope)
 	}
 }

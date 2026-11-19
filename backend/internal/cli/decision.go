@@ -72,6 +72,25 @@ type decisionObserveAPIResponse struct {
 	Rows      []decisionObserveRowAPI `json:"rows"`
 }
 
+type decisionDecideAPIRequest struct {
+	Kind      string            `json:"kind"`
+	What      string            `json:"what"`
+	Why       string            `json:"why"`
+	Undo      string            `json:"undo"`
+	Verify    string            `json:"verify,omitempty"`
+	Links     []decisionLinkAPI `json:"links,omitempty"`
+	Reference string            `json:"reference,omitempty"`
+}
+
+type decisionOverruleAPIRequest struct {
+	Note string `json:"note"`
+}
+
+type decisionDecidedAPI struct {
+	Undo   string `json:"undo"`
+	Verify string `json:"verify,omitempty"`
+}
+
 type decisionCallAPI struct {
 	ID                string              `json:"id"`
 	Link              string              `json:"link"`
@@ -115,6 +134,7 @@ type decisionCallAPI struct {
 	// Prediction is what the session would have decided on its own.
 	Prediction       *decisionPredictionAPI `json:"prediction,omitempty"`
 	PredictionAgreed *bool                  `json:"predictionAgreed,omitempty"`
+	Decided          *decisionDecidedAPI    `json:"decided,omitempty"`
 }
 
 type decisionEntryAPI struct {
@@ -189,6 +209,8 @@ func newDecisionCommand(ctx *commandContext) *cobra.Command {
 		newDecisionRetireCommand(ctx),
 		newDecisionKindsCommand(ctx),
 		newDecisionObserveCommand(ctx),
+		newDecisionDecideCommand(ctx),
+		newDecisionOverruleCommand(ctx),
 	)
 	return cmd
 }
@@ -282,13 +304,9 @@ func decisionRaiseRequest(cmd *cobra.Command, opts decisionRaiseOptions) (decisi
 	}
 	options[opts.recommend-1].Recommended = true
 
-	links := make([]decisionLinkAPI, len(opts.links))
-	for i, raw := range opts.links {
-		label, target, ok := strings.Cut(raw, "=")
-		if !ok {
-			return decisionRaiseAPIRequest{}, usageError{errors.New(`usage: write each --link as "<label>=<url>"`)}
-		}
-		links[i] = decisionLinkAPI{Label: strings.TrimSpace(label), URL: strings.TrimSpace(target)}
+	links, err := parseDecisionLinks(opts.links)
+	if err != nil {
+		return decisionRaiseAPIRequest{}, err
 	}
 	var urgency string
 	switch strings.TrimSpace(opts.urgency) {
@@ -375,6 +393,18 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
+func parseDecisionLinks(raw []string) ([]decisionLinkAPI, error) {
+	links := make([]decisionLinkAPI, len(raw))
+	for i, value := range raw {
+		label, target, ok := strings.Cut(value, "=")
+		if !ok {
+			return nil, usageError{errors.New(`usage: write each --link as "<label>=<url>"`)}
+		}
+		links[i] = decisionLinkAPI{Label: strings.TrimSpace(label), URL: strings.TrimSpace(target)}
+	}
+	return links, nil
+}
+
 func newDecisionKindsCommand(ctx *commandContext) *cobra.Command {
 	var project string
 	var jsonOutput bool
@@ -456,15 +486,21 @@ func newDecisionSearchCommand(ctx *commandContext) *cobra.Command {
 }
 
 func newDecisionListCommand(ctx *commandContext) *cobra.Command {
-	var needsYou, jsonOutput bool
+	var needsYou, decided, jsonOutput bool
 	cmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
 		Short:   "List decision calls",
 		Args:    usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if needsYou && decided {
+				return usageError{errors.New("usage: choose one of --needs-you and --decided")}
+			}
 			scope := "mine"
-			if needsYou || callerSession() == "" {
+			switch {
+			case decided:
+				scope = "decided"
+			case needsYou || callerSession() == "":
 				scope = "needs_you"
 			}
 			if scope == "mine" {
@@ -483,6 +519,7 @@ func newDecisionListCommand(ctx *commandContext) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&needsYou, "needs-you", false, "List calls waiting for the person")
+	cmd.Flags().BoolVar(&decided, "decided", false, "List decisions made for the person that stand")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON")
 	return cmd
 }
@@ -561,6 +598,72 @@ func newDecisionAnswerCommand(ctx *commandContext) *cobra.Command {
 	cmd.Flags().IntVar(&pick, "pick", 0, "Position of the option to choose")
 	cmd.Flags().BoolVar(&other, "other", false, "Choose something outside the listed options")
 	cmd.Flags().StringVar(&note, "note", "", "Optional note for the owning session")
+	return cmd
+}
+
+func newDecisionDecideCommand(ctx *commandContext) *cobra.Command {
+	var request decisionDecideAPIRequest
+	var links []string
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "decide",
+		Short: "Record a decision this session made on the person's behalf (autonomy mode on)",
+		Args:  usageArgs(cobra.NoArgs),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := ctx.refuseRemoteDecisionSession("ao decision decide"); err != nil {
+				return err
+			}
+			parsed, err := parseDecisionLinks(links)
+			if err != nil {
+				return err
+			}
+			request.Links = parsed
+			var response decisionCallAPI
+			if err := ctx.postJSON(cmd.Context(), "decisions/decided", request, &response); err != nil {
+				return err
+			}
+			if jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), response)
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Recorded %s\n%s\n", response.ID, response.Link)
+			return err
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&request.Kind, "kind", "", "Kind of decision; it must not be reserved (see ao decision kinds)")
+	f.StringVar(&request.What, "what", "", "What you decided, in one line")
+	f.StringVar(&request.Why, "why", "", "Why you decided it")
+	f.StringVar(&request.Undo, "undo", "", "How the person can undo it")
+	f.StringVar(&request.Verify, "verify", "", "Optional: how to tell it worked")
+	f.StringArrayVar(&links, "link", nil, `Supporting link as "<label>=<url>" (repeatable)`)
+	f.StringVar(&request.Reference, "ref", "", "Issue or plan reference")
+	f.BoolVar(&jsonOutput, "json", false, "Print JSON")
+	return cmd
+}
+
+func newDecisionOverruleCommand(ctx *commandContext) *cobra.Command {
+	var note string
+	cmd := &cobra.Command{
+		Use:   "overrule <id>",
+		Short: "Overrule a decision made on your behalf",
+		Args:  decisionIDArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
+			if !cmd.Flags().Changed("note") {
+				return usageError{errors.New("usage: ao decision overrule <id> --note <what to do instead>")}
+			}
+			var response decisionCallAPI
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "overrule"), decisionOverruleAPIRequest{Note: note}, &response); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Overruled %s\n", response.ID)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&note, "note", "", "What the session should do instead")
 	return cmd
 }
 
@@ -818,6 +921,9 @@ func writeDecisionDetail(w io.Writer, detail decisionDetailAPIResponse) error {
 	}
 	if prediction := call.Prediction; prediction != nil {
 		lines = append(lines, fmt.Sprintf("Would have decided: %d. %s — %s (undo: %s)", prediction.Option, prediction.Label, prediction.Why, prediction.Undo))
+	}
+	if call.Decided != nil {
+		lines = append(lines, "Undo: "+call.Decided.Undo, "Verify: "+call.Decided.Verify)
 	}
 	if call.PredictionAgreed != nil {
 		if *call.PredictionAgreed {

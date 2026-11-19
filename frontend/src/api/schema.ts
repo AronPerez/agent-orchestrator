@@ -1529,6 +1529,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decisions/{id}/overrule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Overrule a decision made on the person's behalf */
+        post: operations["overruleDecision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/decisions/{id}/retire": {
         parameters: {
             query?: never;
@@ -1557,6 +1574,23 @@ export interface paths {
         put?: never;
         /** Withdraw a decision call */
         post: operations["withdrawDecision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decisions/decided": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a decision a session made on the person's behalf */
+        post: operations["decideDecision"];
         delete?: never;
         options?: never;
         head?: never;
@@ -6073,7 +6107,7 @@ export interface components {
         };
         AutonomyConfig: {
             /** @enum {string} */
-            mode?: "off" | "observe";
+            mode?: "off" | "observe" | "on";
             reserved?: string[];
         };
         AwakeApplication: {
@@ -7465,6 +7499,18 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        DecideRequest: {
+            /** @description Decision kind id; must not be reserved by the project. */
+            kind: string;
+            links?: components["schemas"]["DecisionLinkPayload"][];
+            reference?: string;
+            /** @description How the person can undo it. Required. */
+            undo: string;
+            /** @description How to tell it worked. */
+            verify?: string;
+            what: string;
+            why: string;
+        };
         DecisionCallResponse: {
             answerSurface?: string;
             /** Format: date-time */
@@ -7473,12 +7519,13 @@ export interface components {
              * @description The project's autonomy mode when the call was raised.
              * @enum {string}
              */
-            autonomyMode?: "off" | "observe";
+            autonomyMode?: "off" | "observe" | "on";
             changedAfterClose?: boolean;
             /** @enum {string} */
             choice?: "option" | "other";
             chosenLabel?: string;
             context: string;
+            decided?: components["schemas"]["DecisionDecidedResponse"];
             deliveredFallback?: boolean;
             deliveredTo?: string;
             deliveredToName?: string;
@@ -7512,7 +7559,7 @@ export interface components {
             retired: boolean;
             standingEntryId?: string;
             /** @enum {string} */
-            state: "needs_you" | "in_progress" | "done" | "dismissed" | "withdrawn";
+            state: "needs_you" | "in_progress" | "done" | "dismissed" | "withdrawn" | "decided";
             stateLabel: string;
             streamName?: string;
             streamSessionId?: string;
@@ -7522,6 +7569,10 @@ export interface components {
              * @enum {string}
              */
             urgency?: "blocking" | "can_wait";
+        };
+        DecisionDecidedResponse: {
+            undo: string;
+            verify?: string;
         };
         DecisionDetailResponse: {
             call: components["schemas"]["DecisionCallResponse"];
@@ -7558,7 +7609,7 @@ export interface components {
         DecisionKindsResponse: {
             kinds: components["schemas"]["DecisionKindResponse"][];
             /** @enum {string} */
-            mode: "off" | "observe";
+            mode: "off" | "observe" | "on";
             projectId?: string;
         };
         DecisionLinkPayload: {
@@ -7567,7 +7618,7 @@ export interface components {
         };
         DecisionObserveResponse: {
             /** @enum {string} */
-            mode: "off" | "observe";
+            mode: "off" | "observe" | "on";
             projectId?: string;
             rows: components["schemas"]["DecisionObserveRowResponse"][];
         };
@@ -8298,6 +8349,10 @@ export interface components {
             id: string;
             projectId: string;
             projectName?: string;
+        };
+        OverruleDecisionRequest: {
+            /** @description What to do instead. Required. */
+            note: string;
         };
         PRAttachmentAccessResponse: {
             allowed: boolean;
@@ -15368,7 +15423,7 @@ export interface operations {
         parameters: {
             query?: {
                 /** @description Which calls to list. Defaults to needs_you. Ignored when q is given. */
-                scope?: "mine" | "needs_you";
+                scope?: "mine" | "needs_you" | "decided";
                 /** @description Search words. When given, the response is the search result. */
                 q?: string;
             };
@@ -15787,6 +15842,87 @@ export interface operations {
             };
         };
     };
+    overruleDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Call identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OverruleDecisionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionCallResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     retireDecision: {
         parameters: {
             query?: never;
@@ -15882,6 +16018,84 @@ export interface operations {
         responses: {
             /** @description OK */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionCallResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    decideDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecideRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };

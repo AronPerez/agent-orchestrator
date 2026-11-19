@@ -33,6 +33,8 @@ type DecisionService interface {
 	Retire(context.Context, decisionsvc.Actor, string, bool) (domain.DecisionCall, error)
 	Kinds(context.Context, decisionsvc.Actor, domain.ProjectID) (decisionsvc.Policy, error)
 	Observe(context.Context, decisionsvc.Actor, domain.ProjectID) (decisionsvc.ObserveReport, error)
+	Decide(context.Context, decisionsvc.Actor, decisionsvc.DecideInput) (domain.DecisionCall, error)
+	Overrule(context.Context, decisionsvc.Actor, string, string) (domain.DecisionCall, error)
 }
 
 // DecisionsController owns the /decisions routes.
@@ -45,7 +47,9 @@ func (c *DecisionsController) Register(r chi.Router) {
 	r.Get("/decisions/kinds", c.kinds)
 	r.Get("/decisions/observe", c.observe)
 	r.Get("/decisions/{id}", c.get)
+	r.Post("/decisions/decided", c.decide)
 	r.Post("/decisions/{id}/answer", c.answer)
+	r.Post("/decisions/{id}/overrule", c.overrule)
 	r.Post("/decisions/{id}/dismiss", c.dismiss)
 	r.Post("/decisions/{id}/outcome", c.outcome)
 	r.Post("/decisions/{id}/withdraw", c.withdraw)
@@ -184,6 +188,46 @@ func (c *DecisionsController) get(w http.ResponseWriter, r *http.Request) {
 		response.History[i] = decisionEntryResponse(detail.Entries[i])
 	}
 	envelope.WriteJSON(w, http.StatusOK, response)
+}
+
+func (c *DecisionsController) decide(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decisions/decided")
+		return
+	}
+	var req DecideRequest
+	if !decodeDecisionRequest(w, r, &req, false) {
+		return
+	}
+	links := make([]domain.DecisionLink, len(req.Links))
+	for i, link := range req.Links {
+		links[i] = domain.DecisionLink{Label: link.Label, URL: link.URL}
+	}
+	call, err := c.Svc.Decide(r.Context(), decisionActor(r), decisionsvc.DecideInput{
+		Kind: req.Kind, What: req.What, Why: req.Why, Undo: req.Undo, Verify: req.Verify, Links: links, Reference: req.Reference,
+	})
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_DECIDE_FAILED", "Unable to record decision")
+		return
+	}
+	envelope.WriteJSON(w, http.StatusCreated, decisionCallResponse(call))
+}
+
+func (c *DecisionsController) overrule(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decisions/{id}/overrule")
+		return
+	}
+	var req OverruleDecisionRequest
+	if !decodeDecisionRequest(w, r, &req, false) {
+		return
+	}
+	call, err := c.Svc.Overrule(r.Context(), decisionActor(r), chi.URLParam(r, "id"), req.Note)
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_OVERRULE_FAILED", "Unable to overrule decision")
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, decisionCallResponse(call))
 }
 
 func (c *DecisionsController) answer(w http.ResponseWriter, r *http.Request) {
@@ -330,6 +374,9 @@ func decisionCallResponse(call domain.DecisionCall) DecisionCallResponse {
 	if agreed, known := call.PredictionAgreed(); known {
 		response.PredictionAgreed = &agreed
 	}
+	if call.Decided != nil {
+		response.Decided = &DecisionDecidedResponse{Undo: call.Decided.Undo, Verify: call.Decided.Verify}
+	}
 	if !call.AnsweredAt.IsZero() {
 		answeredAt := call.AnsweredAt
 		response.AnsweredAt = &answeredAt
@@ -351,6 +398,16 @@ func decisionEntryResponse(entry domain.DecisionEntry) DecisionEntryResponse {
 		var payload domain.DecisionAnsweredPayload
 		if json.Unmarshal(entry.Payload, &payload) == nil {
 			response.Choice, response.Option, response.Note = payload.Choice, payload.Option, payload.Note
+		}
+	case domain.DecisionKindDecided:
+		var payload domain.DecisionDecidedPayload
+		if json.Unmarshal(entry.Payload, &payload) == nil {
+			response.Text = payload.What
+		}
+	case domain.DecisionKindOverruled:
+		var payload domain.DecisionOverruledPayload
+		if json.Unmarshal(entry.Payload, &payload) == nil {
+			response.Note = payload.Note
 		}
 	case domain.DecisionKindDismissed:
 		var payload domain.DecisionDismissedPayload

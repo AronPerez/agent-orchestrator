@@ -598,3 +598,86 @@ func TestDecisionObserveWithNothingToShow(t *testing.T) {
 		t.Fatalf("output=%q", out)
 	}
 }
+
+func TestDecisionDecideOverruleAndList(t *testing.T) {
+	type seen struct{ method, uri, caller, body string }
+	var requests []seen
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/decisions") {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		requests = append(requests, seen{r.Method, r.URL.RequestURI(), r.Header.Get(caller.Header), string(body)})
+		w.Header().Set("Content-Type", "application/json")
+		call := `{"id":"dec_2","link":"ao://decisions/dec_2","state":"decided","stateLabel":"Decided for you","title":"Closed the duplicate pull request #12","context":"It repeats #11.","options":[],"links":[],"hostId":"h_a","machineLabel":"m","ownerSessionId":"w-1","ownerSessionName":"w-1","raisedAt":"2026-11-18T15:00:00Z","retired":false,"kind":"pr_hygiene","kindLabel":"Pull request hygiene","autonomyMode":"on","decided":{"undo":"Reopen #12.","verify":"One open PR remains."}}`
+		switch {
+		case r.URL.Path == "/api/v1/decisions/dec_2":
+			_, _ = io.WriteString(w, `{"call":`+call+`,"history":[]}`)
+		case r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, `{"calls":[`+call+`]}`)
+		case r.URL.Path == "/api/v1/decisions/decided":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, call)
+		default:
+			_, _ = io.WriteString(w, call)
+		}
+	}))
+
+	t.Setenv("AO_SESSION_ID", "w-1")
+	out, _, err := executeCLI(t, deps, "decision", "decide", "--kind", "pr_hygiene", "--what", "Closed the duplicate pull request #12",
+		"--why", "It repeats #11.", "--undo", "Reopen #12.", "--verify", "One open PR remains.", "--link", "PR=https://example.com/12", "--ref", "SKY-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "Recorded dec_2\nao://decisions/dec_2\n" {
+		t.Fatalf("decide output=%q", out)
+	}
+	var decide decisionDecideAPIRequest
+	if err := json.Unmarshal([]byte(requests[0].body), &decide); err != nil {
+		t.Fatal(err)
+	}
+	wantDecide := decisionDecideAPIRequest{Kind: "pr_hygiene", What: "Closed the duplicate pull request #12", Why: "It repeats #11.", Undo: "Reopen #12.",
+		Verify: "One open PR remains.", Links: []decisionLinkAPI{{Label: "PR", URL: "https://example.com/12"}}, Reference: "SKY-1"}
+	if requests[0].method != http.MethodPost || requests[0].uri != "/api/v1/decisions/decided" || requests[0].caller != "w-1" || !reflect.DeepEqual(decide, wantDecide) {
+		t.Fatalf("decide request = %+v (%+v)", requests[0], decide)
+	}
+
+	t.Setenv("AO_SESSION_ID", "")
+	if _, _, err := executeCLI(t, deps, "decision", "overrule", "ao://decisions/dec_2", "--note", "Keep both open."); err != nil {
+		t.Fatal(err)
+	}
+	if got := requests[1]; got.method != http.MethodPost || got.uri != "/api/v1/decisions/dec_2/overrule" || got.body != `{"note":"Keep both open."}` {
+		t.Fatalf("overrule request = %+v", got)
+	}
+	out, _, err = executeCLI(t, deps, "decision", "ls", "--decided")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests[2].uri != "/api/v1/decisions?scope=decided" || !strings.Contains(out, "dec_2  Decided for you  Closed the duplicate pull request #12") {
+		t.Fatalf("ls --decided uri=%q out=%s", requests[2].uri, out)
+	}
+	out, _, err = executeCLI(t, deps, "decision", "show", "dec_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Undo: Reopen #12.", "Verify: One open PR remains."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("show output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDecisionDecideAndOverruleUsage(t *testing.T) {
+	for name, args := range map[string][]string{
+		"overrule without note": {"decision", "overrule", "dec_2"},
+		"ls with both scopes":   {"decision", "ls", "--decided", "--needs-you"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := executeCLI(t, Deps{}, args...)
+			if err == nil || ExitCode(err) != 2 {
+				t.Fatalf("err=%v exit=%d", err, ExitCode(err))
+			}
+		})
+	}
+}

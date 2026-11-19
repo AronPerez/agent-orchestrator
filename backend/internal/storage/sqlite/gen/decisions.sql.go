@@ -250,7 +250,7 @@ SELECT pending.id, pending.origin, pending.origin_seq, pending.stamp_wall, pendi
 FROM decision_entries AS pending
 JOIN decision_calls AS calls ON calls.call_id = pending.call_id
 WHERE calls.origin = ?
-  AND pending.kind IN ('answered', 'dismissed')
+  AND pending.kind IN ('answered', 'dismissed', 'overruled')
   AND NOT EXISTS (
       SELECT 1
       FROM decision_entries AS delivered

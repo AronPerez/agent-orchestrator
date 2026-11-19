@@ -632,6 +632,9 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersDecisionKindsResponse":            "DecisionKindsResponse",
 	"ControllersDecisionObserveRowResponse":       "DecisionObserveRowResponse",
 	"ControllersDecisionObserveResponse":          "DecisionObserveResponse",
+	"ControllersDecisionDecidedResponse":          "DecisionDecidedResponse",
+	"ControllersDecideRequest":                    "DecideRequest",
+	"ControllersOverruleDecisionRequest":          "OverruleDecisionRequest",
 	"ControllersClearNotificationsResponse":       "ClearNotificationsResponse",
 	"ControllersUsageHookMetadata":                "UsageHookMetadata",
 	"ControllersListUsageSessionsQuery":           "ListUsageSessionsQuery",
@@ -1108,6 +1111,17 @@ func decisionOperations() []operation {
 			method: http.MethodGet, path: "/api/v1/decisions", id: "listDecisions", tag: "decisions",
 			summary: "List or search decision calls", pathParams: []any{controllers.ListDecisionsQuery{}},
 			resps: append([]respUnit{{http.StatusOK, controllers.ListDecisionsResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/decided", id: "decideDecision", tag: "decisions",
+			summary: "Record a decision a session made on the person's behalf", reqBody: controllers.DecideRequest{},
+			resps: append([]respUnit{{http.StatusCreated, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/overrule", id: "overruleDecision", tag: "decisions",
+			summary: "Overrule a decision made on the person's behalf", pathParams: []any{controllers.DecisionIDParam{}},
+			reqBody: controllers.OverruleDecisionRequest{},
+			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/decisions/kinds", id: "listDecisionKinds", tag: "decisions",
