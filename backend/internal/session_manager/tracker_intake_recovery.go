@@ -363,7 +363,10 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		// tracked child exited while retaining an unpublished terminal host. The
 		// release bit is not ownership proof for that host: settle it before any
 		// resumed-owner shortcut or workspace cleanup can discard its fence.
-		return m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
+		claim.Recovery, err = m.retireReleasedUnpublishedTrackerIntakeRuntime(ctx, rec, claim.Recovery)
+		if err != nil {
+			return fmt.Errorf("recover tracker intake %s: retire legacy runtime owner: %w", rec.ID, err)
+		}
 	}
 	if found && !rec.IsTerminated && claim.Recovery.CapacityReleased && !claim.Recovery.ReleasesCapacityFor(rec) {
 		// Resume rotated the owner after an earlier generation was proved
@@ -457,6 +460,38 @@ func trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(
 		strings.TrimSpace(reservation.RuntimeLaunchID) != "" &&
 		len(uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)) != 0 &&
 		(rec.IsTerminated || !trackerIntakeRuntimeReservationMatchesSession(rec, reservation))
+}
+
+func (m *Manager) retireReleasedUnpublishedTrackerIntakeRuntime(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	reservation domain.TrackerIntakeRecoveryReservation,
+) (domain.TrackerIntakeRecoveryReservation, error) {
+	owner := rec
+	rowHandleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
+	rowLaunchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	rowHasRuntime := rowHandleID != "" || rowLaunchID != ""
+	if !rec.IsTerminated && rowHasRuntime && !trackerIntakeRuntimeReservationMatchesSession(rec, reservation) {
+		if rowHandleID == "" || rowLaunchID == "" {
+			return reservation, fmt.Errorf("replacement runtime identity is incomplete: %w", ports.ErrRuntimeProbeInconclusive)
+		}
+		// The row describes a newer published owner. Probe and stop only the old
+		// reservation; including the row here would destroy the replacement that
+		// must keep its session and workspace.
+		owner.Metadata.RuntimeHandleID = ""
+		owner.Metadata.RuntimeLaunchID = ""
+		owner.Metadata.RuntimeReleasedLaunchID = ""
+		owner.Metadata.AgentSessionID = ""
+	}
+	if err := m.stopTrackerIntakeRuntimeOwners(ctx, owner, reservation); err != nil {
+		return reservation, err
+	}
+	reservation.RuntimeLaunchID = ""
+	reservation.RuntimeHandleIDs = nil
+	if err := m.store.ReserveTrackerIntakeRecovery(ctx, rec.ID, reservation); err != nil {
+		return reservation, fmt.Errorf("retire stopped legacy tracker intake runtime: %w", err)
+	}
+	return reservation, nil
 }
 
 func trackerIntakeRuntimeNeedsStartupHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
@@ -940,6 +975,13 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 	reservation domain.TrackerIntakeRecoveryReservation,
 ) error {
 	persistedOwner := rec
+	if trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(persistedOwner, reservation) {
+		var err error
+		reservation, err = m.retireReleasedUnpublishedTrackerIntakeRuntime(ctx, persistedOwner, reservation)
+		if err != nil {
+			return fmt.Errorf("check session %s: retire legacy runtime owner: %w", rec.ID, err)
+		}
+	}
 	rec = applyTrackerIntakeRecovery(rec, reservation)
 	if reservation.CleanupConfirmed {
 		m.rollbackSpawnSeedRow(ctx, rec.ID)
@@ -963,7 +1005,7 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 		return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
 	}
 
-	if !reservation.CapacityReleased || trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(persistedOwner, reservation) {
+	if !reservation.CapacityReleased {
 		if err := m.stopTrackerIntakeRuntimeOwners(ctx, persistedOwner, reservation); err != nil {
 			return fmt.Errorf("check session %s: %w", rec.ID, err)
 		}
