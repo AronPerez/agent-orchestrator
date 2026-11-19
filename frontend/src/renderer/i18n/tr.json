@@ -5428,7 +5428,7 @@
 	"collisionRadar.stale": "Çakışma taraması yenilenemedi. Son sonuç gösteriliyor.",
 	"settings.project.decisions": "Kararlar",
 	"settings.project.autonomy": "Özerklik",
-	"settings.project.autonomyDescription": "Gözlem modunda ajanlar her kararı size sormaya devam eder ve kendileri ne karar verirdi onu da kaydeder; böylece karşılaştırabilirsiniz.",
+	"settings.project.autonomyDescription": "Gözlem modunda ajanlar her kararı size sormaya devam eder ve kendileri ne karar verirdi onu da kaydeder; böylece karşılaştırabilirsiniz. Değişiklikten sonra başlayan oturumlara uygulanır.",
 	"settings.project.autonomyOff": "Kapalı",
 	"settings.project.autonomyObserve": "Gözlem",
 	"settings.project.reservedKinds": "Size ayrılanlar",

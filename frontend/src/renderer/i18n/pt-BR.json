@@ -5605,7 +5605,7 @@
 	"collisionRadar.stale": "Não foi possível atualizar a verificação de colisões. Exibindo o último resultado.",
 	"settings.project.decisions": "Decisões",
 	"settings.project.autonomy": "Autonomia",
-	"settings.project.autonomyDescription": "No modo de observação, os agentes continuam perguntando cada decisão e também registram o que teriam decidido, para que você possa comparar.",
+	"settings.project.autonomyDescription": "No modo de observação, os agentes continuam perguntando cada decisão e também registram o que teriam decidido, para que você possa comparar. Vale para as sessões iniciadas depois da alteração.",
 	"settings.project.autonomyOff": "Desativado",
 	"settings.project.autonomyObserve": "Observar",
 	"settings.project.reservedKinds": "Reservado para você",

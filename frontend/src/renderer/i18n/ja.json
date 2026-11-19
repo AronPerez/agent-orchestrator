@@ -5449,7 +5449,7 @@
 	"collisionRadar.stale": "競合スキャンを更新できませんでした。最後の結果を表示しています。",
 	"settings.project.decisions": "判断",
 	"settings.project.autonomy": "自律性",
-	"settings.project.autonomyDescription": "観察モードでは、エージェントはこれまでどおりすべての判断をあなたに確認し、自分ならどう判断したかも記録するので、比較できます。",
+	"settings.project.autonomyDescription": "観察モードでは、エージェントはこれまでどおりすべての判断をあなたに確認し、自分ならどう判断したかも記録するので、比較できます。変更後に開始したセッションに適用されます。",
 	"settings.project.autonomyOff": "オフ",
 	"settings.project.autonomyObserve": "観察",
 	"settings.project.reservedKinds": "あなたが判断する種類",

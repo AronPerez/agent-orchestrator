@@ -5743,7 +5743,7 @@
 	"collisionRadar.stale": "Не удалось обновить проверку конфликтов. Показан последний результат.",
 	"settings.project.decisions": "Решения",
 	"settings.project.autonomy": "Автономность",
-	"settings.project.autonomyDescription": "В режиме наблюдения агенты по-прежнему спрашивают вас о каждом решении и записывают, что решили бы сами, чтобы вы могли сравнить.",
+	"settings.project.autonomyDescription": "В режиме наблюдения агенты по-прежнему спрашивают вас о каждом решении и записывают, что решили бы сами, чтобы вы могли сравнить. Действует для сессий, запущенных после изменения.",
 	"settings.project.autonomyOff": "Выкл.",
 	"settings.project.autonomyObserve": "Наблюдение",
 	"settings.project.reservedKinds": "Решаете вы",

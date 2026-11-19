@@ -5428,7 +5428,7 @@
 	"collisionRadar.stale": "Collision scan could not refresh. Showing the last result.",
 	"settings.project.decisions": "Decisions",
 	"settings.project.autonomy": "Autonomy",
-	"settings.project.autonomyDescription": "In observe mode, agents still ask you every decision and also record what they would have decided, so you can compare.",
+	"settings.project.autonomyDescription": "In observe mode, agents still ask you every decision and also record what they would have decided, so you can compare. Applies to sessions started after you change it.",
 	"settings.project.autonomyOff": "Off",
 	"settings.project.autonomyObserve": "Observe",
 	"settings.project.reservedKinds": "Reserved for you",

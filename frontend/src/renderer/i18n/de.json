@@ -5449,7 +5449,7 @@
 	"collisionRadar.stale": "Die Kollisionsprüfung konnte nicht aktualisiert werden. Das letzte Ergebnis wird angezeigt.",
 	"settings.project.decisions": "Entscheidungen",
 	"settings.project.autonomy": "Autonomie",
-	"settings.project.autonomyDescription": "Im Beobachtungsmodus fragen Agenten Sie weiterhin bei jeder Entscheidung und notieren zusätzlich, wie sie selbst entschieden hätten, damit Sie vergleichen können.",
+	"settings.project.autonomyDescription": "Im Beobachtungsmodus fragen Agenten Sie weiterhin bei jeder Entscheidung und notieren zusätzlich, wie sie selbst entschieden hätten, damit Sie vergleichen können. Gilt für Sitzungen, die nach der Änderung starten.",
 	"settings.project.autonomyOff": "Aus",
 	"settings.project.autonomyObserve": "Beobachten",
 	"settings.project.reservedKinds": "Ihnen vorbehalten",

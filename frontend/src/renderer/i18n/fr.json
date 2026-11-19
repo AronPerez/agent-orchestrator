@@ -5605,7 +5605,7 @@
 	"collisionRadar.stale": "L’analyse des collisions n’a pas pu être actualisée. Le dernier résultat est affiché.",
 	"settings.project.decisions": "Décisions",
 	"settings.project.autonomy": "Autonomie",
-	"settings.project.autonomyDescription": "En mode observation, les agents vous soumettent toujours chaque décision et notent aussi ce qu’ils auraient décidé, pour que vous puissiez comparer.",
+	"settings.project.autonomyDescription": "En mode observation, les agents vous soumettent toujours chaque décision et notent aussi ce qu’ils auraient décidé, pour que vous puissiez comparer. S’applique aux sessions démarrées après la modification.",
 	"settings.project.autonomyOff": "Désactivé",
 	"settings.project.autonomyObserve": "Observer",
 	"settings.project.reservedKinds": "Réservé pour vous",

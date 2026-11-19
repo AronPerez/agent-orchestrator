@@ -5449,7 +5449,7 @@
 	"collisionRadar.stale": "충돌 검사를 새로 고치지 못했습니다. 마지막 결과를 표시합니다.",
 	"settings.project.decisions": "결정",
 	"settings.project.autonomy": "자율성",
-	"settings.project.autonomyDescription": "관찰 모드에서는 에이전트가 계속 모든 결정을 물어보고, 자신이라면 어떻게 결정했을지도 기록하므로 비교할 수 있습니다.",
+	"settings.project.autonomyDescription": "관찰 모드에서는 에이전트가 계속 모든 결정을 물어보고, 자신이라면 어떻게 결정했을지도 기록하므로 비교할 수 있습니다. 변경 후 시작한 세션에 적용됩니다.",
 	"settings.project.autonomyOff": "끔",
 	"settings.project.autonomyObserve": "관찰",
 	"settings.project.reservedKinds": "직접 결정할 종류",
