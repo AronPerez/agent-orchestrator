@@ -232,6 +232,7 @@ func TestE2E_SpawnAndProjectAddDTORoundTrip(t *testing.T) {
 			"--model", "gpt-5.6-sol",
 			"--account", "acct-work",
 			"--output", "artifact",
+			"--plan-first",
 		})
 		if err := root.Execute(); err != nil {
 			t.Fatalf("spawn execute: %v\noutput: %s", err, out.String())
@@ -264,6 +265,9 @@ func TestE2E_SpawnAndProjectAddDTORoundTrip(t *testing.T) {
 		}
 		if got.RequestedOutput != "artifact" {
 			t.Errorf("RequestedOutput = %q, want %q (CLI json:\"requestedOutput\" vs SpawnSessionRequest)", got.RequestedOutput, "artifact")
+		}
+		if !got.PlanFirst {
+			t.Error("PlanFirst = false, want true (CLI json:\"planFirst\" vs SpawnSessionRequest)")
 		}
 		if !bytes.Contains(out.Bytes(), []byte("spawned session")) {
 			t.Errorf("output missing %q; got: %s", "spawned session", out.String())

@@ -4,11 +4,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, ExternalLink, GitBranch, MessageSquare } from "lucide-react";
 import type { components } from "../../api/schema";
 import type { WorkspaceSession } from "../types/workspace";
-import { apiClient, apiErrorCode } from "../lib/api-client";
+import { apiErrorCode } from "../lib/api-client";
 import { apiErrorException } from "../lib/api-error-exception";
 import { clientForSessionHost } from "../lib/host-clients";
 import { HOST_UNREACHABLE_CODES, LOCAL_HOST } from "../lib/hosts";
 import { useConnectedHosts } from "../hooks/useHostConnection";
+import { useLocalHostId } from "../hooks/useLocalHostId";
 import { getSessionStatusView } from "../lib/session-presentation";
 import { fleetRows } from "../lib/session-fleet";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
@@ -18,7 +19,6 @@ import { AppLink } from "./AppLink";
 import { Button } from "./ui/button";
 
 type Coordination = components["schemas"]["SessionCoordinationResponse"];
-type Identity = components["schemas"]["IdentityResponse"];
 type CoordinationRequestError = Error & { status?: number; code?: string };
 
 export function SessionFleet({
@@ -42,20 +42,10 @@ export function SessionFleet({
 	const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 	const [showArchived, setShowArchived] = useState(false);
 	const [selectedId, setSelectedId] = useState<string>();
-	const localIdentity = useQuery<Identity>({
-		queryKey: ["local-host-identity"],
-		enabled: !remote && sessions.length > 0,
-		retry: false,
-		staleTime: Infinity,
-		queryFn: async ({ signal }) => {
-			const { data, error } = await apiClient.GET("/api/v1/identity", { signal });
-			if (error || !data) throw apiErrorException(error);
-			return data;
-		},
-	});
+	const localHostId = useLocalHostId(!remote && sessions.length > 0);
 	const rows = useMemo(
-		() => fleetRows(sessions, collapsed, showArchived, localIdentity.data?.hostId),
-		[sessions, collapsed, showArchived, localIdentity.data?.hostId],
+		() => fleetRows(sessions, collapsed, showArchived, localHostId),
+		[sessions, collapsed, showArchived, localHostId],
 	);
 	const selected = rows.find((row) => row.session.id === selectedId) ?? rows[0];
 	const session = selected?.session;

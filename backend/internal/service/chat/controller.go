@@ -80,6 +80,10 @@ type Store interface {
 	AppendReviewRetryUserMessage(ctx context.Context, conversationID string, session domain.SessionID, reviewID, generation string, msg domain.ConversationMessage, turnID, retryOfTurnID string, now time.Time) (bool, error)
 	MarkTurnDispatching(ctx context.Context, turnID string) error
 	RecordProviderInput(ctx context.Context, turnID, text string) error
+	ReopenUndispatchedTurn(ctx context.Context, turnID string) (bool, error)
+	MarkTurnProviderDeliveryAttempted(ctx context.Context, turnID string) error
+	MarkTurnProviderDeliveryAccepted(ctx context.Context, turnID string) error
+	MarkTurnProviderDeliveryAcceptedByProviderID(ctx context.Context, conversationID, providerTurnID string) error
 	BindTurnToProvider(ctx context.Context, turnID, providerTurnID string, now time.Time) error
 	SettleTurn(ctx context.Context, conversationID, providerTurnID string, state domain.TurnState, errMessage string, now time.Time) error
 	SettleTurnWithFailureCode(ctx context.Context, conversationID, providerTurnID string, state domain.TurnState, errMessage string, failureCode domain.ConversationFailureCode, usageLimitResetsAt time.Time, now time.Time) error
@@ -357,6 +361,24 @@ func (c *Controller) beginOperation() func() {
 		c.mu.Lock()
 		c.operations--
 		c.mu.Unlock()
+	}
+}
+
+func (c *Controller) lockSend(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if c.sendMu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -2063,13 +2085,28 @@ func (c *Controller) dispatch(
 			c.log.Error("failed to settle queued batch", "error", err)
 		}
 	}
+	failBeforeProvider := func(operation string, err error) error {
+		failFollowers(operation + ": " + err.Error())
+		c.mu.Lock()
+		if c.dispatchingTurnID == turnID {
+			c.dispatchingTurnID = ""
+		}
+		c.pendingTurnID = ""
+		c.artifactBaseline = nil
+		c.mu.Unlock()
+		if settleErr := c.store.SettleTurnByID(context.WithoutCancel(ctx), turnID,
+			domain.TurnStateFailed, operation+": "+err.Error(), c.now()); settleErr != nil {
+			c.log.Error("failed to settle pre-provider turn", "operation", operation, "error", settleErr)
+		}
+		return fmt.Errorf("%s: %w", operation, err)
+	}
 	// A provider can accept this turn and then lose its SQLite binding to ENOSPC.
 	// Move it out of the durable queue before crossing that boundary, or a live
 	// reconnect can drain the same prompt after the provider completes it. ACP's
 	// deferred start crosses the provider boundary only after binding succeeds.
 	if !hasDeferredStart && !claimed {
 		if err := c.store.MarkTurnDispatching(ctx, turnID); err != nil {
-			return domain.ConversationTurn{}, fmt.Errorf("mark turn dispatching: %w", err)
+			return domain.ConversationTurn{}, failBeforeProvider("mark turn dispatching", err)
 		}
 	}
 
@@ -2080,6 +2117,11 @@ func (c *Controller) dispatch(
 	c.dispatchingTurnID = turnID
 	c.dispatchedApproval, c.hasDispatchedApproval = msg.Settings.Approval, true
 	c.mu.Unlock()
+	if !hasDeferredStart {
+		if err := c.store.MarkTurnProviderDeliveryAttempted(ctx, turnID); err != nil {
+			return domain.ConversationTurn{}, failBeforeProvider("mark provider delivery attempted", err)
+		}
+	}
 	ref, err := c.conv.SendTurn(ctx, msg)
 	if err != nil {
 		captureChatFault(ctx, err, c.harness, "chat_turn", "send")
@@ -2110,6 +2152,11 @@ func (c *Controller) dispatch(
 			CompletedAt:        &completedAt,
 		}, fmt.Errorf("send turn: %w", err)
 	}
+	if !hasDeferredStart {
+		if err := c.store.MarkTurnProviderDeliveryAccepted(ctx, turnID); err != nil {
+			return domain.ConversationTurn{}, fmt.Errorf("mark provider delivery accepted: %w", err)
+		}
+	}
 
 	if err := c.store.BindTurnToProvider(ctx, turnID, ref.ProviderTurnID, c.now()); err != nil {
 		failFollowers("batch provider binding is uncertain: " + err.Error())
@@ -2120,10 +2167,10 @@ func (c *Controller) dispatch(
 		c.mu.Unlock()
 		if hasDeferredStart {
 			deferred.DiscardDeferredTurn(ref.ProviderTurnID)
+			return domain.ConversationTurn{}, failBeforeProvider("bind prepared turn", err)
 		}
 		return domain.ConversationTurn{}, fmt.Errorf("bind turn: %w", err)
 	}
-
 	c.mu.Lock()
 	c.pendingTurnID = ref.ProviderTurnID
 	if c.dispatchingTurnID == turnID {
@@ -2139,6 +2186,10 @@ func (c *Controller) dispatch(
 	// provider-id binding above must exist before the first streamed update can be
 	// projected. Eager drivers do not implement this optional interface.
 	if hasDeferredStart {
+		if err := c.store.MarkTurnProviderDeliveryAttempted(ctx, turnID); err != nil {
+			deferred.DiscardDeferredTurn(ref.ProviderTurnID)
+			return domain.ConversationTurn{}, failBeforeProvider("mark deferred provider delivery attempted", err)
+		}
 		if err := deferred.StartDeferredTurn(ref.ProviderTurnID); err != nil {
 			failFollowers("batch provider start is uncertain: " + err.Error())
 			c.mu.Lock()
@@ -2158,13 +2209,18 @@ func (c *Controller) dispatch(
 		}
 	}
 
+	deliveryState := domain.ProviderDeliveryAccepted
+	if hasDeferredStart {
+		deliveryState = domain.ProviderDeliveryAttempted
+	}
 	return domain.ConversationTurn{
-		ID:                 turnID,
-		ConversationID:     c.conversation.ID,
-		HandledBySessionID: c.sessionID,
-		ProviderTurnID:     ref.ProviderTurnID,
-		State:              domain.TurnStateRunning,
-		RequestedAt:        requestedAt,
+		ID:                    turnID,
+		ConversationID:        c.conversation.ID,
+		HandledBySessionID:    c.sessionID,
+		ProviderTurnID:        ref.ProviderTurnID,
+		ProviderDeliveryState: deliveryState,
+		State:                 domain.TurnStateRunning,
+		RequestedAt:           requestedAt,
 	}, nil
 }
 
@@ -3405,6 +3461,11 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 	if event.ProviderTurnID != "" {
 		c.turnlessPlanItemID = ""
 	}
+	if providerDeliveryEvidence(event) {
+		if err := c.store.MarkTurnProviderDeliveryAcceptedByProviderID(ctx, c.conversation.ID, event.ProviderTurnID); err != nil {
+			return fmt.Errorf("mark provider-evidenced turn %s accepted: %w", event.ProviderTurnID, err)
+		}
+	}
 
 	switch event.Kind {
 	case ports.ChatEventTurnStarted:
@@ -3944,6 +4005,23 @@ func settledTurnState(event ports.ChatEvent) domain.TurnState {
 		return domain.TurnStateFailed
 	}
 	return event.TurnState
+}
+
+// providerDeliveryEvidence reports events that can only follow provider
+// acceptance of the prompt. Local deferred setup emits turn/start and
+// controller/error events too, so those are not evidence by themselves.
+func providerDeliveryEvidence(event ports.ChatEvent) bool {
+	if event.ProviderTurnID == "" {
+		return false
+	}
+	switch event.Kind {
+	case ports.ChatEventTurnStarted, ports.ChatEventControllerState, ports.ChatEventError:
+		return false
+	case ports.ChatEventTurnCompleted:
+		return settledTurnState(event) == domain.TurnStateCompleted
+	default:
+		return true
+	}
 }
 
 // reportProviderState covers work the agent runs on its own between AO turns,

@@ -30,6 +30,8 @@ type fakeStore struct {
 	prPolicies map[string]bool
 	signatures map[string]string
 	accepted   map[string]bool
+	artifacts  map[domain.SessionID][]domain.SessionArtifactRecord
+	done       map[domain.SessionID]domain.SessionDoneReport
 
 	listPRsErr        error
 	listReviewsErr    error
@@ -49,7 +51,23 @@ func newFakeStore() *fakeStore {
 		prPolicies: map[string]bool{},
 		signatures: map[string]string{},
 		accepted:   map[string]bool{},
+		artifacts:  map[domain.SessionID][]domain.SessionArtifactRecord{},
+		done:       map[domain.SessionID]domain.SessionDoneReport{},
 	}
+}
+
+func (f *fakeStore) ListSessionArtifacts(_ context.Context, id domain.SessionID) ([]domain.SessionArtifactRecord, error) {
+	return f.artifacts[id], nil
+}
+
+func (f *fakeStore) ListLatestDoneReportsForSessions(_ context.Context, ids []domain.SessionID) (map[domain.SessionID]domain.SessionDoneReport, error) {
+	out := make(map[domain.SessionID]domain.SessionDoneReport, len(ids))
+	for _, id := range ids {
+		if report, ok := f.done[id]; ok {
+			out[id] = report
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
@@ -2497,6 +2515,39 @@ func TestPRObservation_CIFailingNudgesAgentWithLogs(t *testing.T) {
 	}
 	if strings.Contains(msg.msgs[0], "lint") || strings.Contains(msg.msgs[0], "cancelled") {
 		t.Fatalf("cancelled checks must not be included in CI nudge:\n%s", msg.msgs[0])
+	}
+}
+
+func TestPRObservation_HoldsClaimedPRNudgesUntilPlanApproval(t *testing.T) {
+	m, st, msg := newManager()
+	rec := working("mer-1")
+	rec.PlanFirstState = domain.PlanFirstPending
+	st.sessions[rec.ID] = rec
+	st.prs[rec.ID] = []domain.PullRequest{{URL: "pr1"}}
+	st.comments["pr1"] = []domain.PullRequestComment{{
+		ID: "review-1", Author: "reviewer", Body: "fix this", AutoInjectReview: true,
+	}}
+	o := ports.PRObservation{
+		Fetched: true, URL: "pr1", CI: domain.CIFailing,
+		Checks: []ports.PRCheckObservation{{Name: "build", CommitHash: "c1", Status: domain.PRCheckFailed, LogTail: "boom"}},
+		Review: domain.ReviewChangesRequest,
+	}
+
+	if err := m.ApplyPRObservation(ctx, rec.ID, o); err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.msgs) != 0 || len(st.signatures) != 0 {
+		t.Fatalf("unapproved plan consumed PR nudges: messages=%v signatures=%v", msg.msgs, st.signatures)
+	}
+
+	rec = st.sessions[rec.ID]
+	rec.PlanFirstState = domain.PlanFirstApproved
+	st.sessions[rec.ID] = rec
+	if err := m.ApplyPRObservation(ctx, rec.ID, o); err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.msgs) != 2 || !strings.Contains(msg.msgs[0], "boom") || !strings.Contains(msg.msgs[1], "fix this") {
+		t.Fatalf("approved plan did not release CI and review nudges: %v", msg.msgs)
 	}
 }
 

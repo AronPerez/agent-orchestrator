@@ -30,12 +30,12 @@ func (s *Store) AddSessionArtifacts(ctx context.Context, id domain.SessionID, re
 		for _, registration := range registrations {
 			path := registration.Path
 			if err := q.InsertSessionArtifact(ctx, gen.InsertSessionArtifactParams{
-				ID: uuid.NewString(), SessionID: id, Path: path, CreatedAt: registeredAt,
+				ID: uuid.NewString(), SessionID: id, Path: path, Role: string(registration.Role), CreatedAt: registeredAt,
 			}); err != nil {
 				return err
 			}
 			if err := q.RegisterSessionArtifact(ctx, gen.RegisterSessionArtifactParams{
-				SessionID: id, Path: path, RegisteredAt: sql.NullTime{Time: registeredAt, Valid: true},
+				SessionID: id, Path: path, Role: string(registration.Role), RegisteredAt: sql.NullTime{Time: registeredAt, Valid: true},
 				FileDev: int64(registration.File.Dev), FileIno: int64(registration.File.Ino), FileBirth: registration.File.Birth, FileGeneration: int64(registration.File.Generation), FileMtime: registration.File.ModTime, //nolint:gosec // stored as SQLite's signed integer and read back the same way
 			}); err != nil {
 				return err
@@ -166,7 +166,7 @@ func (s *Store) ApplySessionArtifactChanges(ctx context.Context, id domain.Sessi
 		}
 		for _, row := range changes.Insert {
 			if err := q.InsertSessionArtifact(ctx, gen.InsertSessionArtifactParams{
-				ID: row.ID, SessionID: id, Path: row.Path, CreatedAt: row.CreatedAt,
+				ID: row.ID, SessionID: id, Path: row.Path, Role: string(row.Role), CreatedAt: row.CreatedAt,
 				FileDev: int64(row.File.Dev), FileIno: int64(row.File.Ino), FileBirth: row.File.Birth, FileGeneration: int64(row.File.Generation), FileMtime: row.File.ModTime, //nolint:gosec // see above
 			}); err != nil {
 				return err
@@ -215,6 +215,7 @@ func sessionArtifactRecord(row gen.SessionArtifact) domain.SessionArtifactRecord
 		ID:        row.ID,
 		SessionID: row.SessionID,
 		Path:      row.Path,
+		Role:      domain.SessionArtifactRole(row.Role),
 		File:      domain.FileIdentity{Dev: uint64(row.FileDev), Ino: uint64(row.FileIno), Birth: row.FileBirth, Generation: uint64(row.FileGeneration), ModTime: row.FileMtime}, //nolint:gosec // written from these uint64 values
 		CreatedAt: row.CreatedAt,
 	}

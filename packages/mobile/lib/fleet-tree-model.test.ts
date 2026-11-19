@@ -139,6 +139,44 @@ describe("buildMobileFleetTree", () => {
 		});
 	});
 
+	it("draws a cross-host worker under its parent and drops the emptied branch", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("mac"), project("box")],
+			sessions: [
+				worker("child", "box", "same", { parentHostId: "mac", parentSessionId: "parent" }),
+			],
+			orchestrators: [orchestrator("parent", "mac", "same")],
+			hosts: [
+				{ hostId: "mac", name: "Mac", connection: "open" },
+				{ hostId: "box", name: "Build box", connection: "open" },
+			],
+		});
+
+		expect(tree.map((item) => item.machines.map((machine) => machine.machine.id))).toEqual([["mac"]]);
+		const rows = flattenFleetSessions(tree[0]!.machines[0]!.sessions, new Set());
+		expect(rows.map(({ node, depth }) => [node.session.id, node.machineId, depth])).toEqual([
+			["parent", "mac", 0],
+			["child", "box", 1],
+		]);
+	});
+
+	it("reports an offline parent host even when it contributes no cached rows", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("box")],
+			sessions: [worker("child", "box", "same", { parentHostId: "mac", parentSessionId: "parent" })],
+			orchestrators: [],
+			hosts: [
+				{ hostId: "mac", name: "Mac", connection: "closed" },
+				{ hostId: "box", name: "Build box", connection: "open" },
+			],
+		});
+
+		expect(tree[0]!.machines[0]!.sessions[0]).toMatchObject({
+			parentUnavailable: true,
+			parentUnavailableReason: "machine-offline",
+		});
+	});
+
 	it("omits mobile scopes containing only hidden archived sessions", () => {
 		const tree = buildMobileFleetTree({
 			projects: [project("mac")],

@@ -1657,6 +1657,50 @@ func (s *Store) RecordProviderInput(ctx context.Context, turnID, text string) er
 	return expectBatchRow("record provider input", turnID, rows, err)
 }
 
+// ReopenUndispatchedTurn makes a proven pre-provider failure dispatchable
+// again. The conditional update keeps ambiguous provider outcomes closed.
+func (s *Store) ReopenUndispatchedTurn(ctx context.Context, turnID string) (bool, error) {
+	q, unlock := s.conversationWriter(ctx)
+	defer unlock()
+	rows, err := q.ReopenUndispatchedConversationTurn(ctx, turnID)
+	if err != nil {
+		return false, fmt.Errorf("reopen undispatched turn %s: %w", turnID, err)
+	}
+	return rows == 1, nil
+}
+
+// MarkTurnProviderDeliveryAttempted records that AO crossed the provider boundary
+// without yet confirming acceptance.
+func (s *Store) MarkTurnProviderDeliveryAttempted(ctx context.Context, turnID string) error {
+	q, unlock := s.conversationWriter(ctx)
+	defer unlock()
+	rows, err := q.MarkConversationTurnProviderDeliveryAttempted(ctx, turnID)
+	return expectBatchRow("mark provider delivery attempted", turnID, rows, err)
+}
+
+// MarkTurnProviderDeliveryAccepted records confirmed provider acceptance.
+func (s *Store) MarkTurnProviderDeliveryAccepted(ctx context.Context, turnID string) error {
+	q, unlock := s.conversationWriter(ctx)
+	defer unlock()
+	rows, err := q.MarkConversationTurnProviderDeliveryAccepted(ctx, turnID)
+	return expectBatchRow("mark provider delivery accepted", turnID, rows, err)
+}
+
+// MarkTurnProviderDeliveryAcceptedByProviderID records acceptance proven by a
+// provider lifecycle event.
+func (s *Store) MarkTurnProviderDeliveryAcceptedByProviderID(ctx context.Context, conversationID, providerTurnID string) error {
+	q, unlock := s.conversationWriter(ctx)
+	defer unlock()
+	_, err := q.MarkConversationTurnProviderDeliveryAcceptedByProviderID(ctx,
+		gen.MarkConversationTurnProviderDeliveryAcceptedByProviderIDParams{
+			ConversationID: conversationID, ProviderTurnID: providerTurnID,
+		})
+	if err != nil {
+		return fmt.Errorf("mark provider delivery accepted %s: %w", providerTurnID, err)
+	}
+	return nil
+}
+
 func expectBatchRow(action, id string, rows int64, err error) error {
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", action, id, err)
@@ -1667,8 +1711,8 @@ func expectBatchRow(action, id string, rows int64, err error) error {
 	return nil
 }
 
-// BindTurnToProvider records the provider's turn id once a send is accepted and
-// marks the turn running.
+// BindTurnToProvider records the provider's turn id and marks the turn running.
+// Deferred drivers bind a prepared turn before they cross the provider boundary.
 func (s *Store) BindTurnToProvider(ctx context.Context, turnID, providerTurnID string, now time.Time) error {
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
@@ -4893,16 +4937,17 @@ func rateLimitsFromRow(row gen.Conversation) *domain.ConversationRateLimits {
 
 func turnToDomain(row gen.ConversationTurn) domain.ConversationTurn {
 	turn := domain.ConversationTurn{
-		ID:                 row.ID,
-		ConversationID:     row.ConversationID,
-		BranchID:           row.BranchID,
-		HandledBySessionID: row.HandledBySessionID,
-		ProviderTurnID:     row.ProviderTurnID,
-		ProviderInputText:  row.ProviderInputText,
-		State:              row.State,
-		ErrorMessage:       row.ErrorMessage,
-		FailureCode:        domain.ConversationFailureCode(row.FailureCode),
-		RequestedAt:        row.RequestedAt,
+		ID:                    row.ID,
+		ConversationID:        row.ConversationID,
+		BranchID:              row.BranchID,
+		HandledBySessionID:    row.HandledBySessionID,
+		ProviderTurnID:        row.ProviderTurnID,
+		ProviderInputText:     row.ProviderInputText,
+		ProviderDeliveryState: domain.ProviderDeliveryState(row.ProviderDeliveryState),
+		State:                 row.State,
+		ErrorMessage:          row.ErrorMessage,
+		FailureCode:           domain.ConversationFailureCode(row.FailureCode),
+		RequestedAt:           row.RequestedAt,
 	}
 	if row.RetryOfTurnID.Valid {
 		turn.RetryOfTurnID = row.RetryOfTurnID.String
@@ -5369,6 +5414,9 @@ func editDeliveryToDomain(row gen.ConversationEditDelivery) domain.ConversationE
 		},
 		RejectionKind:    domain.ConversationEditRejectionKind(row.RejectionKind),
 		RejectionMessage: row.RejectionMessage, CreatedAt: row.CreatedAt,
+	}
+	if delivery.State == domain.ConversationEditAccepted {
+		delivery.Turn.ProviderDeliveryState = domain.ProviderDeliveryAccepted
 	}
 	if row.SettledAt.Valid {
 		settled := row.SettledAt.Time

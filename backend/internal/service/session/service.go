@@ -1775,13 +1775,15 @@ func (s *Service) sessionsFromRecords(ctx context.Context, filtered []domain.Ses
 	out := make([]domain.Session, 0, len(filtered))
 	for _, rec := range filtered {
 		facts, found := cleanupBySession[rec.ID]
-		sess, err := s.toSessionWithFactsCached(ctx, rec, prsBySession[rec.ID], runsBySession[rec.ID], interrupted[rec.ID], artifactsBySession[rec.ID], currentWorkspaceCleanup(rec, facts, found), contractProjects)
+		latest, hasDoneReport := doneReportsBySession[rec.ID]
+		hasCurrentDoneReport := hasDoneReport && !latest.Superseded
+		sess, err := s.toSessionWithFactsCached(ctx, rec, prsBySession[rec.ID], runsBySession[rec.ID], interrupted[rec.ID], artifactsBySession[rec.ID], currentWorkspaceCleanup(rec, facts, found), hasCurrentDoneReport, contractProjects)
 		if err != nil {
 			return nil, err
 		}
 		sess.ActiveAgentSwitch = switches[rec.ID]
 		sess.TerminalTitle = presentedTerminalTitle(rec, titles[rec.ID])
-		if latest, ok := doneReportsBySession[rec.ID]; ok {
+		if hasDoneReport {
 			sess.LatestDoneReport = &latest
 		}
 		out = append(out, sess)
@@ -1888,8 +1890,8 @@ func (s *Service) Get(ctx context.Context, id domain.SessionID) (domain.Session,
 	return sess, nil
 }
 
-func (s *Service) toSessionWithFacts(ctx context.Context, rec domain.SessionRecord, prs []domain.PRFacts, runs []domain.CurrentHeadReviewRun, interrupted bool, artifactRows []domain.SessionArtifactRecord, cleanup domain.SessionCleanupRecord) (domain.Session, error) { //nolint:unparam // Every read-model caller propagates this error.
-	return s.toSessionWithFactsCached(ctx, rec, prs, runs, interrupted, artifactRows, cleanup, nil)
+func (s *Service) toSessionWithFacts(ctx context.Context, rec domain.SessionRecord, prs []domain.PRFacts, runs []domain.CurrentHeadReviewRun, interrupted bool, artifactRows []domain.SessionArtifactRecord, cleanup domain.SessionCleanupRecord, hasDoneReport bool) (domain.Session, error) { //nolint:unparam // Every read-model caller propagates this error.
+	return s.toSessionWithFactsCached(ctx, rec, prs, runs, interrupted, artifactRows, cleanup, hasDoneReport, nil)
 }
 
 type contractProjectLookup struct {
@@ -1897,7 +1899,7 @@ type contractProjectLookup struct {
 	found   bool
 }
 
-func (s *Service) toSessionWithFactsCached(ctx context.Context, rec domain.SessionRecord, prs []domain.PRFacts, runs []domain.CurrentHeadReviewRun, interrupted bool, artifactRows []domain.SessionArtifactRecord, cleanup domain.SessionCleanupRecord, contractProjects map[string]contractProjectLookup) (domain.Session, error) {
+func (s *Service) toSessionWithFactsCached(ctx context.Context, rec domain.SessionRecord, prs []domain.PRFacts, runs []domain.CurrentHeadReviewRun, interrupted bool, artifactRows []domain.SessionArtifactRecord, cleanup domain.SessionCleanupRecord, hasDoneReport bool, contractProjects map[string]contractProjectLookup) (domain.Session, error) {
 	// A row created before artifact_dir existed carries it as '' (the
 	// migration's default) even though session_manager always prompts the
 	// agent to write into the deterministic dataDir/artifacts/<id> path.
@@ -1932,11 +1934,13 @@ func (s *Service) toSessionWithFactsCached(ctx context.Context, rec domain.Sessi
 		artifactFiles = nil
 	}
 	s.shareLinks.Apply(rec.ID, artifactFiles)
-	if backfilledArtifactDir || (len(artifactFiles) > 0) != rec.OutputType.HasArtifact() {
+	includePlanApproval := rec.RequestedOutput == domain.RequestedOutputArtifact && hasDoneReport
+	deliverableArtifacts := sessionartifacts.DeliverableCount(artifactFiles, rec.PlanFirstState == domain.PlanFirstPending, includePlanApproval)
+	if backfilledArtifactDir || (deliverableArtifacts > 0) != rec.OutputType.HasArtifact() {
 		// Reflect the repair in this response's OutputType too, not just
 		// future ones: the persisted write below lands asynchronously
 		// relative to this read.
-		rec.OutputType = sessionartifacts.DeriveOutputType(len(prs), len(artifactFiles))
+		rec.OutputType = sessionartifacts.DeriveOutputType(len(prs), deliverableArtifacts)
 		if s.outputTypeReconciler != nil {
 			if err := s.outputTypeReconciler.ReconcileSessionOutputType(ctx, rec.ID); err != nil && s.logger != nil {
 				s.logger.Warn("reconcile output type on read", "session", rec.ID, "err", err)
@@ -2344,11 +2348,13 @@ func (s *Service) toSession(ctx context.Context, rec domain.SessionRecord) (doma
 	if err != nil {
 		return domain.Session{}, fmt.Errorf("list latest done report %s: %w", rec.ID, err)
 	}
-	sess, err := s.toSessionWithFacts(ctx, rec, prs, runs, interrupted[rec.ID], artifacts[rec.ID], cleanup)
+	latest, hasDoneReport := doneReports[rec.ID]
+	hasCurrentDoneReport := hasDoneReport && !latest.Superseded
+	sess, err := s.toSessionWithFacts(ctx, rec, prs, runs, interrupted[rec.ID], artifacts[rec.ID], cleanup, hasCurrentDoneReport)
 	if err != nil {
 		return domain.Session{}, err
 	}
-	if latest, ok := doneReports[rec.ID]; ok {
+	if hasDoneReport {
 		sess.LatestDoneReport = &latest
 	}
 	sess.TerminalTitle = presentedTerminalTitle(rec, s.storedTerminalTitles(ctx, []domain.SessionID{rec.ID})[rec.ID])

@@ -51,14 +51,16 @@ RETURNING *;
 SELECT * FROM decision_calls WHERE call_id = ?;
 
 -- name: ListDecisionCallsForSession :many
-SELECT *
-FROM decision_calls
-WHERE origin = sqlc.arg(origin)
+SELECT calls.*
+FROM decision_calls AS calls
+JOIN decision_entries AS raised
+  ON raised.call_id = calls.call_id AND raised.kind = 'raised'
+WHERE calls.origin = sqlc.arg(origin)
   AND (
-    owner_session_id = sqlc.arg(session_id)
-    OR json_extract(body, '$.deliveredTo') = sqlc.arg(session_id)
+    calls.owner_session_id = sqlc.arg(session_id)
+    OR json_extract(calls.body, '$.deliveredTo') = sqlc.arg(session_id)
   )
-ORDER BY raised_at DESC, call_id DESC
+ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
 LIMIT sqlc.arg(result_limit);
 
 -- name: ListDecisionCallsByState :many

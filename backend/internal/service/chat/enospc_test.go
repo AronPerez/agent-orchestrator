@@ -39,12 +39,25 @@ type enospcProviderInputStore struct {
 	failed bool
 }
 
+type enospcMarkDispatchingStore struct {
+	chatsvc.Store
+	failed bool
+}
+
 func (s *enospcProviderInputStore) RecordProviderInput(ctx context.Context, turnID, text string) error {
 	if !s.failed {
 		s.failed = true
 		return syscall.ENOSPC
 	}
 	return s.Store.RecordProviderInput(ctx, turnID, text)
+}
+
+func (s *enospcMarkDispatchingStore) MarkTurnDispatching(ctx context.Context, turnID string) error {
+	if !s.failed {
+		s.failed = true
+		return syscall.ENOSPC
+	}
+	return s.Store.MarkTurnDispatching(ctx, turnID)
 }
 
 type reconnectedReceiptConversation struct{ *receiptConversation }
@@ -112,7 +125,232 @@ func TestConfirmSessionChatTurnRejectsFailureBeforeProviderDispatch(t *testing.T
 	}
 }
 
-func TestConfirmSessionChatTurnKeepsAcceptedUnboundDeliveryAmbiguous(t *testing.T) {
+func TestSendIfIdleRetriesFailureBeforeProviderDispatch(t *testing.T) {
+	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
+		return &enospcProviderInputStore{Store: st}
+	})
+	ctx := context.Background()
+	msg := ports.ChatUserMessage{
+		Text: "Approved", ClientMessageID: "decision:dent-retry",
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+	}
+
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, syscall.ENOSPC) || sent {
+		t.Fatalf("first SendIfIdle = (%v, %v), want pre-provider ENOSPC", sent, err)
+	}
+	if got := h.conv.sendCallCount(); got != 0 {
+		t.Fatalf("provider calls after failed input write = %d, want 0", got)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || !sent {
+		t.Fatalf("retry SendIfIdle = (%v, %v), want confirmed delivery", sent, err)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || !sent {
+		t.Fatalf("accepted replay = (%v, %v), want idempotent success", sent, err)
+	}
+	if got := h.conv.sendCallCount(); got != 1 {
+		t.Fatalf("provider calls after retry = %d, want 1", got)
+	}
+}
+
+func TestSendIfIdleRecoversAcceptedUnboundDelivery(t *testing.T) {
+	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
+		return &enospcBindStore{Store: st}
+	})
+	ctx := context.Background()
+	msg := ports.ChatUserMessage{
+		Text: "Approved", ClientMessageID: "decision:dent-ambiguous",
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+	}
+
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, syscall.ENOSPC) || sent {
+		t.Fatalf("first SendIfIdle = (%v, %v), want ambiguous bind failure", sent, err)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || !sent {
+		t.Fatalf("accepted retry = (%v, %v), want confirmed delivery", sent, err)
+	}
+	if got := h.conv.sendCallCount(); got != 1 {
+		t.Fatalf("provider calls after ambiguous retry = %d, want 1", got)
+	}
+}
+
+func TestSendIfIdleRetriesMarkDispatchingFailureBeforeProviderIO(t *testing.T) {
+	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
+		return &enospcMarkDispatchingStore{Store: st}
+	})
+	ctx := context.Background()
+	msg := ports.ChatUserMessage{
+		Text: "Approved", ClientMessageID: "decision:dent-dispatch-retry",
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+	}
+
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, syscall.ENOSPC) || sent {
+		t.Fatalf("first SendIfIdle = (%v, %v), want pre-provider dispatch failure", sent, err)
+	}
+	if got := h.conv.sendCallCount(); got != 0 {
+		t.Fatalf("provider calls after failed dispatch marker = %d, want 0", got)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || !sent {
+		t.Fatalf("retry SendIfIdle = (%v, %v), want confirmed delivery", sent, err)
+	}
+	if got := h.conv.sendCallCount(); got != 1 {
+		t.Fatalf("provider calls after successful retry = %d, want 1", got)
+	}
+}
+
+func TestSendIfIdleDoesNotAcceptPreparedDeferredTurn(t *testing.T) {
+	startErr := errors.New("deferred provider start failed")
+	provider := &deferredConversation{
+		fakeConversation: newFakeConversation(),
+		start:            func(string) error { return startErr },
+	}
+	h := newHarnessWithConversation(t, provider)
+	ctx := context.Background()
+	msg := ports.ChatUserMessage{
+		Text: "Approved", ClientMessageID: "decision:dent-deferred",
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+	}
+
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, startErr) || sent {
+		t.Fatalf("first SendIfIdle = (%v, %v), want deferred start failure", sent, err)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, chatsvc.ErrSteerDeliveryUncertain) || sent {
+		t.Fatalf("prepared retry = (%v, %v), want unconfirmed delivery", sent, err)
+	}
+	if got := provider.sendCallCount(); got != 1 {
+		t.Fatalf("provider preparations = %d, want 1", got)
+	}
+}
+
+func TestSendIfIdleDoesNotAcceptDeferredPromptFailure(t *testing.T) {
+	promptErr := errors.New("ACP prompt failed before provider acceptance")
+	base := newFakeConversation()
+	provider := &deferredConversation{fakeConversation: base}
+	provider.start = func(providerTurnID string) error {
+		base.emit(
+			ports.ChatEvent{Kind: ports.ChatEventTurnStarted, ProviderTurnID: providerTurnID},
+			ports.ChatEvent{Kind: ports.ChatEventTurnCompleted, ProviderTurnID: providerTurnID, TurnState: domain.TurnStateFailed, Err: promptErr},
+		)
+		return nil
+	}
+	h := newHarnessWithConversation(t, provider)
+	ctx := context.Background()
+	msg := ports.ChatUserMessage{
+		Text: "Approved", ClientMessageID: "decision:dent-deferred-prompt-failure",
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+	}
+
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || sent {
+		t.Fatalf("initial SendIfIdle = (%v, %v), want unconfirmed deferred start", sent, err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		snapshot, err := h.st.LoadConversationSnapshot(ctx, h.ctrl.ConversationID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Turns) == 1 && snapshot.Turns[0].State == domain.TurnStateFailed {
+			if snapshot.Turns[0].ProviderDeliveryState != domain.ProviderDeliveryAttempted {
+				t.Fatalf("provider delivery state = %q, want attempted", snapshot.Turns[0].ProviderDeliveryState)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("deferred prompt failure was not projected: %+v", snapshot.Turns)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); !errors.Is(err, chatsvc.ErrSteerDeliveryUncertain) || sent {
+		t.Fatalf("failed prompt retry = (%v, %v), want unconfirmed delivery", sent, err)
+	}
+}
+
+func TestSendIfIdleAcceptsDeferredProviderProgressBeforeInterruption(t *testing.T) {
+	base := newFakeConversation()
+	provider := &deferredConversation{fakeConversation: base}
+	provider.start = func(providerTurnID string) error {
+		base.emit(
+			ports.ChatEvent{Kind: ports.ChatEventTurnStarted, ProviderTurnID: providerTurnID},
+			ports.ChatEvent{Kind: ports.ChatEventMessageCompleted, ProviderTurnID: providerTurnID, ProviderItemID: "progress", Text: "Starting implementation."},
+			ports.ChatEvent{Kind: ports.ChatEventTurnCompleted, ProviderTurnID: providerTurnID, TurnState: domain.TurnStateInterrupted},
+		)
+		return nil
+	}
+	h := newHarnessWithConversation(t, provider)
+	ctx := context.Background()
+	msg := ports.ChatUserMessage{
+		Text: "Approved", ClientMessageID: "decision:dent-deferred-progress",
+		Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+	}
+
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || sent {
+		t.Fatalf("initial SendIfIdle = (%v, %v), want deferred evidence pending", sent, err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		snapshot, err := h.st.LoadConversationSnapshot(ctx, h.ctrl.ConversationID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Turns) == 1 && snapshot.Turns[0].State == domain.TurnStateInterrupted {
+			if snapshot.Turns[0].ProviderDeliveryState != domain.ProviderDeliveryAccepted {
+				t.Fatalf("provider delivery state = %q, want accepted", snapshot.Turns[0].ProviderDeliveryState)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("interrupted provider turn was not projected: %+v", snapshot.Turns)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, msg); err != nil || !sent {
+		t.Fatalf("provider-evidenced retry = (%v, %v), want accepted delivery", sent, err)
+	}
+}
+
+func TestSendIfIdleContextCancelsWhileAnotherSendHoldsTheControllerLock(t *testing.T) {
+	provider := newBlockingDispatchConversation()
+	h := newHarnessWithConversation(t, provider)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := h.svc.Send(context.Background(), testSession, ports.ChatUserMessage{Text: "stalled", Origin: domain.MessageOriginHuman})
+		firstDone <- err
+	}()
+	<-provider.sendStarted
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	type result struct {
+		sent bool
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		sent, err := h.svc.SendIfIdle(ctx, testSession, ports.ChatUserMessage{
+			Text: "Approved", ClientMessageID: "decision:dent-lock-timeout",
+			Origin: domain.MessageOriginAutomation, AuthoredByUser: true,
+		})
+		done <- result{sent: sent, err: err}
+	}()
+	blocked := false
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(200 * time.Millisecond):
+		blocked = true
+	}
+	close(provider.releaseSend)
+	if blocked {
+		got = <-done
+	}
+	if firstErr := <-firstDone; firstErr != nil {
+		t.Fatalf("stalled send after release: %v", firstErr)
+	}
+	if blocked || got.sent || !errors.Is(got.err, context.DeadlineExceeded) {
+		t.Fatalf("SendIfIdle blocked=%v result=(%v, %v), want prompt deadline", blocked, got.sent, got.err)
+	}
+}
+
+func TestConfirmSessionChatTurnRecoversAcceptedUnboundDelivery(t *testing.T) {
 	h := newHarnessWithConversationAndStore(t, nil, func(st *store.Store) chatsvc.Store {
 		return &enospcBindStore{Store: st}
 	})
@@ -127,8 +365,8 @@ func TestConfirmSessionChatTurnKeepsAcceptedUnboundDeliveryAmbiguous(t *testing.
 		t.Fatalf("provider calls = %d, want 1", got)
 	}
 	accepted, err := h.svc.ConfirmSessionChatTurn(ctx, testSession, "coordinate", deliveryID, options)
-	if accepted || !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
-		t.Fatalf("ConfirmSessionChatTurn = (%v, %v), want ambiguous accepted write", accepted, err)
+	if err != nil || !accepted {
+		t.Fatalf("ConfirmSessionChatTurn = (%v, %v), want accepted delivery", accepted, err)
 	}
 }
 

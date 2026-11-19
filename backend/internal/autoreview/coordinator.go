@@ -239,6 +239,9 @@ func sessionGate(session domain.SessionRecord, now time.Time, threshold time.Dur
 	if !session.AutoReviewEnabled {
 		return "disabled"
 	}
+	if session.PlanFirstState.BlocksAutomation() {
+		return "plan_first_pending"
+	}
 	if session.Kind != domain.KindWorker {
 		return "not_worker"
 	}
