@@ -29,6 +29,9 @@ func (s *Store) CreateNotification(ctx context.Context, rec domain.NotificationR
 	} else if ok {
 		return existing, false, nil
 	}
+	if rec.Type.TargetsDecision() {
+		return s.createDecisionNotification(ctx, rec)
+	}
 	row, err := s.qw.CreateNotification(ctx, gen.CreateNotificationParams{
 		ID:                   rec.ID,
 		SessionID:            notificationSessionID(rec.SessionID),
@@ -52,6 +55,38 @@ func (s *Store) CreateNotification(ctx context.Context, rec domain.NotificationR
 			}
 		}
 		return domain.NotificationRecord{}, false, fmt.Errorf("create notification %s: %w", rec.ID, err)
+	}
+	return notificationFromGen(row), true, nil
+}
+
+// createDecisionNotification inserts a call's alert unless the call is already
+// known to have left Needs you; the check is part of the insert statement.
+// Callers hold writeMu and have already looked up the source key.
+func (s *Store) createDecisionNotification(ctx context.Context, rec domain.NotificationRecord) (domain.NotificationRecord, bool, error) {
+	row, err := s.qw.CreateDecisionNotification(ctx, gen.CreateDecisionNotificationParams{
+		ID:                   rec.ID,
+		Type:                 rec.Type,
+		Title:                rec.Title,
+		Body:                 rec.Body,
+		Status:               rec.Status,
+		CreatedAt:            rec.CreatedAt,
+		SourceKey:            rec.SourceKey,
+		DecisionCallID:       rec.DecisionCallID,
+		DecisionOriginHostID: rec.DecisionOriginHostID,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		// The call left Needs you after it was scanned: there is nothing to announce.
+		return domain.NotificationRecord{}, false, nil
+	}
+	if err != nil {
+		if isSQLiteUnique(err) {
+			if existing, ok, lookupErr := s.getNotificationByDedupe(ctx, rec); lookupErr != nil {
+				return domain.NotificationRecord{}, false, lookupErr
+			} else if ok {
+				return existing, false, nil
+			}
+		}
+		return domain.NotificationRecord{}, false, fmt.Errorf("create decision notification %s: %w", rec.ID, err)
 	}
 	return notificationFromGen(row), true, nil
 }
