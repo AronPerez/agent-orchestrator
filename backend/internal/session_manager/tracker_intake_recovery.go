@@ -481,21 +481,33 @@ func trackerIntakeBackendAbsentTeardownAllowed(
 	reservation domain.TrackerIntakeRecoveryReservation,
 	owner trackerIntakeRuntimeOwner,
 ) bool {
-	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat ||
-		strings.TrimSpace(reservation.RuntimeLaunchID) != owner.launchID ||
-		!trackerIntakeHandleReserved(reservation.RuntimeHandleIDs, owner.handleID) {
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || !reservation.CapacityReleased {
 		return false
 	}
+	rowHandleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
+	rowLaunchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	reservedOwner := strings.TrimSpace(reservation.RuntimeLaunchID) == owner.launchID &&
+		trackerIntakeHandleReserved(reservation.RuntimeHandleIDs, owner.handleID)
 	releasedLaunchID := strings.TrimSpace(reservation.ReleasedRuntimeLaunchID)
-	if releasedLaunchID != "" && releasedLaunchID != owner.launchID {
+	releasedRowOwner := releasedLaunchID != "" && releasedLaunchID == owner.launchID &&
+		rowHandleID == owner.handleID && rowLaunchID == owner.launchID
+	if !reservedOwner && !releasedRowOwner {
 		return false
 	}
-	// Older releases recorded only a reservation-wide capacity release, while a
-	// completed spawn rollback can confirm workspace cleanup before that release
-	// checkpoint lands. In both cases an explicitly absent backend authorizes an
-	// idempotent Destroy for this exact still-reserved candidate. Generic probe
-	// failures and conflicting generations remain fenced.
-	return reservation.CapacityReleased || (reservation.CleanupConfirmed && reservation.DeliveryPossible)
+	if releasedLaunchID == "" || releasedLaunchID == owner.launchID {
+		return true
+	}
+	// Older releases could copy the stopped row generation into the capacity
+	// proof after separately probing an interrupted reserved generation. A scoped
+	// replacement keeps that row out of this teardown. Otherwise the row must be
+	// absent or retain the exact released generation so it is fenced separately.
+	if reservation.RuntimeTeardownReservationOnly {
+		return true
+	}
+	if rowHandleID == "" && rowLaunchID == "" {
+		return true
+	}
+	return rowHandleID != "" && rowLaunchID == releasedLaunchID
 }
 
 func trackerIntakeUnreleasedRuntimeHandles(reservation domain.TrackerIntakeRecoveryReservation) []string {
@@ -750,11 +762,6 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(
 				}
 			}
 		case ports.FencedUnknown:
-			owner := trackerIntakeRuntimeOwner{handleID: handleID, launchID: launchID}
-			if probe.Reason == ports.FencedReasonBackendAbsent &&
-				trackerIntakeBackendAbsentTeardownAllowed(rec, reservation, owner) {
-				continue
-			}
 			return fmt.Errorf("recover tracker intake %s: runtime %s remains unresolved: %s", rec.ID, handleID, probe.Reason)
 		default:
 			return fmt.Errorf("recover tracker intake %s: runtime %s returned invalid liveness %q", rec.ID, handleID, probe.Liveness)
@@ -1279,6 +1286,10 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 	if handled, err := m.preserveTrackerIntakeReplacementOwner(ctx, rec, reservation); handled {
 		return err
 	}
+	if reservation.CleanupConfirmed {
+		m.rollbackSpawnSeedRow(ctx, rec.ID)
+		return m.settleInterruptedTrackerIntakeClaim(ctx, rec.ID, reservation)
+	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 		if !reservation.CapacityReleased && (reservation.ControllerPossible || trackerIntakeHasChatEffect(rec)) {
 			if m.chat == nil {
@@ -1293,10 +1304,6 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 				return err
 			}
 			reservation.CapacityReleased = true
-		}
-		if reservation.CleanupConfirmed {
-			m.rollbackSpawnSeedRow(ctx, rec.ID)
-			return m.settleInterruptedTrackerIntakeClaim(ctx, rec.ID, reservation)
 		}
 		return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
 	}
@@ -1318,11 +1325,6 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 			return err
 		}
 	}
-	if reservation.CleanupConfirmed {
-		m.rollbackSpawnSeedRow(ctx, rec.ID)
-		return m.settleInterruptedTrackerIntakeClaim(ctx, rec.ID, reservation)
-	}
-
 	return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
 }
 

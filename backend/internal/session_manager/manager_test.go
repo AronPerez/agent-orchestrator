@@ -3752,34 +3752,6 @@ func TestReconcileTrackerIntakeClaimsRevalidatesMissingLegacyOwnerWithoutRelease
 	}
 }
 
-func TestReconcileTrackerIntakeClaimsSettlesCleanupConfirmedRollbackWhenBackendAbsent(t *testing.T) {
-	m, st, rt, ws := newManager()
-	id := domain.SessionID("cleanup-confirmed-rollback-with-absent-backend")
-	issueID := domain.IssueID("github:acme/mer#10921")
-	key := "mer\x00" + string(issueID)
-	handleID := "tmux-10921"
-	launchID := "launch-10921"
-	st.trackerIntakePending[key] = id
-	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
-		WorkspacePath: "/ws/cleanup-confirmed-rollback-with-absent-backend", RuntimeLaunchID: launchID,
-		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CleanupConfirmed: true,
-	}
-	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent}
-
-	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
-		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
-	}
-	if len(rt.fencedRefs) != 2 || !reflect.DeepEqual(rt.destroyedIDs, []string{handleID}) {
-		t.Fatalf("cleanup-confirmed rollback probes=%v destroys=%v", rt.fencedRefs, rt.destroyedIDs)
-	}
-	if ws.destroyed != 0 {
-		t.Fatalf("cleanup-confirmed rollback repeated workspace cleanup %d times", ws.destroyed)
-	}
-	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
-		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
-	}
-}
-
 func TestReconcileTrackerIntakeClaimsKeepsLegacyOwnerFencedWhenGenerationProbeFails(t *testing.T) {
 	m, st, rt, ws := newManager()
 	id := domain.SessionID("terminated-owner-with-inconclusive-legacy-host")
@@ -4053,7 +4025,7 @@ func TestReconcileTrackerIntakeClaimsPreservesReplacementDuringLegacyTeardown(t 
 	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
 		WorkspacePath: "/ws/released-owner-with-replacement", RuntimeLaunchID: "launch-10904-old",
 		RuntimeHandleIDs: []string{oldHandleID}, DeliveryPossible: true, CapacityReleased: true,
-		ReleasedRuntimeLaunchID: "launch-10904-old",
+		ReleasedRuntimeLaunchID: "launch-10904-prior",
 	}
 	st.sessions[id] = domain.SessionRecord{
 		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
