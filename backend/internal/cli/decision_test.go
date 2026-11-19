@@ -553,3 +553,48 @@ func TestDecisionKinds(t *testing.T) {
 		t.Fatalf("paths=%q want=%q", paths, want)
 	}
 }
+
+func TestDecisionObserve(t *testing.T) {
+	var paths []string
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions/observe" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		paths = append(paths, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"projectId":"shop","mode":"observe","rows":[{"kind":"design","label":"Design and product behaviour","reserved":true,"calls":1,"answered":0,"agreed":0,"differed":0},{"kind":"pr_hygiene","label":"Pull request hygiene","reserved":false,"calls":4,"answered":3,"agreed":1,"differed":2}]}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "")
+	out, _, err := executeCLI(t, deps, "decision", "observe", "--project", "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Project shop · autonomy mode: observe",
+		"Design and product behaviour (design), reserved: 1 call",
+		"Pull request hygiene (pr_hygiene): 4 calls, 3 answered, 1 agreed, 2 differed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("observe output missing %q:\n%s", want, out)
+		}
+	}
+	if !reflect.DeepEqual(paths, []string{"/api/v1/decisions/observe?project=shop"}) {
+		t.Fatalf("paths=%q", paths)
+	}
+}
+
+func TestDecisionObserveWithNothingToShow(t *testing.T) {
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"projectId":"shop","mode":"off","rows":[]}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "w-1")
+	out, _, err := executeCLI(t, deps, "decision", "observe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "No calls raised in observe mode yet.") {
+		t.Fatalf("output=%q", out)
+	}
+}

@@ -32,6 +32,7 @@ type DecisionService interface {
 	Withdraw(context.Context, decisionsvc.Actor, string) (domain.DecisionCall, error)
 	Retire(context.Context, decisionsvc.Actor, string, bool) (domain.DecisionCall, error)
 	Kinds(context.Context, decisionsvc.Actor, domain.ProjectID) (decisionsvc.Policy, error)
+	Observe(context.Context, decisionsvc.Actor, domain.ProjectID) (decisionsvc.ObserveReport, error)
 }
 
 // DecisionsController owns the /decisions routes.
@@ -42,6 +43,7 @@ func (c *DecisionsController) Register(r chi.Router) {
 	r.Post("/decisions", c.raise)
 	r.Get("/decisions", c.list)
 	r.Get("/decisions/kinds", c.kinds)
+	r.Get("/decisions/observe", c.observe)
 	r.Get("/decisions/{id}", c.get)
 	r.Post("/decisions/{id}/answer", c.answer)
 	r.Post("/decisions/{id}/dismiss", c.dismiss)
@@ -135,7 +137,31 @@ func (c *DecisionsController) kinds(w http.ResponseWriter, r *http.Request) {
 		Kinds: make([]DecisionKindResponse, len(policy.Kinds)),
 	}
 	for i, kind := range policy.Kinds {
-		response.Kinds[i] = DecisionKindResponse{ID: string(kind.ID), Label: kind.Label, Reserved: kind.Reserved}
+		response.Kinds[i] = DecisionKindResponse{ID: string(kind.ID), Label: kind.Label, Reserved: kind.Reserved, ReservedByDefault: kind.ReservedByDefault}
+	}
+	envelope.WriteJSON(w, http.StatusOK, response)
+}
+
+func (c *DecisionsController) observe(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/decisions/observe")
+		return
+	}
+	project := domain.ProjectID(strings.TrimSpace(r.URL.Query().Get("project")))
+	report, err := c.Svc.Observe(r.Context(), decisionActor(r), project)
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_OBSERVE_FAILED", "Unable to report observe mode")
+		return
+	}
+	response := DecisionObserveResponse{
+		ProjectID: string(report.ProjectID), Mode: string(report.Mode),
+		Rows: make([]DecisionObserveRowResponse, len(report.Rows)),
+	}
+	for i, row := range report.Rows {
+		response.Rows[i] = DecisionObserveRowResponse{
+			Kind: string(row.Kind), Label: row.Label, Reserved: row.Reserved,
+			Calls: row.Calls, Answered: row.Answered, Agreed: row.Agreed, Differed: row.Differed,
+		}
 	}
 	envelope.WriteJSON(w, http.StatusOK, response)
 }

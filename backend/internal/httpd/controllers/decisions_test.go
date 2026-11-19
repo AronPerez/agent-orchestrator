@@ -39,13 +39,23 @@ type fakeDecisionService struct {
 	err      error
 }
 
+func (f *fakeDecisionService) Observe(_ context.Context, actor decisionsvc.Actor, project domain.ProjectID) (decisionsvc.ObserveReport, error) {
+	f.actor, f.project = actor, project
+	if f.err != nil {
+		return decisionsvc.ObserveReport{}, f.err
+	}
+	return decisionsvc.ObserveReport{ProjectID: "shop", Mode: domain.AutonomyObserve, Rows: []decisionsvc.ObserveRow{
+		{Kind: "pr_hygiene", Label: "Pull request hygiene", Calls: 4, Answered: 3, Agreed: 1, Differed: 2},
+	}}, nil
+}
+
 func (f *fakeDecisionService) Kinds(_ context.Context, actor decisionsvc.Actor, project domain.ProjectID) (decisionsvc.Policy, error) {
 	f.actor, f.project = actor, project
 	if f.err != nil {
 		return decisionsvc.Policy{}, f.err
 	}
 	return decisionsvc.Policy{ProjectID: "shop", Mode: domain.AutonomyObserve, Kinds: []decisionsvc.KindPolicy{
-		{ID: "production", Label: "Production changes and deploys", Reserved: true},
+		{ID: "production", Label: "Production changes and deploys", Reserved: true, ReservedByDefault: true},
 		{ID: "pr_hygiene", Label: "Pull request hygiene"},
 	}}, nil
 }
@@ -432,10 +442,26 @@ func TestDecisionsAPI_Kinds(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode: %v body=%s", err, body)
 	}
-	if got.ProjectID != "shop" || got.Mode != "observe" || len(got.Kinds) != 2 || !got.Kinds[0].Reserved || got.Kinds[1].Reserved || got.Kinds[1].Label != "Pull request hygiene" {
+	if got.ProjectID != "shop" || got.Mode != "observe" || len(got.Kinds) != 2 || !got.Kinds[0].Reserved || got.Kinds[1].Reserved || got.Kinds[1].Label != "Pull request hygiene" || !got.Kinds[0].ReservedByDefault || got.Kinds[1].ReservedByDefault {
 		t.Fatalf("kinds = %+v", got)
 	}
 	if _, status := decisionRequest(t, srv, http.MethodGet, "/api/v1/decisions/kinds", "", "w-1"); status != http.StatusOK || svc.actor.Session != "w-1" {
 		t.Fatalf("session kinds status=%d actor=%+v", status, svc.actor)
+	}
+}
+
+func TestDecisionsAPI_Observe(t *testing.T) {
+	svc := &fakeDecisionService{}
+	body, status := decisionRequest(t, newDecisionServer(t, svc), http.MethodGet, "/api/v1/decisions/observe?project=shop", "", "")
+	if status != http.StatusOK || svc.project != "shop" {
+		t.Fatalf("status=%d project=%q body=%s", status, svc.project, body)
+	}
+	var got controllers.DecisionObserveResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	want := controllers.DecisionObserveRowResponse{Kind: "pr_hygiene", Label: "Pull request hygiene", Calls: 4, Answered: 3, Agreed: 1, Differed: 2}
+	if got.ProjectID != "shop" || got.Mode != "observe" || len(got.Rows) != 1 || got.Rows[0] != want {
+		t.Fatalf("observe = %+v", got)
 	}
 }
