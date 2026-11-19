@@ -4161,6 +4161,31 @@ func TestToSpawnAPIErrorMapsSpawnStageSentinels(t *testing.T) {
 	}
 }
 
+func TestToSpawnAPIErrorPreservesTrackerAdmissionOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cause    error
+		wantKind apierr.Kind
+		wantCode string
+	}{
+		{name: "already handled", cause: ports.ErrTrackerIntakeHandled, wantKind: apierr.KindConflict, wantCode: "TRACKER_INTAKE_ALREADY_HANDLED"},
+		{name: "same issue active", cause: ports.ErrTrackerIntakeActive, wantKind: apierr.KindConflict, wantCode: "TRACKER_INTAKE_ACTIVE_SESSION"},
+		{name: "capacity", cause: ports.ErrAutomatedSessionCapacity, wantKind: apierr.KindTooManyRequests, wantCode: "AUTOMATED_SESSION_CAPACITY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := fmt.Errorf("spawn: %w: admission: %w", sessionmanager.ErrSpawnCreate, tc.cause)
+			mapped := toSpawnAPIError(raw)
+			var apiError *apierr.Error
+			if !errors.As(mapped, &apiError) || apiError.Kind != tc.wantKind || apiError.Code != tc.wantCode {
+				t.Fatalf("mapped = %v, want kind=%v code=%s", mapped, tc.wantKind, tc.wantCode)
+			}
+			if !errors.Is(mapped, tc.cause) {
+				t.Fatalf("mapped = %v, want preserved cause %v", mapped, tc.cause)
+			}
+		})
+	}
+}
+
 func TestSpawnEmitsTypedErrorCodeForRuntimeFailure(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}

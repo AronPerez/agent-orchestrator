@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/agentlaunch"
@@ -42,7 +43,7 @@ type ChatLauncher interface {
 	// StartChatTurn delivers the initial prompt as a normal turn. There is no
 	// paste-and-Enter equivalent in chat mode: the provider either accepts the
 	// turn or reports why.
-	StartChatTurn(ctx context.Context, id domain.SessionID, text string) (string, error)
+	StartChatTurn(ctx context.Context, id domain.SessionID, text string, beforeSend func() error) (string, error)
 	// RelaySessionChatTurn preserves delivery identity, authorship, and acceptance
 	// time. A durable clientMessageID makes queued retries idempotent.
 	RelaySessionChatTurn(ctx context.Context, id domain.SessionID, text, clientMessageID string, options ports.MessageDeliveryOptions) (string, error)
@@ -286,9 +287,23 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	}
 
 	var (
-		controllerCommitted bool
-		completionErr       error
+		controllerCommitted    bool
+		providerStartAttempted bool
+		completionErr          error
 	)
+	var beforeProviderStart func(context.Context) error
+	if in.cfg.TrackerIntakeLimits != nil {
+		reservation := trackerIntakeRecoveryForWorkspace(in.workspace)
+		reservation.ControllerPossible = true
+		if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
+			m.rollbackSeedSpawnWorkspace(ctx, in.record, in.workspace, in.workspaceProject, false, in.promptQueued)
+			return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+		beforeProviderStart = func(context.Context) error {
+			providerStartAttempted = true
+			return nil
+		}
+	}
 	_, err = m.chat.StartChat(ctx, ChatStart{
 		SessionID:               id,
 		ProviderConversationID:  providerConversationID,
@@ -307,6 +322,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		AdditionalDirectories:   workspaceProjectDirectories(in.workspace.Path, in.workspaceProject),
 		MCPServers:              m.aoMCPServers(ctx, in.cfg.Harness, env),
 		ExpectedControllerOwner: in.record.ControllerOwner(),
+		BeforeProviderStart:     beforeProviderStart,
 		PrepareControllerEnv: func(launchCtx context.Context, expected domain.SessionControllerOwner) (map[string]string, error) {
 			prepared, launchEnv, prepareErr := m.prepareChatControllerEnv(
 				launchCtx, in.record, in.project.Config.Env, expected,
@@ -321,6 +337,23 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 			return launchEnv, nil
 		},
 		ControllerReady: func(started ChatStarted) (ChatControllerCommit, error) {
+			if in.cfg.TrackerIntakeLimits != nil {
+				reservation, pending, reserveErr := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+				if reserveErr != nil {
+					return ChatControllerCommit{}, fmt.Errorf("load tracker intake Chat owner: %w", reserveErr)
+				}
+				if !pending {
+					return ChatControllerCommit{}, fmt.Errorf("load tracker intake Chat owner: pending claim is missing")
+				}
+				reservation.ControllerPossible = true
+				reservation.ControllerGeneration = strings.TrimSpace(started.ControllerGeneration)
+				if reservation.ControllerGeneration == "" {
+					return ChatControllerCommit{}, fmt.Errorf("reserve tracker intake Chat owner: controller generation is empty")
+				}
+				if reserveErr := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); reserveErr != nil {
+					return ChatControllerCommit{}, fmt.Errorf("reserve tracker intake Chat owner: %w", reserveErr)
+				}
+			}
 			metadata := domain.SessionMetadata{
 				Permissions:       in.record.Metadata.Permissions,
 				Branch:            in.workspace.Branch,
@@ -354,15 +387,52 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		},
 	})
 	if err != nil {
-		if completionErr != nil || controllerCommitted {
-			m.stopChatAfterSpawnFailure(ctx, id)
+		if completionErr != nil || controllerCommitted || providerStartAttempted {
+			controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
+			if in.cfg.TrackerIntakeLimits != nil && !controllerStopped {
+				if completionErr != nil {
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, completionErr)
+				}
+				return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, agentlaunch.RedactError(err, in.project.Config.Env))
+			}
+			if in.cfg.TrackerIntakeLimits != nil {
+				cleanupCtx, cancel := spawnRollbackContext(ctx)
+				releaseErr := m.markTrackerIntakeCapacityReleasedAfterControllerStop(cleanupCtx, id)
+				cancel()
+				if releaseErr != nil {
+					if completionErr != nil {
+						return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, errors.Join(completionErr, releaseErr))
+					}
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController,
+						agentlaunch.RedactError(errors.Join(err, releaseErr), in.project.Config.Env))
+				}
+			}
 			workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
+			if in.cfg.TrackerIntakeLimits != nil && !workspaceDestroyed {
+				if completionErr != nil {
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, completionErr)
+				}
+				return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, agentlaunch.RedactError(err, in.project.Config.Env))
+			}
+			if in.cfg.TrackerIntakeLimits != nil {
+				if confirmErr := m.confirmTrackerIntakeCleanup(ctx, id); confirmErr != nil {
+					if completionErr != nil {
+						return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, errors.Join(completionErr, confirmErr))
+					}
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, errors.Join(agentlaunch.RedactError(err, in.project.Config.Env), confirmErr))
+				}
+			}
 			if in.promptQueued {
 				if workspaceDestroyed {
 					m.clearProvisionedWorkspace(ctx, id, in.workspace.Path)
 				}
 			} else {
 				m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
+			}
+			if in.cfg.TrackerIntakeLimits != nil {
+				if releaseErr := m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id); releaseErr != nil {
+					completionErr = errors.Join(completionErr, releaseErr)
+				}
 			}
 			if completionErr != nil {
 				return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnCommit, completionErr)
@@ -373,6 +443,11 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		// runtime was never touched, hence runtimeDestroyed=false.
 		if providerConversationID != "" {
 			m.discardForkConversation(ctx, in.cfg.Harness, providerConversationID, in.workspace.Path, env)
+		}
+		if in.cfg.TrackerIntakeLimits != nil {
+			if reserveErr := m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspace(in.workspace)); reserveErr != nil {
+				m.logger.Warn("spawn rollback: clear possible chat controller reservation", "sessionID", id, "error", reserveErr)
+			}
 		}
 		m.rollbackSeedSpawnWorkspace(ctx, in.record, in.workspace, in.workspaceProject, false, in.promptQueued)
 		return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, agentlaunch.RedactError(err, in.project.Config.Env))
@@ -388,7 +463,43 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	// paste-and-Enter equivalent here, and no "deliver after start" variant: the
 	// provider either accepts the turn or reports why.
 	if in.prompt != "" && !in.promptQueued {
-		if _, err := m.chat.StartChatTurn(ctx, id, in.prompt); err != nil {
+		var beforeSend func() error
+		if in.cfg.TrackerIntakeLimits != nil {
+			beforeSend = func() error { return m.markTrackerIntakeDeliveryPossible(ctx, id) }
+		}
+		if _, err := m.chat.StartChatTurn(ctx, id, in.prompt, beforeSend); err != nil {
+			if in.cfg.TrackerIntakeLimits != nil {
+				reservation, pending, recoveryErr := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+				if recoveryErr != nil || (pending && reservation.DeliveryPossible) {
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt,
+						agentlaunch.RedactError(errors.Join(err, recoveryErr), in.project.Config.Env))
+				}
+				controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
+				workspaceDestroyed := false
+				if controllerStopped {
+					cleanupCtx, cancel := spawnRollbackContext(ctx)
+					releaseErr := m.markTrackerIntakeCapacityReleasedAfterControllerStop(cleanupCtx, id)
+					cancel()
+					if releaseErr != nil {
+						err = errors.Join(err, releaseErr)
+						return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt,
+							agentlaunch.RedactError(err, in.project.Config.Env))
+					}
+					workspaceDestroyed = m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
+				}
+				if !controllerStopped || !workspaceDestroyed {
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
+				}
+				if confirmErr := m.confirmTrackerIntakeCleanup(ctx, id); confirmErr != nil {
+					err = errors.Join(err, confirmErr)
+					return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
+				}
+				m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
+				if releaseErr := m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id); releaseErr != nil {
+					err = errors.Join(err, releaseErr)
+				}
+				return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
+			}
 			m.stopChatAfterSpawnFailure(ctx, id)
 			m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
 			m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
@@ -433,22 +544,24 @@ func (m *Manager) aoMCPServers(ctx context.Context, harness domain.AgentHarness,
 	}}
 }
 
-func (m *Manager) stopChatAfterSpawnFailure(ctx context.Context, id domain.SessionID) {
+func (m *Manager) stopChatAfterSpawnFailure(ctx context.Context, id domain.SessionID) bool {
 	cleanupCtx, cancel := spawnRollbackContext(ctx)
 	defer cancel()
-	m.stopChatBestEffort(cleanupCtx, id)
+	return m.stopChatBestEffort(cleanupCtx, id)
 }
 
 // stopChatBestEffort closes a controller during rollback. A failure here is
 // logged rather than returned: the spawn is already failing, and the caller's
 // error is the one worth surfacing.
-func (m *Manager) stopChatBestEffort(ctx context.Context, id domain.SessionID) {
+func (m *Manager) stopChatBestEffort(ctx context.Context, id domain.SessionID) bool {
 	if m.chat == nil {
-		return
+		return true
 	}
 	if err := m.chat.StopChat(ctx, id); err != nil {
 		m.logger.Warn("spawn rollback: close chat controller", "sessionID", id, "error", err)
+		return false
 	}
+	return true
 }
 
 // sendChat routes an outbound message into a chat session's conversation.
@@ -668,6 +781,17 @@ func (m *Manager) resumeChatController(
 		target := awakeTargets[0]
 		awakeTarget = &target
 	}
+	var trackerReservation domain.TrackerIntakeRecoveryReservation
+	var trackerPending bool
+	var beforeProviderStart func(context.Context) error
+	if !reconnectOnly {
+		controllerGeneration, trackerReservation, trackerPending, beforeProviderStart, err = m.prepareTrackerIntakeChatRelaunch(
+			ctx, rec.ID, ws, controllerGeneration,
+		)
+		if err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake controller fence", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
+		}
+	}
 	var completionErr error
 	_, err = m.chat.StartChat(ctx, ChatStart{
 		AwakeReconnectTarget:    awakeTarget,
@@ -686,6 +810,7 @@ func (m *Manager) resumeChatController(
 		AdditionalDirectories:   additionalDirectories,
 		MCPServers:              m.aoMCPServers(ctx, rec.Harness, env),
 		ExpectedControllerOwner: rec.ControllerOwner(),
+		BeforeProviderStart:     beforeProviderStart,
 		PrepareControllerEnv: func(launchCtx context.Context, expected domain.SessionControllerOwner) (map[string]string, error) {
 			if preparedImportEnv {
 				// The import preparer already saw this resolved environment. Only
@@ -792,6 +917,15 @@ func (m *Manager) resumeChatController(
 		}
 		m.requireChatLogin(ctx, rec.ID, err)
 		return RestoreResult{}, relaunchFailed("chat start", fmt.Errorf("%s %s: resume chat: %w", operation, rec.ID, agentlaunch.RedactError(err, project.Config.Env)))
+	}
+	if trackerPending {
+		if trackerReservation.DeliveryPossible {
+			if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+				return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: commit resumed tracker intake claim: %w", operation, rec.ID, err))
+			}
+		} else if err := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: publish resumed tracker intake owner: %w", operation, rec.ID, err))
+		}
 	}
 
 	restored, err := m.getRecord(ctx, rec.ID)

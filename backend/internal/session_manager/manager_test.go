@@ -87,6 +87,7 @@ func TestValidateSpawnContractRejectsIncompleteOrNonWorkerContracts(t *testing.T
 		{name: "orchestrator", cfg: ports.SpawnConfig{Kind: domain.KindOrchestrator, Goal: "Ship it", Timebox: time.Hour}},
 		{name: "standalone", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: "Ship it", Timebox: time.Hour}},
 		{name: "overlong goal", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: strings.Repeat("x", 1001), Timebox: time.Hour}},
+		{name: "async tracker intake", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Async: true, TrackerIntakeLimits: &domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := validateSpawnContract(tc.cfg); err == nil {
@@ -104,6 +105,7 @@ func TestValidateSpawnContractRejectsIncompleteOrNonWorkerContracts(t *testing.T
 
 type fakeStore struct {
 	cleanupMu                          sync.Mutex
+	trackerIntakeMu                    sync.RWMutex
 	cleanupFacts                       map[domain.SessionID]domain.SessionCleanupRecord
 	sessions                           map[domain.SessionID]domain.SessionRecord
 	pr                                 map[domain.SessionID]domain.PRFacts
@@ -121,8 +123,17 @@ type fakeStore struct {
 	updateBrowserCapabilityVerifierErr error
 	deletePrepErr                      error
 
-	createClientRequestErr error
-	promoteTaskErr         error
+	createClientRequestErr                         error
+	promoteTaskErr                                 error
+	trackerIntakePending                           map[string]domain.SessionID
+	trackerIntakeHandled                           map[string]domain.SessionID
+	trackerIntakeRecovery                          map[domain.SessionID]domain.TrackerIntakeRecoveryReservation
+	trackerIntakeReleaseErr                        error
+	trackerIntakeCommitStoppedErr                  error
+	trackerIntakeRecoveryErr                       error
+	trackerIntakeRecoveryHook                      func(domain.SessionID)
+	trackerIntakeCleanupConfirmedBeforeTermination bool
+	trackerIntakeLimits                            []domain.AutomatedSessionLimits
 	// worktrees maps session ID to its saved worktree rows (shutdown-saved marker).
 	worktrees map[domain.SessionID][]domain.SessionWorktreeRecord
 	// sharedLog, when non-nil, receives an ordered call entry for each
@@ -138,12 +149,15 @@ func (s *fakeStore) RequireSessionLogin(_ context.Context, id domain.SessionID, 
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		sessions:      map[domain.SessionID]domain.SessionRecord{},
-		pr:            map[domain.SessionID]domain.PRFacts{},
-		projects:      map[string]domain.ProjectRecord{},
-		conversations: map[domain.SessionID]domain.ConversationRecord{},
-		workspaceRepo: map[string][]domain.WorkspaceRepoRecord{},
-		worktrees:     map[domain.SessionID][]domain.SessionWorktreeRecord{},
+		sessions:              map[domain.SessionID]domain.SessionRecord{},
+		pr:                    map[domain.SessionID]domain.PRFacts{},
+		projects:              map[string]domain.ProjectRecord{},
+		conversations:         map[domain.SessionID]domain.ConversationRecord{},
+		workspaceRepo:         map[string][]domain.WorkspaceRepoRecord{},
+		worktrees:             map[domain.SessionID][]domain.SessionWorktreeRecord{},
+		trackerIntakePending:  map[string]domain.SessionID{},
+		trackerIntakeHandled:  map[string]domain.SessionID{},
+		trackerIntakeRecovery: map[domain.SessionID]domain.TrackerIntakeRecoveryReservation{},
 	}
 }
 func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
@@ -165,6 +179,148 @@ func (f *fakeStore) CreateSession(_ context.Context, rec domain.SessionRecord) (
 	rec.ID = domain.SessionID(fmt.Sprintf("%s-%d", prefix, f.num))
 	f.sessions[rec.ID] = rec
 	return rec, nil
+}
+func (f *fakeStore) CreateTrackerIntakeSession(ctx context.Context, rec domain.SessionRecord, limits domain.AutomatedSessionLimits) (domain.SessionRecord, error) {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
+	f.trackerIntakeLimits = append(f.trackerIntakeLimits, limits)
+	key := string(rec.ProjectID) + "\x00" + string(rec.IssueID)
+	if f.trackerIntakePending[key] != "" {
+		return domain.SessionRecord{}, ports.ErrTrackerIntakeActive
+	}
+	if f.trackerIntakeHandled[key] != "" {
+		return domain.SessionRecord{}, ports.ErrTrackerIntakeHandled
+	}
+	created, err := f.CreateSession(ctx, rec)
+	if err == nil {
+		f.trackerIntakePending[key] = created.ID
+	}
+	return created, err
+}
+func (f *fakeStore) CommitTrackerIntakeSession(_ context.Context, id domain.SessionID, _ time.Time) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
+	for key, pendingID := range f.trackerIntakePending {
+		if pendingID == id {
+			delete(f.trackerIntakePending, key)
+			delete(f.trackerIntakeRecovery, id)
+			f.trackerIntakeHandled[key] = id
+			return nil
+		}
+	}
+	return fmt.Errorf("tracker intake session %s is missing", id)
+}
+
+func (f *fakeStore) CommitStoppedTrackerIntakeSession(_ context.Context, id domain.SessionID, _ time.Time) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
+	if f.trackerIntakeCommitStoppedErr != nil {
+		return f.trackerIntakeCommitStoppedErr
+	}
+	for key, pendingID := range f.trackerIntakePending {
+		if pendingID == id {
+			reservation := f.trackerIntakeRecovery[id]
+			reservation.CapacityReleased = true
+			if rec, found := f.sessions[id]; found {
+				reservation.ReleasedRuntimeLaunchID = rec.Metadata.RuntimeLaunchID
+				reservation.ReleasedControllerGeneration = rec.Metadata.ControllerGeneration
+			}
+			f.trackerIntakeRecovery[id] = reservation
+			delete(f.trackerIntakePending, key)
+			f.trackerIntakeHandled[key] = id
+			return nil
+		}
+	}
+	return fmt.Errorf("tracker intake session %s is missing", id)
+}
+
+func (f *fakeStore) ReserveTrackerIntakeRecovery(_ context.Context, id domain.SessionID, reservation domain.TrackerIntakeRecoveryReservation) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
+	for _, pendingID := range f.trackerIntakePending {
+		if pendingID == id {
+			if reservation.CleanupConfirmed {
+				rec := f.sessions[id]
+				f.trackerIntakeCleanupConfirmedBeforeTermination = !rec.IsTerminated
+			}
+			f.trackerIntakeRecovery[id] = reservation
+			return nil
+		}
+	}
+	return fmt.Errorf("tracker intake session %s is not pending", id)
+}
+
+func (f *fakeStore) GetPendingTrackerIntakeRecovery(_ context.Context, id domain.SessionID) (domain.TrackerIntakeRecoveryReservation, bool, error) {
+	if f.trackerIntakeRecoveryHook != nil {
+		f.trackerIntakeRecoveryHook(id)
+	}
+	if f.trackerIntakeRecoveryErr != nil {
+		return domain.TrackerIntakeRecoveryReservation{}, false, f.trackerIntakeRecoveryErr
+	}
+	f.trackerIntakeMu.RLock()
+	defer f.trackerIntakeMu.RUnlock()
+	for _, pendingID := range f.trackerIntakePending {
+		if pendingID == id {
+			return f.trackerIntakeRecovery[id], true, nil
+		}
+	}
+	return domain.TrackerIntakeRecoveryReservation{}, false, nil
+}
+func (f *fakeStore) ListPendingTrackerIntakeClaims(_ context.Context) ([]domain.TrackerIntakePendingClaim, error) {
+	f.trackerIntakeMu.RLock()
+	defer f.trackerIntakeMu.RUnlock()
+	claims := make([]domain.TrackerIntakePendingClaim, 0, len(f.trackerIntakePending))
+	for key, id := range f.trackerIntakePending {
+		project, issue, _ := strings.Cut(key, "\x00")
+		claims = append(claims, domain.TrackerIntakePendingClaim{
+			ProjectID: domain.ProjectID(project), IssueID: domain.IssueID(issue), SessionID: id,
+			Recovery: f.trackerIntakeRecovery[id],
+		})
+	}
+	return claims, nil
+}
+func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.SessionID, _ time.Time) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
+	rec, exists := f.sessions[id]
+	for key, pendingID := range f.trackerIntakePending {
+		if pendingID != id {
+			continue
+		}
+		reservation := f.trackerIntakeRecovery[id]
+		if reservation.CleanupConfirmed && reservation.DeliveryPossible {
+			delete(f.trackerIntakePending, key)
+			delete(f.trackerIntakeRecovery, id)
+			f.trackerIntakeHandled[key] = id
+			return nil
+		}
+		needsFence := reservation.DeliveryPossible || reservation.ControllerPossible ||
+			reservation.WorkspacePath != "" || len(reservation.RuntimeHandleIDs) != 0
+		externalEffect := rec.Metadata.WorkspacePath != "" || rec.Metadata.RuntimeHandleID != "" || rec.Metadata.AgentSessionID != "" ||
+			rec.Metadata.ProviderConversationID != "" || rec.Metadata.ControllerGeneration != "" || rec.Metadata.NativeTranscriptPath != ""
+		if (!exists && (reservation.CleanupConfirmed || !needsFence)) ||
+			(exists && rec.IsTerminated && (reservation.CleanupConfirmed || !externalEffect && !needsFence)) {
+			delete(f.trackerIntakePending, key)
+			delete(f.trackerIntakeRecovery, id)
+			return nil
+		}
+		return nil
+	}
+	return nil
+}
+func (f *fakeStore) ReleaseTrackerIntakeSession(_ context.Context, id domain.SessionID) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
+	if f.trackerIntakeReleaseErr != nil {
+		return f.trackerIntakeReleaseErr
+	}
+	for key, pendingID := range f.trackerIntakePending {
+		if pendingID == id {
+			delete(f.trackerIntakePending, key)
+			delete(f.trackerIntakeRecovery, id)
+		}
+	}
+	return nil
 }
 func (f *fakeStore) CreateAutomationSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error) {
 	for _, existing := range f.sessions {
@@ -529,7 +685,8 @@ type fakeLCM struct {
 	cancelled      []string
 	chatBoundaries []domain.ConversationBranch
 	// terminated counts MarkTerminated calls per session id.
-	terminated map[domain.SessionID]int
+	terminated     map[domain.SessionID]int
+	markSpawnedErr error
 }
 
 func (l *fakeLCM) PrepareLaunch(id domain.SessionID, launchID string) error {
@@ -544,6 +701,9 @@ func (l *fakeLCM) ReleaseLaunch(id domain.SessionID, launchID string) {
 }
 func (l *fakeLCM) MarkSpawned(_ context.Context, id domain.SessionID, metadata domain.SessionMetadata) error {
 	l.completed++
+	if l.markSpawnedErr != nil {
+		return l.markSpawnedErr
+	}
 	rec := l.store.sessions[id]
 	rec.IsTerminated = false
 	rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: time.Now()}
@@ -717,6 +877,7 @@ type fakeRuntime struct {
 	createErr          error
 	createErrSequence  []error
 	createIDs          []string
+	onCreate           func()
 	destroyErr         error
 	destroyErrSequence []error
 	onDestroy          func(call int, handle ports.RuntimeHandle)
@@ -739,11 +900,28 @@ type fakeRuntime struct {
 	supervisedSequence      []bool
 	// exitedLaunches marks launches whose managed agent child is gone even
 	// though the pane (aliveByHandle) survives, as the strict probe reports it.
-	exitedLaunches map[string]bool
-	destroyedIDs   []string
-	fencedResult   ports.FencedProbeResult
-	fencedRefs     []ports.FencedRuntimeRef
+	exitedLaunches   map[string]bool
+	destroyedIDs     []string
+	fencedResult     ports.FencedProbeResult
+	fencedResults    map[string]ports.FencedProbeResult
+	fencedMu         sync.Mutex
+	fencedRefs       []ports.FencedRuntimeRef
+	onFencedProbe    func(ports.FencedRuntimeRef, ports.FencedProbeResult)
+	launchCandidates []ports.RuntimeHandle
 }
+
+type fakeRuntimeEffectError struct {
+	err     error
+	handle  ports.RuntimeHandle
+	effect  ports.RuntimeEffectOutcome
+	cleanup ports.RuntimeCleanupOutcome
+}
+
+func (e fakeRuntimeEffectError) Error() string                               { return e.err.Error() }
+func (e fakeRuntimeEffectError) Unwrap() error                               { return e.err }
+func (e fakeRuntimeEffectError) PossibleHandle() ports.RuntimeHandle         { return e.handle }
+func (e fakeRuntimeEffectError) EffectOutcome() ports.RuntimeEffectOutcome   { return e.effect }
+func (e fakeRuntimeEffectError) CleanupOutcome() ports.RuntimeCleanupOutcome { return e.cleanup }
 
 func (r *fakeRuntime) Interrupt(_ context.Context, handle ports.RuntimeHandle) error {
 	r.interrupts = append(r.interrupts, handle.ID)
@@ -850,6 +1028,9 @@ func (r *blockingRestartRuntime) Destroy(ctx context.Context, handle ports.Runti
 }
 
 func (r *fakeRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
+	if r.onCreate != nil {
+		r.onCreate()
+	}
 	createErr := r.createErr
 	if len(r.createErrSequence) > 0 {
 		createErr = r.createErrSequence[0]
@@ -871,6 +1052,17 @@ func (r *fakeRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.
 	}
 	r.aliveByHandle[handle.ID] = true
 	return handle, nil
+}
+
+func (r *fakeRuntime) LaunchCandidates(cfg ports.RuntimeConfig) ([]ports.RuntimeHandle, error) {
+	if len(r.launchCandidates) != 0 {
+		return append([]ports.RuntimeHandle(nil), r.launchCandidates...), nil
+	}
+	handleID := "h1"
+	if len(r.createIDs) > 0 {
+		handleID = r.createIDs[0]
+	}
+	return []ports.RuntimeHandle{{ID: handleID}}, nil
 }
 func (r *fakeRuntime) Destroy(_ context.Context, handle ports.RuntimeHandle) error {
 	call := r.destroyed
@@ -919,8 +1111,19 @@ func (r *fakeRuntime) IsExactSupervisedProcessAlive(ctx context.Context, handle 
 	return r.IsSupervisedProcessAlive(ctx, handle, ref)
 }
 func (r *fakeRuntime) ProbeFencedRuntime(ctx context.Context, ref ports.FencedRuntimeRef) ports.FencedProbeResult {
+	r.fencedMu.Lock()
 	r.fencedRefs = append(r.fencedRefs, ref)
+	r.fencedMu.Unlock()
+	if result, ok := r.fencedResults[ref.Handle.ID]; ok {
+		if r.onFencedProbe != nil {
+			r.onFencedProbe(ref, result)
+		}
+		return result
+	}
 	if r.fencedResult.Liveness != "" {
+		if r.onFencedProbe != nil {
+			r.onFencedProbe(ref, r.fencedResult)
+		}
 		return r.fencedResult
 	}
 	if r.aliveErr != nil || r.supervisedErr != nil {
@@ -934,9 +1137,17 @@ func (r *fakeRuntime) ProbeFencedRuntime(ctx context.Context, ref ports.FencedRu
 		return ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
 	}
 	if alive {
-		return ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
+		result := ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
+		if r.onFencedProbe != nil {
+			r.onFencedProbe(ref, result)
+		}
+		return result
 	}
-	return ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	result := ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	if r.onFencedProbe != nil {
+		r.onFencedProbe(ref, result)
+	}
+	return result
 }
 func (r *fakeRuntime) GetOutput(_ context.Context, _ ports.RuntimeHandle, _ int) (string, error) {
 	r.outputCalls++
@@ -1132,6 +1343,18 @@ func (a readinessAgent) PromptReadinessHints(context.Context, ports.LaunchConfig
 	return a.hints, nil
 }
 
+type readinessHookAgent struct {
+	afterStartAgent
+	hook func()
+}
+
+func (a *readinessHookAgent) PromptReadinessHints(context.Context, ports.LaunchConfig) (ports.PromptReadinessHints, error) {
+	if a.hook != nil {
+		a.hook()
+	}
+	return ports.PromptReadinessHints{}, nil
+}
+
 type composedAfterStartAgent struct {
 	afterStartAgent
 	buildCalls int
@@ -1304,12 +1527,13 @@ type fakeWorkspace struct {
 	destroyCtxErr error
 	// destroyHook runs at the top of Destroy, so a test can make teardown burn
 	// real time against Kill's budget.
-	destroyHook func()
-	fetchErr    error
-	fetches     []fetchDefaultBranchCall
-	resolves    []resolveDefaultBranchCall
-	resolved    map[string]ports.WorkspaceDefaultBranch
-	fetchFunc   func(context.Context, string, ports.WorkspaceDefaultBranch) error
+	destroyHook     func()
+	destroyInfoHook func(ports.WorkspaceInfo)
+	fetchErr        error
+	fetches         []fetchDefaultBranchCall
+	resolves        []resolveDefaultBranchCall
+	resolved        map[string]ports.WorkspaceDefaultBranch
+	fetchFunc       func(context.Context, string, ports.WorkspaceDefaultBranch) error
 	// createRepoPath, when set, is returned as the RepoPath of a single-repo
 	// Create so tests can assert it survives the spawn->teardown metadata round
 	// trip (production Create resolves this path; the zero default keeps every
@@ -1395,9 +1619,6 @@ func (w *fakeWorkspace) FetchDefaultBranch(ctx context.Context, repoPath string,
 
 func (w *fakeWorkspace) Create(_ context.Context, cfg ports.WorkspaceConfig) (ports.WorkspaceInfo, error) {
 	w.createCount++
-	if w.createErr != nil {
-		return ports.WorkspaceInfo{}, w.createErr
-	}
 	if w.sharedLog != nil {
 		*w.sharedLog = append(*w.sharedLog, "Create")
 	}
@@ -1410,12 +1631,18 @@ func (w *fakeWorkspace) Create(_ context.Context, cfg ports.WorkspaceConfig) (po
 	if baseRef == "" {
 		baseRef = cfg.BaseBranch
 	}
-	return ports.WorkspaceInfo{Path: path, Branch: cfg.Branch, BaseRef: baseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: w.createRepoPath}, nil
+	info := ports.WorkspaceInfo{Path: path, Branch: cfg.Branch, BaseRef: baseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: w.createRepoPath}
+	if cfg.BeforeCreate != nil {
+		if err := cfg.BeforeCreate(info); err != nil {
+			return ports.WorkspaceInfo{}, err
+		}
+	}
+	if w.createErr != nil {
+		return ports.WorkspaceInfo{}, w.createErr
+	}
+	return info, nil
 }
 func (w *fakeWorkspace) CreateWorkspaceProject(_ context.Context, cfg ports.WorkspaceProjectConfig) (ports.WorkspaceProjectInfo, error) {
-	if w.projectErr != nil {
-		return ports.WorkspaceProjectInfo{}, w.projectErr
-	}
 	w.lastProjectCfg = cfg
 	if len(w.projectCreateInfo.Worktrees) > 0 {
 		return w.projectCreateInfo, nil
@@ -1430,6 +1657,14 @@ func (w *fakeWorkspace) CreateWorkspaceProject(_ context.Context, cfg ports.Work
 		rootBaseRef = "refs/remotes/origin/main"
 	}
 	root := ports.WorkspaceInfo{Path: rootPath, Branch: branch, BaseRef: rootBaseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID}
+	if cfg.BeforeCreate != nil {
+		if err := cfg.BeforeCreate(root); err != nil {
+			return ports.WorkspaceProjectInfo{}, err
+		}
+	}
+	if w.projectErr != nil {
+		return ports.WorkspaceProjectInfo{}, w.projectErr
+	}
 	out := ports.WorkspaceProjectInfo{
 		Root: root,
 		Worktrees: []ports.WorkspaceRepoInfo{{
@@ -1460,6 +1695,9 @@ func (w *fakeWorkspace) CreateWorkspaceProject(_ context.Context, cfg ports.Work
 }
 func (w *fakeWorkspace) Destroy(ctx context.Context, info ports.WorkspaceInfo) error {
 	w.lastDestroyInfo = info
+	if w.destroyInfoHook != nil {
+		w.destroyInfoHook(info)
+	}
 	if w.destroyHook != nil {
 		w.destroyHook()
 	}
@@ -2792,6 +3030,1165 @@ func TestSpawnAutomationAdoptsOnlyCompletedLaunch(t *testing.T) {
 	}
 }
 
+func TestSpawnTrackerIntakeFailedLaunchCanRetryAndSuccessfulLaunchCommits(t *testing.T) {
+	m, st, rt, _ := newManager()
+	rt.createErr = errors.New("runtime unavailable")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID:           "mer",
+		IssueID:             "github:acme/mer#12",
+		Kind:                domain.KindWorker,
+		Harness:             domain.HarnessClaudeCode,
+		Prompt:              "do it",
+		TrackerIntakeLimits: &limits,
+	}
+	_, _, _, err := m.Spawn(ctx, cfg)
+	if err == nil {
+		t.Fatal("Spawn() error = nil, want runtime failure")
+	}
+	if _, ok := st.sessions["mer-1"]; ok {
+		t.Fatal("failed launch left its seed session behind")
+	}
+	if got := st.trackerIntakePending["mer\x00github:acme/mer#12"]; got != "" {
+		t.Fatalf("pending intake claim = %q after confirmed rollback, want released", got)
+	}
+	if got := st.trackerIntakeHandled["mer\x00github:acme/mer#12"]; got != "" {
+		t.Fatalf("intake proof = %q after failed launch, want none", got)
+	}
+	if len(st.trackerIntakeLimits) != 1 || st.trackerIntakeLimits[0] != limits {
+		t.Fatalf("atomic-admission limits = %+v, want %+v", st.trackerIntakeLimits, limits)
+	}
+
+	rt.createErr = nil
+	created, _, _, err := m.Spawn(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Spawn(retry): %v", err)
+	}
+	if got := st.trackerIntakeHandled["mer\x00github:acme/mer#12"]; got != created.ID {
+		t.Fatalf("intake proof = %q, want successful retry %q", got, created.ID)
+	}
+}
+
+func TestSpawnTrackerIntakeAmbiguousInCommandDeliveryRemainsFencedAfterRuntimeDies(t *testing.T) {
+	m, st, rt, _ := newManager()
+	lcm := lifecycle.New(&transitionLifecycleStore{transitionStore: &transitionStore{fakeStore: st}}, nil)
+	m.lcm = lcm
+	lcm.SetSessionOperationGate(m)
+	old := time.Now().Add(-2 * time.Minute)
+	m.clock = func() time.Time { return old }
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID:           "mer",
+		IssueID:             "github:acme/mer#12",
+		Kind:                domain.KindWorker,
+		Harness:             domain.HarnessClaudeCode,
+		Prompt:              "do it",
+		TrackerIntakeLimits: &limits,
+	}
+	rt.aliveByHandle = map[string]bool{"partial-runtime": true}
+	rt.createErr = fakeRuntimeEffectError{
+		err:     errors.New("runtime response lost and cleanup failed"),
+		handle:  ports.RuntimeHandle{ID: "partial-runtime"},
+		effect:  ports.RuntimeEffectPossible,
+		cleanup: ports.RuntimeCleanupFailed,
+	}
+	rt.onCreate = func() {
+		if !m.SessionObservationInProgress("mer-1") {
+			t.Fatal("new tracker intake claim was not fenced before runtime creation")
+		}
+		if err := lcm.ApplyRuntimeObservation(context.Background(), "mer-1", ports.RuntimeFacts{
+			Runtime: ports.ProbeDead, Workload: ports.ProbeFailed,
+		}); err != nil {
+			t.Fatalf("runtime observation during spawn: %v", err)
+		}
+		if st.sessions["mer-1"].IsTerminated {
+			t.Fatal("runtime observation terminated a newly pending tracker intake owner")
+		}
+	}
+
+	_, _, _, err := m.Spawn(ctx, cfg)
+	if err == nil {
+		t.Fatal("Spawn() error = nil, want uncertain runtime failure")
+	}
+	rec, ok := st.sessions["mer-1"]
+	if !ok {
+		t.Fatal("uncertain runtime lost its session ownership row")
+	}
+	if rec.Metadata.RuntimeHandleID != "partial-runtime" || rec.Metadata.RuntimeLaunchID == "" {
+		t.Fatalf("uncertain runtime evidence = handle %q launch %q", rec.Metadata.RuntimeHandleID, rec.Metadata.RuntimeLaunchID)
+	}
+	key := "mer\x00github:acme/mer#12"
+	if got := st.trackerIntakePending[key]; got != rec.ID {
+		t.Fatalf("pending intake claim = %q, want %q", got, rec.ID)
+	}
+	if got := st.trackerIntakeHandled[key]; got != "" {
+		t.Fatalf("uncertain runtime was marked handled by metadata: %q", got)
+	}
+	if !m.SessionObservationInProgress(rec.ID) {
+		t.Fatal("uncertain tracker intake owner lost its reaper fence after Spawn returned")
+	}
+	if _, _, _, err := m.Spawn(ctx, cfg); !errors.Is(err, ports.ErrTrackerIntakeActive) {
+		t.Fatalf("Spawn(while uncertain) error = %v, want ErrTrackerIntakeActive", err)
+	}
+
+	// The prompt was part of the runtime create command, so a possible create
+	// effect also means possible delivery. Exact runtime death frees capacity and
+	// cleanup can finish, but the issue remains durably handled so it is never
+	// replayed after arbitrary external work may have occurred.
+	rt.createErr = nil
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile(restart): %v", err)
+	}
+	if err := m.WaitBackgroundWorkers(context.Background()); err != nil {
+		t.Fatalf("WaitBackgroundWorkers(): %v", err)
+	}
+	if got := st.trackerIntakePending[key]; got != "" {
+		t.Fatalf("pending claim after exact dead proof = %q, want settled", got)
+	}
+	if got := st.trackerIntakeHandled[key]; got != rec.ID {
+		t.Fatalf("handled claim after exact dead proof = %q, want fenced owner %q", got, rec.ID)
+	}
+	if m.SessionObservationInProgress(rec.ID) {
+		t.Fatal("settled tracker intake owner retained its reaper fence")
+	}
+	if _, _, _, err := m.Spawn(ctx, cfg); !errors.Is(err, ports.ErrTrackerIntakeHandled) {
+		t.Fatalf("Spawn(retry after dead proof) error = %v, want ErrTrackerIntakeHandled", err)
+	}
+}
+
+func TestSpawnTrackerIntakePossibleInCommandDeliveryStaysHandledAfterSuccessfulRuntimeCleanup(t *testing.T) {
+	m, st, rt, ws := newManager()
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID: "mer", IssueID: "github:acme/mer#91", Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "do it", TrackerIntakeLimits: &limits,
+	}
+	rt.createErr = fakeRuntimeEffectError{
+		err: errors.New("runtime registry write failed after process start"), handle: ports.RuntimeHandle{ID: "partial-runtime"},
+		effect: ports.RuntimeEffectPossible, cleanup: ports.RuntimeCleanupSucceeded,
+	}
+
+	if _, _, _, err := m.Spawn(context.Background(), cfg); err == nil {
+		t.Fatal("Spawn() error = nil, want runtime create failure")
+	}
+	key := "mer\x00github:acme/mer#91"
+	if got := st.trackerIntakePending[key]; got != "" {
+		t.Fatalf("pending claim = %q, want settled no-replay claim", got)
+	}
+	if got := st.trackerIntakeHandled[key]; got != "mer-1" {
+		t.Fatalf("handled claim = %q, want possible delivery owned by mer-1", got)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 1 {
+		t.Fatalf("cleanup calls runtime/workspace = %d/%d, want adapter-cleaned runtime and one workspace cleanup", rt.destroyed, ws.destroyed)
+	}
+	if _, _, _, err := m.Spawn(context.Background(), cfg); !errors.Is(err, ports.ErrTrackerIntakeHandled) {
+		t.Fatalf("Spawn(retry) error = %v, want ErrTrackerIntakeHandled", err)
+	}
+}
+
+func TestSpawnTrackerIntakeSuccessfulRuntimeBeforeCommitWaitsForDeadProofAfterFailedCleanup(t *testing.T) {
+	m, st, rt, _ := newManager()
+	lcm := &fakeLCM{store: st, markSpawnedErr: errors.New("session commit unavailable")}
+	m.lcm = lcm
+	rt.createIDs = []string{"created-runtime"}
+	rt.destroyErr = errors.New("runtime cleanup failed")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID:           "mer",
+		IssueID:             "github:acme/mer#13",
+		Kind:                domain.KindWorker,
+		Harness:             domain.HarnessClaudeCode,
+		Prompt:              "do it",
+		TrackerIntakeLimits: &limits,
+	}
+
+	_, _, _, err := m.Spawn(ctx, cfg)
+	if !errors.Is(err, lcm.markSpawnedErr) {
+		t.Fatalf("Spawn() error = %v, want session commit failure", err)
+	}
+	rec, ok := st.sessions["mer-1"]
+	if !ok || rec.IsTerminated {
+		t.Fatalf("unresolved post-create session = %+v, %t; want live fenced row", rec, ok)
+	}
+	reservation := st.trackerIntakeRecovery[rec.ID]
+	if reservation.RuntimeLaunchID == "" || fmt.Sprint(reservation.RuntimeHandleIDs) != "[created-runtime]" || !reservation.DeliveryPossible {
+		t.Fatalf("durable runtime reservation = %+v", reservation)
+	}
+	if rt.destroyed != 0 {
+		t.Fatalf("runtime cleanup calls = %d, want none after in-command delivery became possible", rt.destroyed)
+	}
+	key := "mer\x00github:acme/mer#13"
+	if got := st.trackerIntakePending[key]; got != rec.ID {
+		t.Fatalf("pending intake claim = %q, want %q", got, rec.ID)
+	}
+
+	// Once the row is terminated, claim recovery probes exact ownership. An
+	// inconclusive probe reports a retryable recovery error while preserving the
+	// claim, so intake cannot duplicate arbitrary external effects.
+	rec.IsTerminated = true
+	st.sessions[rec.ID] = rec
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+	if err := m.ReconcileTrackerIntakeClaims(ctx); err == nil || !strings.Contains(err.Error(), "remains unresolved") {
+		t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want unresolved ownership", err)
+	}
+	if got := st.trackerIntakePending[key]; got != rec.ID {
+		t.Fatalf("pending claim after unknown probe = %q, want %q", got, rec.ID)
+	}
+	if len(rt.fencedRefs) != 1 {
+		t.Fatalf("runtime probes = %+v, want one exact ownership probe", rt.fencedRefs)
+	}
+}
+
+func TestSpawnTrackerIntakeSuccessfulCreateNarrowsRecoveryToReturnedHandle(t *testing.T) {
+	m, st, rt, _ := newManager()
+	lcm := &fakeLCM{store: st, markSpawnedErr: errors.New("session commit unavailable")}
+	m.lcm = lcm
+	rt.createIDs = []string{"ptyhost-v1:mer-1"}
+	rt.launchCandidates = []ports.RuntimeHandle{{ID: "ptyhost-v1:mer-1"}, {ID: "mer-1"}}
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", IssueID: "github:acme/mer#88", Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "do it", TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, lcm.markSpawnedErr) {
+		t.Fatalf("Spawn() error = %v, want commit failure", err)
+	}
+	id := st.trackerIntakePending["mer\x00github:acme/mer#88"]
+	reservation := st.trackerIntakeRecovery[id]
+	if got := fmt.Sprint(reservation.RuntimeHandleIDs); got != "[ptyhost-v1:mer-1]" {
+		t.Fatalf("runtime handles after successful create = %s, want only returned backend handle", got)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsRecoversMissingAndTerminatedOwners(t *testing.T) {
+	m, st, rt, ws := newManager()
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	for _, tc := range []struct {
+		id         domain.SessionID
+		terminated bool
+	}{
+		{id: "missing-owner"},
+		{id: "terminated-owner", terminated: true},
+	} {
+		key := "mer\x00github:acme/mer#" + string(tc.id)
+		st.trackerIntakePending[key] = tc.id
+		st.trackerIntakeRecovery[tc.id] = domain.TrackerIntakeRecoveryReservation{
+			Branch:            "ao/" + string(tc.id) + "/root",
+			WorkspacePath:     "/ws/" + string(tc.id),
+			WorkspaceRepoPath: "/repo/mer",
+			RuntimeLaunchID:   "launch-" + string(tc.id),
+			RuntimeHandleIDs:  []string{"runtime-" + string(tc.id)},
+		}
+		if tc.terminated {
+			st.sessions[tc.id] = domain.SessionRecord{
+				ID: tc.id, ProjectID: "mer", IssueID: domain.IssueID(strings.TrimPrefix(key, "mer\x00")),
+				Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode, IsTerminated: true,
+			}
+		}
+	}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(st.trackerIntakePending) != 0 {
+		t.Fatalf("pending claims = %+v, want both released after exact cleanup", st.trackerIntakePending)
+	}
+	if len(rt.fencedRefs) != 2 {
+		t.Fatalf("runtime probes = %+v, want missing and terminated claims probed", rt.fencedRefs)
+	}
+	if ws.destroyed != 2 {
+		t.Fatalf("workspace cleanup calls = %d, want 2", ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsSettlesPossibleDeliveryAfterTermination(t *testing.T) {
+	m, st, rt, ws := newManager()
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	id := domain.SessionID("terminated-delivery")
+	key := "mer\x00github:acme/mer#99"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-delivery", RuntimeLaunchID: "launch-99",
+		RuntimeHandleIDs: []string{"runtime-99"}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#99", IsTerminated: true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if got := st.trackerIntakePending[key]; got != "" {
+		t.Fatalf("pending delivery claim = %q, want promoted handled claim", got)
+	}
+	if got := st.trackerIntakeHandled[key]; got != id {
+		t.Fatalf("handled delivery claim = %q, want %q", got, id)
+	}
+	if len(rt.fencedRefs) == 0 || rt.destroyed != 0 || ws.destroyed != 1 {
+		t.Fatalf("settled delivery cleanup: probes=%+v runtimeDestroy=%d workspaceDestroy=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsAdoptsReservedRuntime(t *testing.T) {
+	m, st, rt, ws := newManager()
+	lcm := &fakeLCM{store: st}
+	m.lcm = lcm
+	m.runBackground = func(work func()) { work() }
+	id := domain.SessionID("reserved-runtime")
+	key := "mer\x00github:acme/mer#101"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: "ao/reserved-runtime/root", WorkspacePath: "/ws/reserved-runtime",
+		RuntimeLaunchID: "launch-101", RuntimeHandleIDs: []string{"runtime-101"}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#101", Kind: domain.KindWorker}
+	rt.aliveByHandle = map[string]bool{"runtime-101": true}
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground(): %v", err)
+	}
+	got := st.sessions[id]
+	if lcm.completed != 1 || got.Metadata.RuntimeHandleID != "runtime-101" ||
+		got.Metadata.RuntimeLaunchID != "launch-101" || got.Metadata.WorkspacePath != "/ws/reserved-runtime" {
+		t.Fatalf("adopted runtime = %+v, completed=%d", got.Metadata, lcm.completed)
+	}
+	if st.trackerIntakePending[key] != id {
+		t.Fatal("adoption released no-replay claim")
+	}
+	if len(rt.fencedRefs) != 1 || rt.destroyed != 0 || ws.destroyed != 0 {
+		t.Fatalf("live possible delivery was torn down: probes=%v runtime=%d workspace=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsAdoptsOnlyLiveReservedCandidate(t *testing.T) {
+	m, st, rt, _ := newManager()
+	lcm := &fakeLCM{store: st}
+	m.lcm = lcm
+	id := domain.SessionID("reserved-runtime-candidates")
+	key := "mer\x00github:acme/mer#109"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-109", RuntimeHandleIDs: []string{"native-109", "tmux-109"}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#109", Kind: domain.KindWorker}
+	rt.fencedResults = map[string]ports.FencedProbeResult{
+		"native-109": {Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+		"tmux-109":   {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent},
+	}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if lcm.completed != 1 || got.Metadata.RuntimeHandleID != "native-109" || got.Metadata.RuntimeLaunchID != "launch-109" {
+		t.Fatalf("adopted runtime = %+v, completed=%d", got.Metadata, lcm.completed)
+	}
+	if len(rt.fencedRefs) != 2 || st.trackerIntakePending[key] != id {
+		t.Fatalf("candidate probes/pending = %+v/%q", rt.fencedRefs, st.trackerIntakePending[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsSettlesAbsentReservedCandidates(t *testing.T) {
+	m, st, rt, _ := newManager()
+	id := domain.SessionID("absent-runtime-candidates")
+	key := "mer\x00github:acme/mer#1090"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-1090", RuntimeHandleIDs: []string{"native-1090", "tmux-1090"}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#1090", Kind: domain.KindWorker}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("absent candidate claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if len(rt.fencedRefs) < 2 {
+		t.Fatalf("candidate probes = %+v, want both handles", rt.fencedRefs)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsKeepsPreStartSupervisorFenced(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("pre-start-supervisor")
+	key := "mer\x00github:acme/mer#10901"
+	handleID := "tmux-10901"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/pre-start-supervisor", RuntimeLaunchID: "launch-10901",
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: "github:acme/mer#10901", Kind: domain.KindWorker,
+	}
+	// The exact supervisor owns a live terminal but has not started its child yet.
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if !errors.Is(err, ports.ErrRuntimeProbeInconclusive) {
+		t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want runtime ownership inconclusive", err)
+	}
+	if got := st.trackerIntakePending[key]; got != id {
+		t.Fatalf("pending claim = %q, want %q", got, id)
+	}
+	if got := st.trackerIntakeHandled[key]; got != "" {
+		t.Fatalf("handled claim = %q, want empty", got)
+	}
+	if st.trackerIntakeRecovery[id].CapacityReleased {
+		t.Fatal("live pre-start supervisor released intake capacity")
+	}
+	if !m.trackerIntakeReaperFenceActive(id) {
+		t.Fatal("live pre-start supervisor lost its reaper fence")
+	}
+	if ws.destroyed != 0 || rt.destroyed != 0 {
+		t.Fatalf("live pre-start supervisor was cleaned up: runtime=%d workspace=%d", rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsSettlesExitedDirectChildWithRetainedHost(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("exited-direct-child")
+	issueID := domain.IssueID("github:acme/mer#10902")
+	key := "mer\x00" + string(issueID)
+	handleID := "direct-10902"
+	launchID := "launch-10902"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/exited-direct-child", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/exited-direct-child", RuntimeHandleID: handleID, RuntimeLaunchID: launchID,
+		},
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited || !got.RuntimeReleased() {
+		t.Fatalf("completed direct session = %+v, want stopped resumable row", got)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 {
+		t.Fatalf("completed direct session cleanup runtime=%d workspace=%d, want preserved", rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeAdoptionRevalidatesAfterKill(t *testing.T) {
+	m, st, rt, _ := newManager()
+	lcm := &fakeLCM{store: st}
+	m.lcm = lcm
+	id := domain.SessionID("adoption-kill-race")
+	key := "mer\x00github:acme/mer#1091"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-1091", RuntimeHandleIDs: []string{"runtime-1091"}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#1091", Kind: domain.KindWorker}
+	rt.aliveByHandle = map[string]bool{"runtime-1091": true}
+	probeEntered := make(chan struct{})
+	probeRelease := make(chan struct{})
+	var probeMu sync.Mutex
+	blocked := false
+	rt.onFencedProbe = func(_ ports.FencedRuntimeRef, _ ports.FencedProbeResult) {
+		probeMu.Lock()
+		if blocked {
+			probeMu.Unlock()
+			return
+		}
+		blocked = true
+		close(probeEntered)
+		probeMu.Unlock()
+		<-probeRelease
+	}
+
+	reconciled := make(chan error, 1)
+	go func() { reconciled <- m.ReconcileTrackerIntakeClaims(context.Background()) }()
+	select {
+	case <-probeEntered:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not probe the reserved runtime before adoption")
+	}
+	if _, err := m.Kill(context.Background(), id); err != nil {
+		t.Fatalf("Kill(): %v", err)
+	}
+	close(probeRelease)
+	if err := <-reconciled; err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if lcm.completed != 0 || !st.sessions[id].IsTerminated {
+		t.Fatalf("stale adoption resurrected killed row: completed=%d session=%+v", lcm.completed, st.sessions[id])
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("killed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestKillFencesEveryReservedTrackerIntakeRuntime(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("mer-1")
+	issueID := domain.IssueID("github:acme/mer#110")
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI}
+	st.trackerIntakePending["mer\x00"+string(issueID)] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-110", RuntimeHandleIDs: []string{"native-110", "tmux-110"}, DeliveryPossible: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+
+	if _, err := m.Kill(context.Background(), id); err == nil || !strings.Contains(err.Error(), "remains unresolved") {
+		t.Fatalf("Kill() error = %v, want unresolved reserved runtime", err)
+	}
+	if got := st.trackerIntakeRecovery[id]; got.CapacityReleased {
+		t.Fatalf("Kill() released capacity with unknown candidate: %+v", got)
+	}
+	if len(rt.fencedRefs) != 1 || rt.destroyed != 0 || ws.destroyed != 0 {
+		t.Fatalf("Kill() ownership effects: probes=%v runtime=%d workspace=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestKillTrackerIntakeDestroysLiveTerminalAfterWorkloadExit(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("dead-workload-live-terminal-kill")
+	issueID := domain.IssueID("github:acme/mer#1101")
+	handleID := "runtime-1101"
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/dead-workload-live-terminal-kill", RuntimeLaunchID: "launch-1101",
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+	runtimeStoppedBeforeWorkspace := false
+	ws.destroyHook = func() {
+		runtimeStoppedBeforeWorkspace = rt.destroyed == 1 && !rt.aliveByHandle[handleID]
+	}
+
+	freed, err := m.Kill(context.Background(), id)
+	if err != nil || !freed {
+		t.Fatalf("Kill() = %t, %v, want terminal and workspace removed", freed, err)
+	}
+	if rt.destroyed != 1 || ws.destroyed != 1 || !runtimeStoppedBeforeWorkspace {
+		t.Fatalf("Kill() teardown order: runtime=%d workspace=%d runtimeStoppedBeforeWorkspace=%t",
+			rt.destroyed, ws.destroyed, runtimeStoppedBeforeWorkspace)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestKillTrackerIntakeFailedTerminalDestroyPreservesWorkspace(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("failed-terminal-destroy-kill")
+	issueID := domain.IssueID("github:acme/mer#1102")
+	handleID := "runtime-1102"
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/failed-terminal-destroy-kill", RuntimeLaunchID: "launch-1102",
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+	rt.destroyErr = errors.New("terminal host is still alive")
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
+	probeCalls := 0
+	rt.onFencedProbe = func(_ ports.FencedRuntimeRef, _ ports.FencedProbeResult) {
+		probeCalls++
+		if probeCalls == 1 {
+			rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+		}
+	}
+
+	if _, err := m.Kill(context.Background(), id); err == nil || !strings.Contains(err.Error(), "terminal host is still alive") {
+		t.Fatalf("Kill() error = %v, want failed terminal teardown", err)
+	}
+	if rt.destroyed != 2 || ws.destroyed != 0 {
+		t.Fatalf("Kill() cleanup after failed terminal teardown: runtime=%d workspace=%d", rt.destroyed, ws.destroyed)
+	}
+	if got := st.trackerIntakePending[key]; got != id {
+		t.Fatalf("pending claim = %q, want %q", got, id)
+	}
+	if got := st.trackerIntakeRecovery[id]; got.CapacityReleased {
+		t.Fatalf("capacity released after failed terminal teardown: %+v", got)
+	}
+	if st.sessions[id].IsTerminated {
+		t.Fatal("session terminated after failed terminal teardown")
+	}
+}
+
+func TestKillTrackerIntakeUsesReservedWorkspaceBeforePublication(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("reserved-workspace-kill")
+	issueID := domain.IssueID("github:acme/mer#1100")
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI}
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: "ao/reserved-workspace-kill/root", WorkspacePath: "/ws/reserved-workspace-kill", WorkspaceRepoPath: "/repo/mer",
+		WorkspaceCreationIntent: true, RuntimeLaunchID: "launch-1100", RuntimeHandleIDs: []string{"runtime-1100"}, DeliveryPossible: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
+
+	freed, err := m.Kill(context.Background(), id)
+	if err != nil || !freed {
+		t.Fatalf("Kill() = %t, %v, want reserved workspace removed", freed, err)
+	}
+	if ws.destroyed != 1 || ws.lastDestroyInfo.Path != "/ws/reserved-workspace-kill" {
+		t.Fatalf("reserved workspace cleanup = calls %d info %+v", ws.destroyed, ws.lastDestroyInfo)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("reserved workspace claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeCreationIntentPreservesOccupiedPath(t *testing.T) {
+	m, st, _, ws := newManager()
+	m.dataDir = t.TempDir()
+	ws.path = filepath.Join(m.dataDir, "worktrees", "occupied")
+	if err := os.MkdirAll(ws.path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	project := st.projects["mer"]
+	project.Config.PreRemove = []string{"echo ran > cleanup-marker"}
+	st.projects["mer"] = project
+	ws.createErr = gitworktree.ErrPathOccupied
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	issueID := domain.IssueID("github:acme/mer#111")
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "fix it", TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, gitworktree.ErrPathOccupied) {
+		t.Fatalf("Spawn() error = %v, want occupied path refusal", err)
+	}
+	key := "mer\x00" + string(issueID)
+	id := st.trackerIntakePending[key]
+	if id == "" || st.sessions[id].ID != "" {
+		t.Fatalf("occupied spawn claim/session = %q/%+v, want preserved claim with deleted seed", id, st.sessions[id])
+	}
+	if got := st.trackerIntakeRecovery[id]; !got.WorkspaceCreationIntent || got.WorkspacePath != ws.path {
+		t.Fatalf("occupied spawn reservation = %+v, want durable creation intent", got)
+	}
+
+	ws.destroyErr = ports.ErrWorkspaceDirty
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err == nil {
+		t.Fatal("ReconcileTrackerIntakeClaims() error = nil, want occupied path preserved")
+	}
+	if ws.lastDestroyInfo.BaseSHA != trackerIntakeWorkspaceCreationFence {
+		t.Fatalf("workspace cleanup fence = %q, want creation intent", ws.lastDestroyInfo.BaseSHA)
+	}
+	if st.trackerIntakePending[key] != id {
+		t.Fatal("occupied creation intent released its pending claim")
+	}
+	if _, err := os.Stat(filepath.Join(ws.path, "cleanup-marker")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup hook ran in unowned occupied path: %v", err)
+	}
+}
+
+func TestRequestKillTrackerIntakeCreationIntentSkipsCleanupHook(t *testing.T) {
+	m, st, _, ws := newManager()
+	m.runBackground = func(work func()) { work() }
+	m.dataDir = t.TempDir()
+	workspace := filepath.Join(m.dataDir, "worktrees", "occupied")
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	project := st.projects["mer"]
+	project.Config.PreRemove = []string{"echo ran > cleanup-marker"}
+	st.projects["mer"] = project
+	id := domain.SessionID("occupied-intent-kill")
+	issueID := domain.IssueID("github:acme/mer#1110")
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI}
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: "ao/occupied-intent-kill/root", WorkspacePath: workspace, WorkspaceRepoPath: "/repo/mer",
+		WorkspaceCreationIntent: true, CapacityReleased: true,
+	}
+	ws.destroyErr = ports.ErrWorkspaceDirty
+
+	result, err := m.RequestKill(context.Background(), id)
+	if err != nil || !result.CleanupPending {
+		t.Fatalf("RequestKill() = %+v, %v, want queued cleanup", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "cleanup-marker")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup hook ran in unowned occupied path: %v", err)
+	}
+	if st.trackerIntakePending[key] != id {
+		t.Fatal("occupied creation intent lost its no-replay fence")
+	}
+}
+
+func TestRequestKillTrackerIntakeUsesRecoveredWorkspaceProjectInventory(t *testing.T) {
+	m, st, _, ws := newManager()
+	m.runBackground = func(work func()) { work() }
+	root := t.TempDir()
+	child := filepath.Join(root, "services", "api")
+	if err := os.MkdirAll(child, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	project := st.projects["mer"]
+	project.Kind = domain.ProjectKindWorkspace
+	project.Path = "/repo/root"
+	project.Config.PreRemove = []string{"true"}
+	st.projects["mer"] = project
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "services/api"}}
+	id := domain.SessionID("partial-project-kill")
+	issueID := domain.IssueID("github:acme/mer#1111")
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI}
+	st.worktrees[id] = []domain.SessionWorktreeRecord{{
+		SessionID: id, RepoName: domain.RootWorkspaceRepoName, Branch: "ao/partial-project-kill/root",
+		WorktreePath: root, BaseSHA: "root-base", State: "active",
+	}}
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: "ao/partial-project-kill/root", WorkspacePath: root, WorkspaceRepoPath: project.Path,
+		WorkspaceCreationIntent: true, CapacityReleased: true,
+	}
+	ws.destroyInfoHook = func(info ports.WorkspaceInfo) {
+		if info.Path == child {
+			ws.destroyErr = ports.ErrWorkspaceDirty
+		} else {
+			ws.destroyErr = nil
+		}
+	}
+
+	result, err := m.RequestKill(context.Background(), id)
+	if err != nil || !result.CleanupPending {
+		t.Fatalf("RequestKill() = %+v, %v, want queued cleanup", result, err)
+	}
+	if ws.destroyed != 1 || ws.lastDestroyInfo.Path != child {
+		t.Fatalf("background cleanup destroyed %d workspaces, last=%+v; want dirty recovered child checked before root", ws.destroyed, ws.lastDestroyInfo)
+	}
+	if st.trackerIntakePending[key] != id {
+		t.Fatal("dirty recovered child did not preserve the pending claim")
+	}
+}
+
+func TestKillTrackerIntakeConfirmedWorkspaceRunsCleanupHook(t *testing.T) {
+	m, st, _, _ := newManager()
+	dataDir := t.TempDir()
+	workspace := filepath.Join(dataDir, "worktrees", "confirmed-workspace-kill")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.dataDir = dataDir
+	project := st.projects["mer"]
+	project.Config.PreRemove = []string{"echo ran > cleanup-marker"}
+	st.projects["mer"] = project
+	rec := mkLive("confirmed-workspace-kill")
+	rec.IssueID = "github:acme/mer#1112"
+	rec.Metadata.WorkspacePath = workspace
+	rec.Metadata.WorkspaceRepoPath = "/repo/mer"
+	rec.Metadata.RuntimeLaunchID = "launch-1112"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	reservation := trackerIntakeRecoveryForWorkspace(workspaceInfo(rec))
+	reservation.RuntimeLaunchID = rec.Metadata.RuntimeLaunchID
+	reservation.RuntimeHandleIDs = []string{rec.Metadata.RuntimeHandleID}
+	st.trackerIntakeRecovery[rec.ID] = reservation
+
+	freed, err := m.Kill(context.Background(), rec.ID)
+	if err != nil || !freed {
+		t.Fatalf("Kill() = %t, %v", freed, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "cleanup-marker")); err != nil {
+		t.Fatalf("confirmed workspace cleanup hook did not run: %v", err)
+	}
+}
+
+func TestScheduledTrackerIntakeCleanupReloadsClaimBeforeTeardown(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("stale-cleanup")
+	issueID := domain.IssueID("github:acme/mer#1113")
+	key := "mer\x00" + string(issueID)
+	workspace := "/ws/stale-cleanup"
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: issueID, IsTerminated: true}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: workspace, WorkspaceRepoPath: "/repo/mer", DeliveryPossible: true, CapacityReleased: true,
+	}
+	var queued func()
+	m.runBackground = func(work func()) { queued = work }
+	if err := m.ScheduleTrackerIntakeClaimReconciliation(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if queued == nil {
+		t.Fatal("claim reconciliation was not queued")
+	}
+	delete(st.trackerIntakePending, key)
+	delete(st.trackerIntakeRecovery, id)
+	restored := mkLive(id)
+	restored.IssueID = issueID
+	restored.Metadata.WorkspacePath = workspace
+	st.sessions[id] = restored
+
+	queued()
+	if ws.destroyed != 0 {
+		t.Fatalf("stale queued cleanup destroyed restored workspace %d time(s)", ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimFencesWorkspaceTeardown(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("fenced-cleanup")
+	issueID := domain.IssueID("github:acme/mer#1114")
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/fenced-cleanup", WorkspaceRepoPath: "/repo/mer",
+		WorkspaceCreationIntent: true, CapacityReleased: true,
+	}
+	fenced := false
+	ws.destroyInfoHook = func(ports.WorkspaceInfo) {
+		fenced = m.agentOperationIs(id, agentOperationReconcile)
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !fenced {
+		t.Fatal("tracker intake workspace teardown ran without the session reconcile fence")
+	}
+}
+
+func TestScheduleTrackerIntakeClaimReconciliationDoesNotBlockCaller(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("slow-cleanup")
+	key := "mer\x00github:acme/mer#112"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/slow", WorkspaceRepoPath: "/repo/mer", WorkspaceCreationIntent: true, CapacityReleased: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#112", IsTerminated: true}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ws.destroyInfoHook = func(ports.WorkspaceInfo) {
+		close(started)
+		<-release
+	}
+
+	returned := make(chan error, 1)
+	go func() { returned <- m.ScheduleTrackerIntakeClaimReconciliation(context.Background()) }()
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatalf("ScheduleTrackerIntakeClaimReconciliation(): %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("claim scheduling blocked on workspace cleanup")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled cleanup did not start")
+	}
+	close(release)
+	if err := m.WaitBackgroundWorkers(context.Background()); err != nil {
+		t.Fatalf("WaitBackgroundWorkers(): %v", err)
+	}
+}
+
+func TestReconcileTrackerIntakeReleasedChatPreservesRestoredGeneration(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("restored-released-chat")
+	issueID := domain.IssueID("github:acme/mer#113")
+	key := "mer\x00" + string(issueID)
+	oldGeneration := "controller-stopped"
+	newGeneration := "controller-restored"
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/restored-released-chat/root", WorkspacePath: "/ws/restored-released-chat",
+			ProviderConversationID: "thread-113", ControllerGeneration: oldGeneration,
+		},
+	}
+	st.sessions[id] = rec
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		ControllerPossible: true, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedControllerGeneration: oldGeneration,
+	}
+	ws.destroyErr = ports.ErrWorkspaceDirty
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err == nil {
+		t.Fatal("first recovery error = nil, want dirty workspace to retain pending claim")
+	}
+	if ws.destroyed != 1 || st.trackerIntakePending[key] != id {
+		t.Fatalf("first recovery destroyed=%d pending=%q", ws.destroyed, st.trackerIntakePending[key])
+	}
+
+	ws.destroyErr = nil
+	restored := st.sessions[id]
+	restored.Metadata.ControllerGeneration = newGeneration
+	restored.Activity.State = domain.ActivityActive
+	st.sessions[id] = restored
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("recovery after Resume: %v", err)
+	}
+	if ws.destroyed != 1 {
+		t.Fatalf("restored workspace destroyed %d time(s), want only pre-Resume attempt", ws.destroyed)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Metadata.ControllerGeneration != newGeneration {
+		t.Fatalf("restored session changed by stale cleanup: %+v", got)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("restored delivered claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestWorkspaceProjectRestoreRowsMergePartialMarkersWithRegistry(t *testing.T) {
+	m, st, _, _ := newManager()
+	project := st.projects["mer"]
+	project.Kind = domain.ProjectKindWorkspace
+	project.Path = "/repo/root"
+	st.projects["mer"] = project
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{
+		{Name: "api", RelativePath: "services/api"},
+		{Name: "web", RelativePath: "apps/web"},
+		{Name: "assets", RelativePath: "assets", GitStatus: domain.GitStatusNeedsInit},
+	}
+	rec := domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Metadata: domain.SessionMetadata{WorkspacePath: "/ws/root", Branch: "ao/mer-1/root"}}
+	markers := []domain.SessionWorktreeRecord{
+		{SessionID: rec.ID, RepoName: domain.RootWorkspaceRepoName, WorktreePath: "/ws/root", Branch: rec.Metadata.Branch, BaseSHA: "root-base"},
+		{SessionID: rec.ID, RepoName: "api", WorktreePath: "/ws/root/services/api", Branch: rec.Metadata.Branch, BaseSHA: "api-base"},
+	}
+
+	st.worktrees[rec.ID] = markers
+	rows, isProject, err := m.trackerIntakeWorkspaceRows(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("trackerIntakeWorkspaceRows(): %v", err)
+	}
+	if !isProject || len(rows) != 3 || rows[2].RepoName != "web" || rows[2].Path != "/ws/root/apps/web" {
+		t.Fatalf("merged restore rows = %+v, want root plus both registry children", rows)
+	}
+	if rows[1].BaseSHA != "api-base" || rows[2].BaseSHA != trackerIntakeWorkspaceCreationFence {
+		t.Fatalf("merged marker/create fences = api %q web %q", rows[1].BaseSHA, rows[2].BaseSHA)
+	}
+	for _, row := range rows {
+		if row.RepoName == "assets" {
+			t.Fatalf("asset directory reconstructed as worktree: %+v", rows)
+		}
+	}
+}
+
+func TestSpawnTrackerIntakeCheckpointsWorkspaceProjectIntentBeforeCreateFailure(t *testing.T) {
+	m, st, _, ws := newManager()
+	project := st.projects["mer"]
+	project.Kind = domain.ProjectKindWorkspace
+	project.Path = "/repo/mer"
+	st.projects["mer"] = project
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "services/api"}}
+	ws.path = "/ws/mer-1"
+	ws.projectErr = errors.New("child worktree creation interrupted")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", IssueID: "github:acme/mer#102", Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "do it", TrackerIntakeLimits: &limits,
+	})
+	if err == nil {
+		t.Fatal("Spawn() error = nil, want workspace project failure")
+	}
+	id := st.trackerIntakePending["mer\x00github:acme/mer#102"]
+	if id == "" {
+		t.Fatal("workspace project creation failure lost pending claim")
+	}
+	if got := st.trackerIntakeRecovery[id]; got.WorkspacePath != ws.path || got.Branch == "" {
+		t.Fatalf("workspace creation intent = %+v, want root path and branch before materialization", got)
+	}
+	ws.projectErr = nil
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if ws.projectDestroyed != 1 || st.trackerIntakePending["mer\x00github:acme/mer#102"] != "" {
+		t.Fatalf("recovered workspace project cleanup = %d, pending=%+v", ws.projectDestroyed, st.trackerIntakePending)
+	}
+}
+
+func TestDeliverAfterStartPromptDoesNotFenceBeforeReadiness(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	marked := false
+	agent := readinessAgent{
+		afterStartAgent: afterStartAgent{recordingAgent: &recordingAgent{}},
+		hints:           ports.PromptReadinessHints{InitialDelay: time.Second},
+	}
+	m := New(Deps{Runtime: &fakeRuntime{}, Messenger: &fakeMessenger{}})
+
+	err := m.deliverAfterStartPromptWithFence(ctx, agent, ports.LaunchConfig{}, ports.RuntimeHandle{}, "mer-1", "task", func() error {
+		marked = true
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("deliverAfterStartPromptWithFence() error = %v, want context cancellation", err)
+	}
+	if marked {
+		t.Fatal("delivery was fenced before readiness completed")
+	}
+}
+
+func TestDeliverAfterStartPromptDoesNotFenceSuppressedWrite(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		Activity: domain.Activity{State: domain.ActivityBlocked}, FirstSignalAt: time.Now(),
+	}
+	msg := &fakeMessenger{}
+	m := New(Deps{Store: st, Runtime: &fakeRuntime{}, Messenger: msg})
+	marked := false
+
+	err := m.deliverAfterStartPromptWithFence(context.Background(), fakeAgent{}, ports.LaunchConfig{}, ports.RuntimeHandle{}, id, "task", func() error {
+		marked = true
+		return nil
+	})
+	if !errors.Is(err, ErrAwaitingDecision) {
+		t.Fatalf("deliverAfterStartPromptWithFence() error = %v, want blocked delivery", err)
+	}
+	if marked || len(msg.msgs) != 0 {
+		t.Fatalf("suppressed write fenced/sent = %t/%d, want false/0", marked, len(msg.msgs))
+	}
+}
+
+func TestSpawnTrackerIntakeSuppressedPromptReleasesClaimForRetry(t *testing.T) {
+	m, st, rt, _ := newManager()
+	agent := &readinessHookAgent{afterStartAgent: afterStartAgent{recordingAgent: &recordingAgent{}}}
+	m.agents = singleAgent{agent: agent}
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	issueID := domain.IssueID("github:acme/mer#113")
+	cfg := ports.SpawnConfig{
+		ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "fix it", TrackerIntakeLimits: &limits,
+	}
+	agent.hook = func() {
+		rec := st.sessions["mer-1"]
+		rec.Activity.State = domain.ActivityBlocked
+		st.sessions[rec.ID] = rec
+	}
+
+	if _, _, _, err := m.Spawn(context.Background(), cfg); !errors.Is(err, ErrAwaitingDecision) {
+		t.Fatalf("Spawn() error = %v, want guarded prompt refusal", err)
+	}
+	key := "mer\x00" + string(issueID)
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("suppressed prompt kept claim: pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if rt.destroyed != 1 {
+		t.Fatalf("suppressed prompt runtime cleanup = %d, want 1", rt.destroyed)
+	}
+
+	agent.hook = nil
+	if _, _, _, err := m.Spawn(context.Background(), cfg); err != nil {
+		t.Fatalf("Spawn(retry): %v", err)
+	}
+}
+
+func TestSpawnTrackerIntakeCheckpointsWorkspaceBeforeSetup(t *testing.T) {
+	m, st, _, ws := newManager()
+	project := st.projects["mer"]
+	project.Path = t.TempDir()
+	project.Config.PostCreate = []string{"exit 3"}
+	st.projects["mer"] = project
+	ws.path = t.TempDir()
+	ws.destroyErr = errors.New("workspace destroy unavailable")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", IssueID: "github:acme/mer#77", Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "do it", TrackerIntakeLimits: &limits,
+	})
+	if err == nil {
+		t.Fatal("Spawn() error = nil, want setup failure")
+	}
+	id := st.trackerIntakePending["mer\x00github:acme/mer#77"]
+	if id == "" {
+		t.Fatal("setup failure with unresolved workspace cleanup released the intake claim")
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if reservation.WorkspacePath != ws.path {
+		t.Fatalf("workspace recovery reservation = %+v, want path %q checkpointed before setup", reservation, ws.path)
+	}
+}
+
+func TestSpawnTrackerIntakePostCreateFailureReleasesOnlyAfterConfirmedCleanup(t *testing.T) {
+	m, st, rt, _ := newManager()
+	m.agents = singleAgent{agent: afterStartAgent{recordingAgent: &recordingAgent{}}}
+	lcm := &fakeLCM{store: st, markSpawnedErr: errors.New("session commit unavailable")}
+	m.lcm = lcm
+	rt.createIDs = []string{"created-runtime"}
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID:           "mer",
+		IssueID:             "github:acme/mer#14",
+		Kind:                domain.KindWorker,
+		Harness:             domain.HarnessClaudeCode,
+		Prompt:              "do it",
+		TrackerIntakeLimits: &limits,
+	}
+
+	_, _, _, err := m.Spawn(ctx, cfg)
+	if !errors.Is(err, lcm.markSpawnedErr) {
+		t.Fatalf("Spawn() error = %v, want session commit failure", err)
+	}
+	if rt.destroyed != 1 {
+		t.Fatalf("runtime cleanup calls = %d, want 1", rt.destroyed)
+	}
+	key := "mer\x00github:acme/mer#14"
+	if got := st.trackerIntakePending[key]; got != "" {
+		t.Fatalf("pending claim after confirmed runtime/workspace cleanup = %q, want released", got)
+	}
+}
+
+func TestSpawnTrackerIntakeCheckpointsCleanupBeforeTerminating(t *testing.T) {
+	m, st, rt, _ := newManager()
+	m.agents = singleAgent{agent: afterStartAgent{recordingAgent: &recordingAgent{}}}
+	lcm := &fakeLCM{store: st, markSpawnedErr: errors.New("session commit unavailable")}
+	m.lcm = lcm
+	rt.createIDs = []string{"created-runtime"}
+	st.trackerIntakeReleaseErr = errors.New("claim release unavailable")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID:           "mer",
+		IssueID:             "github:acme/mer#15",
+		Kind:                domain.KindWorker,
+		Harness:             domain.HarnessClaudeCode,
+		Prompt:              "do it",
+		TrackerIntakeLimits: &limits,
+	}
+
+	_, _, _, err := m.Spawn(ctx, cfg)
+	if !errors.Is(err, st.trackerIntakeReleaseErr) {
+		t.Fatalf("Spawn() error = %v, want claim release failure", err)
+	}
+	if !st.trackerIntakeCleanupConfirmedBeforeTermination {
+		t.Fatal("cleanup confirmation was not durably checkpointed before session termination")
+	}
+}
+
 func TestSpawnClientRequestReplaysCommittedWorkerAndRejectsConflictOrIncomplete(t *testing.T) {
 	m, st, rt, _ := newManager()
 	cfg := ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode, Prompt: "do it", ClientRequestID: "draft-1", ClientRequestHash: "v1:first"}
@@ -2931,6 +4328,43 @@ func TestSpawnAutomationAfterStartPromptFailureDoesNotCompleteLaunch(t *testing.
 	}
 	if !found {
 		t.Fatal("automation session row missing; want incomplete row for scheduler rollback")
+	}
+}
+
+func TestSpawnTrackerIntakeAfterStartPromptErrorPreservesPossibleDelivery(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	deliveryErr := errors.New("terminal accepted input but acknowledgement was lost")
+	msg := &fakeMessenger{err: deliveryErr}
+	rt := &fakeRuntime{}
+	m := New(Deps{
+		Runtime:   rt,
+		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: &recordingAgent{}}},
+		Workspace: &fakeWorkspace{},
+		Store:     st,
+		Messenger: msg,
+		Lifecycle: &fakeLCM{store: st},
+		LookPath:  func(string) (string, error) { return "/bin/true", nil },
+	})
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", IssueID: "github:acme/mer#89", Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "do it", TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, deliveryErr) {
+		t.Fatalf("Spawn() error = %v, want ambiguous delivery error", err)
+	}
+	id := st.trackerIntakePending["mer\x00github:acme/mer#89"]
+	if id == "" || st.sessions[id].IsTerminated {
+		t.Fatalf("ambiguous after-start delivery lost live ownership: id=%q row=%+v", id, st.sessions[id])
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.DeliveryPossible || fmt.Sprint(reservation.RuntimeHandleIDs) != "[h1]" {
+		t.Fatalf("after-start recovery reservation = %+v, want exact handle plus delivery fence", reservation)
+	}
+	if rt.destroyed != 0 {
+		t.Fatalf("runtime cleanup calls = %d, want none after delivery became possible", rt.destroyed)
 	}
 }
 
@@ -4143,6 +5577,31 @@ func TestKill_TearsDownRuntimeAndWorkspace(t *testing.T) {
 		t.Fatalf("reviewer terminate bodies = %v", reviewer.bodies)
 	}
 	requireNoPromptDir(t, dataDir, "mer-1")
+}
+
+func TestKillTrackerIntakeReleasesCapacityWhileDirtyWorkspaceRemainsFenced(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("mer-1")
+	issueID := domain.IssueID("github:acme/mer#103")
+	rec := mkLive(id)
+	rec.IssueID = issueID
+	rec.Metadata.RuntimeLaunchID = "launch-103"
+	st.sessions[id] = rec
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: rec.Metadata.WorkspacePath, RuntimeLaunchID: rec.Metadata.RuntimeLaunchID,
+		RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID}, DeliveryPossible: true,
+	}
+	ws.destroyErr = ports.ErrWorkspaceDirty
+
+	if freed, err := m.Kill(context.Background(), id); err != nil || freed {
+		t.Fatalf("Kill() = freed %t, err %v, want successful termination with dirty workspace preserved", freed, err)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.CapacityReleased || st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("post-kill claim = %+v pending=%q handled=%q", reservation, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
 }
 
 func TestKillCleanupScriptHasNoTimeLimit(t *testing.T) {
@@ -7254,13 +8713,24 @@ func TestRestore_FallbackLaunchCarriesSystemPrompt(t *testing.T) {
 
 func TestRestore_FallbackLaunchDeliversPromptAfterStartWhenAgentRequestsIt(t *testing.T) {
 	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#115")
+	key := "mer\x00" + string(issueID)
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
 	st.sessions["mer-1"] = domain.SessionRecord{
-		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true,
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, IsTerminated: true,
 		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath:    "/ws/mer-1",
+		CapacityReleased: true,
 	}
 	rt := &fakeRuntime{}
 	msg := &fakeMessenger{}
+	deliveryFencedAtSend := false
+	msg.onSend = func(domain.SessionID, string) {
+		deliveryFencedAtSend = st.trackerIntakeRecovery["mer-1"].DeliveryPossible
+	}
 	recording := &recordingAgent{}
 	agent := &composedAfterStartAgent{afterStartAgent: afterStartAgent{recordingAgent: recording}}
 	m := New(Deps{
@@ -7289,6 +8759,12 @@ func TestRestore_FallbackLaunchDeliversPromptAfterStartWhenAgentRequestsIt(t *te
 	}
 	if rt.created != 1 {
 		t.Fatalf("runtime.Create = %d, want 1", rt.created)
+	}
+	if !deliveryFencedAtSend {
+		t.Fatal("saved tracker prompt reached the messenger before delivery was fenced")
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != "mer-1" {
+		t.Fatalf("restored claim pending=%q handled=%q, want durable handled fence", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
 	}
 }
 
@@ -7331,11 +8807,22 @@ func TestRestore_NativeAfterStartAgentResumesPassively(t *testing.T) {
 
 func TestRestore_CodexWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) {
 	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#114")
+	key := "mer\x00" + string(issueID)
 	st.sessions["mer-1"] = domain.SessionRecord{
-		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
 		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
 	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath:    "/ws/mer-1",
+		CapacityReleased: true,
+	}
 	rt := &fakeRuntime{}
+	deliveryFencedAtCreate := false
+	rt.onCreate = func() {
+		deliveryFencedAtCreate = st.trackerIntakeRecovery["mer-1"].DeliveryPossible
+	}
 	agent := &recordingAgent{}
 	m := New(Deps{
 		Runtime:   rt,
@@ -7366,8 +8853,678 @@ func TestRestore_CodexWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) 
 	if rt.created != 1 {
 		t.Fatalf("runtime.Create = %d, want 1", rt.created)
 	}
+	if !deliveryFencedAtCreate {
+		t.Fatal("saved tracker prompt entered runtime creation before delivery was fenced")
+	}
 	if st.sessions["mer-1"].IsTerminated {
 		t.Fatal("session must be live after fallback launch")
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != "mer-1" {
+		t.Fatalf("restored claim pending=%q handled=%q, want durable handled fence", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+
+	// Cleanup of the resumed session must not make its still-open issue eligible
+	// for another unattended intake launch.
+	delete(st.sessions, "mer-1")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 1}
+	_, _, _, err = m.Spawn(ctx, ports.SpawnConfig{
+		ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Prompt: "continue the task", RequestedMode: domain.SessionModeTUI, TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, ports.ErrTrackerIntakeHandled) {
+		t.Fatalf("Spawn(after restored session cleanup) error = %v, want ErrTrackerIntakeHandled", err)
+	}
+}
+
+func TestRestore_SavedPromptDefiniteRuntimeFailureRestoresUndeliveredTrackerClaim(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#116")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
+	}
+	prior := domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath:           "/ws/mer-1",
+		CapacityReleased:        true,
+		ReleasedRuntimeLaunchID: "stopped-launch",
+		CleanupConfirmed:        true,
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = prior
+	rt := &fakeRuntime{createErr: errors.New("runtime unavailable before process start")}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+		t.Fatal("Restore error = nil, want definite runtime failure")
+	}
+	got := st.trackerIntakeRecovery["mer-1"]
+	if got.DeliveryPossible || got.WorkspacePath != prior.WorkspacePath ||
+		got.CapacityReleased != prior.CapacityReleased || got.ReleasedRuntimeLaunchID != prior.ReleasedRuntimeLaunchID ||
+		got.CleanupConfirmed != prior.CleanupConfirmed {
+		t.Fatalf("recovery after definite no-effect failure = %+v, want prior undelivered reservation %+v", got, prior)
+	}
+	if st.trackerIntakePending[key] != "mer-1" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("failed restore claim pending=%q handled=%q, want retryable pending claim", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestRestore_SavedPromptPossibleRuntimeEffectKeepsDeliveryFenced(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#117")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1",
+	}
+	rt := &fakeRuntime{createErr: fakeRuntimeEffectError{
+		err: errors.New("runtime registry write failed after process start"), handle: ports.RuntimeHandle{ID: "partial-runtime"},
+		effect: ports.RuntimeEffectPossible, cleanup: ports.RuntimeCleanupSucceeded,
+	}}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+		t.Fatal("Restore error = nil, want possible runtime effect failure")
+	}
+	if got := st.trackerIntakeRecovery["mer-1"]; !got.DeliveryPossible {
+		t.Fatalf("recovery after possible runtime effect = %+v, want delivery fenced", got)
+	}
+	if st.trackerIntakePending[key] != "mer-1" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("uncertain restore claim pending=%q handled=%q, want fenced pending claim", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestRestore_PendingTrackerClaimReservesRelaunchedRuntimeBeforePublication(t *testing.T) {
+	tests := []struct {
+		name                 string
+		agent                func() ports.Agent
+		agentSessionID       string
+		wantDeliveryPossible bool
+	}{
+		{
+			name: "saved prompt in command",
+			agent: func() ports.Agent {
+				return &recordingAgent{}
+			},
+			wantDeliveryPossible: true,
+		},
+		{
+			name: "saved prompt after start",
+			agent: func() ports.Agent {
+				return &composedAfterStartAgent{afterStartAgent: afterStartAgent{recordingAgent: &recordingAgent{}}}
+			},
+		},
+		{
+			name: "native restore",
+			agent: func() ports.Agent {
+				return &recordingAgent{}
+			},
+			agentSessionID: "native-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			issueID := domain.IssueID("github:acme/mer#118")
+			key := "mer\x00" + string(issueID)
+			st.sessions["mer-1"] = domain.SessionRecord{
+				ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task", AgentSessionID: tt.agentSessionID,
+				},
+			}
+			st.trackerIntakePending[key] = "mer-1"
+			st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"old-runtime"},
+				CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+			}
+			rt := &fakeRuntime{createIDs: []string{"new-runtime"}}
+			m := New(Deps{
+				Runtime: rt, Agents: singleAgent{agent: tt.agent()}, Workspace: &fakeWorkspace{}, Store: st,
+				Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st, markSpawnedErr: errors.New("publication interrupted")},
+				LookPath: func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+				t.Fatal("Restore error = nil, want interrupted publication")
+			}
+			reservation := st.trackerIntakeRecovery["mer-1"]
+			if reservation.RuntimeLaunchID == "" || reservation.RuntimeLaunchID == "stopped-launch" ||
+				len(reservation.RuntimeHandleIDs) != 1 || reservation.RuntimeHandleIDs[0] != "new-runtime" {
+				t.Fatalf("reserved runtime = launch %q handles %v, want new generation/new-runtime", reservation.RuntimeLaunchID, reservation.RuntimeHandleIDs)
+			}
+			if reservation.DeliveryPossible != tt.wantDeliveryPossible || reservation.CapacityReleased || reservation.CleanupConfirmed {
+				t.Fatalf("reserved recovery = %+v, want delivery=%v with stale release/cleanup cleared", reservation, tt.wantDeliveryPossible)
+			}
+		})
+	}
+}
+
+func TestResume_SavedPromptRestartErrorRequiresExplicitNoEffectToClearFence(t *testing.T) {
+	tests := []struct {
+		name              string
+		restartErr        error
+		wantDelivery      bool
+		wantOldGeneration bool
+	}{
+		{
+			name:         "unclassified post-respawn failure",
+			restartErr:   errors.New("restart probe failed after respawn"),
+			wantDelivery: true,
+		},
+		{
+			name: "explicit no effect",
+			restartErr: fakeRuntimeEffectError{
+				err: errors.New("restart rejected before respawn"), effect: ports.RuntimeEffectNone, cleanup: ports.RuntimeCleanupNotAttempted,
+			},
+			wantOldGeneration: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			issueID := domain.IssueID("github:acme/mer#119")
+			key := "mer\x00" + string(issueID)
+			st.sessions["mer-1"] = domain.SessionRecord{
+				ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task",
+					RuntimeHandleID: "h1", RuntimeLaunchID: "stopped-launch",
+				},
+			}
+			st.trackerIntakePending[key] = "mer-1"
+			prior := domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"h1"},
+				CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+			}
+			st.trackerIntakeRecovery["mer-1"] = prior
+			base := &fakeRuntime{
+				aliveByHandle: map[string]bool{"h1": true}, exitedLaunches: map[string]bool{"stopped-launch": true},
+			}
+			rt := &fakeRestartRuntime{fakeRuntime: base, restartErr: tt.restartErr}
+			m := New(Deps{
+				Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+				Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+				LookPath: func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); err == nil {
+				t.Fatal("ResumeAgentWithMode error = nil, want restart failure")
+			}
+			reservation := st.trackerIntakeRecovery["mer-1"]
+			if reservation.DeliveryPossible != tt.wantDelivery {
+				t.Fatalf("DeliveryPossible = %v, want %v after %s", reservation.DeliveryPossible, tt.wantDelivery, tt.name)
+			}
+			if gotOldGeneration := reservation.RuntimeLaunchID == prior.RuntimeLaunchID; gotOldGeneration != tt.wantOldGeneration {
+				t.Fatalf("old generation retained = %v, want %v; reservation=%+v", gotOldGeneration, tt.wantOldGeneration, reservation)
+			}
+		})
+	}
+}
+
+func TestResume_PendingTrackerIntakeKeepsInconclusivePriorOwnerFenced(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#1191")
+	key := "mer\x00" + string(issueID)
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Activity: domain.Activity{State: domain.ActivityExited},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task",
+			RuntimeHandleID: "ptyhost-v1:mer-1", RuntimeLaunchID: "old-launch", AgentSessionID: "native-1",
+		},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	prior := domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "old-launch",
+		RuntimeHandleIDs: []string{"ptyhost-v1:mer-1", "mer-1"}, DeliveryPossible: true,
+	}
+	st.trackerIntakeRecovery["mer-1"] = prior
+	rt := &fakeRuntime{
+		aliveByHandle: map[string]bool{"ptyhost-v1:mer-1": false, "mer-1": false},
+		supervisedErr: errors.New("conpty listener refused connection while host may still live"),
+		fencedResults: map[string]ports.FencedProbeResult{
+			"ptyhost-v1:mer-1": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			"mer-1":            {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent},
+		},
+	}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); !errors.Is(err, ports.ErrRuntimeProbeInconclusive) {
+		t.Fatalf("ResumeAgentWithMode error = %v, want ErrRuntimeProbeInconclusive", err)
+	}
+	if rt.created != 0 {
+		t.Fatalf("runtime creates = %d, want 0 while prior owner is unresolved", rt.created)
+	}
+	if got := st.trackerIntakeRecovery["mer-1"]; !reflect.DeepEqual(got, prior) {
+		t.Fatalf("reservation after refused resume = %+v, want prior fence %+v", got, prior)
+	}
+	if len(rt.fencedRefs) != 1 || rt.fencedRefs[0].Handle.ID != "ptyhost-v1:mer-1" ||
+		rt.fencedRefs[0].Generation != "old-launch" {
+		t.Fatalf("fenced probes = %+v, want exact prior direct-host generation", rt.fencedRefs)
+	}
+}
+
+func TestRestore_PendingUndeliveredNativeOwnerSurvivesClaimReconciliation(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#120")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task", AgentSessionID: "native-1",
+		},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"old-runtime"},
+		CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+	}
+	rt := &fakeRuntime{createIDs: []string{"new-runtime"}}
+	ws := &fakeWorkspace{}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: ws,
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	result, err := m.RestoreWithMode(ctx, "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Mode != RestoreModeNative {
+		t.Fatalf("restore mode = %q, want native", result.Mode)
+	}
+	reservation := st.trackerIntakeRecovery["mer-1"]
+	if reservation.DeliveryPossible || !reservation.RelaunchPublished {
+		t.Fatalf("restored reservation = %+v, want undelivered published owner", reservation)
+	}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions["mer-1"]
+	if got.IsTerminated || got.Metadata.RuntimeHandleID != "new-runtime" || got.Metadata.RuntimeLaunchID != reservation.RuntimeLaunchID {
+		t.Fatalf("native owner after reconciliation = %+v, want restored runtime preserved", got)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != "mer-1" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("reconciliation changed owner/claim: runtime destroys=%d workspace destroys=%d pending=%q handled=%q",
+			rt.destroyed, ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestRestore_PendingUndeliveredNativeOwnerExitReleasesCapacityWithoutTeardown(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#1201")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task", AgentSessionID: "native-1",
+		},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"old-runtime"},
+		CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+	}
+	rt := &fakeRuntime{createIDs: []string{"new-runtime"}}
+	ws := &fakeWorkspace{}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: ws,
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ExitAgent(ctx, "mer-1"); err != nil {
+		t.Fatalf("ExitAgent(): %v", err)
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions["mer-1"]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited || !got.RuntimeReleased() {
+		t.Fatalf("exited native owner = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery["mer-1"]
+	if !reservation.RelaunchPublished || reservation.DeliveryPossible || !reservation.CapacityReleased ||
+		reservation.ReleasedRuntimeLaunchID != got.Metadata.RuntimeLaunchID {
+		t.Fatalf("settled native reservation = %+v, want released capacity for stopped generation", reservation)
+	}
+	if ws.destroyed != 0 || st.trackerIntakePending[key] != "mer-1" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("stopped native owner destroyed workspace=%d or changed claim pending=%q handled=%q",
+			ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeDeliveredOwnerExitCommitsStoppedClaimWithoutTeardown(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("delivered-owner")
+	issueID := domain.IssueID("github:acme/mer#1202")
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/delivered-owner", Branch: "b",
+			RuntimeHandleID: "delivered-runtime", RuntimeLaunchID: "delivered-launch",
+		},
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/delivered-owner", RuntimeLaunchID: "delivered-launch",
+		RuntimeHandleIDs: []string{"delivered-runtime"}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{"delivered-runtime": true}
+
+	if _, err := m.ExitAgent(ctx, id); err != nil {
+		t.Fatalf("ExitAgent(): %v", err)
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited || !got.RuntimeReleased() {
+		t.Fatalf("exited delivered owner = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.CapacityReleased || reservation.ReleasedRuntimeLaunchID != got.Metadata.RuntimeLaunchID {
+		t.Fatalf("handled stopped reservation = %+v, want released capacity for stopped generation", reservation)
+	}
+	if ws.destroyed != 0 || st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("stopped delivered owner destroyed workspace=%d or claim pending=%q handled=%q",
+			ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestRestore_PendingUndeliveredNativeOwnerNaturalExitReleasesCapacityWithoutTeardown(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#1203")
+	key := "mer\x00" + string(issueID)
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex, IsTerminated: true,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task", AgentSessionID: "native-1",
+		},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	st.trackerIntakeRecovery["mer-1"] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "stopped-launch", RuntimeHandleIDs: []string{"old-runtime"},
+		CapacityReleased: true, ReleasedRuntimeLaunchID: "stopped-launch", CleanupConfirmed: true,
+	}
+	rt := &fakeRuntime{createIDs: []string{"new-runtime"}}
+	ws := &fakeWorkspace{}
+	lcm := &fakeLCM{store: st}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: ws,
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm,
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	rec := st.sessions["mer-1"]
+	rt.exitedLaunches = map[string]bool{rec.Metadata.RuntimeLaunchID: true}
+	if err := m.recordAgentExited(ctx, rec); err != nil {
+		t.Fatalf("recordAgentExited(): %v", err)
+	}
+	if st.sessions["mer-1"].RuntimeReleased() {
+		t.Fatal("natural exit unexpectedly recorded an explicit runtime release")
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions["mer-1"]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited {
+		t.Fatalf("naturally exited native owner = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery["mer-1"]
+	if !reservation.RelaunchPublished || reservation.DeliveryPossible || !reservation.CapacityReleased ||
+		reservation.ReleasedRuntimeLaunchID != got.Metadata.RuntimeLaunchID {
+		t.Fatalf("settled natural-exit reservation = %+v, want released capacity", reservation)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != "mer-1" {
+		t.Fatalf("natural exit destroyed runtime=%d workspace=%d or changed pending=%q",
+			rt.destroyed, ws.destroyed, st.trackerIntakePending[key])
+	}
+}
+
+func TestReconcileTrackerIntakeDeliveredOwnerNaturalExitCommitsStoppedClaimWithoutTeardown(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("naturally-exited-delivery")
+	issueID := domain.IssueID("github:acme/mer#1204")
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/naturally-exited-delivery", Branch: "b",
+			RuntimeHandleID: "delivery-runtime", RuntimeLaunchID: "delivery-launch",
+		},
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/naturally-exited-delivery", RuntimeLaunchID: "delivery-launch",
+		RuntimeHandleIDs: []string{"delivery-runtime"}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{"delivery-runtime": true}
+	rt.exitedLaunches = map[string]bool{"delivery-launch": true}
+
+	if err := m.recordAgentExited(ctx, st.sessions[id]); err != nil {
+		t.Fatalf("recordAgentExited(): %v", err)
+	}
+	if st.sessions[id].RuntimeReleased() {
+		t.Fatal("natural exit unexpectedly recorded an explicit runtime release")
+	}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited {
+		t.Fatalf("naturally exited delivery = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.CapacityReleased || reservation.ReleasedRuntimeLaunchID != got.Metadata.RuntimeLaunchID {
+		t.Fatalf("handled natural-exit reservation = %+v, want released capacity", reservation)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("natural delivery exit destroyed runtime=%d workspace=%d or claim pending=%q handled=%q",
+			rt.destroyed, ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeAdoptsInterruptedRelaunchGeneration(t *testing.T) {
+	for _, terminated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("terminated=%t", terminated), func(t *testing.T) {
+			m, st, rt, ws := newManager()
+			id := domain.SessionID("interrupted-relaunch")
+			issueID := domain.IssueID("github:acme/mer#121")
+			key := "mer\x00" + string(issueID)
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				IsTerminated: terminated, Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/interrupted-relaunch", Branch: "b", Prompt: "continue the task",
+					RuntimeHandleID: "old-runtime", RuntimeLaunchID: "old-launch",
+				},
+			}
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/interrupted-relaunch", RuntimeLaunchID: "new-launch",
+				RuntimeHandleIDs: []string{"new-runtime"}, DeliveryPossible: true,
+			}
+			rt.aliveByHandle = map[string]bool{"new-runtime": true}
+
+			if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+				t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+			}
+			got := st.sessions[id]
+			if got.IsTerminated || got.Activity.State != domain.ActivityIdle ||
+				got.Metadata.RuntimeHandleID != "new-runtime" || got.Metadata.RuntimeLaunchID != "new-launch" {
+				t.Fatalf("adopted session = %+v, want live reserved generation", got)
+			}
+			if ws.destroyed != 0 || st.trackerIntakePending[key] != id {
+				t.Fatalf("adoption destroyed workspace=%d or settled pending=%q", ws.destroyed, st.trackerIntakePending[key])
+			}
+			if len(rt.fencedRefs) == 0 || rt.fencedRefs[0].Generation != "new-launch" {
+				t.Fatalf("runtime probes = %+v, want reserved generation", rt.fencedRefs)
+			}
+		})
+	}
+}
+
+func TestReconcileTrackerIntakeRepublishesTerminatedMatchingRuntime(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-matching-runtime")
+	issueID := domain.IssueID("github:acme/mer#1211")
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		IsTerminated: true, Activity: domain.Activity{State: domain.ActivityExited},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/terminated-matching-runtime", Branch: "b", Prompt: "continue the task",
+			RuntimeHandleID: "new-runtime", RuntimeLaunchID: "new-launch",
+		},
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-matching-runtime", RuntimeLaunchID: "new-launch",
+		RuntimeHandleIDs: []string{"new-runtime"}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{"new-runtime": true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityIdle ||
+		got.Metadata.RuntimeHandleID != "new-runtime" || got.Metadata.RuntimeLaunchID != "new-launch" {
+		t.Fatalf("republished session = %+v, want live matching generation", got)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != id {
+		t.Fatalf("republication destroyed runtime=%d workspace=%d or settled pending=%q",
+			rt.destroyed, ws.destroyed, st.trackerIntakePending[key])
+	}
+}
+
+func TestReconcileTrackerIntakePublishedOwnerRequiresExactDeadProof(t *testing.T) {
+	tests := []struct {
+		name         string
+		probe        ports.FencedProbeResult
+		wantErr      bool
+		wantActivity domain.ActivityState
+	}{
+		{
+			name:         "alive stale exit is republished",
+			probe:        ports.FencedProbeResult{Liveness: ports.FencedAlive},
+			wantActivity: domain.ActivityIdle,
+		},
+		{
+			name:    "unknown owner remains fenced",
+			probe:   ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			wantErr: true, wantActivity: domain.ActivityExited,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, st, rt, ws := newManager()
+			id := domain.SessionID("published-owner")
+			issueID := domain.IssueID("github:acme/mer#1212")
+			key := "mer\x00" + string(issueID)
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/published-owner", Branch: "b",
+					RuntimeHandleID: "published-runtime", RuntimeLaunchID: "published-launch",
+				},
+			}
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/published-owner", RuntimeLaunchID: "published-launch",
+				RuntimeHandleIDs: []string{"published-runtime"}, RelaunchPublished: true,
+			}
+			rt.fencedResult = tt.probe
+
+			err := m.ReconcileTrackerIntakeClaims(context.Background())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, wantErr=%v", err, tt.wantErr)
+			}
+			if got := st.sessions[id]; got.IsTerminated || got.Activity.State != tt.wantActivity {
+				t.Fatalf("published owner = %+v, want activity %q and resumable row", got, tt.wantActivity)
+			}
+			if rt.destroyed != 0 || ws.destroyed != 0 || st.trackerIntakePending[key] != id {
+				t.Fatalf("uncertain published owner destroyed runtime=%d workspace=%d or settled pending=%q",
+					rt.destroyed, ws.destroyed, st.trackerIntakePending[key])
+			}
+		})
+	}
+}
+
+func TestReconcileTrackerIntakeUndeliveredRelaunchUsesReservedGeneration(t *testing.T) {
+	for _, terminated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("terminated=%t", terminated), func(t *testing.T) {
+			m, st, rt, _ := newManager()
+			id := domain.SessionID("undelivered-relaunch")
+			issueID := domain.IssueID("github:acme/mer#122")
+			key := "mer\x00" + string(issueID)
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				IsTerminated: terminated, Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/undelivered-relaunch", Branch: "b",
+					RuntimeHandleID: "old-runtime", RuntimeLaunchID: "old-launch",
+				},
+			}
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/undelivered-relaunch", RuntimeLaunchID: "new-launch",
+				RuntimeHandleIDs: []string{"new-runtime"},
+			}
+			rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+
+			if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+				t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+			}
+			if len(rt.fencedRefs) == 0 {
+				t.Fatal("reserved runtime was not probed")
+			}
+			seen := map[string]bool{}
+			for _, ref := range rt.fencedRefs {
+				seen[ref.Handle.ID+"\x00"+ref.Generation] = true
+			}
+			if !seen["new-runtime\x00new-launch"] || !seen["old-runtime\x00old-launch"] {
+				t.Fatalf("runtime probes = %+v, want both reserved and stale row generations", rt.fencedRefs)
+			}
+			if st.trackerIntakePending[key] != "" {
+				t.Fatalf("undelivered stopped claim remained pending: %q", st.trackerIntakePending[key])
+			}
+		})
 	}
 }
 
@@ -11365,6 +13522,7 @@ func TestReconcileReap_TerminatedButAliveTmuxDestroyed(t *testing.T) {
 		ID: "t1", ProjectID: "p1", IsTerminated: true,
 		Metadata: domain.SessionMetadata{RuntimeHandleID: "t1"},
 	}
+	st.sessions[rec.ID] = rec
 
 	if err := m.reconcileReap(context.Background(), rec); err != nil {
 		t.Fatalf("reconcileReap: %v", err)
@@ -11386,6 +13544,7 @@ func TestReconcileReap_TerminatedAndDeadTmuxLeftAlone(t *testing.T) {
 		ID: "t2", ProjectID: "p1", IsTerminated: true,
 		Metadata: domain.SessionMetadata{RuntimeHandleID: "t2"},
 	}
+	st.sessions[rec.ID] = rec
 	if err := m.reconcileReap(context.Background(), rec); err != nil {
 		t.Fatalf("reconcileReap: %v", err)
 	}

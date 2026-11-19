@@ -884,7 +884,8 @@ func Run(buildVersion string) (retErr error) {
 		stop()
 		<-reportDeliveryDone
 	}()
-	lcStack.trackerDone = startTrackerIntake(ctx, cfg, store, sessionSvc, tracker, log)
+	trackerIntakeStart := make(chan struct{})
+	lcStack.trackerDone = startTrackerIntake(ctx, cfg, store, sessionSvc, tracker, log, trackerIntakeStart)
 
 	hostCommands := systemexec.New(cfg.DataDir)
 	systemChecks := systemcheck.NewWithCommandRunner(agentSvc, hostCommands, hostCommands)
@@ -1519,6 +1520,7 @@ func Run(buildVersion string) (retErr error) {
 		go func() {
 			defer sentryobs.RecoverBackground()
 			defer close(done)
+			defer close(trackerIntakeStart)
 			// Contract supervision acts on persisted idle time, so its immediate
 			// first sweep must wait until session and runtime reconciliation have
 			// refreshed facts left by the previous daemon.

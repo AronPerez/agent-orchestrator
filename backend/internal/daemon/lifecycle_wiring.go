@@ -959,8 +959,8 @@ func (c chatLauncher) RunPromptSuggestionTask(ctx context.Context, id domain.Ses
 	return c.svc.RunPromptSuggestionTask(ctx, id, turnID, harness, cfg, prompt)
 }
 
-func (c chatLauncher) StartChatTurn(ctx context.Context, id domain.SessionID, text string) (string, error) {
-	return c.svc.StartChatTurn(ctx, id, text)
+func (c chatLauncher) StartChatTurn(ctx context.Context, id domain.SessionID, text string, beforeSend func() error) (string, error) {
+	return c.svc.StartChatTurn(ctx, id, text, beforeSend)
 }
 
 func (c chatLauncher) RelaySessionChatTurn(ctx context.Context, id domain.SessionID, text, clientMessageID string, options ports.MessageDeliveryOptions) (string, error) {

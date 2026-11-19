@@ -17875,6 +17875,21 @@ components:
       - failures
       - pausedAt
       type: object
+    AutomatedSessionLimits:
+      properties:
+        maxConcurrent:
+          description: Maximum live sessions counted by this producer. Zero selects
+            the default of 3.
+          maximum: 100
+          minimum: 0
+          type: integer
+        maxStartsPerPass:
+          description: Maximum session start attempts in one polling or scheduling
+            pass. Zero selects the default of 2.
+          maximum: 100
+          minimum: 0
+          type: integer
+      type: object
     AutomationEnvelope:
       properties:
         automation:
@@ -28112,6 +28127,8 @@ components:
           type: string
         enabled:
           type: boolean
+        limits:
+          $ref: '#/components/schemas/AutomatedSessionLimits'
         provider:
           enum:
           - github

@@ -194,7 +194,7 @@ Orchestrator observes GitHub and GitLab repositories and can use their issue tra
 
 Set `canonicalRepoURL` when a numeric PR claim should use a particular upstream. It does not change checkout or push destinations. For issue spawning, select `--tracker-provider github|gitlab`. See [issue intake](/plugins/trackers) and [source-control setup](/plugins/scm), including self-managed GitLab hosts.
 
-Issue intake starts workers only when both the daemon has `AO_TRACKER_INTAKE=on` and the project has an enabled `trackerIntake` rule. Intake does not comment on or change issues.
+Issue intake starts workers only when both the daemon has `AO_TRACKER_INTAKE=on` and the project has an enabled `trackerIntake` rule. By default, one sweep starts at most two workers and no more than three live issue-linked sessions consume a project's intake capacity. Intake records each delivered issue durably, so terminating or deleting its session does not enqueue the still-open issue again. Intake does not comment on or change issues.
 
 ## Automations and Cues
 

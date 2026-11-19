@@ -25,6 +25,7 @@ const (
 
 // Ensure Runtime satisfies the port at compile time (Attach in attach.go).
 var _ ports.Runtime = (*Runtime)(nil)
+var _ ports.RuntimeLaunchCandidateProvider = (*Runtime)(nil)
 var _ ports.FencedRuntimeProber = (*Runtime)(nil)
 var _ ports.StyledTerminalOutputReader = (*Runtime)(nil)
 
@@ -265,6 +266,16 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 	return ports.RuntimeHandle{ID: id}, nil
 }
 
+// LaunchCandidates returns the stable PTY-host handle without touching its
+// registry or starting a process.
+func (r *Runtime) LaunchCandidates(cfg ports.RuntimeConfig) ([]ports.RuntimeHandle, error) {
+	id := string(cfg.SessionID)
+	if !validSessionID.MatchString(id) {
+		return nil, fmt.Errorf("conpty: invalid session id %q: must match ^[a-zA-Z0-9_-]+$", id)
+	}
+	return []ports.RuntimeHandle{{ID: id}}, nil
+}
+
 // Destroy gracefully kills the pty-host, then force-kills it when necessary.
 // The session remains registered until its PID is confirmed gone so callers
 // never receive a false-success teardown while a provider may still be alive.
@@ -451,6 +462,9 @@ func (r *Runtime) ProbeFencedRuntime(ctx context.Context, ref ports.FencedRuntim
 	}
 	if status.Alive {
 		return ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
+	}
+	if status.ExitCode != nil {
+		return ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited}
 	}
 	return ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
 }

@@ -162,6 +162,14 @@ type sessionOperationGate interface {
 	SessionMutationInProgress(id domain.SessionID) bool
 }
 
+type sessionObservationGate interface {
+	SessionObservationInProgress(id domain.SessionID) bool
+}
+
+type sessionOwnershipObservationGate interface {
+	SessionOwnershipObservationInProgress(id domain.SessionID) bool
+}
+
 type pendingLaunch struct {
 	launchID string
 	ready    chan struct{}
@@ -483,6 +491,35 @@ func (m *Manager) sessionMutationInProgress(id domain.SessionID) bool {
 	return gate != nil && gate.SessionMutationInProgress(id)
 }
 
+func (m *Manager) runtimeObservationInProgress(id domain.SessionID) bool {
+	m.operationGateMu.RLock()
+	gate := m.operationGate
+	m.operationGateMu.RUnlock()
+	if gate == nil {
+		return false
+	}
+	if observationGate, ok := gate.(sessionObservationGate); ok {
+		return observationGate.SessionObservationInProgress(id)
+	}
+	return gate.SessionMutationInProgress(id)
+}
+
+func (m *Manager) runtimeOwnershipObservationInProgress(id domain.SessionID) bool {
+	m.operationGateMu.RLock()
+	gate := m.operationGate
+	m.operationGateMu.RUnlock()
+	if gate == nil {
+		return false
+	}
+	if ownershipGate, ok := gate.(sessionOwnershipObservationGate); ok {
+		return ownershipGate.SessionOwnershipObservationInProgress(id)
+	}
+	if observationGate, ok := gate.(sessionObservationGate); ok {
+		return observationGate.SessionObservationInProgress(id)
+	}
+	return false
+}
+
 // PrepareLaunch registers a supervised generation before the runtime starts.
 // Hooks from that exact generation wait until MarkSpawned commits the generation
 // instead of racing the old durable generation and being discarded as stale.
@@ -603,6 +640,9 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 		}
 		currentLaunch := cur.Metadata.RuntimeLaunchID
 		if currentLaunch != "" && f.Runtime == ports.ProbeAlive && f.Workload == ports.ProbeDead {
+			if m.runtimeOwnershipObservationInProgress(id) {
+				return cur, false
+			}
 			if cur.Activity.State == domain.ActivityExited {
 				return cur, false
 			}
@@ -611,15 +651,15 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 			delete(m.flights, id)
 			return next, true
 		}
+		if m.runtimeObservationInProgress(id) {
+			return cur, false
+		}
 		// AO destroyed this launch's terminal on purpose and kept the session
 		// (an agent exit); Resume builds a new one. Its death is not a crash.
 		if cur.RuntimeReleased() {
 			return cur, false
 		}
 		if !runtimeClearlyDead(f, cur.Activity, now, m.window) {
-			return cur, false
-		}
-		if m.sessionMutationInProgress(id) {
 			return cur, false
 		}
 		finalizer = m.usageFinalizer
@@ -638,7 +678,7 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 	err := m.mutate(ctx, id, func(cur domain.SessionRecord, now time.Time) (domain.SessionRecord, bool) {
 		if cur.IsTerminated || cur.Revision != terminationRevision ||
 			cur.Metadata.RuntimeLaunchID != terminationLaunch || !matchesLaunch(cur) ||
-			!runtimeClearlyDead(f, cur.Activity, now, m.window) || m.sessionMutationInProgress(id) {
+			!runtimeClearlyDead(f, cur.Activity, now, m.window) || m.runtimeObservationInProgress(id) {
 			return cur, false
 		}
 		next := cur

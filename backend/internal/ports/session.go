@@ -15,11 +15,31 @@ var ErrSessionNotFound = errors.New("session not found")
 // retrying concurrent session writes. The same hook payload may be retried.
 var ErrActivityProjectionContention = errors.New("activity projection contention")
 
+// ErrTrackerIntakeHandled means an intake item already has durable delivery
+// proof. Callers should skip it rather than launch another session.
+var ErrTrackerIntakeHandled = errors.New("tracker intake item already handled")
+
+// ErrTrackerIntakeActive means another live session already owns the same
+// project issue. Callers should skip it for this pass; once that session is no
+// longer live, intake may try the still-open issue again.
+var ErrTrackerIntakeActive = errors.New("tracker intake item already has a live session")
+
+// ErrAutomatedSessionCapacity means a project is currently at its configured
+// automated-session concurrency limit. The shared limit concept is also used
+// by backlog scheduling; the tracker-intake admission record remains specific
+// to issue delivery.
+var ErrAutomatedSessionCapacity = errors.New("automated session capacity exhausted")
+
 // SpawnConfig is the request to start a new session: which project/issue, which
 // agent harness, and the branch/prompt the agent launches with.
 type SpawnConfig struct {
 	ProjectID domain.ProjectID
 	IssueID   domain.IssueID
+	// TrackerIntakeLimits requests atomic tracker-intake admission: the store
+	// checks current project capacity and same-issue ownership, then creates the
+	// seed session and a pending claim in one transaction. The manager promotes
+	// the claim only after launch succeeds. Ordinary spawns leave it nil.
+	TrackerIntakeLimits *domain.AutomatedSessionLimits
 	// AutomationRunID makes one scheduled occurrence idempotent across daemon
 	// restarts. Ordinary interactive spawns leave this unset.
 	AutomationRunID *domain.AutomationRunID

@@ -538,6 +538,33 @@ func TestGuard_DeliverUnderMutationCheckedRunsGenerationProofBeforePaneWrite(t *
 	}
 }
 
+func TestGuard_DeliverCheckedRunsPreWriteOnlyForAdmittedDelivery(t *testing.T) {
+	messenger := &fakeMessenger{}
+	store := &fakeStore{rec: record(domain.ActivityBlocked, false), ok: true}
+	g := New(store, messenger, nil)
+	preWrites := 0
+
+	got, err := g.DeliverChecked(context.Background(), "s1", "task", func(context.Context, domain.SessionRecord) error {
+		preWrites++
+		return nil
+	})
+	if err != nil || got != SuppressedAwaitingUser {
+		t.Fatalf("blocked DeliverChecked = (%v, %v), want (SuppressedAwaitingUser, nil)", got, err)
+	}
+	if preWrites != 0 || len(messenger.sent) != 0 {
+		t.Fatalf("blocked delivery ran pre-write/send = %d/%d, want 0/0", preWrites, len(messenger.sent))
+	}
+
+	store.rec = record(domain.ActivityWaitingInput, false)
+	got, err = g.DeliverChecked(context.Background(), "s1", "task", func(context.Context, domain.SessionRecord) error {
+		preWrites++
+		return nil
+	})
+	if err != nil || got != Sent || preWrites != 1 || len(messenger.sent) != 1 {
+		t.Fatalf("admitted DeliverChecked = (%v, %v), preWrites=%d sends=%d", got, err, preWrites, len(messenger.sent))
+	}
+}
+
 func TestGuard_CoordinationUnderMutationRechecksActivityAndBypassesInputGate(t *testing.T) {
 	steersCodex := func(h domain.AgentHarness) bool { return h == domain.HarnessCodex }
 	acceptsClaudeWaiting := func(h domain.AgentHarness) bool { return h == domain.HarnessClaudeCode }

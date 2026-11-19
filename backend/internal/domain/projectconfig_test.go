@@ -91,6 +91,8 @@ func TestProjectConfigValidate(t *testing.T) {
 		{"empty reviewer harness", ProjectConfig{Reviewers: []ReviewerConfig{{Harness: ""}}}, true},
 		{"tracker intake assignee rule", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Assignee: "alice"}}, false},
 		{"tracker intake explicit github", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Provider: TrackerProviderGitHub, Assignee: "alice"}}, false},
+		{"tracker intake custom limits", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Assignee: "alice", Limits: AutomatedSessionLimits{MaxConcurrent: 8, MaxStartsPerPass: 2}}}, false},
+		{"tracker intake invalid limits", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Assignee: "alice", Limits: AutomatedSessionLimits{MaxConcurrent: -1}}}, true},
 		{"tracker intake no rule", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true}}, true},
 		{"tracker intake unknown provider", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Provider: "linear", Assignee: "alice"}}, true},
 		{"tracker intake repo with whitespace", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Repo: " acme/demo", Assignee: "alice"}}, true},
@@ -169,10 +171,16 @@ func TestProjectConfigWithDefaults(t *testing.T) {
 	if got.TrackerIntake.Provider != "" {
 		t.Fatalf("TrackerIntake.Provider = %q, want empty (inferred at use time)", got.TrackerIntake.Provider)
 	}
+	if got.TrackerIntake.Limits != (AutomatedSessionLimits{MaxConcurrent: DefaultAutomatedSessionMaxConcurrent, MaxStartsPerPass: DefaultAutomatedSessionMaxStartsPerPass}) {
+		t.Fatalf("TrackerIntake.Limits = %#v, want safe defaults", got.TrackerIntake.Limits)
+	}
 
 	got = (ProjectConfig{}).WithDefaults()
 	if got.TrackerIntake.Provider != "" {
 		t.Fatalf("disabled TrackerIntake.Provider = %q, want empty", got.TrackerIntake.Provider)
+	}
+	if got.TrackerIntake.Limits != (AutomatedSessionLimits{}) {
+		t.Fatalf("disabled TrackerIntake.Limits = %#v, want zero", got.TrackerIntake.Limits)
 	}
 }
 

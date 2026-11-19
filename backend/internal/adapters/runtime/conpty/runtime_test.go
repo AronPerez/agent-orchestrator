@@ -142,6 +142,32 @@ func TestProbeFencedRuntimeGenerationMismatchIsUnknown(t *testing.T) {
 	}
 }
 
+func TestProbeFencedRuntimeExitedChildRetainsHostEvidence(t *testing.T) {
+	isolateRegistry(t)
+	hosts := map[string]*inProcHost{}
+	rt := New(Options{Spawner: fakeSpawnerFor(t, hosts, livePID())})
+	handle, err := rt.Create(context.Background(), ports.RuntimeConfig{
+		SessionID: "sess-exited", WorkspacePath: t.TempDir(), Argv: []string{"codex"},
+		Env: map[string]string{runtimeLaunchIDEnv: "launch-exited"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	host := hosts[handle.ID]
+	t.Cleanup(func() { host.cleanup(t) })
+	host.pty.signalExit(0)
+
+	got := rt.ProbeFencedRuntime(context.Background(), ports.FencedRuntimeRef{
+		Handle: handle, SessionID: "sess-exited", Generation: "launch-exited",
+	})
+	if got.Liveness != ports.FencedDead || got.Reason != ports.FencedReasonExactExited {
+		t.Fatalf("ProbeFencedRuntime exited child = %+v, want dead/exact_exited", got)
+	}
+	if alive, err := rt.IsAlive(context.Background(), handle); err != nil || !alive {
+		t.Fatalf("IsAlive retained host = %t, %v, want true", alive, err)
+	}
+}
+
 func TestPartialCreateCleanupFailureReturnsRuntimeEffectEvidence(t *testing.T) {
 	isolateRegistry(t)
 	createErr := errors.New("spawn response lost")

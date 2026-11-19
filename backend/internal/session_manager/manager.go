@@ -383,6 +383,14 @@ type Store interface {
 	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
 	ListWorkspaceRepos(ctx context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error)
 	CreateSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, error)
+	CreateTrackerIntakeSession(ctx context.Context, rec domain.SessionRecord, limits domain.AutomatedSessionLimits) (domain.SessionRecord, error)
+	CommitTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
+	CommitStoppedTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
+	ReconcileTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
+	ReserveTrackerIntakeRecovery(ctx context.Context, id domain.SessionID, reservation domain.TrackerIntakeRecoveryReservation) error
+	GetPendingTrackerIntakeRecovery(ctx context.Context, id domain.SessionID) (domain.TrackerIntakeRecoveryReservation, bool, error)
+	ListPendingTrackerIntakeClaims(ctx context.Context) ([]domain.TrackerIntakePendingClaim, error)
+	ReleaseTrackerIntakeSession(ctx context.Context, id domain.SessionID) error
 	CreateAutomationSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error)
 	CreateClientRequestSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error)
 	GetSessionByClientRequestID(ctx context.Context, id string) (domain.SessionRecord, bool, error)
@@ -516,10 +524,17 @@ type Manager struct {
 	startupProvisioningRetries []domain.SessionRecord
 	// runBackground runs an asynchronous spawn's remaining work. Nil means a
 	// plain goroutine; tests substitute a synchronous runner.
-	runBackground     func(func())
-	backgroundWorkers sync.WaitGroup
-	asyncChatSpawnsMu sync.Mutex
-	asyncChatSpawns   map[domain.SessionID]*asyncChatSpawnRun
+	runBackground           func(func())
+	backgroundWorkers       sync.WaitGroup
+	trackerIntakeRecoveryMu sync.Mutex
+	trackerIntakeRecovering map[domain.SessionID]struct{}
+	// trackerIntakeReaperFenced keeps observation-driven runtime death from
+	// terminating a session whose exact intake owner is still unresolved. It is
+	// deliberately separate from agentOperations so explicit Kill/Resume can
+	// resolve the ambiguity instead of being blocked by it.
+	trackerIntakeReaperFenced map[domain.SessionID]struct{}
+	asyncChatSpawnsMu         sync.Mutex
+	asyncChatSpawns           map[domain.SessionID]*asyncChatSpawnRun
 	// provisionObserver hears provision-state writes (SetProvisionObserver).
 	provisionObserver ProvisionObserver
 	// killTeardown bounds Kill's detached teardown. Zero means
@@ -550,7 +565,7 @@ type Manager struct {
 	statusRecoveryRevision      uint64
 	statusRecoveries            map[domain.SessionID]statusRecovery
 	statusVerificationLimit     time.Duration
-	startupChatRetryDelays      []time.Duration
+	startupHealthRetryDelays    []time.Duration
 	agentOpMu                   sync.Mutex
 	agentOperations             map[domain.SessionID]agentOperationKind
 	// launchStartWait bounds the wait to see a new supervised launch alive.
@@ -1044,6 +1059,8 @@ func New(d Deps) *Manager {
 		taskPreparations:               make(map[domain.TaskPreparationToken]*taskPreparation),
 		taskNamingSlots:                make(chan struct{}, 4),
 		asyncChatSpawns:                make(map[domain.SessionID]*asyncChatSpawnRun),
+		trackerIntakeRecovering:        make(map[domain.SessionID]struct{}),
+		trackerIntakeReaperFenced:      make(map[domain.SessionID]struct{}),
 		taskPreparationTTL:             defaultTaskPreparationTTL,
 		openTranscriptFile:             os.Open,
 		lookPath:                       d.LookPath,
@@ -1079,7 +1096,7 @@ func New(d Deps) *Manager {
 	}
 	m.statusRecoveries = make(map[domain.SessionID]statusRecovery)
 	m.statusVerificationLimit = statusVerificationLimit
-	m.startupChatRetryDelays = defaultStartupChatRetryDelays
+	m.startupHealthRetryDelays = defaultStartupHealthRetryDelays
 	if m.reconcileWorkers < 1 {
 		m.reconcileWorkers = 1
 	}
@@ -1321,7 +1338,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	asyncChat := cfg.Async && mode == domain.SessionModeChat && m.chat != nil && (cfg.Kind == domain.KindOrchestrator || cfg.Kind == domain.KindWorker)
 
 	var prep *taskPreparation
-	if cfg.AutomationRunID == nil && cfg.Branch == "" {
+	if cfg.AutomationRunID == nil && cfg.TrackerIntakeLimits == nil && cfg.Branch == "" {
 		prep = m.claimTaskPreparation(cfg.TaskPreparation, cfg.ProjectID)
 	}
 	var rec domain.SessionRecord
@@ -1338,7 +1355,9 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		if asyncChat {
 			seed.ProvisionState = domain.SessionProvisionProvisioning
 		}
-		if cfg.ClientRequestID != "" {
+		if cfg.TrackerIntakeLimits != nil {
+			rec, err = m.store.CreateTrackerIntakeSession(ctx, seed, *cfg.TrackerIntakeLimits)
+		} else if cfg.ClientRequestID != "" {
 			var fresh bool
 			rec, fresh, err = m.store.CreateClientRequestSession(ctx, seed)
 			if err == nil && !fresh {
@@ -1366,6 +1385,21 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 	}
 	id := rec.ID
+	if cfg.TrackerIntakeLimits != nil {
+		m.setTrackerIntakeReaperFence(id)
+		defer func() {
+			cleanupCtx, cancel := spawnRollbackContext(ctx)
+			defer cancel()
+			if resultErr != nil {
+				if reconcileErr := m.store.ReconcileTrackerIntakeSession(cleanupCtx, id, m.clock()); reconcileErr != nil {
+					m.logger.Warn("spawn: tracker intake claim reconciliation failed", "sessionID", id, "error", reconcileErr)
+				}
+			}
+			if refreshErr := m.refreshTrackerIntakeReaperFence(cleanupCtx, id); refreshErr != nil {
+				m.logger.Warn("spawn: tracker intake reaper fence refresh failed", "sessionID", id, "error", refreshErr)
+			}
+		}()
+	}
 	if m.agentAccounts != nil || cfg.AgentAccountID != "" {
 		err := ports.ErrAgentAccountUnknown
 		if m.agentAccounts != nil {
@@ -1587,6 +1621,12 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrWorkspaceCreate, err)
 	}
+	if cfg.TrackerIntakeLimits != nil {
+		if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspace(ws)); err != nil {
+			m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false, false)
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+	}
 	// Per-project workspace provisioning: symlink shared files, then run any
 	// post-create commands (e.g. `pnpm install`) before the agent launches.
 	provisioned := BeginSpawnStep(ctx, SpawnStepSetup)
@@ -1596,7 +1636,6 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false, false)
 		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrWorkspaceProvision, err)
 	}
-
 	// CLI agents receive the prompt as text and cannot consume inline binary
 	// data, so any pasted/dropped images are written into the worktree and
 	// referenced by path in the prompt. Done after provisioning (so the worktree
@@ -1646,6 +1685,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 		if cfg.ClientRequestID != "" {
 			if err := m.store.CommitClientRequestSession(ctx, id); err != nil {
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+			}
+		}
+		if cfg.TrackerIntakeLimits != nil {
+			if err := m.store.CommitTrackerIntakeSession(ctx, id, m.clock()); err != nil {
 				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
 			}
 		}
@@ -1785,25 +1829,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: %w", id, err)
 	}
 	defer releaseCodexAdmission()
-	started := BeginSpawnStep(ctx, SpawnStepAgentStart)
-	handle, err := m.runtime.Create(ctx, ports.RuntimeConfig{
-		SessionID:     id,
-		WorkspacePath: ws.Path,
-		Argv:          argv,
-		Env:           env,
-	})
-	started(err)
-	if err != nil {
-		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true, false)
-		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrRuntimeCreate, agentlaunch.RedactError(err, project.Config.Env))
-	}
-
 	metadata := domain.SessionMetadata{
 		Permissions:               rec.Metadata.Permissions,
 		Branch:                    ws.Branch,
 		WorkspacePath:             ws.Path,
 		WorkspaceRepoPath:         ws.RepoPath,
-		RuntimeHandleID:           handle.ID,
 		RuntimeLaunchID:           launchID,
 		Prompt:                    prompt,
 		LatestUserPrompt:          prompt,
@@ -1822,6 +1852,58 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	if projectKind == domain.ProjectKindSingleRepo {
 		metadata.DiffBaseSHA, metadata.DiffBaseRef = resolveSpawnDiffBase(ctx, ws.Path, ws.BaseRef)
 	}
+	runtimeCfg := ports.RuntimeConfig{
+		SessionID:     id,
+		WorkspacePath: ws.Path,
+		Argv:          argv,
+		Env:           env,
+	}
+	deliveryPossibleAtCreate := delivery == ports.PromptDeliveryInCommand && strings.TrimSpace(launchCfg.Prompt) != ""
+	if cfg.TrackerIntakeLimits != nil {
+		if err := m.reserveTrackerIntakeRuntime(ctx, id, ws, launchID, runtimeCfg, deliveryPossibleAtCreate); err != nil {
+			m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true, false)
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+	}
+	started := BeginSpawnStep(ctx, SpawnStepAgentStart)
+	handle, err := m.runtime.Create(ctx, runtimeCfg)
+	started(err)
+	if err != nil {
+		if cfg.TrackerIntakeLimits != nil {
+			if effect, possible := runtimeCreateEffect(err); possible {
+				metadata.RuntimeHandleID = effect.PossibleHandle().ID
+				if effect.CleanupOutcome() == ports.RuntimeCleanupSucceeded {
+					if deliveryPossibleAtCreate {
+						if releaseErr := m.markTrackerIntakeCapacityReleased(ctx, id); releaseErr != nil {
+							err = errors.Join(err, releaseErr)
+						}
+					} else if clearErr := m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspace(ws)); clearErr != nil {
+						err = errors.Join(err, clearErr)
+					}
+					m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true, false)
+					return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrRuntimeCreate, agentlaunch.RedactError(err, project.Config.Env))
+				}
+				if persistErr := m.preserveUncertainTrackerIntakeRuntime(ctx, rec, metadata); persistErr != nil {
+					err = errors.Join(err, persistErr)
+				}
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrRuntimeCreate, agentlaunch.RedactError(err, project.Config.Env))
+			}
+			if clearErr := m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspace(ws)); clearErr != nil {
+				err = errors.Join(err, clearErr)
+			}
+		}
+		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true, false)
+		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrRuntimeCreate, agentlaunch.RedactError(err, project.Config.Env))
+	}
+	metadata.RuntimeHandleID = handle.ID
+	if cfg.TrackerIntakeLimits != nil {
+		if err := m.reserveTrackerIntakeRuntimeHandle(ctx, id, ws, launchID, handle, deliveryPossibleAtCreate); err != nil {
+			if persistErr := m.preserveUncertainTrackerIntakeRuntime(ctx, rec, metadata); persistErr != nil {
+				err = errors.Join(err, persistErr)
+			}
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+	}
 	if cfg.AutomationRunID != nil {
 		rec.Metadata = metadata
 		rec.UpdatedAt = m.clock()
@@ -1833,13 +1915,66 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 	}
 	if err := m.lcm.MarkSpawned(ctx, id, metadata); err != nil {
+		if cfg.TrackerIntakeLimits != nil && deliveryPossibleAtCreate {
+			if persistErr := m.preserveUncertainTrackerIntakeRuntime(ctx, rec, metadata); persistErr != nil {
+				err = errors.Join(err, persistErr)
+			}
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
 		runtimeDestroyed := m.destroySpawnRuntimeAfterFailure(ctx, handle)
-		m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, rec, ws, workspaceProject, runtimeDestroyed)
+		if cfg.TrackerIntakeLimits != nil && !runtimeDestroyed {
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+		workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, rec, ws, workspaceProject, runtimeDestroyed)
+		if cfg.TrackerIntakeLimits != nil {
+			if !workspaceDestroyed {
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+			}
+			if confirmErr := m.confirmTrackerIntakeCleanup(ctx, id); confirmErr != nil {
+				err = errors.Join(err, confirmErr)
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+			}
+			m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
+			if releaseErr := m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id); releaseErr != nil {
+				err = errors.Join(err, releaseErr)
+			}
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
 		m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
 		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
 	}
 	if delivery == ports.PromptDeliveryAfterStart {
-		if err := m.deliverAfterStartPrompt(ctx, agent, launchCfg, handle, id, afterStartPrompt); err != nil {
+		var beforePrompt func() error
+		if cfg.TrackerIntakeLimits != nil {
+			beforePrompt = func() error { return m.markTrackerIntakeDeliveryPossible(ctx, id) }
+		}
+		if err := m.deliverAfterStartPromptWithFence(ctx, agent, launchCfg, handle, id, afterStartPrompt, beforePrompt); err != nil {
+			if cfg.TrackerIntakeLimits != nil {
+				reservation, pending, recoveryErr := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+				if recoveryErr != nil {
+					err = errors.Join(err, recoveryErr)
+				}
+				if recoveryErr != nil || (pending && reservation.DeliveryPossible) {
+					return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
+				}
+				runtimeDestroyed := m.destroySpawnRuntimeAfterFailure(ctx, handle)
+				if !runtimeDestroyed {
+					return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
+				}
+				workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, rec, ws, workspaceProject, true)
+				m.markSpawnFailedTerminatedAfterFailure(ctx, id, runtimeDestroyed && workspaceDestroyed)
+				if !workspaceDestroyed {
+					return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
+				}
+				if confirmErr := m.confirmTrackerIntakeCleanup(ctx, id); confirmErr != nil {
+					err = errors.Join(err, confirmErr)
+					return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
+				}
+				if releaseErr := m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id); releaseErr != nil {
+					err = errors.Join(err, releaseErr)
+				}
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnDeliverPrompt, err)
+			}
 			runtimeDestroyed := m.destroySpawnRuntimeAfterFailure(ctx, handle)
 			workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, rec, ws, workspaceProject, runtimeDestroyed)
 			m.markSpawnFailedTerminatedAfterFailure(ctx, id, runtimeDestroyed && workspaceDestroyed)
@@ -1853,6 +1988,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	}
 	if cfg.ClientRequestID != "" {
 		if err := m.store.CommitClientRequestSession(ctx, id); err != nil {
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+	}
+	if cfg.TrackerIntakeLimits != nil {
+		if err := m.store.CommitTrackerIntakeSession(ctx, id, m.clock()); err != nil {
 			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
 		}
 	}
@@ -2303,6 +2443,12 @@ func (m *Manager) createSessionWorkspace(ctx context.Context, project domain.Pro
 // set; session import uses it to continue from the original commit.
 func (m *Manager) createSessionWorkspaceAt(ctx context.Context, project domain.ProjectRecord, cfg ports.SpawnConfig, id domain.SessionID, branch string, baseRefs map[string]string, startRef string) (ports.WorkspaceInfo, *ports.WorkspaceProjectInfo, error) {
 	projectKind := project.Kind.WithDefault()
+	var beforeCreate func(ports.WorkspaceInfo) error
+	if cfg.TrackerIntakeLimits != nil {
+		beforeCreate = func(ws ports.WorkspaceInfo) error {
+			return m.store.ReserveTrackerIntakeRecovery(ctx, id, trackerIntakeRecoveryForWorkspaceCreationIntent(ws))
+		}
+	}
 	if cfg.ProjectID == "" {
 		projectKind = domain.ProjectKindScratch
 	}
@@ -2321,6 +2467,7 @@ func (m *Manager) createSessionWorkspaceAt(ctx context.Context, project domain.P
 			RequireNewBranch: cfg.RequireNewBranch,
 			BaseBranch:       baseBranch,
 			BaseRef:          baseRefs[filepath.Clean(project.Path)],
+			BeforeCreate:     beforeCreate,
 		}
 		if cfg.Fork != nil {
 			return m.createForkWorkspace(ctx, cfg.Fork, workspaceCfg)
@@ -2381,6 +2528,7 @@ func (m *Manager) createSessionWorkspaceAt(ctx context.Context, project domain.P
 		StartRef:         startRef,
 		Repos:            childRepos,
 		Assets:           assets,
+		BeforeCreate:     beforeCreate,
 	})
 	if err != nil && (cfg.TaskPreparation == "" || len(info.Worktrees) == 0) {
 		return ports.WorkspaceInfo{}, nil, err
@@ -2497,9 +2645,11 @@ func (m *Manager) destroySpawnWorkspace(ctx context.Context, ws ports.WorkspaceI
 		m.logger.Warn("spawn rollback: workspace ownership changed; preserving workspace", "sessionID", ws.SessionID, "error", err)
 		return false
 	}
-	if err := m.runPreRemove(ws.ProjectID, ws.Path); err != nil {
-		m.logger.Warn("spawn rollback: workspace cleanup failed; preserving workspace", "sessionID", ws.SessionID, "error", err)
-		return false
+	if trackerIntakeCleanupHooksSafe(ws, workspaceProject) {
+		if err := m.runPreRemove(ws.ProjectID, ws.Path); err != nil {
+			m.logger.Warn("spawn rollback: workspace cleanup failed; preserving workspace", "sessionID", ws.SessionID, "error", err)
+			return false
+		}
 	}
 	ctx, cancel := spawnRollbackContext(ctx)
 	defer cancel()
@@ -2540,6 +2690,305 @@ func (m *Manager) destroySpawnRuntimeAfterFailure(ctx context.Context, handle po
 	return m.runtime.Destroy(cleanupCtx, handle) == nil
 }
 
+func runtimeCreateEffect(err error) (ports.RuntimeEffectError, bool) {
+	var effect ports.RuntimeEffectError
+	if !errors.As(err, &effect) || effect.EffectOutcome() == ports.RuntimeEffectNone {
+		return nil, false
+	}
+	return effect, true
+}
+
+func (m *Manager) reserveTrackerIntakeRuntime(
+	ctx context.Context,
+	id domain.SessionID,
+	ws ports.WorkspaceInfo,
+	launchID string,
+	cfg ports.RuntimeConfig,
+	deliveryPossible bool,
+) error {
+	provider, ok := m.runtime.(ports.RuntimeLaunchCandidateProvider)
+	if !ok {
+		return errors.New("runtime does not expose stable launch candidates")
+	}
+	handles, err := provider.LaunchCandidates(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve runtime launch candidates: %w", err)
+	}
+	seen := make(map[string]struct{}, len(handles))
+	ids := make([]string, 0, len(handles))
+	for _, handle := range handles {
+		handleID := strings.TrimSpace(handle.ID)
+		if handleID == "" {
+			continue
+		}
+		if _, exists := seen[handleID]; exists {
+			continue
+		}
+		seen[handleID] = struct{}{}
+		ids = append(ids, handleID)
+	}
+	if len(ids) == 0 {
+		return errors.New("runtime returned no stable launch candidates")
+	}
+	reservation := trackerIntakeRecoveryForWorkspace(ws)
+	reservation.RuntimeLaunchID = strings.TrimSpace(launchID)
+	reservation.RuntimeHandleIDs = ids
+	reservation.DeliveryPossible = deliveryPossible
+	if reservation.RuntimeLaunchID == "" {
+		return errors.New("runtime launch generation is empty")
+	}
+	return m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation)
+}
+
+func (m *Manager) reserveTrackerIntakeRuntimeHandle(
+	ctx context.Context,
+	id domain.SessionID,
+	ws ports.WorkspaceInfo,
+	launchID string,
+	handle ports.RuntimeHandle,
+	deliveryPossible bool,
+) error {
+	handleID := strings.TrimSpace(handle.ID)
+	launchID = strings.TrimSpace(launchID)
+	if handleID == "" || launchID == "" {
+		return errors.New("successful runtime create returned an incomplete recovery identity")
+	}
+	reservation := trackerIntakeRecoveryForWorkspace(ws)
+	reservation.RuntimeLaunchID = launchID
+	reservation.RuntimeHandleIDs = []string{handleID}
+	reservation.DeliveryPossible = deliveryPossible
+	return m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation)
+}
+
+func (m *Manager) markTrackerIntakeDeliveryPossible(ctx context.Context, id domain.SessionID) error {
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load tracker intake recovery before prompt delivery: %w", err)
+	}
+	if !pending {
+		return fmt.Errorf("mark tracker intake delivery possible for %s: pending claim is missing", id)
+	}
+	reservation.DeliveryPossible = true
+	if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
+		return fmt.Errorf("mark tracker intake delivery possible for %s: %w", id, err)
+	}
+	return nil
+}
+
+func (m *Manager) markTrackerIntakeRelaunchPublished(ctx context.Context, id domain.SessionID) error {
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load tracker intake recovery after relaunch: %w", err)
+	}
+	if !pending {
+		return fmt.Errorf("mark tracker intake relaunch published for %s: pending claim is missing", id)
+	}
+	reservation.RelaunchPublished = true
+	if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
+		return fmt.Errorf("mark tracker intake relaunch published for %s: %w", id, err)
+	}
+	return nil
+}
+
+func (m *Manager) prepareTrackerIntakeChatRelaunch(
+	ctx context.Context,
+	id domain.SessionID,
+	ws ports.WorkspaceInfo,
+	controllerGeneration string,
+) (string, domain.TrackerIntakeRecoveryReservation, bool, func(context.Context) error, error) {
+	prior, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+	if err != nil {
+		return "", domain.TrackerIntakeRecoveryReservation{}, false, nil, fmt.Errorf("load tracker intake recovery before Chat relaunch: %w", err)
+	}
+	if !pending {
+		return controllerGeneration, domain.TrackerIntakeRecoveryReservation{}, false, nil, nil
+	}
+	controllerGeneration = strings.TrimSpace(controllerGeneration)
+	if controllerGeneration == "" {
+		controllerGeneration = m.newLaunchID()
+	}
+	if strings.TrimSpace(controllerGeneration) == "" {
+		return "", domain.TrackerIntakeRecoveryReservation{}, false, nil, errors.New("reserve tracker intake Chat relaunch: controller generation is empty")
+	}
+	reservation := trackerIntakeRecoveryForWorkspace(ws)
+	reservation.ControllerPossible = true
+	reservation.ControllerGeneration = controllerGeneration
+	reservation.DeliveryPossible = prior.DeliveryPossible
+	reserve := func(reserveCtx context.Context) error {
+		if err := m.store.ReserveTrackerIntakeRecovery(reserveCtx, id, reservation); err != nil {
+			return fmt.Errorf("reserve tracker intake Chat relaunch: %w", err)
+		}
+		return nil
+	}
+	return controllerGeneration, reservation, true, reserve, nil
+}
+
+func (m *Manager) markTrackerIntakeCapacityReleased(ctx context.Context, id domain.SessionID) error {
+	return m.markTrackerIntakeCapacityReleasedForStoppedOwner(ctx, id, false, "", "")
+}
+
+func (m *Manager) markTrackerIntakeCapacityReleasedAfterControllerStop(ctx context.Context, id domain.SessionID) error {
+	return m.markTrackerIntakeCapacityReleasedForStoppedOwner(ctx, id, true, "", "")
+}
+
+func (m *Manager) markTrackerIntakeCapacityReleasedAfterRuntimeStop(
+	ctx context.Context,
+	id domain.SessionID,
+	handleID, launchID string,
+) error {
+	return m.markTrackerIntakeCapacityReleasedForStoppedOwner(ctx, id, false, handleID, launchID)
+}
+
+func (m *Manager) markTrackerIntakeCapacityReleasedForStoppedOwner(
+	ctx context.Context,
+	id domain.SessionID,
+	controllerStopped bool,
+	stoppedRuntimeHandleID, stoppedRuntimeLaunchID string,
+) error {
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load tracker intake recovery before releasing capacity: %w", err)
+	}
+	if !pending {
+		return nil
+	}
+	reservation, err = m.trackerIntakeCapacityReleaseProof(
+		ctx, id, reservation, controllerStopped, stoppedRuntimeHandleID, stoppedRuntimeLaunchID,
+	)
+	if err != nil {
+		return err
+	}
+	if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
+		return fmt.Errorf("release tracker intake capacity for %s: %w", id, err)
+	}
+	return nil
+}
+
+func (m *Manager) trackerIntakeCapacityReleaseProof(
+	ctx context.Context,
+	id domain.SessionID,
+	reservation domain.TrackerIntakeRecoveryReservation,
+	controllerStopped bool,
+	stoppedRuntimeHandleID, stoppedRuntimeLaunchID string,
+) (domain.TrackerIntakeRecoveryReservation, error) {
+	rec, found, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return reservation, fmt.Errorf("load tracker intake owner before releasing capacity: %w", err)
+	}
+	if reservation.CapacityReleased && (!found || reservation.ReleasesCapacityFor(rec)) {
+		return reservation, nil
+	}
+	owners := reservation
+	if found {
+		// Initial Chat intake reserved the controller before its generation was
+		// known. Once the same row publishes that generation, retain it as the
+		// exact owner that the caller has just stopped.
+		if owners.ControllerPossible && strings.TrimSpace(owners.ControllerGeneration) == "" &&
+			domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+			owners.ControllerGeneration = strings.TrimSpace(rec.Metadata.ControllerGeneration)
+		}
+	} else {
+		rec.ID = id
+	}
+	if controllerStopped {
+		reservedGeneration := strings.TrimSpace(owners.ControllerGeneration)
+		rowGeneration := strings.TrimSpace(rec.Metadata.ControllerGeneration)
+		if reservedGeneration != "" && rowGeneration != "" && reservedGeneration != rowGeneration {
+			return reservation, fmt.Errorf("reserved tracker intake Chat generation %s does not match stopped row generation %s",
+				reservedGeneration, rowGeneration)
+		}
+	}
+	// Verify the unreleased owner set before constructing a stopped-generation
+	// proof. Setting ReleasedRuntimeLaunchID first would incorrectly exempt every
+	// fallback handle that shares the published row's generation.
+	if err := m.ensureTrackerIntakePriorRuntimeStopped(
+		ctx, rec, owners, controllerStopped, stoppedRuntimeHandleID, stoppedRuntimeLaunchID,
+	); err != nil {
+		return reservation, fmt.Errorf("verify tracker intake owners before releasing capacity: %w", err)
+	}
+	proof := owners
+	proof.CapacityReleased = true
+	proof.ReleasedRuntimeLaunchID = ""
+	proof.ReleasedControllerGeneration = ""
+	if found {
+		proof.ReleasedRuntimeLaunchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+		proof.ReleasedControllerGeneration = strings.TrimSpace(rec.Metadata.ControllerGeneration)
+	}
+	if controllerStopped {
+		if reservedGeneration := strings.TrimSpace(proof.ControllerGeneration); reservedGeneration != "" {
+			proof.ReleasedControllerGeneration = reservedGeneration
+		}
+	}
+	return proof, nil
+}
+
+func (m *Manager) recordTrackerIntakeStoppedOwners(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	reservation domain.TrackerIntakeRecoveryReservation,
+) (domain.TrackerIntakeRecoveryReservation, error) {
+	reservation.CapacityReleased = true
+	reservation.ReleasedRuntimeLaunchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	reservation.ReleasedControllerGeneration = strings.TrimSpace(rec.Metadata.ControllerGeneration)
+	reservation.RuntimeLaunchID = reservation.ReleasedRuntimeLaunchID
+	reservation.RuntimeHandleIDs = nil
+	if handleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID); handleID != "" {
+		reservation.RuntimeHandleIDs = []string{handleID}
+	}
+	if reservation.ControllerPossible {
+		reservation.ControllerGeneration = reservation.ReleasedControllerGeneration
+	}
+	if err := m.store.ReserveTrackerIntakeRecovery(ctx, rec.ID, reservation); err != nil {
+		return reservation, fmt.Errorf("record stopped tracker intake owners for %s: %w", rec.ID, err)
+	}
+	return reservation, nil
+}
+
+func (m *Manager) releaseTrackerIntakeAfterConfirmedCleanup(ctx context.Context, id domain.SessionID) error {
+	cleanupCtx, cancel := spawnRollbackContext(ctx)
+	defer cancel()
+	if err := m.store.ReleaseTrackerIntakeSession(cleanupCtx, id); err != nil {
+		return fmt.Errorf("release tracker intake claim after confirmed cleanup: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) confirmTrackerIntakeCleanup(ctx context.Context, id domain.SessionID) error {
+	cleanupCtx, cancel := spawnRollbackContext(ctx)
+	defer cancel()
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(cleanupCtx, id)
+	if err != nil {
+		return fmt.Errorf("load tracker intake recovery before cleanup confirmation: %w", err)
+	}
+	if !pending {
+		return fmt.Errorf("confirm tracker intake cleanup for %s: pending claim is missing", id)
+	}
+	reservation.CleanupConfirmed = true
+	reservation, err = m.trackerIntakeCapacityReleaseProof(cleanupCtx, id, reservation, false, "", "")
+	if err != nil {
+		return err
+	}
+	if err := m.store.ReserveTrackerIntakeRecovery(cleanupCtx, id, reservation); err != nil {
+		return fmt.Errorf("confirm tracker intake cleanup for %s: %w", id, err)
+	}
+	return nil
+}
+
+func (m *Manager) preserveUncertainTrackerIntakeRuntime(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	metadata domain.SessionMetadata,
+) error {
+	cleanupCtx, cancel := spawnRollbackContext(ctx)
+	defer cancel()
+	rec.Metadata = metadata
+	rec.UpdatedAt = m.clock()
+	if err := m.store.UpdateSession(cleanupCtx, rec); err != nil {
+		return fmt.Errorf("preserve uncertain tracker intake runtime %s: %w", rec.ID, err)
+	}
+	return nil
+}
+
 func (m *Manager) rollbackSpawnSeedRowAfterFailure(ctx context.Context, id domain.SessionID) {
 	cleanupCtx, cancel := spawnRollbackContext(ctx)
 	defer cancel()
@@ -2577,6 +3026,7 @@ func (m *Manager) rollbackSeedSpawnWorkspace(ctx context.Context, rec domain.Ses
 	workspaceDestroyed := m.destroySpawnWorkspace(cleanupCtx, ws, workspaceProject)
 	cancel()
 	if workspaceDestroyed {
+		m.settleTrackerIntakeWorkspaceCleanup(ctx, rec.ID)
 		if prepared {
 			cleanupCtx, cancel = spawnRollbackContext(ctx)
 			m.cleanupAgentWorkspace(cleanupCtx, rec, ws.Path)
@@ -2597,6 +3047,36 @@ func (m *Manager) rollbackSeedSpawnWorkspace(ctx context.Context, rec domain.Ses
 		return
 	}
 	m.markSpawnFailedTerminatedAfterFailure(ctx, rec.ID, false)
+}
+
+func (m *Manager) settleTrackerIntakeWorkspaceCleanup(ctx context.Context, id domain.SessionID) {
+	cleanupCtx, cancel := spawnRollbackContext(ctx)
+	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(cleanupCtx, id)
+	cancel()
+	if err != nil {
+		m.logger.Warn("spawn rollback: tracker intake recovery lookup failed", "sessionID", id, "error", err)
+		return
+	}
+	if !pending {
+		return
+	}
+	if err := m.confirmTrackerIntakeCleanup(ctx, id); err != nil {
+		m.logger.Warn("spawn rollback: tracker intake cleanup confirmation failed", "sessionID", id, "error", err)
+		return
+	}
+	var settleErr error
+	if reservation.DeliveryPossible {
+		cleanupCtx, cancel = spawnRollbackContext(ctx)
+		settleErr = m.store.CommitTrackerIntakeSession(cleanupCtx, id, m.clock())
+		cancel()
+	} else {
+		settleErr = m.releaseTrackerIntakeAfterConfirmedCleanup(ctx, id)
+	}
+	if settleErr != nil {
+		// CleanupConfirmed remains durable. The next claim reconciliation can
+		// settle the ledger row even if this final write was interrupted.
+		m.logger.Warn("spawn rollback: tracker intake claim settlement deferred", "sessionID", id, "error", settleErr)
+	}
 }
 
 func (m *Manager) preserveFailedSpawnWorkspace(ctx context.Context, id domain.SessionID, ws ports.WorkspaceInfo, runtimeDestroyed bool) {
@@ -3015,16 +3495,35 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	if !ok {
 		return KillResult{}, nil // already gone: benign race
 	}
+	intakeRecovery, pendingIntake, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+	if err != nil {
+		return KillResult{}, fmt.Errorf("kill %s: tracker intake claim: %w", id, err)
+	}
+	persistedOwner := rec
+	if pendingIntake {
+		rec = applyTrackerIntakeRecovery(rec, intakeRecovery)
+	}
 	m.stopPreviewBestEffort(ctx, id)
 	m.destroyBrowserBestEffort(ctx, id)
 	handle := runtimeHandle(rec.Metadata)
 	ws := workspaceInfo(rec)
+	if pendingIntake {
+		ws = trackerIntakeWorkspaceInfo(rec, intakeRecovery)
+	}
 
 	var workspaceProjectRows []ports.WorkspaceRepoInfo
 	workspaceProject := false
-	if rows, ok, rowErr := m.workspaceProjectRows(ctx, rec); rowErr != nil {
+	var rows []ports.WorkspaceRepoInfo
+	var isWorkspaceProject bool
+	var rowErr error
+	if pendingIntake {
+		rows, isWorkspaceProject, rowErr = m.trackerIntakeWorkspaceRows(ctx, rec)
+	} else {
+		rows, isWorkspaceProject, rowErr = m.workspaceProjectRows(ctx, rec)
+	}
+	if rowErr != nil {
 		return KillResult{}, fmt.Errorf("kill %s: workspace rows: %w", id, rowErr)
-	} else if ok {
+	} else if isWorkspaceProject {
 		workspaceProjectRows = rows
 		workspaceProject = true
 	}
@@ -3042,8 +3541,20 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	// session has no runtime handle; its controller owns an app-server child
 	// process, and closing it also settles any turn left in flight so a later
 	// read does not show work that is no longer running.
+	externalOwnerStopped := true
+	capacityRecorded := false
+	chatOwnerStopped := false
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-		m.stopChatBestEffort(ctx, id)
+		externalOwnerStopped = m.stopChatBestEffort(ctx, id)
+		chatOwnerStopped = externalOwnerStopped
+	} else if pendingIntake && !intakeRecovery.CapacityReleased && trackerIntakeHasRuntimeEvidence(rec, intakeRecovery) {
+		if err := m.stopTrackerIntakeRuntimeOwners(ctx, persistedOwner, intakeRecovery); err != nil {
+			return KillResult{}, fmt.Errorf("kill %s: tracker intake runtime: %w", id, err)
+		}
+		if _, err := m.recordTrackerIntakeStoppedOwners(ctx, persistedOwner, intakeRecovery); err != nil {
+			return KillResult{}, fmt.Errorf("kill %s: release tracker intake capacity: %w", id, err)
+		}
+		capacityRecorded = true
 	} else if handle.ID != "" {
 		// Any Destroy error stops the kill. Every runtime's Destroy already
 		// returns nil when it confirms the session is absent, so an error means
@@ -3053,6 +3564,15 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 		// then would leave a possibly-live agent with no row pointing at it.
 		if err := m.destroySessionRuntime(ctx, handle); err != nil {
 			return KillResult{}, fmt.Errorf("kill %s: runtime: %w", id, err)
+		}
+	}
+	if externalOwnerStopped && !capacityRecorded {
+		markStopped := m.markTrackerIntakeCapacityReleased
+		if chatOwnerStopped {
+			markStopped = m.markTrackerIntakeCapacityReleasedAfterControllerStop
+		}
+		if err := markStopped(ctx, id); err != nil {
+			return KillResult{}, fmt.Errorf("kill %s: release tracker intake capacity: %w", id, err)
 		}
 	}
 	if err := m.terminateReviewer(ctx, id, "cancelled by worker session termination"); err != nil {
@@ -3111,7 +3631,12 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 				releaseOperation = nil
 				m.runInBackground(func() {
 					defer releaseOp()
-					_, refusal := m.cleanupOne(m.backgroundContext, rec, ws)
+					var cleanupProject *ports.WorkspaceProjectInfo
+					if workspaceProject {
+						cleanupProject = &ports.WorkspaceProjectInfo{Root: ws, Worktrees: workspaceProjectRows}
+					}
+					_, refusal := m.cleanupOneWithPlan(m.backgroundContext, rec, ws, cleanupProject,
+						trackerIntakeCleanupHooksSafe(ws, cleanupProject))
 					if !refusal.refused() && workspaceProject {
 						if err := m.recordTermination(m.backgroundContext, id, true); err != nil {
 							refusal = refusedTeardownFailed
@@ -3121,12 +3646,21 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 					if err := m.recordWorkspaceCleanupResult(m.backgroundContext, rec, refusal, false); err != nil {
 						m.logger.Error("record background workspace cleanup", "sessionID", id, "error", err)
 					}
+					if externalOwnerStopped && !refusal.refused() {
+						m.settleTrackerIntakeWorkspaceCleanup(m.backgroundContext, id)
+					}
 				})
 				return KillResult{CleanupPending: true}, nil
 			}
 		}
-		if err := m.runPreRemove(rec.ProjectID, ws.Path); err != nil {
-			return KillResult{}, err
+		var cleanupProject *ports.WorkspaceProjectInfo
+		if workspaceProject {
+			cleanupProject = &ports.WorkspaceProjectInfo{Root: ws, Worktrees: workspaceProjectRows}
+		}
+		if trackerIntakeCleanupHooksSafe(ws, cleanupProject) {
+			if err := m.runPreRemove(rec.ProjectID, ws.Path); err != nil {
+				return KillResult{}, err
+			}
 		}
 		// Give workspace removal its own budget after untimed user commands.
 		cancelTeardown()
@@ -3167,6 +3701,9 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 		m.recordSettledWorkspaceCleanup(ctx, rec, domain.DispositionRemoved)
 	} else if ws.Path == "" {
 		m.recordSettledWorkspaceCleanup(ctx, rec, domain.DispositionNotApplicable)
+	}
+	if externalOwnerStopped {
+		m.settleTrackerIntakeWorkspaceCleanup(ctx, id)
 	}
 	return KillResult{Freed: freed}, nil
 }
@@ -3571,14 +4108,15 @@ func (m *Manager) stopAgentController(ctx context.Context, rec domain.SessionRec
 	})
 }
 
-// stopSourceRuntime stops one fenced TUI runtime. A failed destroy is checked
-// against the runtime's own liveness and retried once before it is reported.
+// stopSourceRuntime stops one fenced TUI runtime. Destroy is idempotent, so a
+// retry is safe, but only a successful Destroy proves the terminal host gone.
+// Exact-generation probes observe the managed child, which can be dead while
+// tmux or the pty host still owns the session.
 func (m *Manager) stopSourceRuntime(ctx context.Context, ref ports.FencedRuntimeRef) error {
 	if strings.TrimSpace(ref.Handle.ID) == "" {
 		return ErrIncompleteHandle
 	}
 	var errs []error
-	var probe ports.FencedProbeResult
 	for range 2 {
 		err := m.runtime.Destroy(ctx, ref.Handle)
 		if err == nil {
@@ -3588,11 +4126,8 @@ func (m *Manager) stopSourceRuntime(ctx context.Context, ref ports.FencedRuntime
 		if ctx.Err() != nil {
 			return errors.Join(append(errs, ctx.Err())...)
 		}
-		if probe = m.runtime.ProbeFencedRuntime(ctx, ref); probe.Liveness == ports.FencedDead {
-			return nil
-		}
 	}
-	return errors.Join(append(errs, fmt.Errorf("runtime ownership remains unresolved: %s", probe.Reason))...)
+	return fmt.Errorf("runtime terminal teardown remains unresolved: %w", errors.Join(errs...))
 }
 
 func (m *Manager) recordAgentExited(ctx context.Context, rec domain.SessionRecord) error {
@@ -3992,6 +4527,16 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		)
 	}
 
+	trackerIntakePriorReservation, trackerIntakePending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+	if err != nil {
+		return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: load pending tracker intake claim: %w", operation, rec.ID, err))
+	}
+	if trackerIntakePending {
+		if err := m.ensureTrackerIntakePriorRuntimeStopped(ctx, rec, trackerIntakePriorReservation, false, "", ""); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: verify prior tracker intake owner: %w", operation, rec.ID, err))
+		}
+	}
+
 	var env map[string]string
 	preparedImportEnv := rec.Metadata.ImportSource != nil && rec.NeedsImportResume()
 	if preparedImportEnv {
@@ -4156,6 +4701,24 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 			return RestoreResult{}, relaunchFailed("after-start prompt", fmt.Errorf("%s %s: after-start prompt: %w", operation, rec.ID, err))
 		}
 	}
+	// Every pending tracker-intake relaunch replaces the stopped generation in
+	// its durable recovery fence before touching the runtime. Saved-prompt
+	// fallback is also a new delivery attempt: in-command delivery is fenced in
+	// that reservation, while after-start delivery is fenced at the prompt write.
+	// Native restore and handoff/switch prompts do not replay the issue.
+	trackerIntakeSavedPrompt := mode == RestoreModeSavedPrompt && !switching && !savedNote && strings.TrimSpace(savedPrompt) != ""
+	trackerIntakeDeliveryPossible := trackerIntakePriorReservation.DeliveryPossible ||
+		(trackerIntakeSavedPrompt && delivery == ports.PromptDeliveryInCommand)
+	markTrackerIntakeDelivery := func() error {
+		if !trackerIntakePending || trackerIntakeDeliveryPossible {
+			return nil
+		}
+		if err := m.markTrackerIntakeDeliveryPossible(ctx, rec.ID); err != nil {
+			return err
+		}
+		trackerIntakeDeliveryPossible = true
+		return nil
+	}
 	if err := m.validateAgentBinary(argv); err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, relaunchFailed("agent binary", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
@@ -4199,14 +4762,41 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 			return RestoreResult{}, fmt.Errorf("%s %s: reserve switch launch: %w", operation, rec.ID, err)
 		}
 	}
+	trackerIntakeRuntimeReserved := false
+	if trackerIntakePending {
+		if err := m.reserveTrackerIntakeRuntime(ctx, rec.ID, ws, launchID, runtimeCfg, trackerIntakeDeliveryPossible); err != nil {
+			m.cleanupSystemPromptDir(rec.ID)
+			return RestoreResult{}, relaunchFailed("tracker intake runtime fence", fmt.Errorf("%s %s: reserve relaunched runtime: %w", operation, rec.ID, err))
+		}
+		trackerIntakeRuntimeReserved = true
+	}
 	if restartHandle == nil {
 		handle, err = m.runtime.Create(ctx, runtimeCfg)
 	} else {
 		handle, err = m.restartRuntime(ctx, *restartHandle, runtimeCfg)
 	}
 	if err != nil {
+		// An unclassified Create error is pre-effect by the Runtime contract. A
+		// Restart error is conservative instead: tmux can fail its post-respawn
+		// probe after the saved prompt has started. Only an explicit EffectNone
+		// classification proves that a restart did not replace the process.
+		definiteNoEffect := restartHandle == nil
+		var effect ports.RuntimeEffectError
+		if errors.As(err, &effect) {
+			definiteNoEffect = effect.EffectOutcome() == ports.RuntimeEffectNone
+		}
+		if trackerIntakeRuntimeReserved && definiteNoEffect {
+			if restoreErr := m.store.ReserveTrackerIntakeRecovery(ctx, rec.ID, trackerIntakePriorReservation); restoreErr != nil {
+				err = errors.Join(err, restoreErr)
+			}
+		}
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, relaunchFailed("runtime", fmt.Errorf("%s %s: runtime: %w", operation, rec.ID, agentlaunch.RedactError(err, project.Config.Env)))
+	}
+	if trackerIntakePending {
+		if err := m.reserveTrackerIntakeRuntimeHandle(ctx, rec.ID, ws, launchID, handle, trackerIntakeDeliveryPossible); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake runtime fence", fmt.Errorf("%s %s: reserve relaunched runtime handle: %w", operation, rec.ID, err))
+		}
 	}
 	// A runtime accepting Restart only proves that its supervisor was created.
 	// Keep the previous launch (and stale/release references) until the exact
@@ -4282,7 +4872,11 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		if mode == RestoreModeNative {
 			afterStartPrompt = "" // restore native state without replaying a user turn
 		}
-		if err := m.deliverAfterStartPrompt(ctx, agent, launchCfg, handle, rec.ID, afterStartPrompt); err != nil {
+		var beforePrompt func() error
+		if trackerIntakePending && trackerIntakeSavedPrompt {
+			beforePrompt = markTrackerIntakeDelivery
+		}
+		if err := m.deliverAfterStartPromptWithFence(ctx, agent, launchCfg, handle, rec.ID, afterStartPrompt, beforePrompt); err != nil {
 			m.destroySpawnRuntimeAfterFailure(ctx, handle)
 			// A provider switch brings the source back itself, so its session
 			// must not be ended here.
@@ -4297,6 +4891,15 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 	}
 	if savedNote {
 		m.clearHandoffNote(ctx, rec.ID)
+	}
+	if trackerIntakePending {
+		if trackerIntakeDeliveryPossible {
+			if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+				return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: commit restored tracker intake claim: %w", operation, rec.ID, err))
+			}
+		} else if err := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: publish restored tracker intake owner: %w", operation, rec.ID, err))
+		}
 	}
 	updated, err := m.getRecord(ctx, rec.ID)
 	if err != nil {
@@ -4662,11 +5265,40 @@ func (m *Manager) preserveFailedReconcileRelaunch(ctx context.Context, before do
 	return false, errors.New("session changed while recording failed relaunch")
 }
 
-// reconcileReap kills the leaked tmux session of a session the DB already marks
-// terminated. This covers the teardown that marked the row terminated but failed
-// to kill the runtime (e.g. ForceDestroy/Destroy errored after MarkTerminated).
-// Destroy is idempotent, so an already-gone session is a no-op.
-func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) error {
+// reconcileReap kills the leaked tmux session of a session the DB still marks
+// terminated. The startup snapshot is only a candidate: claim recovery or a
+// user operation may already be adopting a replacement generation. Reaping
+// shares the session operation fence, reloads the row, and yields every pending
+// tracker claim to its exact-generation reconciler before touching a runtime.
+func (m *Manager) reconcileReap(ctx context.Context, snapshot domain.SessionRecord) error {
+	if err := m.beginAgentOperation(ctx, snapshot.ID, agentOperationReconcile); err != nil {
+		if errors.Is(err, errAgentOperationInProgress) {
+			return nil
+		}
+		return fmt.Errorf("reconcile reap %s: reserve: %w", snapshot.ID, err)
+	}
+	defer m.endAgentOperation(snapshot.ID, agentOperationReconcile)
+
+	rec, found, err := m.store.GetSession(ctx, snapshot.ID)
+	if err != nil {
+		return fmt.Errorf("reconcile reap %s: reload: %w", snapshot.ID, err)
+	}
+	if !found || !rec.IsTerminated {
+		return nil
+	}
+	if !snapshot.CreatedAt.IsZero() && !snapshot.CreatedAt.Equal(rec.CreatedAt) {
+		return nil
+	}
+	if strings.TrimSpace(rec.Metadata.RuntimeHandleID) != strings.TrimSpace(snapshot.Metadata.RuntimeHandleID) ||
+		strings.TrimSpace(rec.Metadata.RuntimeLaunchID) != strings.TrimSpace(snapshot.Metadata.RuntimeLaunchID) {
+		return nil
+	}
+	if _, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID); err != nil {
+		return fmt.Errorf("reconcile reap %s: inspect tracker intake claim: %w", rec.ID, err)
+	} else if pending {
+		return nil
+	}
+
 	handle := runtimeHandle(rec.Metadata)
 	if handle.ID == "" {
 		return nil
@@ -4776,9 +5408,21 @@ func (m *Manager) ReconcileBackground(ctx context.Context) (resultErr error) {
 		}
 	}
 	m.startupProvisioningRetries = nil
+	if err := m.scheduleTrackerIntakeClaimInspection(ctx); err != nil {
+		m.logger.Warn("reconcile: pending tracker intake inspection scheduling deferred", "error", err)
+	}
 	recs, err := m.store.ListAllSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("reconcile: list sessions: %w", err)
+	}
+	if m.reconcileStartupTrackerIntakeTerminalClaims(ctx, recs) {
+		// Exact-generation recovery can publish an intentional terminal stop.
+		// Refresh the startup snapshot so the ordinary health pass and boot reaper
+		// see that stopped owner instead of the stale pre-recovery activity.
+		recs, err = m.store.ListAllSessions(ctx)
+		if err != nil {
+			return fmt.Errorf("reconcile: refresh sessions after tracker intake recovery: %w", err)
+		}
 	}
 	m.reconcileLivePass(ctx, recs)
 	for _, rec := range recs {
@@ -4794,6 +5438,9 @@ func (m *Manager) ReconcileBackground(ctx context.Context) (resultErr error) {
 		m.logger.Error("reconcile: transition-message delivery deferred for retry", "error", err)
 	}
 	m.wakeTransitionMessageDispatcher()
+	if err := m.ScheduleTrackerIntakeClaimReconciliation(ctx); err != nil {
+		m.logger.Warn("reconcile: pending tracker intake cleanup scheduling deferred", "error", err)
+	}
 	return nil
 }
 
@@ -4802,6 +5449,18 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 	ids := make([]domain.SessionID, 0, len(recs))
 	for _, rec := range recs {
 		if rec.IsTerminated || rec.IsTaskPreparation || rec.HibernatedAt != nil || rec.ProvisionState.WithDefault() != domain.SessionProvisionReady {
+			continue
+		}
+		reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+		if err != nil {
+			m.fenceStatusRecoveryFromReaper(rec.ID)
+			m.finishStatusRecovery(ctx, rec, err)
+			m.logger.Warn("reconcile: tracker intake claim lookup failed, retrying in live pass", "sessionID", rec.ID, "error", err)
+			captureBackgroundFault(ctx, err, "reconcile", "tracker_intake_claim")
+		} else if pending && !trackerIntakeClaimNeedsStartupHealth(rec, reservation) {
+			// The per-claim job owns terminal and interrupted-Chat recovery. Letting
+			// the generic live pass reserve the same operation fence can starve that
+			// job for the entire startup sweep without doing any useful health work.
 			continue
 		}
 		candidates = append(candidates, rec)
@@ -4844,7 +5503,7 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 	jobs := make(chan domain.SessionRecord)
 	var wg sync.WaitGroup
 	var retryMu sync.Mutex
-	var retryChats []domain.SessionID
+	var retrySessions []domain.SessionID
 	wg.Add(workers)
 	for range workers {
 		go func() {
@@ -4857,8 +5516,9 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 					defer cancel()
 					return m.checkSessionHealth(recoveryCtx, rec)
 				}()
-				retry := err != nil && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat &&
-					retryableStartupChatCheck(err) && len(m.startupChatRetryDelays) > 0
+				retry := err != nil && len(m.startupHealthRetryDelays) > 0 &&
+					(m.statusRecoveryReaperFenceActive(rec.ID) ||
+						domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat && retryableStartupChatCheck(err))
 				if !retry {
 					// A scheduled reattach keeps the session checking; its last attempt settles it.
 					m.finishStatusRecovery(ctx, rec, err)
@@ -4871,7 +5531,7 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 				}
 				if retry {
 					retryMu.Lock()
-					retryChats = append(retryChats, rec.ID)
+					retrySessions = append(retrySessions, rec.ID)
 					retryMu.Unlock()
 				}
 			}
@@ -4882,8 +5542,8 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 	}
 	close(jobs)
 	wg.Wait()
-	if len(retryChats) > 0 && ctx.Err() == nil {
-		go m.retryStartupChatChecks(ctx, retryChats)
+	if len(retrySessions) > 0 && ctx.Err() == nil {
+		go m.retryStartupHealthChecks(ctx, retrySessions)
 	}
 }
 
@@ -5190,34 +5850,56 @@ func (m *Manager) workspaceProjectRestoreRows(ctx context.Context, project domai
 }
 
 func (m *Manager) workspaceProjectRestoreRowsFromMarkers(ctx context.Context, project domain.ProjectRecord, rec domain.SessionRecord, rows []domain.SessionWorktreeRecord) ([]ports.WorkspaceRepoInfo, error) {
-	if len(rows) > 1 {
-		return m.sessionWorktreeRowsToRepoInfos(ctx, project, rec, rows)
-	}
 	childRepos, err := m.store.ListWorkspaceRepos(ctx, project.ID)
 	if err != nil {
 		return nil, err
 	}
+	markers := make(map[string]domain.SessionWorktreeRecord, len(rows))
+	valid := map[string]struct{}{domain.RootWorkspaceRepoName: {}}
+	for _, repo := range childRepos {
+		if repo.GitStatus.WithDefault() != domain.GitStatusReady {
+			continue
+		}
+		valid[repo.Name] = struct{}{}
+	}
+	for _, row := range rows {
+		name := row.RepoName
+		if name == "" {
+			name = domain.RootWorkspaceRepoName
+		}
+		if _, ok := valid[name]; !ok {
+			return nil, fmt.Errorf("session worktree row %q no longer matches workspace registry", name)
+		}
+		row.RepoName = name
+		markers[name] = row
+	}
 	rootPath := rec.Metadata.WorkspacePath
 	rootBranch := rec.Metadata.Branch
-	var rootBaseSHA, rootBaseRef string
-	if len(rows) == 1 && (rows[0].RepoName == "" || rows[0].RepoName == domain.RootWorkspaceRepoName) {
-		rootPath = firstNonEmptyString(rows[0].WorktreePath, rootPath)
-		rootBranch = firstNonEmptyString(rows[0].Branch, rootBranch)
-		rootBaseSHA = rows[0].BaseSHA
-		rootBaseRef = rows[0].BaseRef
+	var rootBaseSHA string
+	var rootBaseRef, rootCreationSHA string
+	if row, ok := markers[domain.RootWorkspaceRepoName]; ok {
+		rootPath = firstNonEmptyString(row.WorktreePath, rootPath)
+		rootBranch = firstNonEmptyString(row.Branch, rootBranch)
+		rootBaseSHA = firstNonEmptyString(row.BaseSHA, rootBaseSHA)
+		rootBaseRef = row.BaseRef
+		rootCreationSHA = row.CreationSHA
 	}
 	out := []ports.WorkspaceRepoInfo{{
-		RepoName:  domain.RootWorkspaceRepoName,
-		RepoPath:  project.Path,
-		Path:      rootPath,
-		Branch:    rootBranch,
-		BaseSHA:   rootBaseSHA,
-		BaseRef:   rootBaseRef,
-		SessionID: rec.ID,
-		ProjectID: rec.ProjectID,
+		RepoName:    domain.RootWorkspaceRepoName,
+		RepoPath:    project.Path,
+		Path:        rootPath,
+		Branch:      rootBranch,
+		BaseSHA:     rootBaseSHA,
+		BaseRef:     rootBaseRef,
+		CreationSHA: rootCreationSHA,
+		SessionID:   rec.ID,
+		ProjectID:   rec.ProjectID,
 	}}
 	for _, repo := range childRepos {
-		out = append(out, ports.WorkspaceRepoInfo{
+		if repo.GitStatus.WithDefault() != domain.GitStatusReady {
+			continue
+		}
+		info := ports.WorkspaceRepoInfo{
 			RepoName:     repo.Name,
 			RepoPath:     filepath.Join(project.Path, filepath.FromSlash(repo.RelativePath)),
 			Path:         filepath.Join(rootPath, filepath.FromSlash(repo.RelativePath)),
@@ -5225,7 +5907,15 @@ func (m *Manager) workspaceProjectRestoreRowsFromMarkers(ctx context.Context, pr
 			SessionID:    rec.ID,
 			ProjectID:    rec.ProjectID,
 			RelativePath: repo.RelativePath,
-		})
+		}
+		if row, ok := markers[repo.Name]; ok {
+			info.Path = firstNonEmptyString(row.WorktreePath, info.Path)
+			info.Branch = firstNonEmptyString(row.Branch, info.Branch)
+			info.BaseSHA = firstNonEmptyString(row.BaseSHA, info.BaseSHA)
+			info.BaseRef = row.BaseRef
+			info.CreationSHA = row.CreationSHA
+		}
+		out = append(out, info)
 	}
 	return out, nil
 }
@@ -6468,6 +7158,21 @@ func (m *Manager) isWorkspaceInUse(ctx context.Context, projectID domain.Project
 // call) — most commonly because a scoped shell terminal could not be
 // confirmed closed, so reclaiming would pull the ground out from under it.
 func (m *Manager) cleanupOne(ctx context.Context, rec domain.SessionRecord, ws ports.WorkspaceInfo) (ports.WorkspaceReclaim, cleanupRefusal) {
+	return m.cleanupOneWithPlan(ctx, rec, ws, nil, true)
+}
+
+// cleanupOneWithPlan carries recovery's complete workspace-project inventory
+// and ownership decision through asynchronous cleanup. Reloading only the
+// persisted rows would lose reconstructed children, while rerunning hooks for
+// a pre-materialization intent could execute project commands in an unrelated
+// occupied directory.
+func (m *Manager) cleanupOneWithPlan(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	ws ports.WorkspaceInfo,
+	workspaceProject *ports.WorkspaceProjectInfo,
+	runCleanupHooks bool,
+) (ports.WorkspaceReclaim, cleanupRefusal) {
 	{
 		release := m.acquireWorkspaceGate(rec.ProjectID)
 
@@ -6493,9 +7198,11 @@ func (m *Manager) cleanupOne(ctx context.Context, rec domain.SessionRecord, ws p
 		m.logger.Warn("cleanup: attachment preservation failed", "sessionID", rec.ID, "error", err)
 		return ports.WorkspaceReclaimRemoved, refusedAttachmentsFailed
 	}
-	if err := m.runPreRemove(rec.ProjectID, ws.Path); err != nil {
-		m.logger.Warn("cleanup: workspace script failed; preserving workspace", "sessionID", rec.ID, "error", err)
-		return ports.WorkspaceReclaimRemoved, cleanupRefusalFor(err)
+	if runCleanupHooks {
+		if err := m.runPreRemove(rec.ProjectID, ws.Path); err != nil {
+			m.logger.Warn("cleanup: workspace script failed; preserving workspace", "sessionID", rec.ID, "error", err)
+			return ports.WorkspaceReclaimRemoved, cleanupRefusalFor(err)
+		}
 	}
 	ctx, cancelWorkspace := context.WithTimeout(m.backgroundContext, killTeardownBudget)
 	defer cancelWorkspace()
@@ -6510,10 +7217,19 @@ func (m *Manager) cleanupOne(ctx context.Context, rec domain.SessionRecord, ws p
 
 	// A fork's inherited uncommitted changes are not its own work.
 	m.dropInheritedForkChanges(ctx, rec, ws)
-	if rows, ok, rowErr := m.workspaceProjectRows(ctx, rec); rowErr != nil {
-		m.logger.Warn("cleanup: workspace rows failed", "sessionID", rec.ID, "error", rowErr)
-		return ports.WorkspaceReclaimRemoved, refusedTeardownFailed
-	} else if ok {
+	var rows []ports.WorkspaceRepoInfo
+	workspaceProjectCleanup := workspaceProject != nil
+	if workspaceProjectCleanup {
+		rows = workspaceProject.Worktrees
+	} else {
+		var rowErr error
+		rows, workspaceProjectCleanup, rowErr = m.workspaceProjectRows(ctx, rec)
+		if rowErr != nil {
+			m.logger.Warn("cleanup: workspace rows failed", "sessionID", rec.ID, "error", rowErr)
+			return ports.WorkspaceReclaimRemoved, refusedTeardownFailed
+		}
+	}
+	if workspaceProjectCleanup {
 		reclaim, err := m.destroyWorkspaceProjectRows(ctx, rows)
 		if err != nil {
 			if !expectedWorkspaceRefusal(err) {
@@ -6633,6 +7349,9 @@ func planFirstState(enabled bool) domain.PlanFirstState {
 
 func validateSpawnContract(cfg ports.SpawnConfig) error {
 	const maxGoalRunes = 1000
+	if cfg.TrackerIntakeLimits != nil && cfg.Async {
+		return fmt.Errorf("tracker intake does not support asynchronous spawn")
+	}
 	goal := strings.TrimSpace(cfg.Goal)
 	if goal == "" && cfg.Timebox == 0 {
 		return nil
@@ -7869,6 +8588,10 @@ func (m *Manager) cleanupAgentWorkspace(ctx context.Context, rec domain.SessionR
 }
 
 func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent, cfg ports.LaunchConfig, handle ports.RuntimeHandle, id domain.SessionID, prompt string) error {
+	return m.deliverAfterStartPromptWithFence(ctx, agent, cfg, handle, id, prompt, nil)
+}
+
+func (m *Manager) deliverAfterStartPromptWithFence(ctx context.Context, agent ports.Agent, cfg ports.LaunchConfig, handle ports.RuntimeHandle, id domain.SessionID, prompt string, beforePrompt func() error) error {
 	selector, selects := agent.(ports.AgentAfterStartCommand)
 	command := ""
 	if selects {
@@ -7895,7 +8618,11 @@ func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent
 	if prompt == "" {
 		return nil
 	}
-	return m.deliverStartedInput(ctx, id, prompt)
+	var preWrite func(context.Context, domain.SessionRecord) error
+	if beforePrompt != nil {
+		preWrite = func(context.Context, domain.SessionRecord) error { return beforePrompt() }
+	}
+	return m.deliverStartedInputChecked(ctx, id, prompt, preWrite)
 }
 
 func (m *Manager) waitForAfterStartCommand(ctx context.Context, selector ports.AgentAfterStartCommand, cfg ports.LaunchConfig, handle ports.RuntimeHandle) error {
@@ -7926,6 +8653,15 @@ func (m *Manager) waitForAfterStartCommand(ctx context.Context, selector ports.A
 }
 
 func (m *Manager) deliverStartedInput(ctx context.Context, id domain.SessionID, prompt string) error {
+	return m.deliverStartedInputChecked(ctx, id, prompt, nil)
+}
+
+func (m *Manager) deliverStartedInputChecked(
+	ctx context.Context,
+	id domain.SessionID,
+	prompt string,
+	preWrite func(context.Context, domain.SessionRecord) error,
+) error {
 	// Call Deliver directly (not the Guard.Send wrapper, which folds a suppressed
 	// outcome into nil): a freshly-spawned session can terminate or hit a
 	// permission dialog between readiness and prompt injection, and folding that
@@ -7937,9 +8673,9 @@ func (m *Manager) deliverStartedInput(ctx context.Context, id domain.SessionID, 
 	outcome, err = deliverWithStaleExitRetry(ctx, id, m.staleExitClearerRef(),
 		func() (sessionguard.Outcome, error) {
 			if m.SessionMutationInProgress(id) {
-				return m.messenger.DeliverUnderMutation(ctx, id, prompt)
+				return m.messenger.DeliverUnderMutationChecked(ctx, id, prompt, preWrite)
 			}
-			return m.messenger.Deliver(ctx, id, prompt)
+			return m.messenger.DeliverChecked(ctx, id, prompt, preWrite)
 		})
 	if err != nil {
 		return fmt.Errorf("send %s: %w", id, err)

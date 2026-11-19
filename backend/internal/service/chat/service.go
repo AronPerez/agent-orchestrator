@@ -556,7 +556,10 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 	resume := driver.Resume
 	if cfg.ReconnectOnly {
 		reconnector, ok := driver.(ports.ChatDriverReconnector)
-		if !ok || cfg.ProviderConversationID == "" {
+		if !ok {
+			return nil, fmt.Errorf("%w: chat driver %s cannot probe an existing host", ports.ErrChatRecoveryInconclusive, cfg.Harness)
+		}
+		if cfg.ProviderConversationID == "" {
 			return nil, ports.ErrChatHostNotRunning
 		}
 		resume = reconnector.Reconnect
@@ -859,6 +862,16 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 		handoffNote = cfg.ProviderSwitch.Bootstrap
 	}
 	providerSystemPrompt := withHandoffNote(cfg.SystemPrompt, handoffNote)
+
+	if beforeProviderStart := cfg.BeforeProviderStart; beforeProviderStart != nil {
+		// This is the last definite no-provider-effect boundary. Once it returns,
+		// Resume/Start may create or attach a host even when the call later reports
+		// an error, so the caller's durable ownership fence must already exist.
+		cfg.BeforeProviderStart = nil
+		if err := beforeProviderStart(ctx); err != nil {
+			return nil, fmt.Errorf("prepare chat provider start: %w", err)
+		}
+	}
 
 	var conv ports.ChatConversation
 	hostID := providerHostID(cfg)
@@ -2667,10 +2680,15 @@ type StartResult = ports.ChatControllerStarted
 // It goes through the controller rather than the mode-gated Send, because the
 // session row is still being written when spawn calls this: reading the persisted
 // mode here would race the write that sets it.
-func (s *Service) StartChatTurn(ctx context.Context, id domain.SessionID, text string) (string, error) {
+func (s *Service) StartChatTurn(ctx context.Context, id domain.SessionID, text string, beforeSend func() error) (string, error) {
 	controller, err := s.Controller(id)
 	if err != nil {
 		return "", err
+	}
+	if beforeSend != nil {
+		if err := beforeSend(); err != nil {
+			return "", err
+		}
 	}
 	turn, err := controller.Send(ctx, ports.ChatUserMessage{
 		Text:               text,

@@ -125,6 +125,10 @@ type exitAgentCommander interface {
 	ExitAgent(context.Context, domain.SessionID) (domain.SessionRecord, error)
 }
 
+type trackerIntakeReconciler interface {
+	ScheduleTrackerIntakeClaimReconciliation(context.Context) error
+}
+
 // agentAccountCommander keeps account moves optional for focused service fakes.
 type agentAccountCommander interface {
 	StartAccountTransition(context.Context, domain.SessionID, string, domain.SessionInterfaceTransitionPolicy) (domain.SessionInterfaceTransition, error)
@@ -474,6 +478,17 @@ func (s *Service) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		}
 	}
 	return s.spawnUnlessAutoPaused(ctx, cfg, func(spawnCtx context.Context) (domain.Session, int, int, error) { return s.spawn(spawnCtx, cfg) })
+}
+
+// ScheduleTrackerIntakeClaimReconciliation lets the intake observer queue
+// external cleanup without blocking an unrelated project's admission pass.
+// Focused service fakes need not implement it.
+func (s *Service) ScheduleTrackerIntakeClaimReconciliation(ctx context.Context) error {
+	reconciler, ok := s.manager.(trackerIntakeReconciler)
+	if !ok {
+		return nil
+	}
+	return reconciler.ScheduleTrackerIntakeClaimReconciliation(ctx)
 }
 
 func (s *Service) spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error) {
@@ -2257,6 +2272,18 @@ func toSpawnAPIError(err error) error {
 		return apierr.Conflict("WORKSPACE_PROVISION_FAILED", setupErr.Error(), nil)
 	}
 	switch {
+	case errors.Is(err, ports.ErrTrackerIntakeHandled):
+		mapped := apierr.Conflict("TRACKER_INTAKE_ALREADY_HANDLED", "This tracker item was already delivered to a session", nil)
+		mapped.Cause = err
+		return mapped
+	case errors.Is(err, ports.ErrTrackerIntakeActive):
+		mapped := apierr.Conflict("TRACKER_INTAKE_ACTIVE_SESSION", "This tracker item already has a live session", nil)
+		mapped.Cause = err
+		return mapped
+	case errors.Is(err, ports.ErrAutomatedSessionCapacity):
+		mapped := apierr.TooManyRequests("AUTOMATED_SESSION_CAPACITY", "The project is at its automated-session capacity")
+		mapped.Cause = err
+		return mapped
 	case errors.Is(err, sessionmanager.ErrClientRequestConflict):
 		return apierr.Conflict("CLIENT_REQUEST_CONFLICT", "clientRequestId belongs to a different task", nil)
 	case errors.Is(err, sessionmanager.ErrClientRequestIncomplete):

@@ -129,6 +129,7 @@ type Config struct {
 	Protocol             Protocol
 	OwnershipFingerprint string
 	Prepare              func(context.Context) (PreparedProvider, error)
+	launchToken          string
 }
 
 // PreparedProvider is resolved only when no compatible live host can be
@@ -205,6 +206,9 @@ func lockPath(dataDir, sessionID string) (string, error) {
 }
 
 func acquireHostLock(dataDir, sessionID string) (func(), error) {
+	if err := retirePriorBootHostOwnership(dataDir, sessionID); err != nil {
+		return nil, err
+	}
 	dir, err := hostDir(dataDir, sessionID)
 	if err != nil {
 		return nil, err
@@ -215,12 +219,17 @@ func acquireHostLock(dataDir, sessionID string) (func(), error) {
 	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // Directories need execute permission; access is owner-only.
 		return nil, err
 	}
+	ownershipLock, err := acquireHostOwnershipMutationLock(dataDir, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = ownershipLock.Release() }()
 	path, _ := lockPath(dataDir, sessionID)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // AO-owned capability directory.
 	if errors.Is(err, os.ErrExist) {
 		owner, readErr := os.ReadFile(path) //nolint:gosec // AO-owned path derived from validated session id.
 		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(owner)))
-		if readErr != nil || parseErr != nil || pid <= 0 || processalive.Alive(pid) {
+		if readErr != nil || parseErr != nil || pid <= 0 || !processalive.Exited(pid) {
 			return nil, ErrHostExists
 		}
 		// A host can die after atomically creating its launch lock but before it
@@ -284,6 +293,11 @@ func writeDescriptor(dataDir string, d Descriptor) error {
 	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // Directories need execute permission; access is owner-only.
 		return err
 	}
+	ownershipLock, err := acquireHostOwnershipMutationLock(dataDir, d.SessionID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = ownershipLock.Release() }()
 	b, err := json.Marshal(d)
 	if err != nil {
 		return err
@@ -326,6 +340,9 @@ func validateDescriptor(cfg Config, d Descriptor) error {
 // ConnectOrStart attaches to an existing compatible host or starts one with the
 // current AO executable. Failed/incompatible probes never terminate that host.
 func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
+	if err := retirePriorBootHostOwnership(cfg.DataDir, cfg.SessionID); err != nil {
+		return nil, err
+	}
 	if d, err := readDescriptor(cfg.DataDir, cfg.SessionID); err == nil {
 		if err := validateDescriptor(cfg, d); err != nil && processalive.Alive(d.PID) {
 			return nil, err
@@ -359,7 +376,7 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 		// A failed socket probe is not proof that a provider is dead. Only an OS
 		// process observation permits clearing the descriptor and falling back to
 		// native resume in a new host.
-		if processalive.Alive(d.PID) {
+		if !processalive.Exited(d.PID) {
 			return nil, fmt.Errorf("%w: %w", ErrOwnershipInconclusive, attachErr)
 		}
 		// Do not remove stale ownership files here. Another starter may have
@@ -370,6 +387,9 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 		// A malformed or unreadable ownership record is not proof that no host
 		// exists. Fail closed instead of launching a competing process.
 		return nil, fmt.Errorf("%w: %w", ErrOwnershipInconclusive, err)
+	}
+	if err := probeUnpublishedHost(cfg.DataDir, cfg.SessionID); err != nil {
+		return nil, err
 	}
 	if cfg.ReconnectOnly {
 		return nil, ErrNotRunning
@@ -388,7 +408,15 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 	if len(cfg.Argv) == 0 {
 		return nil, errors.New("chat host start requires provider argv")
 	}
+	launchToken, err := reserveLaunchIntent(cfg.DataDir, cfg.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("reserve chat host launch: %w", err)
+	}
+	cfg.launchToken = launchToken
 	if err := spawnDetached(ctx, cfg); err != nil {
+		if !errors.Is(err, ErrOwnershipInconclusive) {
+			clearLaunchIntent(cfg.DataDir, cfg.SessionID, launchToken)
+		}
 		return nil, err
 	}
 	deadline := time.Now().Add(startupTimeout)
@@ -414,6 +442,9 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 	}
 	if d, readErr := readDescriptor(cfg.DataDir, cfg.SessionID); readErr == nil && processalive.Alive(d.PID) {
 		return nil, fmt.Errorf("%w: %w", ErrOwnershipInconclusive, lastErr)
+	}
+	if ownershipErr := probeUnpublishedHost(cfg.DataDir, cfg.SessionID); ownershipErr != nil {
+		return nil, ownershipErr
 	}
 	return nil, fmt.Errorf("start chat host: %w", lastErr)
 }
@@ -446,7 +477,7 @@ func Reconcile(ctx context.Context, dataDir string, keep map[string]struct{}) er
 		if d.Version != ProtocolVersion {
 			continue
 		}
-		if !processalive.Alive(d.PID) {
+		if processalive.Exited(d.PID) {
 			// Claim the launch lock before cleaning a dead descriptor. If a new host
 			// already owns it, preserve its descriptor instead of deleting ownership
 			// state observed by a stale reconciler.
@@ -583,9 +614,12 @@ func readShutdownDescriptor(ctx context.Context, dataDir, sessionID string) (Des
 }
 
 func shutdown(ctx context.Context, dataDir, sessionID string, quick bool) error {
+	if err := retirePriorBootHostOwnership(dataDir, sessionID); err != nil {
+		return err
+	}
 	d, err := readShutdownDescriptor(ctx, dataDir, sessionID)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return probeUnpublishedHost(dataDir, sessionID)
 	}
 	if err != nil {
 		return err
@@ -597,8 +631,11 @@ func shutdown(ctx context.Context, dataDir, sessionID string, quick bool) error 
 	defer cancel()
 	conn, err := (&net.Dialer{}).DialContext(handshakeCtx, "tcp", d.Address)
 	if err != nil {
-		if !processalive.Alive(d.PID) {
-			return nil
+		if processalive.Exited(d.PID) {
+			// A replacement can be between launch readiness and descriptor
+			// publication while this stale descriptor still names the old host.
+			// Launch intent or the host lock takes precedence over the dead record.
+			return probeUnpublishedHost(dataDir, sessionID)
 		}
 		return err
 	}
@@ -653,6 +690,23 @@ func shutdown(ctx context.Context, dataDir, sessionID string, quick bool) error 
 func Run(ctx context.Context, cfg Config) error {
 	if len(cfg.Argv) == 0 || !filepath.IsAbs(cfg.Workdir) {
 		return errors.New("chat host requires provider argv and absolute workdir")
+	}
+	envLaunchToken, cleanEnv := launchTokenFromEnv(cfg.Env)
+	cfg.Env = cleanEnv
+	if cfg.launchToken == "" {
+		cfg.launchToken = envLaunchToken
+	}
+	if cfg.launchToken != "" {
+		// Keep the durable fence for the host's full lifetime. On Unix the
+		// provider owns a separate process group and can survive an abrupt host
+		// exit, so descriptor publication alone does not prove that later host
+		// death also stopped the provider tree. Register before readiness so a
+		// definite pre-admission exit also removes the exact launch records. This
+		// defer still runs after provider-tree and host-lock cleanup on shutdown.
+		defer clearLaunchIntent(cfg.DataDir, cfg.SessionID, cfg.launchToken)
+	}
+	if err := awaitLaunchReady(ctx, cfg); err != nil {
+		return err
 	}
 	releaseLock, err := acquireHostLock(cfg.DataDir, cfg.SessionID)
 	if err != nil {

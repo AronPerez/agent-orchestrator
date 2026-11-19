@@ -69,15 +69,18 @@ type recordingLauncher struct {
 	// Empty preserves the default identity used by ordinary Chat fixtures.
 	providerConversationID string
 
-	permissionModes  []ports.PermissionMode
-	preflightErr     error
-	startErr         error
-	turnErr          error
-	live             bool
-	beforeStart      func(ChatStart)
-	afterReady       func()
-	providerBoundary *domain.ConversationBranch
-	liveReconnect    bool
+	permissionModes   []ports.PermissionMode
+	preflightErr      error
+	preStartErr       error
+	startErr          error
+	stopErr           error
+	turnBeforeSendErr error
+	turnErr           error
+	live              bool
+	beforeStart       func(ChatStart)
+	afterReady        func()
+	providerBoundary  *domain.ConversationBranch
+	liveReconnect     bool
 
 	preflighted          []domain.AgentHarness
 	preflightPermissions []ports.PermissionMode
@@ -178,6 +181,12 @@ func (l *recordingLauncher) PreflightChat(
 }
 
 func prepareTestChatStart(ctx context.Context, cfg ChatStart) (ChatStart, error) {
+	if cfg.BeforeProviderStart != nil {
+		if err := cfg.BeforeProviderStart(ctx); err != nil {
+			return cfg, err
+		}
+		cfg.BeforeProviderStart = nil
+	}
 	if cfg.PrepareControllerEnv == nil {
 		return cfg, nil
 	}
@@ -190,6 +199,9 @@ func prepareTestChatStart(ctx context.Context, cfg ChatStart) (ChatStart, error)
 }
 
 func (l *recordingLauncher) StartChat(ctx context.Context, cfg ChatStart) (ChatStarted, error) {
+	if l.preStartErr != nil {
+		return ChatStarted{}, l.preStartErr
+	}
 	var err error
 	cfg, err = prepareTestChatStart(ctx, cfg)
 	if err != nil {
@@ -225,7 +237,15 @@ func (l *recordingLauncher) StartChat(ctx context.Context, cfg ChatStart) (ChatS
 	return started, nil
 }
 
-func (l *recordingLauncher) StartChatTurn(_ context.Context, _ domain.SessionID, text string) (string, error) {
+func (l *recordingLauncher) StartChatTurn(_ context.Context, _ domain.SessionID, text string, beforeSend func() error) (string, error) {
+	if l.turnBeforeSendErr != nil {
+		return "", l.turnBeforeSendErr
+	}
+	if beforeSend != nil {
+		if err := beforeSend(); err != nil {
+			return "", err
+		}
+	}
 	l.turns = append(l.turns, text)
 	return "turn-1", l.turnErr
 }
@@ -250,7 +270,7 @@ func (l *recordingLauncher) SendIfIdle(_ context.Context, _ domain.SessionID, ms
 func (l *recordingLauncher) StopChat(_ context.Context, id domain.SessionID) error { //nolint:unparam
 
 	l.stopped = append(l.stopped, id)
-	return nil
+	return l.stopErr
 }
 
 func (l *recordingLauncher) HasLiveChatController(domain.SessionID) bool {
@@ -419,6 +439,351 @@ type generationClaimFailureLauncher struct {
 	store      *fakeStore
 	generation string
 	err        error
+}
+
+func TestChatTrackerIntakeTurnErrorPreservesPossibleDelivery(t *testing.T) {
+	turnErr := errors.New("provider accepted turn but response was lost")
+	launcher := &recordingLauncher{turnErr: turnErr}
+	m, st, _ := newChatManager(launcher)
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, IssueID: "github:acme/mer#81", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, RequestedMode: domain.SessionModeChat,
+		Prompt: "fix it", TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, turnErr) {
+		t.Fatalf("Spawn() error = %v, want ambiguous turn error", err)
+	}
+	if len(launcher.turns) != 1 || len(launcher.stopped) != 0 {
+		t.Fatalf("turns/stops = %v/%v, want attempted turn and preserved controller", launcher.turns, launcher.stopped)
+	}
+	id := st.trackerIntakePending["mer\x00github:acme/mer#81"]
+	if id == "" {
+		t.Fatal("ambiguous Chat delivery released its intake claim")
+	}
+	if st.sessions[id].IsTerminated {
+		t.Fatalf("ambiguous Chat delivery terminated session: %+v", st.sessions[id])
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.ControllerPossible || !reservation.DeliveryPossible {
+		t.Fatalf("Chat recovery reservation = %+v, want controller and delivery fences", reservation)
+	}
+	if got, want := reservation.ControllerGeneration, st.sessions[id].Metadata.ControllerGeneration; got == "" || got != want {
+		t.Fatalf("Chat recovery controller generation = %q, want published generation %q", got, want)
+	}
+}
+
+func TestChatTrackerIntakePreSendErrorReleasesClaimForRetry(t *testing.T) {
+	lookupErr := errors.New("controller not registered")
+	launcher := &recordingLauncher{turnBeforeSendErr: lookupErr}
+	m, st, _ := newChatManager(launcher)
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID: chatTestProject, IssueID: "github:acme/mer#82", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, RequestedMode: domain.SessionModeChat,
+		Prompt: "fix it", TrackerIntakeLimits: &limits,
+	}
+
+	if _, _, _, err := m.Spawn(context.Background(), cfg); !errors.Is(err, lookupErr) {
+		t.Fatalf("Spawn() error = %v, want controller lookup error", err)
+	}
+	key := "mer\x00github:acme/mer#82"
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("pre-send failure kept intake claim: pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if len(launcher.turns) != 0 || len(launcher.stopped) != 1 {
+		t.Fatalf("pre-send turns/stops = %v/%v, want no turn and one cleanup", launcher.turns, launcher.stopped)
+	}
+
+	launcher.turnBeforeSendErr = nil
+	if _, _, _, err := m.Spawn(context.Background(), cfg); err != nil {
+		t.Fatalf("Spawn(retry): %v", err)
+	}
+	if len(launcher.turns) != 1 {
+		t.Fatalf("retry turns = %v, want delivered prompt", launcher.turns)
+	}
+}
+
+func TestChatTrackerIntakePostSpawnStartErrorKeepsClaimUntilHostIsFenced(t *testing.T) {
+	startErr := context.DeadlineExceeded
+	launcher := &recordingLauncher{
+		startErr: startErr,
+		stopErr:  fmt.Errorf("unpublished host: %w", ports.ErrChatRecoveryInconclusive),
+	}
+	m, st, _ := newChatManager(launcher)
+	ws := m.workspace.(*fakeWorkspace)
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, IssueID: "github:acme/mer#83", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, RequestedMode: domain.SessionModeChat,
+		Prompt: "fix it", TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, startErr) {
+		t.Fatalf("Spawn() error = %v, want post-spawn start failure", err)
+	}
+	key := "mer\x00github:acme/mer#83"
+	id := st.trackerIntakePending[key]
+	if id == "" {
+		t.Fatal("post-spawn failure released its pending intake claim")
+	}
+	if len(launcher.stopped) != 1 || launcher.stopped[0] != id {
+		t.Fatalf("host stop attempts = %v, want %s", launcher.stopped, id)
+	}
+	if got := st.trackerIntakeRecovery[id]; !got.ControllerPossible || got.CapacityReleased || got.CleanupConfirmed {
+		t.Fatalf("post-spawn recovery reservation = %+v, want possible controller still charged", got)
+	}
+	if got := st.sessions[id]; got.IsTerminated {
+		t.Fatalf("post-spawn failure terminated the fenced session: %+v", got)
+	}
+	if ws.destroyed != 0 || ws.projectDestroyed != 0 {
+		t.Fatalf("post-spawn failure destroyed a workspace with a possible host: single=%d project=%d", ws.destroyed, ws.projectDestroyed)
+	}
+}
+
+func TestChatTrackerIntakePreSendCleanupFailureResumePublishesControllerFence(t *testing.T) {
+	preSendErr := errors.New("controller not registered")
+	cleanupErr := errors.New("workspace cleanup refused")
+	launcher := &recordingLauncher{turnBeforeSendErr: preSendErr}
+	m, st, _ := newChatManager(launcher)
+	m.newLaunchID = func() string { return "resumed-generation" }
+	ws := m.workspace.(*fakeWorkspace)
+	ws.destroyErr = cleanupErr
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID: chatTestProject, IssueID: "github:acme/mer#821", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, RequestedMode: domain.SessionModeChat,
+		Prompt: "fix it", TrackerIntakeLimits: &limits,
+	}
+
+	if _, _, _, err := m.Spawn(context.Background(), cfg); !errors.Is(err, preSendErr) {
+		t.Fatalf("Spawn() error = %v, want pre-send failure", err)
+	}
+	key := "mer\x00github:acme/mer#821"
+	id := st.trackerIntakePending[key]
+	if id == "" {
+		t.Fatal("failed cleanup released the pending intake claim")
+	}
+	if len(launcher.stopped) != 1 || ws.destroyed != 1 {
+		t.Fatalf("failed spawn stops/destroys = %v/%d, want one attempted controller and workspace cleanup", launcher.stopped, ws.destroyed)
+	}
+	prior := st.trackerIntakeRecovery[id]
+	if prior.DeliveryPossible || !prior.ControllerPossible {
+		t.Fatalf("pre-send reservation = %+v, want undelivered possible controller", prior)
+	}
+
+	launcher.turnBeforeSendErr = nil
+	ws.destroyErr = nil
+	resumed, err := m.ResumeAgentWithMode(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ResumeAgentWithMode(): %v", err)
+	}
+	launcher.live = true
+	reservation := st.trackerIntakeRecovery[id]
+	if reservation.ControllerGeneration != "resumed-generation" || !reservation.ControllerPossible ||
+		!reservation.RelaunchPublished || reservation.DeliveryPossible || reservation.CapacityReleased {
+		t.Fatalf("resumed reservation = %+v, want published resumed-generation owner", reservation)
+	}
+	if resumed.Session.Metadata.ControllerGeneration != reservation.ControllerGeneration {
+		t.Fatalf("resumed controller generation = %q, reservation = %q",
+			resumed.Session.Metadata.ControllerGeneration, reservation.ControllerGeneration)
+	}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Metadata.ControllerGeneration != "resumed-generation" {
+		t.Fatalf("resumed Chat owner after reconciliation = %+v", got)
+	}
+	if len(launcher.stopped) != 1 || ws.destroyed != 1 || st.trackerIntakePending[key] != id {
+		t.Fatalf("reconciliation stopped resumed controller=%v destroyed workspaces=%d or changed pending=%q",
+			launcher.stopped, ws.destroyed, st.trackerIntakePending[key])
+	}
+}
+
+func TestCheckSessionHealth_PublishedUndeliveredTrackerChatReconnectsWithoutHandling(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, st, _ := newChatManager(launcher)
+	id := domain.SessionID("mer-published-chat")
+	issueID := domain.IssueID("github:acme/mer#822")
+	key := "mer\x00" + string(issueID)
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: chatTestProject, IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/mer-published-chat/root", WorkspacePath: "/ws/mer-published-chat",
+			ProviderConversationID: "thread-1", ControllerGeneration: "resumed-generation",
+		},
+	}
+	st.sessions[id] = rec
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-published-chat", Branch: "ao/mer-published-chat/root",
+		ControllerPossible: true, ControllerGeneration: "resumed-generation",
+	}
+
+	if err := m.checkSessionHealth(context.Background(), rec); err != nil {
+		t.Fatalf("checkSessionHealth(): %v", err)
+	}
+	if len(launcher.started) != 1 {
+		t.Fatalf("Chat starts = %d, want one reconnect", len(launcher.started))
+	}
+	start := launcher.started[0]
+	if !start.ReconnectOnly || start.ControllerGeneration != "resumed-generation" {
+		t.Fatalf("reconnect = %+v, want reconnect-only reserved generation", start)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.RelaunchPublished || reservation.DeliveryPossible || reservation.CapacityReleased ||
+		reservation.ControllerGeneration != "resumed-generation" {
+		t.Fatalf("reconnected reservation = %+v, want unchanged undelivered published fence", reservation)
+	}
+	if st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("reconnect changed claim: pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntake_PublishedUndeliveredChatExitReleasesCapacityWithoutTeardown(t *testing.T) {
+	launcher := &recordingLauncher{live: true}
+	m, st, _ := newChatManager(launcher)
+	ws := m.workspace.(*fakeWorkspace)
+	id := domain.SessionID("mer-exited-chat")
+	issueID := domain.IssueID("github:acme/mer#823")
+	key := "mer\x00" + string(issueID)
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: chatTestProject, IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/mer-exited-chat/root", WorkspacePath: "/ws/mer-exited-chat",
+			ProviderConversationID: "thread-1", ControllerGeneration: "resumed-generation",
+		},
+	}
+	st.sessions[id] = rec
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-exited-chat", Branch: "ao/mer-exited-chat/root",
+		ControllerPossible: true, ControllerGeneration: "resumed-generation", RelaunchPublished: true,
+	}
+
+	if _, err := m.ExitAgent(context.Background(), id); err != nil {
+		t.Fatalf("ExitAgent(): %v", err)
+	}
+	launcher.live = false
+	launcher.startErr = ports.ErrChatHostNotRunning
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited {
+		t.Fatalf("exited Chat owner = %+v, want stopped resumable session", got)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.RelaunchPublished || reservation.DeliveryPossible || !reservation.CapacityReleased ||
+		reservation.ReleasedControllerGeneration != "resumed-generation" {
+		t.Fatalf("settled Chat reservation = %+v, want released capacity for stopped generation", reservation)
+	}
+	if len(launcher.stopped) != 1 || ws.destroyed != 0 || st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("reconciliation stopped=%v destroyed=%d pending=%q handled=%q",
+			launcher.stopped, ws.destroyed, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntake_PublishedChatInconclusiveDisconnectKeepsCapacity(t *testing.T) {
+	launcher := &recordingLauncher{startErr: ports.ErrChatRecoveryInconclusive}
+	m, st, _ := newChatManager(launcher)
+	ws := m.workspace.(*fakeWorkspace)
+	id := domain.SessionID("mer-disconnected-chat")
+	issueID := domain.IssueID("github:acme/mer#824")
+	key := "mer\x00" + string(issueID)
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: chatTestProject, IssueID: issueID, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityExited},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/mer-disconnected-chat/root", WorkspacePath: "/ws/mer-disconnected-chat",
+			ProviderConversationID: "thread-1", ControllerGeneration: "resumed-generation",
+		},
+	}
+	st.sessions[id] = rec
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-disconnected-chat", Branch: "ao/mer-disconnected-chat/root",
+		ControllerPossible: true, ControllerGeneration: "resumed-generation", RelaunchPublished: true,
+	}
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if !errors.Is(err, ports.ErrChatRecoveryInconclusive) {
+		t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want inconclusive recovery", err)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if reservation.CapacityReleased || st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("inconclusive disconnect changed claim: reservation=%+v pending=%q handled=%q",
+			reservation, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if ws.destroyed != 0 || st.sessions[id].IsTerminated {
+		t.Fatalf("inconclusive disconnect destroyed=%d terminated=%v", ws.destroyed, st.sessions[id].IsTerminated)
+	}
+}
+
+func TestRelaunchSession_PublishedUndeliveredChatStartFailurePreservesCorrectFence(t *testing.T) {
+	definiteErr := errors.New("controller gate canceled")
+	uncertainErr := errors.New("provider start outcome unknown")
+	tests := []struct {
+		name      string
+		launcher  *recordingLauncher
+		wantPrior bool
+	}{
+		{name: "definite pre-provider failure", launcher: &recordingLauncher{preStartErr: definiteErr}, wantPrior: true},
+		{name: "uncertain provider failure", launcher: &recordingLauncher{startErr: uncertainErr}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, st, _ := newChatManager(tt.launcher)
+			m.newLaunchID = func() string { return "replacement-generation" }
+			id := domain.SessionID("mer-second-resume")
+			issueID := domain.IssueID("github:acme/mer#825")
+			key := "mer\x00" + string(issueID)
+			rec := domain.SessionRecord{
+				ID: id, ProjectID: chatTestProject, IssueID: issueID, Kind: domain.KindWorker,
+				Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+				Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					Branch: "ao/mer-second-resume/root", WorkspacePath: "/ws/mer-second-resume",
+					ProviderConversationID: "thread-1", ControllerGeneration: "prior-generation",
+				},
+			}
+			prior := domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/mer-second-resume", Branch: "ao/mer-second-resume/root",
+				ControllerPossible: true, ControllerGeneration: "prior-generation", RelaunchPublished: true,
+				CapacityReleased: true, ReleasedControllerGeneration: "prior-generation",
+			}
+			st.sessions[id] = rec
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = prior
+
+			_, err := m.relaunchSessionWithPolicyAndGeneration(
+				context.Background(), "resume agent", rec, st.projects[string(chatTestProject)], workspaceInfo(rec),
+				nil, false, false, "", domain.SessionInterfaceTransitionHistoryStrict, nil,
+			)
+			if err == nil {
+				t.Fatal("relaunch unexpectedly succeeded")
+			}
+			got := st.trackerIntakeRecovery[id]
+			if tt.wantPrior {
+				if !reflect.DeepEqual(got, prior) {
+					t.Fatalf("definite pre-start failure changed published fence:\n got: %+v\nwant: %+v", got, prior)
+				}
+				return
+			}
+			if got.ControllerGeneration != "replacement-generation" || !got.ControllerPossible ||
+				got.RelaunchPublished || got.CapacityReleased {
+				t.Fatalf("uncertain start reservation = %+v, want replacement generation fenced", got)
+			}
+		})
+	}
 }
 
 func (l *generationClaimFailureLauncher) StartChat(ctx context.Context, cfg ChatStart) (ChatStarted, error) {
@@ -2048,7 +2413,12 @@ type deadlineConsumingChatLauncher struct {
 	cancel context.CancelFunc
 }
 
-func (l *deadlineConsumingChatLauncher) StartChatTurn(_ context.Context, _ domain.SessionID, text string) (string, error) {
+func (l *deadlineConsumingChatLauncher) StartChatTurn(_ context.Context, _ domain.SessionID, text string, beforeSend func() error) (string, error) {
+	if beforeSend != nil {
+		if err := beforeSend(); err != nil {
+			return "", err
+		}
+	}
 	l.turns = append(l.turns, text)
 	l.cancel()
 	return "", context.DeadlineExceeded

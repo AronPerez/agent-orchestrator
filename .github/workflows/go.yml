@@ -90,7 +90,9 @@ jobs:
   chat-race:
     if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.base_ref == 'main' || github.base_ref == 'develop'))
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    # The complete race suite now consistently needs just over 40 minutes on
+    # hosted runners, so leave setup and teardown headroom above the Go limit.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -108,7 +110,7 @@ jobs:
           cache-dependency-path: backend/go.sum
 
       - name: Test chat
-        run: go test -race -count=1 -timeout=40m ./internal/service/chat
+        run: go test -race -count=1 -timeout=50m ./internal/service/chat
 
   session-store-race:
     if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.base_ref == 'main' || github.base_ref == 'develop'))
@@ -133,7 +135,7 @@ jobs:
   sqlite-race:
     if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.base_ref == 'main' || github.base_ref == 'develop'))
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 55
     strategy:
       fail-fast: false
       matrix:
@@ -155,7 +157,7 @@ jobs:
           tests=$(go test -race -list . ./internal/storage/sqlite | grep -E '^(Test|Example|Fuzz)')
           selected=$(printf '%s\n' "$tests" | awk -v shard=${{ matrix.shard }} '((NR - 1) % 4) == shard' | paste -sd '|' -)
           test -n "$selected"
-          go test -race -count=1 -timeout=40m -run "^($selected)$" ./internal/storage/sqlite
+          go test -race -count=1 -timeout=45m -run "^($selected)$" ./internal/storage/sqlite
 
   # Keep the existing required check as the gate for every backend race test.
   build-test:

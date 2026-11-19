@@ -97,10 +97,17 @@ type roleOverride struct {
 
 // trackerIntakeConfig mirrors domain.TrackerIntakeConfig.
 type trackerIntakeConfig struct {
-	Enabled  bool   `json:"enabled,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	Repo     string `json:"repo,omitempty"`
-	Assignee string `json:"assignee,omitempty"`
+	Enabled  bool                   `json:"enabled,omitempty"`
+	Provider string                 `json:"provider,omitempty"`
+	Repo     string                 `json:"repo,omitempty"`
+	Assignee string                 `json:"assignee,omitempty"`
+	Limits   automatedSessionLimits `json:"limits,omitempty"`
+}
+
+// automatedSessionLimits mirrors domain.AutomatedSessionLimits.
+type automatedSessionLimits struct {
+	MaxConcurrent    int `json:"maxConcurrent,omitempty"`
+	MaxStartsPerPass int `json:"maxStartsPerPass,omitempty"`
 }
 
 // reviewerConfig mirrors domain.ReviewerConfig.

@@ -6020,6 +6020,12 @@ export interface components {
             /** Format: date-time */
             pausedAt: string;
         };
+        AutomatedSessionLimits: {
+            /** @description Maximum live sessions counted by this producer. Zero selects the default of 3. */
+            maxConcurrent?: number;
+            /** @description Maximum session start attempts in one polling or scheduling pass. Zero selects the default of 2. */
+            maxStartsPerPass?: number;
+        };
         AutomationEnvelope: {
             automation: components["schemas"]["AutomationResponse"];
         };
@@ -9974,6 +9980,7 @@ export interface components {
         TrackerIntakeConfig: {
             assignee?: string;
             enabled?: boolean;
+            limits?: components["schemas"]["AutomatedSessionLimits"];
             /** @enum {string} */
             provider?: "github" | "gitlab";
             repo?: string;

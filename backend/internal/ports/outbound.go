@@ -93,6 +93,15 @@ type Runtime interface {
 	IsAlive(ctx context.Context, handle RuntimeHandle) (bool, error)
 }
 
+// RuntimeLaunchCandidateProvider returns every opaque handle Create may make
+// externally observable for cfg. The set must be deterministic across daemon
+// restarts and must be computed without creating or reserving a runtime. A
+// caller persists it before Create so an interrupted launch can probe every
+// possible backend generation without guessing how handles are encoded.
+type RuntimeLaunchCandidateProvider interface {
+	LaunchCandidates(cfg RuntimeConfig) ([]RuntimeHandle, error)
+}
+
 // RuntimeChildInspector distinguishes running terminal children from a runtime
 // retained only to serve scrollback. False with no error confirms all children
 // have exited (or the runtime is absent); inconclusive probes must return errors.
@@ -121,6 +130,7 @@ type FencedProbeReason string
 const (
 	FencedReasonExactMatch         FencedProbeReason = "exact_match"
 	FencedReasonExactAbsent        FencedProbeReason = "exact_absent"
+	FencedReasonExactExited        FencedProbeReason = "exact_exited"
 	FencedReasonIdentityMissing    FencedProbeReason = "identity_missing"
 	FencedReasonRegistryUnreadable FencedProbeReason = "registry_unreadable"
 	FencedReasonRegistryMalformed  FencedProbeReason = "registry_malformed"
@@ -620,6 +630,9 @@ type WorkspaceConfig struct {
 	// StartPoint creates a fresh branch at this commit instead of the base
 	// branch. Session forks use it to start at the source's HEAD.
 	StartPoint string
+	// BeforeCreate checkpoints the final managed identity before the adapter
+	// materializes a directory, branch, or worktree.
+	BeforeCreate func(WorkspaceInfo) error
 }
 
 // WorkspaceInfo describes a created workspace — where it lives and its branch.
@@ -660,6 +673,9 @@ type WorkspaceProjectConfig struct {
 	StartRef string
 	Repos    []WorkspaceProjectRepoConfig
 	Assets   []WorkspaceProjectAssetConfig
+	// BeforeCreate checkpoints the final root identity before the adapter
+	// materializes the first repository in the workspace project.
+	BeforeCreate func(WorkspaceInfo) error
 }
 
 // WorkspaceProjectAssetConfig describes a non-repository child directory that

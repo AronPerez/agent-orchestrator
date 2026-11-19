@@ -30,6 +30,40 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 		}
 		rec = current
 	}
+	intakeRecovery, pendingIntake, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+	if err != nil {
+		return fmt.Errorf("check session %s: tracker intake claim: %w", rec.ID, err)
+	}
+	if pendingIntake {
+		current, found, err := m.store.GetSession(ctx, rec.ID)
+		if err != nil {
+			return fmt.Errorf("check session %s: reload tracker intake owner: %w", rec.ID, err)
+		}
+		if !found || current.IsTerminated {
+			return nil
+		}
+		rec = current
+		if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+			if intakeRecovery.DeliveryPossible && !intakeRecovery.CapacityReleased {
+				return m.reconnectPendingTrackerIntakeChat(ctx, rec, project)
+			}
+			if !intakeRecovery.DeliveryPossible && !intakeRecovery.CapacityReleased &&
+				trackerIntakeChatReservationMatchesSession(rec, intakeRecovery) {
+				return m.reconnectReservedTrackerIntakeChat(ctx, rec, project, intakeRecovery)
+			}
+			if !intakeRecovery.DeliveryPossible {
+				// The per-claim background job owns interrupted launch teardown.
+				// Cleanup hooks intentionally have no default timeout, so running
+				// them in the startup live pass could hold every daemon gate shut.
+				return nil
+			}
+		}
+		// Pending terminal claims are reconciled independently from this live
+		// pass so a possibly-delivered runtime is never stopped as ordinary
+		// startup cleanup. A delivered Chat is handled above by reconnecting to
+		// its existing conversation without replaying the initial turn.
+		return nil
+	}
 	// Preserve cleanup of interrupted spawns that never committed a workspace.
 	// Their client request IDs must remain retryable after a daemon crash.
 	if rec.Metadata.WorkspacePath == "" ||
@@ -70,6 +104,83 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 	return m.recordTerminalStoppedAtStartup(ctx, rec)
 }
 
+func (m *Manager) reconnectReservedTrackerIntakeChat(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	project domain.ProjectRecord,
+	reservation domain.TrackerIntakeRecoveryReservation,
+) error {
+	if m.chat == nil {
+		return ports.ErrChatUnsupported
+	}
+	if rec.Metadata.ProviderConversationID == "" {
+		return fmt.Errorf("check session %s: reserved tracker intake chat has no provider conversation: %w", rec.ID, ErrIncompleteHandle)
+	}
+	if !m.chat.HasLiveChatController(rec.ID) {
+		_, err := m.resumeChatController(ctx, "check reserved tracker intake", rec, project,
+			workspaceInfo(rec), false, true, reservation.ControllerGeneration, domain.SessionInterfaceTransitionHistoryStrict)
+		if err != nil && !errors.Is(err, ports.ErrChatHostNotRunning) {
+			return err
+		}
+		if err != nil {
+			// ControllerReady durably published this exact generation before the
+			// relaunch marker could be written. Preserve it as a resumable owner even
+			// when the provider host has since stopped.
+			if !reservation.RelaunchPublished {
+				if publishErr := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); publishErr != nil {
+					return fmt.Errorf("check session %s: publish recovered tracker intake Chat: %w", rec.ID, publishErr)
+				}
+			}
+			if recordErr := m.recordAgentExited(ctx, rec); recordErr != nil {
+				return recordErr
+			}
+			if releaseErr := m.markTrackerIntakeCapacityReleasedAfterControllerStop(ctx, rec.ID); releaseErr != nil {
+				return fmt.Errorf("check session %s: release stopped published tracker intake chat: %w", rec.ID, releaseErr)
+			}
+			return nil
+		}
+	}
+	if !reservation.RelaunchPublished {
+		if err := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); err != nil {
+			return fmt.Errorf("check session %s: publish reattached tracker intake Chat: %w", rec.ID, err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) reconnectPendingTrackerIntakeChat(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord) error {
+	if m.chat == nil {
+		return ports.ErrChatUnsupported
+	}
+	if rec.Metadata.ProviderConversationID == "" {
+		return fmt.Errorf("check session %s: pending tracker intake chat has no provider conversation: %w", rec.ID, ErrIncompleteHandle)
+	}
+	if !m.chat.HasLiveChatController(rec.ID) {
+		_, err := m.resumeChatController(ctx, "check pending tracker intake", rec, project,
+			workspaceInfo(rec), false, true, "", domain.SessionInterfaceTransitionHistoryStrict)
+		if errors.Is(err, ports.ErrChatHostNotRunning) {
+			return m.settleMissingTrackerIntakeChatHost(ctx, rec)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+		return fmt.Errorf("check session %s: commit reattached tracker intake chat: %w", rec.ID, err)
+	}
+	return nil
+}
+
+func (m *Manager) settleMissingTrackerIntakeChatHost(ctx context.Context, rec domain.SessionRecord) error {
+	if err := m.recordAgentExited(ctx, rec); err != nil {
+		return err
+	}
+	if err := m.store.CommitStoppedTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+		return fmt.Errorf("check session %s: preserve missing tracker intake chat claim: %w", rec.ID, err)
+	}
+	return nil
+}
+
 // recordTerminalStoppedAtStartup keeps a terminal whose runtime ended while AO
 // was down (a reboot, a crash, a quit that stopped its agents) stopped and
 // resumable, like a Chat whose host is gone. Releasing the launch first stops
@@ -81,10 +192,10 @@ func (m *Manager) recordTerminalStoppedAtStartup(ctx context.Context, rec domain
 	return m.recordAgentExited(ctx, rec)
 }
 
-// defaultStartupChatRetryDelays spaces the reattach attempts for a Chat whose
-// startup check failed transiently. Its provider host is still running, so a
-// later attempt reconnects to it: no provider is launched and no history moves.
-var defaultStartupChatRetryDelays = []time.Duration{
+// defaultStartupHealthRetryDelays spaces retries for a transient startup
+// classification failure. The retry only observes existing owners: it never
+// launches a provider, restores a workspace, or replays a task.
+var defaultStartupHealthRetryDelays = []time.Duration{
 	2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second,
 	30 * time.Second, time.Minute, time.Minute,
 }
@@ -96,13 +207,11 @@ func retryableStartupChatCheck(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ports.ErrChatRecoveryInconclusive)
 }
 
-// retryStartupChatChecks reattaches Chats whose startup check failed
-// transiently. Without it, a live host reads "stopped" until the user clicks
-// Resume, even though the next attempt would reconnect immediately. The
-// sessions stay "checking" until an attempt settles them, so clients show a
-// reconnect in progress instead of offering Resume.
-func (m *Manager) retryStartupChatChecks(ctx context.Context, ids []domain.SessionID) {
-	for i, delay := range m.startupChatRetryDelays {
+// retryStartupHealthChecks reclassifies sessions whose startup check failed
+// transiently. Sessions stay fenced from the reaper until a successful check;
+// a final failure remains unavailable and fail-closed.
+func (m *Manager) retryStartupHealthChecks(ctx context.Context, ids []domain.SessionID) {
+	for i, delay := range m.startupHealthRetryDelays {
 		if len(ids) == 0 {
 			return
 		}
@@ -113,10 +222,10 @@ func (m *Manager) retryStartupChatChecks(ctx context.Context, ids []domain.Sessi
 			return
 		case <-timer.C:
 		}
-		final := i == len(m.startupChatRetryDelays)-1
+		final := i == len(m.startupHealthRetryDelays)-1
 		remaining := ids[:0]
 		for _, id := range ids {
-			if m.retryStartupChatCheck(ctx, id, final) {
+			if m.retryStartupHealthCheck(ctx, id, final) {
 				remaining = append(remaining, id)
 			}
 		}
@@ -124,9 +233,9 @@ func (m *Manager) retryStartupChatChecks(ctx context.Context, ids []domain.Sessi
 	}
 }
 
-// retryStartupChatCheck makes one reattach attempt and reports whether the
+// retryStartupHealthCheck makes one observation attempt and reports whether the
 // session still needs another one. Every other outcome settles its readiness.
-func (m *Manager) retryStartupChatCheck(ctx context.Context, id domain.SessionID, final bool) bool {
+func (m *Manager) retryStartupHealthCheck(ctx context.Context, id domain.SessionID, final bool) bool {
 	rec, found, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		if !final && ctx.Err() == nil {
@@ -136,8 +245,8 @@ func (m *Manager) retryStartupChatCheck(ctx context.Context, id domain.SessionID
 		return false
 	}
 	if !found || rec.IsTerminated || rec.HibernatedAt != nil ||
-		domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat || m.chat == nil ||
-		m.chat.HasLiveChatController(id) {
+		(domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat && m.chat != nil &&
+			m.chat.HasLiveChatController(id) && !m.statusRecoveryReaperFenceActive(id)) {
 		// Gone, asleep, or already reattached (for example by Resume).
 		m.finishStatusRecovery(ctx, rec, nil)
 		return false
@@ -158,14 +267,15 @@ func (m *Manager) retryStartupChatCheck(ctx context.Context, id domain.SessionID
 	}()
 	if err == nil {
 		m.finishStatusRecovery(ctx, rec, nil)
-		m.logger.Info("reconcile: chat reattached on retry", "sessionID", id)
+		m.logger.Info("reconcile: session health verified on retry", "sessionID", id)
 		return false
 	}
-	retry := retryableStartupChatCheck(err) && !final && ctx.Err() == nil
+	retry := !final && ctx.Err() == nil && (m.statusRecoveryReaperFenceActive(id) ||
+		domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat && retryableStartupChatCheck(err))
 	if !retry {
 		m.finishStatusRecovery(ctx, rec, err)
 	}
-	m.logger.Warn("reconcile: chat reattach retry failed", "sessionID", id, "retrying", retry, "error", err)
+	m.logger.Warn("reconcile: session health retry failed", "sessionID", id, "retrying", retry, "error", err)
 	return retry
 }
 

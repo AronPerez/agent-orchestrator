@@ -21,6 +21,19 @@ type fakeBackend struct {
 	childErr     error
 }
 
+type fakeRuntimeEffectFailure struct {
+	err     error
+	handle  ports.RuntimeHandle
+	effect  ports.RuntimeEffectOutcome
+	cleanup ports.RuntimeCleanupOutcome
+}
+
+func (e fakeRuntimeEffectFailure) Error() string                               { return e.err.Error() }
+func (e fakeRuntimeEffectFailure) Unwrap() error                               { return e.err }
+func (e fakeRuntimeEffectFailure) PossibleHandle() ports.RuntimeHandle         { return e.handle }
+func (e fakeRuntimeEffectFailure) EffectOutcome() ports.RuntimeEffectOutcome   { return e.effect }
+func (e fakeRuntimeEffectFailure) CleanupOutcome() ports.RuntimeCleanupOutcome { return e.cleanup }
+
 func (f *fakeBackend) record(call string, handle ports.RuntimeHandle) {
 	f.calls = append(f.calls, call)
 	f.handles = append(f.handles, handle)
@@ -35,6 +48,10 @@ func (f *fakeBackend) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.
 		return f.createHandle, nil
 	}
 	return ports.RuntimeHandle{ID: string(cfg.SessionID)}, nil
+}
+
+func (f *fakeBackend) LaunchCandidates(cfg ports.RuntimeConfig) ([]ports.RuntimeHandle, error) {
+	return []ports.RuntimeHandle{{ID: string(cfg.SessionID)}}, nil
 }
 
 func (f *fakeBackend) Destroy(_ context.Context, handle ports.RuntimeHandle) error {
@@ -178,6 +195,93 @@ func TestHybridRuntimeFallsBackToTmuxWhenDirectCreateFails(t *testing.T) {
 	}
 	if !reflect.DeepEqual(legacy.calls, []string{"create:session-1"}) {
 		t.Fatalf("legacy calls = %v", legacy.calls)
+	}
+}
+
+func TestHybridRuntimeLaunchCandidatesIncludeDirectAndFallbackHandles(t *testing.T) {
+	legacy := &restartableFakeBackend{}
+	direct := &fakeBackend{}
+	runtime := newHybridRuntime(legacy, direct, nil, "Linux")
+
+	handles, err := runtime.LaunchCandidates(ports.RuntimeConfig{SessionID: "session-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(handles, []ports.RuntimeHandle{{ID: directHandlePrefix + "session-1"}, {ID: "session-1"}}) {
+		t.Fatalf("launch candidates = %+v, want direct and fallback handles", handles)
+	}
+}
+
+func TestHybridRuntimeDoesNotFallbackAfterAmbiguousDirectCreate(t *testing.T) {
+	legacy := &restartableFakeBackend{}
+	direct := &fakeBackend{createErr: fakeRuntimeEffectFailure{
+		err:     errors.New("native response lost and cleanup failed"),
+		handle:  ports.RuntimeHandle{ID: "session-1"},
+		effect:  ports.RuntimeEffectPossible,
+		cleanup: ports.RuntimeCleanupFailed,
+	}}
+	runtime := newHybridRuntime(legacy, direct, nil, "Linux")
+
+	_, err := runtime.Create(context.Background(), ports.RuntimeConfig{SessionID: "session-1"})
+	var effect ports.RuntimeEffectError
+	if !errors.As(err, &effect) {
+		t.Fatalf("Create error = %v, want RuntimeEffectError", err)
+	}
+	if got := effect.PossibleHandle().ID; got != directHandlePrefix+"session-1" {
+		t.Fatalf("possible handle = %q, want routed direct handle", got)
+	}
+	if len(legacy.calls) != 0 {
+		t.Fatalf("legacy calls = %v, want no fallback after ambiguous native effect", legacy.calls)
+	}
+}
+
+func TestHybridRuntimeDoesNotFallbackAfterPossibleDirectDeliveryWasCleanedUp(t *testing.T) {
+	legacy := &restartableFakeBackend{}
+	direct := &fakeBackend{createErr: fakeRuntimeEffectFailure{
+		err:     errors.New("native registry write failed after process start"),
+		handle:  ports.RuntimeHandle{ID: "session-1"},
+		effect:  ports.RuntimeEffectPossible,
+		cleanup: ports.RuntimeCleanupSucceeded,
+	}}
+	runtime := newHybridRuntime(legacy, direct, nil, "Linux")
+
+	_, err := runtime.Create(context.Background(), ports.RuntimeConfig{SessionID: "session-1"})
+	var effect ports.RuntimeEffectError
+	if !errors.As(err, &effect) {
+		t.Fatalf("Create error = %v, want RuntimeEffectError", err)
+	}
+	if got := effect.PossibleHandle().ID; got != directHandlePrefix+"session-1" {
+		t.Fatalf("possible handle = %q, want routed direct handle", got)
+	}
+	if len(legacy.calls) != 0 {
+		t.Fatalf("legacy calls = %v, want no fallback after possible task delivery", legacy.calls)
+	}
+}
+
+func TestHybridRuntimePreservesAmbiguousFallbackCreateEvidence(t *testing.T) {
+	legacy := &restartableFakeBackend{fakeBackend: fakeBackend{createErr: fakeRuntimeEffectFailure{
+		err:     errors.New("tmux response lost and cleanup failed"),
+		handle:  ports.RuntimeHandle{ID: "session-1"},
+		effect:  ports.RuntimeEffectPossible,
+		cleanup: ports.RuntimeCleanupFailed,
+	}}}
+	direct := &fakeBackend{createErr: fakeRuntimeEffectFailure{
+		err:     errors.New("native unavailable"),
+		effect:  ports.RuntimeEffectNone,
+		cleanup: ports.RuntimeCleanupNotAttempted,
+	}}
+	runtime := newHybridRuntime(legacy, direct, nil, "Linux")
+
+	_, err := runtime.Create(context.Background(), ports.RuntimeConfig{SessionID: "session-1"})
+	var effect ports.RuntimeEffectError
+	if !errors.As(err, &effect) {
+		t.Fatalf("Create error = %v, want RuntimeEffectError", err)
+	}
+	if got := effect.PossibleHandle().ID; got != "session-1" {
+		t.Fatalf("possible fallback handle = %q, want tmux handle", got)
+	}
+	if effect.EffectOutcome() != ports.RuntimeEffectPossible || effect.CleanupOutcome() != ports.RuntimeCleanupFailed {
+		t.Fatalf("fallback effect = %q cleanup = %q", effect.EffectOutcome(), effect.CleanupOutcome())
 	}
 }
 

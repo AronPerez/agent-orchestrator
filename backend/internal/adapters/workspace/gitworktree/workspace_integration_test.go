@@ -159,6 +159,45 @@ func TestWorkspaceIntegrationExplicitNewBranchRejectsChildCollision(t *testing.T
 	}
 }
 
+func TestWorkspaceIntegrationCheckpointsProjectIntentBeforeMaterialization(t *testing.T) {
+	git := requireGit(t)
+	tmp := t.TempDir()
+	rootRepo := setupOriginClone(t, git, filepath.Join(tmp, "root"))
+	childRepo := setupOriginClone(t, git, filepath.Join(tmp, "child"))
+	ws, err := New(Options{Binary: git, ManagedRoot: filepath.Join(tmp, "managed"), RepoResolver: StaticRepoResolver{"proj": rootRepo}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointErr := errors.New("checkpoint unavailable")
+	wantRoot := filepath.Join(ws.managedRoot, "proj", "task")
+	wantRepo, err := physicalAbs(rootRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ws.CreateWorkspaceProject(context.Background(), ports.WorkspaceProjectConfig{
+		ProjectID: "proj", SessionID: "task", Kind: domain.KindWorker, Branch: "fix/intake",
+		FreshBranch: true, RootRepoPath: rootRepo, BaseBranch: "main",
+		Repos: []ports.WorkspaceProjectRepoConfig{{Name: "api", RelativePath: "services/api", RepoPath: childRepo}},
+		BeforeCreate: func(info ports.WorkspaceInfo) error {
+			if info.Path != wantRoot || info.Branch != "fix/intake" || info.RepoPath != wantRepo {
+				t.Fatalf("checkpoint info = %+v", info)
+			}
+			for _, path := range []string{wantRoot, filepath.Join(wantRoot, "services", "api")} {
+				if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("worktree %q existed before checkpoint: %v", path, statErr)
+				}
+			}
+			return checkpointErr
+		},
+	})
+	if !errors.Is(err, checkpointErr) {
+		t.Fatalf("CreateWorkspaceProject() error = %v, want checkpoint failure", err)
+	}
+	if _, statErr := os.Stat(wantRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("root after checkpoint failure stat = %v, want absent", statErr)
+	}
+}
+
 func TestWorkspaceIntegrationCancelledPreparedAddLeavesNoWorktreeOrBranch(t *testing.T) {
 	git := requireGit(t)
 	tmp := t.TempDir()

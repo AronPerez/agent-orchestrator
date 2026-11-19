@@ -132,6 +132,31 @@ func TestStatusReadinessDiscoveryFailureIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestStatusReadinessClaimLookupFailureRetriesThenIsUnavailable(t *testing.T) {
+	m, st, _, _ := newManager()
+	m.startupHealthRetryDelays = []time.Duration{time.Millisecond}
+	rec := domain.SessionRecord{
+		ID: "chat-claim-lookup", ProjectID: "mer", Harness: domain.HarnessClaudeCode,
+		Mode: domain.SessionModeChat, Activity: domain.Activity{State: domain.ActivityActive},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/chat-claim-lookup", WorkspacePath: "/wt/chat-claim-lookup",
+			ProviderConversationID: "conversation-1", ControllerGeneration: "controller-1",
+		},
+	}
+	st.sessions[rec.ID] = rec
+	st.trackerIntakeRecoveryErr = errors.New("tracker intake ledger unavailable")
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("reconcile background: %v", err)
+	}
+	if got := m.SessionStatusReadiness(rec); got != "checking" {
+		t.Fatalf("claim lookup failure readiness during retry = %s, want checking", got)
+	}
+	waitFor(t, "claim lookup retries to finish", func() bool {
+		return m.SessionStatusReadiness(rec) == "unavailable"
+	})
+}
+
 func TestStatusReadinessFreshSpawnAfterDiscoveryFailureIsReady(t *testing.T) {
 	m, st, _, _ := newManager()
 	st.listAllErr = errors.New("storage unavailable")

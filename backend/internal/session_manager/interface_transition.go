@@ -590,6 +590,18 @@ func (m *Manager) runInterfaceTransition(
 		return
 	}
 	sourceStopped = true
+	markStopped := func(ctx context.Context, id domain.SessionID) error {
+		return m.markTrackerIntakeCapacityReleasedAfterRuntimeStop(
+			ctx, id, rec.Metadata.RuntimeHandleID, rec.Metadata.RuntimeLaunchID,
+		)
+	}
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		markStopped = m.markTrackerIntakeCapacityReleasedAfterControllerStop
+	}
+	if err := markStopped(ctx, rec.ID); err != nil {
+		fail("TRACKER_INTAKE_FENCE_FAILED", fmt.Errorf("record stopped source ownership: %w", err))
+		return
+	}
 	if err := m.moveInterfaceTransition(transition.ID, domain.SessionInterfaceTransitionSourceStopped, "", ""); err != nil {
 		fail("TRANSITION_STATE_FAILED", err)
 		return
@@ -1399,10 +1411,10 @@ func (m *Manager) stopSourceController(ctx context.Context, rec domain.SessionRe
 }
 
 // stopSourceControllerConclusive makes one retry because both shipped runtime
-// teardown and Chat stop are idempotent. A TUI liveness probe can turn a failed
-// tmux command into a conclusive success when the process did in fact exit. Chat
-// Service retains a controller whose event stream has not stopped, so its retry
-// waits for the same process rather than losing the only handle to it.
+// teardown and Chat stop are idempotent. A dead TUI workload is not enough: the
+// terminal host must be destroyed before another controller can reuse its ID.
+// Chat Service retains a controller whose event stream has not stopped, so its
+// retry waits for the same process rather than losing the only handle to it.
 func (m *Manager) stopSourceControllerConclusive(rec domain.SessionRecord) error {
 	var failures []error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -1413,17 +1425,6 @@ func (m *Manager) stopSourceControllerConclusive(rec domain.SessionRecord) error
 			return nil
 		}
 		failures = append(failures, err)
-		if domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
-			probeCtx, probeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			alive, probeErr := m.runtime.IsAlive(probeCtx, runtimeHandle(rec.Metadata))
-			probeCancel()
-			if probeErr == nil && !alive {
-				return nil
-			}
-			if probeErr != nil {
-				failures = append(failures, fmt.Errorf("verify terminal controller stopped: %w", probeErr))
-			}
-		}
 	}
 	return fmt.Errorf("could not prove the source controller stopped after retry: %w", errors.Join(failures...))
 }

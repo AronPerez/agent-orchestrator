@@ -782,7 +782,13 @@ func (c *transitionChat) StartChat(ctx context.Context, cfg ChatStart) (ChatStar
 	}
 	return started, nil
 }
-func (*transitionChat) StartChatTurn(context.Context, domain.SessionID, string) (string, error) {
+
+func (*transitionChat) StartChatTurn(_ context.Context, _ domain.SessionID, _ string, beforeSend func() error) (string, error) {
+	if beforeSend != nil {
+		if err := beforeSend(); err != nil {
+			return "", err
+		}
+	}
 	return "", nil
 }
 func (c *transitionChat) RelaySessionChatTurn(_ context.Context, _ domain.SessionID, text, clientMessageID string, _ ports.MessageDeliveryOptions) (string, error) {
@@ -1133,6 +1139,17 @@ func awaitTransition(t *testing.T, store *transitionStore, id string) domain.Ses
 
 func TestInterfaceTransitionTUIToChatStopsBeforeStartingAndReusesNativeConversation(t *testing.T) {
 	manager, store, runtime, chat, log := newTransitionManager(t, domain.SessionModeTUI)
+	rec := store.sessions["session-1"]
+	rec.IssueID = "github:acme/repo#stopped-published-runtime"
+	store.sessions[rec.ID] = rec
+	store.trackerIntakePending["proj\x00"+string(rec.IssueID)] = rec.ID
+	store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: rec.Metadata.RuntimeLaunchID, RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID},
+		DeliveryPossible: true,
+	}
+	runtime.fencedResults = map[string]ports.FencedProbeResult{
+		rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+	}
 	manager.browserCapabilities = &scriptedBrowserCapabilities{issues: []browserCapabilityIssue{{
 		token: "transition-chat-token", verifier: "transition-chat-verifier",
 	}}}
@@ -1144,7 +1161,7 @@ func TestInterfaceTransitionTUIToChatStopsBeforeStartingAndReusesNativeConversat
 	if settled.Phase != domain.SessionInterfaceTransitionCompleted {
 		t.Fatalf("phase = %s, error = %s", settled.Phase, settled.ErrorDetail)
 	}
-	rec := store.sessions["session-1"]
+	rec = store.sessions["session-1"]
 	if rec.Mode != domain.SessionModeChat {
 		t.Fatalf("mode = %s, want chat", rec.Mode)
 	}
@@ -1165,6 +1182,70 @@ func TestInterfaceTransitionTUIToChatStopsBeforeStartingAndReusesNativeConversat
 	}
 	if got := fmt.Sprint(*log); got != "[stop:tui:runtime-1 start:chat]" {
 		t.Fatalf("controller order = %s", got)
+	}
+	if len(runtime.fencedRefs) != 0 {
+		t.Fatalf("already-stopped source was probed again: %+v", runtime.fencedRefs)
+	}
+}
+
+func TestInterfaceTransitionTUIToChatKeepsReservedReplacementFenced(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		launchID  string
+		handleIDs []string
+		probeByID map[string]ports.FencedProbeResult
+	}{
+		{
+			name: "live replacement", launchID: "replacement-generation", handleIDs: []string{"runtime-replacement"},
+			probeByID: map[string]ports.FencedProbeResult{
+				"runtime-replacement": {Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+			},
+		},
+		{
+			name: "unknown replacement", launchID: "replacement-generation", handleIDs: []string{"runtime-replacement"},
+			probeByID: map[string]ports.FencedProbeResult{
+				"runtime-replacement": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			},
+		},
+		{
+			name: "matching generation unknown fallback", launchID: "old-tui-generation",
+			handleIDs: []string{"runtime-1", "runtime-fallback"},
+			probeByID: map[string]ports.FencedProbeResult{
+				"runtime-fallback": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, store, runtime, chat, _ := newTransitionManager(t, domain.SessionModeTUI)
+			rec := store.sessions["session-1"]
+			rec.IssueID = "github:acme/repo#reserved"
+			store.sessions[rec.ID] = rec
+			store.trackerIntakePending["proj\x00"+string(rec.IssueID)] = rec.ID
+			store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+				RuntimeLaunchID: tc.launchID, RuntimeHandleIDs: tc.handleIDs,
+				DeliveryPossible: true,
+			}
+			runtime.fencedResults = tc.probeByID
+
+			transition, err := manager.StartInterfaceTransition(
+				context.Background(), rec.ID, domain.SessionModeChat,
+				domain.SessionInterfaceTransitionDrain, domain.SessionInterfaceTransitionHistoryStrict,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settled := awaitTransition(t, store, transition.ID)
+			if settled.Phase != domain.SessionInterfaceTransitionRecovery {
+				t.Fatalf("transition = %+v, want recovery while replacement owner is unresolved", settled)
+			}
+			reservation := store.trackerIntakeRecovery[rec.ID]
+			if reservation.CapacityReleased || reservation.RuntimeLaunchID != tc.launchID {
+				t.Fatalf("tracker intake reservation = %+v, want replacement owner still fenced", reservation)
+			}
+			if runtime.created != 0 || chat.start.SessionID != "" {
+				t.Fatalf("started another owner: terminal creates=%d chat session=%q", runtime.created, chat.start.SessionID)
+			}
+		})
 	}
 }
 
@@ -1190,7 +1271,7 @@ func TestInterfaceTransitionRollbackClearsStaleTUIRuntimeBeforeRestore(t *testin
 	if runtime.created != 1 {
 		t.Fatalf("restored runtime create count = %d, want 1", runtime.created)
 	}
-	wantLog := "[stop:tui:runtime-1 start:chat stop:chat stop:tui:runtime-1 start:tui]"
+	wantLog := "[stop:tui:runtime-1 stop:tui:runtime-1 start:chat stop:chat stop:tui:runtime-1 start:tui]"
 	if got := fmt.Sprint(*log); got != wantLog {
 		t.Fatalf("controller order = %s, want %s", got, wantLog)
 	}
@@ -2617,6 +2698,14 @@ func TestInterfaceTransitionChatToTUIRejectsReservedIDWhenHistoryIsMissing(t *te
 
 func TestInterfaceTransitionChatToTUIInterruptsThenStopsBeforeStarting(t *testing.T) {
 	manager, store, runtime, chat, log := newTransitionManager(t, domain.SessionModeChat)
+	rec := store.sessions["session-1"]
+	rec.IssueID = "github:acme/repo#123"
+	store.sessions[rec.ID] = rec
+	claimKey := "proj\x00" + string(rec.IssueID)
+	store.trackerIntakePending[claimKey] = rec.ID
+	store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		ControllerPossible: true, ControllerGeneration: rec.Metadata.ControllerGeneration, DeliveryPossible: true,
+	}
 	transition, err := manager.StartInterfaceTransition(context.Background(), "session-1", domain.SessionModeTUI, domain.SessionInterfaceTransitionInterrupt, domain.SessionInterfaceTransitionHistoryStrict)
 	if err != nil {
 		t.Fatal(err)
@@ -2628,7 +2717,7 @@ func TestInterfaceTransitionChatToTUIInterruptsThenStopsBeforeStarting(t *testin
 	if chat.preparedPolicy != domain.SessionInterfaceTransitionInterrupt {
 		t.Fatalf("prepared policy = %s", chat.preparedPolicy)
 	}
-	rec := store.sessions["session-1"]
+	rec = store.sessions["session-1"]
 	if rec.Mode != domain.SessionModeTUI {
 		t.Fatalf("mode = %s, want tui", rec.Mode)
 	}
@@ -2648,6 +2737,15 @@ func TestInterfaceTransitionChatToTUIInterruptsThenStopsBeforeStarting(t *testin
 	}
 	if runtime.created != 1 {
 		t.Fatalf("terminal runtime created %d times, want 1", runtime.created)
+	}
+	if got := store.trackerIntakeHandled[claimKey]; got != rec.ID {
+		t.Fatalf("handled tracker intake claim = %q, want %q", got, rec.ID)
+	}
+	if got := store.trackerIntakePending[claimKey]; got != "" {
+		t.Fatalf("pending tracker intake claim = %q, want committed", got)
+	}
+	if reservation, exists := store.trackerIntakeRecovery[rec.ID]; exists {
+		t.Fatalf("tracker intake recovery after handled Chat-to-TUI switch = %+v, want cleared", reservation)
 	}
 	if got := fmt.Sprint(*log); got != "[prepare:chat:interrupt stop:chat start:tui]" {
 		t.Fatalf("controller order = %s", got)
@@ -3177,6 +3275,44 @@ func TestInterfaceTransitionDoesNotStartTargetWhenSourceStopRemainsAmbiguous(t *
 	}
 	if chat.start.ProviderConversationID != "" {
 		t.Fatalf("target Chat controller started with %q", chat.start.ProviderConversationID)
+	}
+}
+
+func TestInterfaceTransitionDoesNotReleaseTrackerIntakeWhenDestroyFails(t *testing.T) {
+	manager, store, runtime, chat, _ := newTransitionManager(t, domain.SessionModeTUI)
+	rec := store.sessions["session-1"]
+	rec.IssueID = "github:acme/repo#uncertain-stop"
+	store.sessions[rec.ID] = rec
+	store.trackerIntakePending["proj\x00"+string(rec.IssueID)] = rec.ID
+	store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: rec.Metadata.RuntimeLaunchID, RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID},
+		DeliveryPossible: true,
+	}
+	runtime.stopErrors = []error{errors.New("pty-host still alive"), errors.New("pty-host still alive")}
+	runtime.aliveByHandle = map[string]bool{rec.Metadata.RuntimeHandleID: false}
+	runtime.fencedResults = map[string]ports.FencedProbeResult{
+		rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+	}
+
+	transition, err := manager.StartInterfaceTransition(
+		context.Background(), rec.ID, domain.SessionModeChat,
+		domain.SessionInterfaceTransitionDrain, domain.SessionInterfaceTransitionHistoryStrict,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := awaitTransition(t, store, transition.ID)
+	if settled.Phase != domain.SessionInterfaceTransitionRecovery || settled.ErrorCode != "SOURCE_STOP_UNCERTAIN" {
+		t.Fatalf("transition = %+v, want uncertain source stop recovery", settled)
+	}
+	if reservation := store.trackerIntakeRecovery[rec.ID]; reservation.CapacityReleased {
+		t.Fatalf("tracker intake reservation = %+v, want ownership fence retained", reservation)
+	}
+	if chat.start.SessionID != "" {
+		t.Fatalf("target Chat controller started for %s", chat.start.SessionID)
+	}
+	if len(runtime.fencedRefs) != 0 {
+		t.Fatalf("workload probes cannot prove terminal teardown: %+v", runtime.fencedRefs)
 	}
 }
 

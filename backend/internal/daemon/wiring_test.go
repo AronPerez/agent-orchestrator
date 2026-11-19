@@ -597,7 +597,9 @@ func TestStartTrackerIntake_RunsEvenWithoutEnabledProjects(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := startTrackerIntake(ctx, config.Config{TrackerIntake: true}, store, svc, newMultiTracker(config.GitLabConfig{}, log), log)
+	gate := make(chan struct{})
+	close(gate)
+	done := startTrackerIntake(ctx, config.Config{TrackerIntake: true}, store, svc, newMultiTracker(config.GitLabConfig{}, log), log, gate)
 
 	select {
 	case <-done:
@@ -650,7 +652,7 @@ func TestStartTrackerIntake_GatedOff(t *testing.T) {
 			var logs strings.Builder
 			logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-			if done := startTrackerIntake(ctx, config.Config{}, store, nil, nil, logger); done != nil {
+			if done := startTrackerIntake(ctx, config.Config{}, store, nil, nil, logger, nil); done != nil {
 				t.Fatal("startTrackerIntake returned a non-nil channel while gated off")
 			}
 
@@ -666,6 +668,80 @@ func TestStartTrackerIntake_GatedOff(t *testing.T) {
 				t.Errorf("want %s in gated-off log, got:\n%s", tc.wantAttr, out)
 			}
 		})
+	}
+}
+
+type trackerIntakeRecoverySessionsStub struct {
+	results chan error
+	calls   chan error
+}
+
+func (s *trackerIntakeRecoverySessionsStub) Spawn(context.Context, ports.SpawnConfig) (domain.Session, int, int, error) {
+	return domain.Session{}, 0, 0, nil
+}
+
+func (s *trackerIntakeRecoverySessionsStub) ScheduleTrackerIntakeClaimReconciliation(context.Context) error {
+	var err error
+	select {
+	case err = <-s.results:
+	default:
+	}
+	select {
+	case s.calls <- err:
+	default:
+	}
+	return err
+}
+
+func TestStartTrackerIntake_GatedOffRetriesPendingClaimRecovery(t *testing.T) {
+	store, err := sqlitetest.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	results := make(chan error, 2)
+	results <- errors.New("temporary ownership probe failure")
+	results <- nil
+	calls := make(chan error, 2)
+	sessions := &trackerIntakeRecoverySessionsStub{results: results, calls: calls}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	gate := make(chan struct{})
+	done := startTrackerIntakeWithRecoveryTick(ctx, config.Config{}, store, sessions, nil, logger, gate, 5*time.Millisecond)
+	if done == nil {
+		t.Fatal("startTrackerIntake returned nil while gated-off recovery was available")
+	}
+
+	select {
+	case <-calls:
+		t.Fatal("pending-claim recovery ran before the startup gate opened")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(gate)
+
+	select {
+	case firstErr := <-calls:
+		if firstErr == nil {
+			t.Fatal("initial pending-claim recovery unexpectedly succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial pending-claim recovery did not run")
+	}
+	select {
+	case retryErr := <-calls:
+		if retryErr != nil {
+			t.Fatalf("pending-claim recovery retry error = %v, want nil", retryErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending-claim recovery was not retried while intake admission was off")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("gated-off recovery did not stop after context cancellation")
 	}
 }
 
@@ -1167,6 +1243,10 @@ type selectableRuntime struct {
 func (r *selectableRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	r.lastCfg = cfg
 	return ports.RuntimeHandle{ID: "runtime-1"}, nil
+}
+
+func (r *selectableRuntime) LaunchCandidates(ports.RuntimeConfig) ([]ports.RuntimeHandle, error) {
+	return []ports.RuntimeHandle{{ID: "runtime-1"}}, nil
 }
 
 func (r *selectableRuntime) Destroy(context.Context, ports.RuntimeHandle) error { return nil }

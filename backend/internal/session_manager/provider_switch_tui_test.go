@@ -139,6 +139,165 @@ func TestSwitchTargetWithoutANativeSessionYetRestoresFromTheHandoff(t *testing.T
 	}
 }
 
+func TestSwitchTUIProviderKeepsReservedReplacementFenced(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		launchID  string
+		handleIDs []string
+		probes    map[string]ports.FencedProbeResult
+	}{
+		{
+			name: "live replacement", launchID: "replacement-generation", handleIDs: []string{"runtime-replacement"},
+			probes: map[string]ports.FencedProbeResult{
+				"runtime-replacement": {Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+			},
+		},
+		{
+			name: "unknown replacement", launchID: "replacement-generation", handleIDs: []string{"runtime-replacement"},
+			probes: map[string]ports.FencedProbeResult{
+				"runtime-replacement": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			},
+		},
+		{
+			name: "matching generation unknown fallback", launchID: "published-generation",
+			handleIDs: []string{"h1", "runtime-fallback"},
+			probes: map[string]ports.FencedProbeResult{
+				"runtime-fallback": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+			rec := mkLive("mer-1")
+			rec.Harness, rec.Mode, rec.Kind = domain.HarnessCodex, domain.SessionModeTUI, domain.KindWorker
+			rec.Activity.State = domain.ActivityIdle
+			rec.IssueID = "github:acme/mer#reserved"
+			rec.Metadata.RuntimeLaunchID = "published-generation"
+			st.sessions[rec.ID] = rec
+			key := "mer\x00" + string(rec.IssueID)
+			st.trackerIntakePending[key] = rec.ID
+			st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+				RuntimeLaunchID: tc.launchID, RuntimeHandleIDs: tc.handleIDs,
+				DeliveryPossible: true,
+			}
+			runtime := &fakeRuntime{
+				aliveByHandle: map[string]bool{rec.Metadata.RuntimeHandleID: true},
+				fencedResults: tc.probes,
+			}
+			m := New(Deps{
+				Runtime: runtime, Agents: singleAgent{agent: &recordingAgent{}}, Store: &launchOptionsFakeStore{fakeStore: st},
+				Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+				LookPath: func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			err := m.SwitchTUIProvider(context.Background(), rec.ID, domain.ProviderSwitchRequest{
+				TargetHarness: domain.HarnessClaudeCode, HandoffNote: "handoff",
+			})
+			var switchErr *domain.ProviderSwitchError
+			if !errors.As(err, &switchErr) || switchErr.Kind != domain.ProviderSwitchRefusalRecoveryRequired {
+				t.Fatalf("SwitchTUIProvider() error = %v, want recovery required", err)
+			}
+			reservation := st.trackerIntakeRecovery[rec.ID]
+			if reservation.CapacityReleased || reservation.RuntimeLaunchID != tc.launchID {
+				t.Fatalf("tracker intake reservation = %+v, want replacement owner still fenced", reservation)
+			}
+			if runtime.created != 0 {
+				t.Fatalf("started another runtime while replacement remained unresolved: %d", runtime.created)
+			}
+		})
+	}
+}
+
+func TestSwitchTUIProviderRetainsPublishedRuntimeStop(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	rec := mkLive("mer-1")
+	rec.Harness, rec.Mode, rec.Kind = domain.HarnessCodex, domain.SessionModeTUI, domain.KindWorker
+	rec.Activity.State = domain.ActivityIdle
+	rec.IssueID = "github:acme/mer#stopped-published-runtime"
+	rec.Metadata.AgentSessionID = "source-native"
+	rec.Metadata.RuntimeLaunchID = "published-generation"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: rec.Metadata.RuntimeLaunchID, RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID},
+		DeliveryPossible: true,
+	}
+	baseRuntime := &fakeRuntime{
+		aliveByHandle: map[string]bool{rec.Metadata.RuntimeHandleID: true},
+		fencedResults: map[string]ports.FencedProbeResult{
+			rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+		},
+	}
+	runtime := &childProbeRuntime{fakeRuntime: baseRuntime, childAlive: true}
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: &recordingAgent{}}, Store: &launchOptionsFakeStore{fakeStore: st},
+		Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if err := m.SwitchTUIProvider(context.Background(), rec.ID, domain.ProviderSwitchRequest{
+		TargetHarness: domain.HarnessClaudeCode, HandoffNote: "handoff",
+	}); err != nil {
+		t.Fatalf("SwitchTUIProvider(): %v", err)
+	}
+	if baseRuntime.created != 1 {
+		t.Fatalf("target runtime creates = %d, want 1", baseRuntime.created)
+	}
+	if len(baseRuntime.fencedRefs) != 0 {
+		t.Fatalf("already-stopped source was probed again: %+v", baseRuntime.fencedRefs)
+	}
+}
+
+func TestSwitchTUIProviderDoesNotReleaseTrackerIntakeWhenDestroyFailsEvenIfExactWorkloadIsDead(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	rec := mkLive("mer-1")
+	rec.Harness, rec.Mode, rec.Kind = domain.HarnessCodex, domain.SessionModeTUI, domain.KindWorker
+	rec.Activity.State = domain.ActivityIdle
+	rec.IssueID = "github:acme/mer#uncertain-stop"
+	rec.Metadata.AgentSessionID = "source-native"
+	rec.Metadata.RuntimeLaunchID = "source-generation"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: rec.Metadata.RuntimeLaunchID, RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID},
+		DeliveryPossible: true,
+	}
+	runtime := &fakeRuntime{
+		destroyErr:    errors.New("pty-host still alive"),
+		aliveByHandle: map[string]bool{rec.Metadata.RuntimeHandleID: true},
+		fencedResults: map[string]ports.FencedProbeResult{
+			rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent},
+		},
+	}
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: &recordingAgent{}}, Store: &launchOptionsFakeStore{fakeStore: st},
+		Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	err := m.SwitchTUIProvider(context.Background(), rec.ID, domain.ProviderSwitchRequest{
+		TargetHarness: domain.HarnessClaudeCode, HandoffNote: "handoff",
+	})
+	var switchErr *domain.ProviderSwitchError
+	if !errors.As(err, &switchErr) || switchErr.Kind != domain.ProviderSwitchRefusalRecoveryRequired {
+		t.Fatalf("SwitchTUIProvider() error = %v, want recovery required", err)
+	}
+	if reservation := st.trackerIntakeRecovery[rec.ID]; reservation.CapacityReleased {
+		t.Fatalf("tracker intake reservation = %+v, want ownership fence retained", reservation)
+	}
+	if runtime.created != 0 {
+		t.Fatalf("started target runtime while source ownership remained unresolved: %d", runtime.created)
+	}
+	if len(runtime.fencedRefs) != 0 {
+		t.Fatalf("dead workload probes cannot prove terminal teardown: %+v", runtime.fencedRefs)
+	}
+}
+
 func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -159,6 +318,21 @@ func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing
 			rec := mkLive("mer-1")
 			rec.Metadata.Prompt = "TASK"
 			rec.Metadata.AgentSessionID = ""
+			if tc.override != nil {
+				rec.IssueID = "github:acme/mer#123"
+				rec.Activity.State = domain.ActivityExited
+				rec.Metadata.RuntimeLaunchID = "launch-old"
+				rec.Metadata.RuntimeReleasedLaunchID = "launch-old"
+				key := "mer\x00" + string(rec.IssueID)
+				st.trackerIntakePending[key] = rec.ID
+				st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+					WorkspacePath:           rec.Metadata.WorkspacePath,
+					RuntimeLaunchID:         rec.Metadata.RuntimeLaunchID,
+					RuntimeHandleIDs:        []string{rec.Metadata.RuntimeHandleID},
+					CapacityReleased:        true,
+					ReleasedRuntimeLaunchID: rec.Metadata.RuntimeLaunchID,
+				}
+			}
 			st.sessions[rec.ID] = rec
 			store := &launchOptionsFakeStore{fakeStore: st, options: domain.AgentLaunchOptions{HandoffNote: tc.savedNote}}
 			lcm := &fakeLCM{store: st}
@@ -172,6 +346,13 @@ func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing
 			}
 			if got := lcm.terminated[rec.ID]; got != tc.ended {
 				t.Fatalf("session ended %d times, want %d", got, tc.ended)
+			}
+			if tc.override != nil {
+				reservation := st.trackerIntakeRecovery[rec.ID]
+				if reservation.DeliveryPossible || st.trackerIntakeHandled["mer\x00"+string(rec.IssueID)] != "" {
+					t.Fatalf("switch handoff changed tracker delivery state: recovery=%+v handled=%q",
+						reservation, st.trackerIntakeHandled["mer\x00"+string(rec.IssueID)])
+				}
 			}
 		})
 	}

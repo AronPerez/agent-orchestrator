@@ -16,12 +16,16 @@ import (
 
 type healthCheckLauncher struct {
 	recordingLauncher
-	checks []ChatStart
-	err    error
+	checks  []ChatStart
+	err     error
+	onStart func(ChatStart)
 }
 
 func (l *healthCheckLauncher) StartChat(_ context.Context, cfg ChatStart) (ChatStarted, error) {
 	l.checks = append(l.checks, cfg)
+	if l.onStart != nil {
+		l.onStart(cfg)
+	}
 	return ChatStarted{}, l.err
 }
 
@@ -98,6 +102,389 @@ func TestStartupHealthUnavailableRuntimeProbePreservesSession(t *testing.T) {
 	}
 }
 
+func TestTrackerIntakeClaimReconciliationStopsPossibleChatControllerBeforeRetry(t *testing.T) {
+	m, st, _, _ := newManager()
+	chat := &recordingLauncher{}
+	m.chat = chat
+	m.runBackground = func(work func()) { work() }
+	rec := domain.SessionRecord{
+		ID: "mer-chat-intake", ProjectID: "mer", Kind: domain.KindWorker,
+		IssueID: "github:acme/mer#44",
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+	}
+	st.sessions[rec.ID] = rec
+	key := "mer\x00github:acme/mer#44"
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch:             "ao/mer-chat-intake/root",
+		WorkspacePath:      "/ws/mer-chat-intake",
+		WorkspaceRepoPath:  "/ws/mer-chat-intake",
+		ControllerPossible: true,
+	}
+
+	if err := m.ScheduleTrackerIntakeClaimReconciliation(context.Background()); err != nil {
+		t.Fatalf("ScheduleTrackerIntakeClaimReconciliation(): %v", err)
+	}
+	if len(chat.stopped) != 1 || chat.stopped[0] != rec.ID {
+		t.Fatalf("stopped controllers = %v, want %s", chat.stopped, rec.ID)
+	}
+	if got := st.trackerIntakePending[key]; got != "" {
+		t.Fatalf("pending claim after confirmed controller stop = %q, want released", got)
+	}
+	if got := st.trackerIntakeHandled[key]; got != "" {
+		t.Fatalf("controller metadata inferred prompt delivery: handled=%q", got)
+	}
+}
+
+type failingStopChatLauncher struct {
+	*recordingLauncher
+	err error
+}
+
+func (l *failingStopChatLauncher) StopChat(_ context.Context, id domain.SessionID) error {
+	l.stopped = append(l.stopped, id)
+	return l.err
+}
+
+func TestTrackerIntakeClaimReconciliationPreservesChatClaimWhenControllerStopIsUnconfirmed(t *testing.T) {
+	m, st, _, ws := newManager()
+	stopErr := errors.New("controller owner unavailable")
+	chat := &failingStopChatLauncher{recordingLauncher: &recordingLauncher{}, err: stopErr}
+	m.chat = chat
+	m.runBackground = func(work func()) { work() }
+	rec := domain.SessionRecord{
+		ID: "mer-chat-intake", ProjectID: "mer", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+	}
+	st.sessions[rec.ID] = rec
+	key := "mer\x00github:acme/mer#45"
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch:             "ao/mer-chat-intake/root",
+		WorkspacePath:      "/ws/mer-chat-intake",
+		WorkspaceRepoPath:  "/ws/mer-chat-intake",
+		ControllerPossible: true,
+	}
+
+	if err := m.ScheduleTrackerIntakeClaimReconciliation(context.Background()); err != nil {
+		t.Fatalf("ScheduleTrackerIntakeClaimReconciliation(): %v", err)
+	}
+	if got := st.trackerIntakePending[key]; got != rec.ID {
+		t.Fatalf("pending claim after unconfirmed controller stop = %q, want %q", got, rec.ID)
+	}
+	if stored := st.sessions[rec.ID]; stored.IsTerminated {
+		t.Fatalf("unconfirmed controller session was terminated: %+v", stored)
+	}
+	if ws.destroyed != 0 {
+		t.Fatalf("workspace cleanup calls = %d, want none while controller may be alive", ws.destroyed)
+	}
+}
+
+func TestStartupHealthDoesNotWaitForInterruptedTrackerChatCleanup(t *testing.T) {
+	m, st, _, ws := newManager()
+	chat := &recordingLauncher{}
+	m.chat = chat
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-cleanup"
+	rec.IssueID = "github:acme/mer#451"
+	rec.Metadata.ProviderConversationID = ""
+	rec.Metadata.ControllerGeneration = ""
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true,
+	}
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	ws.destroyInfoHook = func(ports.WorkspaceInfo) {
+		close(cleanupStarted)
+		<-releaseCleanup
+	}
+
+	returned := make(chan error, 1)
+	go func() { returned <- m.ReconcileBackground(context.Background()) }()
+	select {
+	case err := <-returned:
+		if err != nil {
+			close(releaseCleanup)
+			t.Fatalf("ReconcileBackground(): %v", err)
+		}
+	case <-time.After(time.Second):
+		close(releaseCleanup)
+		t.Fatal("startup live pass blocked on interrupted tracker Chat cleanup")
+	}
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		close(releaseCleanup)
+		t.Fatal("per-claim background cleanup did not start")
+	}
+	close(releaseCleanup)
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if err := m.WaitBackgroundWorkers(waitCtx); err != nil {
+		t.Fatalf("WaitBackgroundWorkers(): %v", err)
+	}
+}
+
+func TestStartupHealthPendingDeliveredTrackerChatReattachesWithoutReplay(t *testing.T) {
+	m, st, _, _ := newManager()
+	launcher := &healthCheckLauncher{}
+	m.chat = launcher
+	m.runBackground = func(work func()) { work() }
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-delivered"
+	rec.IssueID = "github:acme/mer#46"
+	rec.Metadata.ControllerGeneration = "controller-46"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true, DeliveryPossible: true,
+	}
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground(): %v", err)
+	}
+	if len(launcher.checks) != 1 || !launcher.checks[0].ReconnectOnly {
+		t.Fatalf("pending delivered chat reconnects = %+v, want one reconnect-only start", launcher.checks)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID {
+		t.Fatalf("reattached chat claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestStartupHealthPendingDeliveredTrackerChatRunsPastAsyncClaimInspection(t *testing.T) {
+	m, st, _, _ := newManager()
+	launcher := &healthCheckLauncher{}
+	m.chat = launcher
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-async-claim"
+	rec.IssueID = "github:acme/mer#461"
+	rec.Metadata.ControllerGeneration = "controller-461"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true, DeliveryPossible: true,
+	}
+	claimStarted := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	var hookMu sync.Mutex
+	firstLookup := true
+	st.trackerIntakeRecoveryHook = func(domain.SessionID) {
+		hookMu.Lock()
+		block := firstLookup
+		firstLookup = false
+		hookMu.Unlock()
+		if block {
+			close(claimStarted)
+			<-releaseClaim
+		}
+	}
+	m.runBackground = func(work func()) {
+		go work()
+		select {
+		case <-claimStarted:
+		case <-time.After(time.Second):
+			t.Fatal("claim reconciliation did not begin")
+		}
+	}
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		close(releaseClaim)
+		t.Fatalf("ReconcileBackground(): %v", err)
+	}
+	close(releaseClaim)
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if err := m.WaitBackgroundWorkers(waitCtx); err != nil {
+		t.Fatalf("WaitBackgroundWorkers(): %v", err)
+	}
+	if len(launcher.checks) != 1 || !launcher.checks[0].ReconnectOnly {
+		t.Fatalf("pending delivered chat reconnects = %+v, want health check while claim lookup is blocked", launcher.checks)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID {
+		t.Fatalf("async claim chat pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestStartupReaperDoesNotDestroyPendingTrackerIntakeAdoption(t *testing.T) {
+	m, st, rt, _ := newManager()
+	id := domain.SessionID("mer-intake-adoption")
+	issueID := domain.IssueID("github:acme/mer#4611")
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		IsTerminated: true, Activity: domain.Activity{State: domain.ActivityExited},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/intake-adoption", Branch: "b",
+			RuntimeHandleID: "replacement-runtime", RuntimeLaunchID: "replacement-launch",
+		},
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/intake-adoption", RuntimeLaunchID: "replacement-launch",
+		RuntimeHandleIDs: []string{"replacement-runtime"}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{"replacement-runtime": true}
+
+	claimStarted := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClaim) }) }
+	defer release()
+	var hookMu sync.Mutex
+	firstLookup := true
+	st.trackerIntakeRecoveryHook = func(domain.SessionID) {
+		hookMu.Lock()
+		block := firstLookup
+		firstLookup = false
+		hookMu.Unlock()
+		if block {
+			close(claimStarted)
+			<-releaseClaim
+		}
+	}
+	m.runBackground = func(work func()) {
+		go work()
+		select {
+		case <-claimStarted:
+		case <-time.After(time.Second):
+			t.Fatal("claim reconciliation did not begin")
+		}
+	}
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground(): %v", err)
+	}
+	if rt.destroyed != 0 {
+		t.Fatalf("startup reaper destroyed pending replacement %d time(s)", rt.destroyed)
+	}
+	release()
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if err := m.WaitBackgroundWorkers(waitCtx); err != nil {
+		t.Fatalf("WaitBackgroundWorkers(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Activity.State != domain.ActivityIdle ||
+		got.Metadata.RuntimeHandleID != "replacement-runtime" || got.Metadata.RuntimeLaunchID != "replacement-launch" {
+		t.Fatalf("adopted startup owner = %+v, want live replacement", got)
+	}
+	if rt.destroyed != 0 || st.trackerIntakePending[key] != id {
+		t.Fatalf("startup adoption destroyed runtime=%d or settled pending=%q", rt.destroyed, st.trackerIntakePending[key])
+	}
+}
+
+func TestStartupHealthPendingDeliveredTrackerChatMissingHostSettlesClaim(t *testing.T) {
+	m, st, _, _ := newManager()
+	launcher := &healthCheckLauncher{err: ports.ErrChatHostNotRunning}
+	m.chat = launcher
+	m.runBackground = func(work func()) { work() }
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-missing-host"
+	rec.IssueID = "github:acme/mer#460"
+	rec.Metadata.ControllerGeneration = "controller-460"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true, DeliveryPossible: true,
+	}
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground(): %v", err)
+	}
+	if got := st.sessions[rec.ID].Activity.State; got != domain.ActivityExited {
+		t.Fatalf("missing-host chat activity = %q, want exited", got)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID {
+		t.Fatalf("missing-host claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestStartupHealthMissingTrackerChatSettlementFailureRemainsResumable(t *testing.T) {
+	m, st, _, ws := newManager()
+	commitErr := errors.New("commit stopped claim")
+	launcher := &healthCheckLauncher{err: ports.ErrChatHostNotRunning}
+	m.chat = launcher
+	m.runBackground = func(work func()) { work() }
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-missing-host-retry"
+	rec.IssueID = "github:acme/mer#462"
+	rec.Metadata.ControllerGeneration = "controller-462"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true, DeliveryPossible: true,
+	}
+	st.trackerIntakeCommitStoppedErr = commitErr
+
+	if err := m.checkSessionHealth(context.Background(), rec); !errors.Is(err, commitErr) {
+		t.Fatalf("checkSessionHealth() error = %v, want atomic settlement failure", err)
+	}
+	if got := st.sessions[rec.ID]; got.IsTerminated || got.Activity.State != domain.ActivityExited {
+		t.Fatalf("failed settlement changed stopped resumable session: %+v", got)
+	}
+	if got := st.trackerIntakeRecovery[rec.ID]; got.CapacityReleased {
+		t.Fatalf("failed atomic settlement partially released capacity: %+v", got)
+	}
+	if st.trackerIntakePending[key] != rec.ID || ws.destroyed != 0 {
+		t.Fatalf("failed settlement pending=%q workspace destroys=%d", st.trackerIntakePending[key], ws.destroyed)
+	}
+
+	st.trackerIntakeCommitStoppedErr = nil
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground() retry: %v", err)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID || ws.destroyed != 0 {
+		t.Fatalf("retried settlement pending=%q handled=%q workspace destroys=%d", st.trackerIntakePending[key], st.trackerIntakeHandled[key], ws.destroyed)
+	}
+}
+
+func TestScheduledClaimReconciliationSettlesDeliveredChatThatExitedAfterStartup(t *testing.T) {
+	m, st, _, _ := newManager()
+	launcher := &healthCheckLauncher{err: ports.ErrChatHostNotRunning}
+	m.chat = launcher
+	m.runBackground = func(work func()) { work() }
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-exited-after-startup"
+	rec.IssueID = "github:acme/mer#463"
+	rec.Activity.State = domain.ActivityExited
+	rec.Metadata.ControllerGeneration = "controller-463"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true, DeliveryPossible: true,
+	}
+	fenced := false
+	launcher.onStart = func(ChatStart) {
+		fenced = m.agentOperationIs(rec.ID, agentOperationReconcile)
+	}
+
+	if err := m.ScheduleTrackerIntakeClaimReconciliation(context.Background()); err != nil {
+		t.Fatalf("ScheduleTrackerIntakeClaimReconciliation(): %v", err)
+	}
+	if !fenced || len(launcher.checks) != 1 || !launcher.checks[0].ReconnectOnly {
+		t.Fatalf("exited Chat health check fenced=%t checks=%+v", fenced, launcher.checks)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID {
+		t.Fatalf("exited Chat claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 // flakyStartupLauncher fails reattach attempts until failures runs out, then
 // reports a live controller the way a successful reconnect does.
 type flakyStartupLauncher struct {
@@ -170,7 +557,7 @@ func TestStartupChatCheckRetriesTransientFailure(t *testing.T) {
 			m, st, rt, ws := newLifecycleManager()
 			launcher := &flakyStartupLauncher{failures: 2, err: cause}
 			m.chat = launcher
-			m.startupChatRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+			m.startupHealthRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 			rec := startupChatRecord()
 			st.sessions[rec.ID] = rec
 			if err := m.ReconcileBackground(ctx); err != nil {
@@ -199,7 +586,7 @@ func TestStartupChatCheckDoesNotRetryPermanentFailure(t *testing.T) {
 	m, st, _, _ := newLifecycleManager()
 	launcher := &flakyStartupLauncher{failures: -1, err: errors.New("provider rejected the permission mode")}
 	m.chat = launcher
-	m.startupChatRetryDelays = []time.Duration{time.Millisecond}
+	m.startupHealthRetryDelays = []time.Duration{time.Millisecond}
 	rec := startupChatRecord()
 	st.sessions[rec.ID] = rec
 	if err := m.ReconcileBackground(ctx); err != nil {
@@ -220,7 +607,7 @@ func TestStartupChatCheckRetryStopsOnceReattached(t *testing.T) {
 	m, st, _, _ := newLifecycleManager()
 	launcher := &flakyStartupLauncher{failures: -1, err: ports.ErrChatRecoveryInconclusive}
 	m.chat = launcher
-	m.startupChatRetryDelays = []time.Duration{20 * time.Millisecond, time.Millisecond}
+	m.startupHealthRetryDelays = []time.Duration{20 * time.Millisecond, time.Millisecond}
 	rec := startupChatRecord()
 	st.sessions[rec.ID] = rec
 	if err := m.ReconcileBackground(ctx); err != nil {
@@ -242,7 +629,7 @@ func TestStartupChatCheckStaysCheckingWhileRetryPending(t *testing.T) {
 	m, st, _, _ := newLifecycleManager()
 	launcher := &flakyStartupLauncher{failures: 1, err: ports.ErrChatRecoveryInconclusive}
 	m.chat = launcher
-	m.startupChatRetryDelays = []time.Duration{100 * time.Millisecond}
+	m.startupHealthRetryDelays = []time.Duration{100 * time.Millisecond}
 	rec := startupChatRecord()
 	st.sessions[rec.ID] = rec
 	if err := m.ReconcileBackground(ctx); err != nil {
@@ -263,7 +650,7 @@ func TestStartupChatCheckRetryGivesUpAfterSchedule(t *testing.T) {
 	m, st, _, _ := newLifecycleManager()
 	launcher := &flakyStartupLauncher{failures: -1, err: ports.ErrChatRecoveryInconclusive}
 	m.chat = launcher
-	m.startupChatRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	m.startupHealthRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	rec := startupChatRecord()
 	st.sessions[rec.ID] = rec
 	if err := m.ReconcileBackground(ctx); err != nil {

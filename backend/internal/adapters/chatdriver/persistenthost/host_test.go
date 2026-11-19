@@ -9,9 +9,13 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/datadirlock"
 )
 
 func TestMain(m *testing.M) {
@@ -893,6 +897,55 @@ func TestAcquireHostLockReclaimsDeadOwner(t *testing.T) {
 	release()
 }
 
+func TestOwnershipMutationLockFallsBackWhenAdvisoryLocksUnsupported(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "unsupported-advisory-lock"
+	unsupported := func(context.Context, string, time.Duration) (*datadirlock.Lock, error) {
+		return nil, fmt.Errorf("lock probe: %w", datadirlock.ErrUnsupported)
+	}
+	first, err := acquireHostOwnershipMutationLockWith(dataDir, sessionID, unsupported)
+	if err != nil {
+		t.Fatalf("first fallback lock: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Release() })
+
+	type result struct {
+		lock hostOwnershipMutationLock
+		err  error
+	}
+	secondDone := make(chan result, 1)
+	go func() {
+		lock, lockErr := acquireHostOwnershipMutationLockWith(dataDir, sessionID, unsupported)
+		secondDone <- result{lock: lock, err: lockErr}
+	}()
+	select {
+	case got := <-secondDone:
+		if got.lock != nil {
+			_ = got.lock.Release()
+		}
+		t.Fatalf("second fallback lock acquired while first held: %v", got.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if err := first.Release(); err != nil {
+		t.Fatalf("release first fallback lock: %v", err)
+	}
+	select {
+	case got := <-secondDone:
+		if got.err != nil {
+			t.Fatalf("second fallback lock: %v", got.err)
+		}
+		if got.lock == nil {
+			t.Fatal("second fallback lock is nil")
+		}
+		if err := got.lock.Release(); err != nil {
+			t.Fatalf("release second fallback lock: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("second fallback lock did not acquire after release")
+	}
+}
+
 func TestConnectOrStartWaitsForOldControllerToDetach(t *testing.T) {
 	dataDir := t.TempDir()
 	cfg := Config{SessionID: "overlap", DataDir: dataDir, Workdir: t.TempDir(),
@@ -1004,5 +1057,551 @@ func TestReconnectOnlyNeverPreparesOrStartsMissingHost(t *testing.T) {
 	}
 	if _, err := readDescriptor(cfg.DataDir, cfg.SessionID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("health check wrote a descriptor: %v", err)
+	}
+}
+
+func TestUnpublishedLiveHostRemainsFencedBeforeLockAndDescriptor(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "unpublished-live"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, "host.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("host lock exists before child ownership checkpoint: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, "host.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("descriptor exists before publication: %v", err)
+	}
+
+	if err := Shutdown(context.Background(), dataDir, sessionID); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("Shutdown() error = %v, want ErrOwnershipInconclusive", err)
+	}
+	cfg := Config{SessionID: sessionID, DataDir: dataDir, Workdir: t.TempDir(), ReconnectOnly: true}
+	if _, err := ConnectOrStart(context.Background(), cfg); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("Reconnect-only probe error = %v, want ErrOwnershipInconclusive", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, "host.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery launched or published a competing host: %v", err)
+	}
+}
+
+func TestLaunchProbeRechecksReadinessAfterLauncherExit(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "readiness-race"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+
+	checks := 0
+	var publishErr error
+	err = probeLaunchTokenWithExitProbe(dataDir, sessionID, token, func(int) bool {
+		checks++
+		if checks == 1 {
+			// The initial readiness read already missed. Publish exactly while
+			// recovery observes the launcher exit, before it may clear the intent.
+			publishErr = publishLaunchReady(dataDir, sessionID, token, os.Getpid())
+			return true
+		}
+		return false
+	})
+	if publishErr != nil {
+		t.Fatal(publishErr)
+	}
+	if !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("probe error = %v, want ErrOwnershipInconclusive", err)
+	}
+	if checks != 2 {
+		t.Fatalf("process exit checks = %d, want launcher then admitted child", checks)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); err != nil {
+		t.Fatalf("probe removed readiness for the admitted child: %v", err)
+	}
+}
+
+func TestLaunchProbeClearsSameBootIntentWhenLauncherNeverStartedChild(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "abandoned-before-child"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := probeLaunchTokenWithExitProbe(dataDir, sessionID, token, func(int) bool { return true }); err != nil {
+		t.Fatalf("probe abandoned launch intent: %v", err)
+	}
+	if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned launch intent remains: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned launch readiness exists: %v", err)
+	}
+}
+
+func TestRunClearsLaunchIntentBeforeLateReadiness(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "late-readiness"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = Run(ctx, Config{
+		SessionID: sessionID, DataDir: dataDir, Workdir: t.TempDir(),
+		Argv: []string{"unused"}, launchToken: token,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context canceled", err)
+	}
+	if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("late readiness publication error = %v, want removed intent", err)
+	}
+	if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("launch intent remains after pre-admission exit: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("launch readiness remains after pre-admission exit: %v", err)
+	}
+}
+
+func TestLaunchCancellationSerializesWithReadinessPublication(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "cancel-during-publication"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := make(chan struct{})
+	finishPublication := make(chan struct{})
+	publishDone := make(chan error, 1)
+	go func() {
+		publishDone <- publishLaunchReadyAfterWrite(dataDir, sessionID, token, os.Getpid(), func() {
+			close(published)
+			<-finishPublication
+		})
+	}()
+	select {
+	case <-published:
+	case <-time.After(3 * time.Second):
+		t.Fatal("readiness publication did not reach post-write checkpoint")
+	}
+	clearDone := make(chan struct{})
+	go func() {
+		clearLaunchIntent(dataDir, sessionID, token)
+		close(clearDone)
+	}()
+	select {
+	case <-clearDone:
+		t.Fatal("launch cancellation crossed in-flight readiness publication")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(finishPublication)
+	if err := <-publishDone; err != nil {
+		t.Fatalf("publish readiness: %v", err)
+	}
+	select {
+	case <-clearDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launch cancellation did not finish after publication released ownership")
+	}
+	if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canceled launch intent remains: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("readiness published after cancellation: %v", err)
+	}
+}
+
+func TestPublishedReadinessRemainsFencedIfIntentDisappearsAfterWrite(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "intent-lost-after-publication"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	intentPath, err := launchIntentPath(dataDir, sessionID, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = publishLaunchReadyAfterWrite(dataDir, sessionID, token, os.Getpid(), func() {
+		if removeErr := os.Remove(intentPath); removeErr != nil {
+			t.Errorf("remove launch intent after readiness write: %v", removeErr)
+		}
+	})
+	if err != nil {
+		t.Fatalf("publish readiness after intent loss: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); err != nil {
+		t.Fatalf("published readiness was removed: %v", err)
+	}
+	if err := probeLaunchTokenWithExitProbe(dataDir, sessionID, token, func(int) bool { return false }); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("probe error = %v, want ownership fence", err)
+	}
+}
+
+func TestLaunchProbeClearsReadinessFromPriorBoot(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "prior-boot"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	if err := publishLaunchReady(dataDir, sessionID, token, 2147483647); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := readLaunchReady(dataDir, sessionID, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.BootID == "" {
+		t.Fatal("launch readiness omitted boot identity")
+	}
+
+	err = probeLaunchTokenWithProbes(
+		dataDir, sessionID, token,
+		func(int) bool { return true },
+		func() (string, error) { return ready.BootID + "-next", nil },
+		false,
+	)
+	if err != nil {
+		t.Fatalf("probe prior-boot readiness: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prior-boot readiness remains: %v", err)
+	}
+	if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prior-boot intent remains: %v", err)
+	}
+}
+
+func TestPriorBootOwnershipIgnoresReusedDescriptorAndLockPID(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, string, string) error
+	}{
+		{
+			name: "reconnect",
+			run: func(ctx context.Context, dataDir, sessionID string) error {
+				_, err := ConnectOrStart(ctx, Config{
+					SessionID: sessionID, DataDir: dataDir, Workdir: t.TempDir(), ReconnectOnly: true,
+				})
+				return err
+			},
+		},
+		{name: "shutdown", run: Shutdown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			sessionID := "prior-boot-" + tt.name
+			writePriorBootReusedPIDOwnership(t, dataDir, sessionID)
+
+			err := tt.run(context.Background(), dataDir, sessionID)
+			if tt.name == "reconnect" {
+				if !errors.Is(err, ErrNotRunning) {
+					t.Fatalf("reconnect error = %v, want ErrNotRunning", err)
+				}
+			} else if err != nil {
+				t.Fatalf("shutdown error = %v, want nil", err)
+			}
+
+			for _, name := range []string{"host.json", "host.lock"} {
+				if _, statErr := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, name)); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("%s remains after prior-boot recovery: %v", name, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestPriorBootRetirementSerializesReplacementPublication(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "retirement-replacement"
+	oldToken := writePriorBootReusedPIDOwnership(t, dataDir, sessionID)
+
+	validated := make(chan struct{})
+	continueRetirement := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- retirePriorBootHostOwnershipAfterValidation(dataDir, sessionID, func() {
+			close(validated)
+			<-continueRetirement
+		})
+	}()
+	select {
+	case <-validated:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first retirement did not reach validated ownership")
+	}
+
+	newToken, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, newToken) })
+	publishDone := make(chan error, 1)
+	go func() { publishDone <- publishLaunchReady(dataDir, sessionID, newToken, os.Getpid()) }()
+	select {
+	case err := <-publishDone:
+		t.Fatalf("replacement readiness crossed stale retirement: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(continueRetirement)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first retirement: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first retirement did not finish")
+	}
+	select {
+	case err := <-publishDone:
+		if err != nil {
+			t.Fatalf("publish replacement readiness: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement readiness did not publish after retirement")
+	}
+
+	type replacementResult struct {
+		release func()
+		err     error
+	}
+	replacementDone := make(chan replacementResult, 1)
+	go func() {
+		release, lockErr := acquireHostLock(dataDir, sessionID)
+		if lockErr == nil {
+			lockErr = writeDescriptor(dataDir, Descriptor{
+				Version: ProtocolVersion, SessionID: sessionID, Address: "127.0.0.1:1",
+				Token: "replacement", PID: os.Getpid(),
+			})
+		}
+		replacementDone <- replacementResult{release: release, err: lockErr}
+	}()
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- retirePriorBootHostOwnership(dataDir, sessionID) }()
+	var replacement replacementResult
+	select {
+	case replacement = <-replacementDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement publication did not finish")
+	}
+	if replacement.err != nil {
+		if replacement.release != nil {
+			replacement.release()
+		}
+		t.Fatalf("replacement publication: %v", replacement.err)
+	}
+	if replacement.release == nil {
+		t.Fatal("replacement did not acquire host lock")
+	}
+	t.Cleanup(replacement.release)
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second retirement: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second retirement did not finish")
+	}
+
+	d, err := readDescriptor(dataDir, sessionID)
+	if err != nil {
+		t.Fatalf("read replacement descriptor: %v", err)
+	}
+	if d.Token != "replacement" {
+		t.Fatalf("descriptor token = %q, want replacement", d.Token)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, "host.lock")); err != nil {
+		t.Fatalf("replacement host lock missing: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, newToken); err != nil {
+		t.Fatalf("replacement readiness missing: %v", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, oldToken); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prior-boot readiness remains: %v", err)
+	}
+}
+
+func TestPriorBootAbandonedIntentIgnoresReusedLauncherPID(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, string, string) error
+	}{
+		{
+			name: "reconnect",
+			run: func(ctx context.Context, dataDir, sessionID string) error {
+				_, err := ConnectOrStart(ctx, Config{
+					SessionID: sessionID, DataDir: dataDir, Workdir: t.TempDir(), ReconnectOnly: true,
+				})
+				return err
+			},
+		},
+		{name: "shutdown", run: Shutdown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			sessionID := "prior-boot-intent-" + tt.name
+			token, err := reserveLaunchIntent(dataDir, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			intent, err := readLaunchIntent(dataDir, sessionID, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if intent.BootID == "" {
+				t.Fatal("reserved launch intent omitted boot identity")
+			}
+			intent.BootID = priorBootIDForTest(t)
+			intentPath, err := launchIntentPath(dataDir, sessionID, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := json.Marshal(intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(intentPath, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			err = tt.run(context.Background(), dataDir, sessionID)
+			if tt.name == "reconnect" {
+				if !errors.Is(err, ErrNotRunning) {
+					t.Fatalf("reconnect error = %v, want ErrNotRunning", err)
+				}
+			} else if err != nil {
+				t.Fatalf("shutdown error = %v, want nil", err)
+			}
+			if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("abandoned prior-boot intent remains: %v", err)
+			}
+		})
+	}
+}
+
+func writePriorBootReusedPIDOwnership(t *testing.T, dataDir, sessionID string) string {
+	t.Helper()
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyPath, err := launchReadyPath(dataDir, sessionID, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(launchReady{
+		Token: token, HostPID: os.Getpid(), BootID: priorBootIDForTest(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomicLaunchFile(readyPath, b); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockPath(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lock, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDescriptor(dataDir, Descriptor{
+		Version: ProtocolVersion, SessionID: sessionID, Address: address,
+		Token: "prior-boot", PID: os.Getpid(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+func priorBootIDForTest(t *testing.T) string {
+	t.Helper()
+	bootID, err := currentBootIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootSource, _, ok := strings.Cut(bootID, ":")
+	if !ok {
+		t.Fatalf("boot identity = %q, want source:value", bootID)
+	}
+	return bootSource + ":prior-boot"
+}
+
+func TestLaunchIDEnvironmentPreservesInheritanceAndStaysOutOfProvider(t *testing.T) {
+	const inheritedKey = "AO_CHAT_HOST_INHERITED_TEST"
+	t.Setenv(inheritedKey, "present")
+	token := strings.Repeat("ab", 32)
+	hostEnv := envWithLaunchToken(nil, token)
+	gotToken, providerEnv := launchTokenFromEnv(hostEnv)
+	if gotToken != token {
+		t.Fatalf("launch id = %q, want %q", gotToken, token)
+	}
+	var inherited bool
+	for _, entry := range providerEnv {
+		if entry == inheritedKey+"=present" {
+			inherited = true
+		}
+		if strings.HasPrefix(entry, launchIDEnv+"=") {
+			t.Fatalf("provider environment retained internal launch id: %q", entry)
+		}
+	}
+	if !inherited {
+		t.Fatal("nil environment no longer inherits the parent environment")
+	}
+}
+
+func TestShutdownStaleDescriptorPreservesUnpublishedReplacement(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "stale-with-replacement"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDescriptor(dataDir, Descriptor{
+		Version: ProtocolVersion, SessionID: sessionID, Address: address,
+		Token: "stale", PID: 2147483647,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Shutdown(context.Background(), dataDir, sessionID); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("Shutdown() error = %v, want replacement ownership inconclusive", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); err != nil {
+		t.Fatalf("stale descriptor cleanup removed replacement readiness: %v", err)
 	}
 }
