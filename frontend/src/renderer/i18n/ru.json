@@ -1433,6 +1433,7 @@
 	"decisions.sessionOffline": "Подключитесь к {{machine}}, чтобы открыть эту сессию.",
 	"decisions.sessionMissing": "Эта сессия больше недоступна.",
 	"decisions.sessionCheckFailed": "Не удалось проверить эту сессию.",
+	"decisions.changesRequired": "Опишите нужные изменения.",
 	"pr.botSuffix": "{{name}} бот",
 	"pr.card.changesRequested": "Запрошены изменения",
 	"pr.card.checksFailing": "Есть ошибки проверок",

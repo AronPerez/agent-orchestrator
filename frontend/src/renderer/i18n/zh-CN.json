@@ -1421,6 +1421,7 @@
 	"decisions.sessionOffline": "连接到 {{machine}} 才能打开此会话。",
 	"decisions.sessionMissing": "此会话已不可用。",
 	"decisions.sessionCheckFailed": "无法检查此会话。",
+	"decisions.changesRequired": "请描述你想要的修改。",
 	"pr.botSuffix": "{{name}} 机器人",
 	"pr.card.changesRequested": "请求修改",
 	"pr.card.checksFailing": "检查失败",

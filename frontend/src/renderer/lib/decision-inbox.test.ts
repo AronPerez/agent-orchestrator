@@ -17,6 +17,7 @@ import {
 	fetchDecisionDetail,
 	fetchDecisionInboxCalls,
 	fetchDecisionSearch,
+	decisionOptionRequiresNote,
 	mergeDecisionInboxSources,
 	recordDecisionOutcome,
 	retireDecisionCall,
@@ -182,5 +183,17 @@ describe("decision actions API", () => {
 	it("surfaces the daemon's refusal", async () => {
 		postMock.mockResolvedValue({ error: { code: "DECISION_WRONG_STATE", message: "Only a call in \"Needs you\" can be dismissed." } });
 		await expect(dismissDecisionCall("dec_1", "")).rejects.toThrow("Only a call in \"Needs you\" can be dismissed.");
+	});
+});
+
+describe("decisionOptionRequiresNote", () => {
+	it("requires a note only for a plan-first call's Approve with changes", () => {
+		const plan = { ...call("dec_1", "2026-11-18T10:00:00Z"), reference: "plan-first", options: [
+			{ label: "Approve", consequence: "", recommended: true },
+			{ label: "Approve with changes", consequence: "" },
+		] };
+		expect(decisionOptionRequiresNote(plan, 2)).toBe(true);
+		expect(decisionOptionRequiresNote(plan, 1)).toBe(false);
+		expect(decisionOptionRequiresNote({ ...plan, reference: undefined }, 2)).toBe(false);
 	});
 });

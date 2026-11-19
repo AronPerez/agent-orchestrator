@@ -1455,6 +1455,7 @@
 	"decisions.sessionOffline": "Conecte-se a {{machine}} para abrir esta sessão.",
 	"decisions.sessionMissing": "Esta sessão não está mais disponível.",
 	"decisions.sessionCheckFailed": "Não foi possível verificar esta sessão.",
+	"decisions.changesRequired": "Descreva as mudanças que você quer.",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Alterações solicitadas",
 	"pr.card.checksFailing": "Verificações falhando",

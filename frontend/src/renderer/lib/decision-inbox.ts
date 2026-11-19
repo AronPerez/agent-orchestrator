@@ -94,6 +94,15 @@ export async function fetchDecisionSearch(query: string, limit: number, signal?:
 	return data.calls;
 }
 
+/**
+ * Plan-first's "Approve with changes" is only actionable with the changes
+ * written down; the gate stays pending without them. Every surface that
+ * answers applies this one rule.
+ */
+export function decisionOptionRequiresNote(call: Pick<DecisionCall, "reference" | "options">, optionNumber: number): boolean {
+	return call.reference === "plan-first" && optionNumber === 2 && call.options[1]?.label === "Approve with changes";
+}
+
 function answerBody(input: DecisionInboxAnswer) {
 	const note = input.note?.trim();
 	const choice = input.choice ?? "option";

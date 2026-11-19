@@ -1439,6 +1439,7 @@
 	"decisions.sessionOffline": "このセッションを開くには {{machine}} に接続してください。",
 	"decisions.sessionMissing": "このセッションは利用できなくなりました。",
 	"decisions.sessionCheckFailed": "このセッションを確認できませんでした。",
+	"decisions.changesRequired": "希望する変更を書いてください。",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "変更がリクエストされました",
 	"pr.card.checksFailing": "チェックに失敗",

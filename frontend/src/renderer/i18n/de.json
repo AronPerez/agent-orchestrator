@@ -1439,6 +1439,7 @@
 	"decisions.sessionOffline": "Verbinde dich mit {{machine}}, um diese Sitzung zu öffnen.",
 	"decisions.sessionMissing": "Diese Sitzung ist nicht mehr verfügbar.",
 	"decisions.sessionCheckFailed": "Diese Sitzung konnte nicht geprüft werden.",
+	"decisions.changesRequired": "Beschreibe die gewünschten Änderungen.",
 	"pr.botSuffix": "{{name}}-Bot",
 	"pr.card.changesRequested": "Änderungen angefordert",
 	"pr.card.checksFailing": "Checks fehlgeschlagen",

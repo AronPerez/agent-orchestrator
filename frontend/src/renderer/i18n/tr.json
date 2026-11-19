@@ -1405,6 +1405,7 @@
 	"decisions.sessionOffline": "Bu oturumu açmak için {{machine}} makinesine bağlanın.",
 	"decisions.sessionMissing": "Bu oturum artık kullanılamıyor.",
 	"decisions.sessionCheckFailed": "Bu oturum kontrol edilemedi.",
+	"decisions.changesRequired": "İstediğiniz değişiklikleri yazın.",
 	"pr.botSuffix": "{{name}} botu",
 	"pr.card.changesRequested": "Değişiklik istendi",
 	"pr.card.checksFailing": "Denetimler başarısız",
