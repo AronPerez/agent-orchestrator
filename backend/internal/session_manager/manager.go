@@ -5356,12 +5356,11 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 		}
 		reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
 		if err != nil {
+			m.fenceStatusRecoveryFromReaper(rec.ID)
 			m.finishStatusRecovery(ctx, rec, err)
-			m.logger.Warn("reconcile: tracker intake claim lookup failed, skipping live pass", "sessionID", rec.ID, "error", err)
+			m.logger.Warn("reconcile: tracker intake claim lookup failed, retrying in live pass", "sessionID", rec.ID, "error", err)
 			captureBackgroundFault(ctx, err, "reconcile", "tracker_intake_claim")
-			continue
-		}
-		if pending && !trackerIntakeClaimNeedsStartupHealth(rec, reservation) {
+		} else if pending && !trackerIntakeClaimNeedsStartupHealth(rec, reservation) {
 			// The per-claim job owns terminal and interrupted-Chat recovery. Letting
 			// the generic live pass reserve the same operation fence can starve that
 			// job for the entire startup sweep without doing any useful health work.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,21 @@ type failingPendingClaimListStore struct {
 
 func (s *failingPendingClaimListStore) ListPendingTrackerIntakeClaims(context.Context) ([]domain.TrackerIntakePendingClaim, error) {
 	return nil, errors.New("pending claim list unavailable")
+}
+
+type failPendingRecoveryOnceStore struct {
+	*sqlite.Store
+	calls atomic.Int32
+}
+
+func (s *failPendingRecoveryOnceStore) GetPendingTrackerIntakeRecovery(
+	ctx context.Context,
+	id domain.SessionID,
+) (domain.TrackerIntakeRecoveryReservation, bool, error) {
+	if s.calls.Add(1) == 1 {
+		return domain.TrackerIntakeRecoveryReservation{}, false, errors.New("pending claim lookup unavailable")
+	}
+	return s.Store.GetPendingTrackerIntakeRecovery(ctx, id)
 }
 
 // A terminal orchestrator whose host died while AO was down (a reboot, a
@@ -86,6 +102,67 @@ func TestStartupHealthKeepsDeadTerminalOrchestratorThroughTheReaper(t *testing.T
 	}
 	if runtime.created != 0 {
 		t.Fatalf("startup launched %d runtimes; it must leave the agent stopped", runtime.created)
+	}
+}
+
+func TestStartupHealthRetriesClaimLookupBeforeTheBootReaper(t *testing.T) {
+	ctx := context.Background()
+	base, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := base.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	idleSince := now.Add(-time.Hour)
+	if err := base.UpsertProject(ctx, domain.ProjectRecord{ID: "mer", Path: "/repo", Config: testRoleAgents(), RegisteredAt: now}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := base.CreateSession(ctx, domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeTUI,
+		Activity:      domain.Activity{State: domain.ActivityIdle, LastActivityAt: idleSince},
+		FirstSignalAt: idleSince, CreatedAt: idleSince, UpdatedAt: idleSince,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/worker", Branch: "ao/mer-1/root",
+			RuntimeHandleID: "ptyhost-v1:mer-1", RuntimeLaunchID: "launch-before-restart",
+		},
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	store := &failPendingRecoveryOnceStore{Store: base}
+	runtime := &fakeRuntime{} // the terminal died while AO was down
+	lcm := lifecycle.New(base, nil)
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: launchArgvAgent{argv: []string{"claude"}}},
+		Workspace: &fakeWorkspace{}, Store: store, Messenger: &fakeMessenger{}, Lifecycle: lcm,
+		DataDir: t.TempDir(),
+	})
+	lcm.SetSessionOperationGate(m)
+
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if store.calls.Load() < 2 {
+		t.Fatalf("pending claim lookups = %d, want the failed read retried", store.calls.Load())
+	}
+	if m.SessionObservationInProgress("mer-1") {
+		t.Fatal("successful startup health retry left the reaper fence active")
+	}
+	if err := reaper.New(lcm, base, runtime, reaper.Config{}).Tick(ctx); err != nil {
+		t.Fatalf("reaper tick: %v", err)
+	}
+	rec, ok, err := base.GetSession(ctx, "mer-1")
+	if err != nil || !ok {
+		t.Fatalf("read session: ok=%v err=%v", ok, err)
+	}
+	if rec.IsTerminated || rec.Activity.State != domain.ActivityExited || rec.Metadata.RuntimeReleasedLaunchID != "launch-before-restart" {
+		t.Fatalf("terminal after startup retry = terminated:%v activity:%s released:%q; want stopped and resumable",
+			rec.IsTerminated, rec.Activity.State, rec.Metadata.RuntimeReleasedLaunchID)
 	}
 }
 

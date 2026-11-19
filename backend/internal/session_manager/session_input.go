@@ -98,7 +98,8 @@ func (m *Manager) SessionMutationInProgress(id domain.SessionID) bool {
 // operations: Kill and Resume remain available to resolve an inconclusive
 // external owner.
 func (m *Manager) SessionObservationInProgress(id domain.SessionID) bool {
-	return m.SessionMutationInProgress(id) || m.trackerIntakeReaperFenceActive(id)
+	return m.SessionMutationInProgress(id) || m.trackerIntakeReaperFenceActive(id) ||
+		m.statusRecoveryReaperFenceActive(id)
 }
 
 func (m *Manager) agentOperationActiveLocked(id domain.SessionID) bool {

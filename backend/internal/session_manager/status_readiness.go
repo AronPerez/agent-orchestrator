@@ -12,8 +12,9 @@ import (
 const statusVerificationLimit = 30 * time.Second
 
 type statusRecovery struct {
-	pending bool
-	failed  *domain.SessionRecord
+	pending      bool
+	failed       *domain.SessionRecord
+	reaperFenced bool
 }
 
 // StatusRecoveryRevision fences API snapshots read concurrently with recovery.
@@ -59,8 +60,26 @@ func (m *Manager) SessionStatusReadiness(rec domain.SessionRecord) string {
 func (m *Manager) beginStatusRecovery(id domain.SessionID) {
 	m.statusRecoveryMu.Lock()
 	defer m.statusRecoveryMu.Unlock()
-	m.statusRecoveries[id] = statusRecovery{pending: true}
+	result := m.statusRecoveries[id]
+	result.pending = true
+	result.failed = nil
+	m.statusRecoveries[id] = result
 	m.statusRecoveryRevision++
+}
+
+func (m *Manager) fenceStatusRecoveryFromReaper(id domain.SessionID) {
+	m.statusRecoveryMu.Lock()
+	defer m.statusRecoveryMu.Unlock()
+	result := m.statusRecoveries[id]
+	result.reaperFenced = true
+	m.statusRecoveries[id] = result
+	m.statusRecoveryRevision++
+}
+
+func (m *Manager) statusRecoveryReaperFenceActive(id domain.SessionID) bool {
+	m.statusRecoveryMu.RLock()
+	defer m.statusRecoveryMu.RUnlock()
+	return m.statusRecoveries[id].reaperFenced
 }
 
 // markFreshSessionStatusReady keeps a session created by this daemon outside
@@ -71,9 +90,10 @@ func (m *Manager) markFreshSessionStatusReady(id domain.SessionID) {
 	defer m.statusRecoveryMu.Unlock()
 	select {
 	case <-m.startupBackgroundReconcileDone:
-		// After a successful startup, an untracked session already reads as ready;
-		// avoid turning ordinary spawns into recovery-revision changes.
-		if !m.statusRecoveryFailed {
+		// After a successful startup, an untracked session already reads as ready.
+		// A deliberate relaunch still retires an earlier conservative reaper fence.
+		if result, found := m.statusRecoveries[id]; !m.statusRecoveryFailed &&
+			(!found || !result.reaperFenced) {
 			return
 		}
 	default:
@@ -95,6 +115,9 @@ func (m *Manager) finishStatusRecovery(ctx context.Context, before domain.Sessio
 		result.failed = &before
 	}
 	m.statusRecoveryMu.Lock()
+	if recoveryErr != nil {
+		result.reaperFenced = m.statusRecoveries[before.ID].reaperFenced
+	}
 	m.statusRecoveries[before.ID] = result
 	m.statusRecoveryRevision++
 	m.statusRecoveryMu.Unlock()
