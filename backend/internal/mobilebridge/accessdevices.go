@@ -60,6 +60,10 @@ const (
 // agents run with the user's OS authority, this is not an authority sandbox.
 const DeviceScopeAgentCoordination = "agent-coordination"
 
+// DeviceScopeDecisionSync limits a peer machine to the two decision ledger
+// sync routes. It is minted by this host for one peer host id (ClientID).
+const DeviceScopeDecisionSync = "decision-sync"
+
 // maxAccessDevices bounds the device and capability tokens a full credential can mint.
 const maxAccessDevices = 64
 

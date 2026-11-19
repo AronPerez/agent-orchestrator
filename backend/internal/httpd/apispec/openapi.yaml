@@ -7337,6 +7337,84 @@ paths:
       summary: Revoke one route-limited cross-machine agent coordination credential
       tags:
       - mobile
+  /api/v1/remote-host/decision-sync-token:
+    post:
+      operationId: issueRemoteHostDecisionSyncToken
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueDecisionSyncTokenRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionSyncTokenResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Issue a credential limited to decision ledger sync for one peer machine
+      tags:
+      - mobile
+  /api/v1/remote-host/decision-sync-token/{deviceId}:
+    delete:
+      operationId: revokeRemoteHostDecisionSyncToken
+      parameters:
+      - description: The decision sync token's device id.
+        in: path
+        name: deviceId
+        required: true
+        schema:
+          description: The decision sync token's device id.
+          type: string
+      responses:
+        "204":
+          description: No Content
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Revoke one decision ledger sync credential
+      tags:
+      - mobile
   /api/v1/remote-host/devices:
     post:
       operationId: pairRemoteHostDevice
@@ -22344,6 +22422,24 @@ components:
       - why
       - undo
       type: object
+    DecisionSyncTokenResponse:
+      properties:
+        deviceId:
+          type: string
+        hostId:
+          type: string
+        scope:
+          enum:
+          - decision-sync
+          type: string
+        token:
+          type: string
+      required:
+      - hostId
+      - deviceId
+      - token
+      - scope
+      type: object
     DegradedProject:
       properties:
         id:
@@ -23297,6 +23393,22 @@ components:
           type: string
         name:
           description: Name shown in the host's device list.
+          type: string
+        platform:
+          description: The requesting machine's platform.
+          type: string
+      required:
+      - clientId
+      type: object
+    IssueDecisionSyncTokenRequest:
+      properties:
+        clientId:
+          description: Required host id of the requesting machine (h_ followed by
+            letters, numbers or hyphens).
+          type: string
+        name:
+          description: Name shown in the host's device list, for example "Decision
+            sync from laptop".
           type: string
         platform:
           description: The requesting machine's platform.

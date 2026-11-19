@@ -183,6 +183,8 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersTelemetryIdentityResponse":                 "TelemetryIdentityResponse",
 	"ControllersIssueCoordinationTokenRequest":             "IssueCoordinationTokenRequest",
 	"ControllersCoordinationTokenResponse":                 "CoordinationTokenResponse",
+	"ControllersIssueDecisionSyncTokenRequest":             "IssueDecisionSyncTokenRequest",
+	"ControllersDecisionSyncTokenResponse":                 "DecisionSyncTokenResponse",
 	"ControllersAgentAccountIDParam":                       "AgentAccountIDParam",
 	"ControllersAgentLoginActionRequest":                   "AgentLoginActionRequest",
 	"ControllersAgentAccountLoginIDParam":                  "AgentAccountLoginIDParam",
@@ -2847,6 +2849,29 @@ func mobileOperations() []operation {
 			method: http.MethodDelete, path: "/api/v1/remote-host/coordination-token/{deviceId}", id: "revokeRemoteHostCoordinationToken", tag: "mobile",
 			summary:    "Revoke one route-limited cross-machine agent coordination credential",
 			pathParams: []any{controllers.CoordinationDeviceIDParam{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/remote-host/decision-sync-token", id: "issueRemoteHostDecisionSyncToken", tag: "mobile",
+			summary: "Issue a credential limited to decision ledger sync for one peer machine",
+			reqBody: controllers.IssueDecisionSyncTokenRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.DecisionSyncTokenResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/remote-host/decision-sync-token/{deviceId}", id: "revokeRemoteHostDecisionSyncToken", tag: "mobile",
+			summary:    "Revoke one decision ledger sync credential",
+			pathParams: []any{controllers.DecisionSyncDeviceIDParam{}},
 			resps: []respUnit{
 				{http.StatusNoContent, nil},
 				{http.StatusForbidden, envelope.APIError{}},

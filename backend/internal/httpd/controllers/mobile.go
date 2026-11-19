@@ -86,23 +86,77 @@ func (c *MobileController) IssueAccountToken(w http.ResponseWriter, r *http.Requ
 	envelope.WriteJSON(w, http.StatusOK, result)
 }
 
+// scopedTokenRoute is what differs between the coordination and decision sync
+// token routes: the error codes they answer with and which client ids they
+// accept. Everything else is the same full-credential issuance.
+type scopedTokenRoute struct {
+	issuerCode, clientIDCode, clientIDMessage string
+	tokenCode, notFoundCode, notFoundMessage  string
+	unavailable, issueFailed, revokeFailed    string
+	clientID                                  *regexp.Regexp
+}
+
+var coordinationTokenRoute = scopedTokenRoute{
+	issuerCode: "COORDINATION_TOKEN_ISSUER", clientIDCode: "INVALID_COORDINATION_CLIENT_ID",
+	clientIDMessage: "clientId is required and must contain only letters, numbers, underscores, or hyphens.",
+	tokenCode:       "COORDINATION_TOKEN", notFoundCode: "COORDINATION_TOKEN_NOT_FOUND",
+	notFoundMessage: "Unknown agent coordination credential.",
+	unavailable:     "agent coordination credentials are unavailable",
+	issueFailed:     "could not issue an agent coordination credential",
+	revokeFailed:    "could not revoke the agent coordination credential",
+	clientID:        coordinationClientIDPattern,
+}
+
+// decisionSyncClientIDPattern is a host id: "h_" and a uuid in practice.
+var decisionSyncClientIDPattern = regexp.MustCompile(`^h_[A-Za-z0-9-]{1,120}$`)
+
+var decisionSyncTokenRoute = scopedTokenRoute{
+	issuerCode: "DECISION_SYNC_TOKEN_ISSUER", clientIDCode: "INVALID_DECISION_SYNC_CLIENT_ID",
+	clientIDMessage: "clientId is required and must be the requesting machine's host id.",
+	tokenCode:       "DECISION_SYNC_TOKEN", notFoundCode: "DECISION_SYNC_TOKEN_NOT_FOUND",
+	notFoundMessage: "Unknown decision sync credential.",
+	unavailable:     "decision sync credentials are unavailable",
+	issueFailed:     "could not issue a decision sync credential",
+	revokeFailed:    "could not revoke the decision sync credential",
+	clientID:        decisionSyncClientIDPattern,
+}
+
 // IssueCoordinationToken handles POST /api/v1/remote-host/coordination-token.
 // Only an existing full LAN credential may mint the route-filtered token that
 // headless agents keep in the owner-only saved-host file. Because it can prompt
 // agents with OS authority, clients must protect it as full host authority.
 func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http.Request) {
-	credential := requestscope.CredentialFrom(r.Context())
-	if !isFullRemoteCredential(credential) {
-		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
-			"A full remote-host credential is required.", nil)
-		return
-	}
 	issuer, ok := c.Bridge.(interface {
 		IssueCoordinationToken(context.Context, string, string, string, requestscope.Credential, string) (CoordinationTokenResponse, error)
 	})
-	if !ok {
-		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "COORDINATION_TOKEN",
-			"agent coordination credentials are unavailable", nil)
+	c.issueScopedToken(w, r, coordinationTokenRoute, ok, func(req IssueCoordinationTokenRequest, credential requestscope.Credential, presented string) (any, error) {
+		return issuer.IssueCoordinationToken(r.Context(), req.Name, req.Platform, req.ClientID, credential, presented)
+	})
+}
+
+// IssueDecisionSyncToken handles POST /api/v1/remote-host/decision-sync-token.
+// A full LAN credential mints a token that may call only the two decision sync
+// routes, for the peer machine whose host id is clientId.
+func (c *MobileController) IssueDecisionSyncToken(w http.ResponseWriter, r *http.Request) {
+	issuer, ok := c.Bridge.(interface {
+		IssueDecisionSyncToken(context.Context, string, string, string, requestscope.Credential, string) (DecisionSyncTokenResponse, error)
+	})
+	c.issueScopedToken(w, r, decisionSyncTokenRoute, ok, func(req IssueCoordinationTokenRequest, credential requestscope.Credential, presented string) (any, error) {
+		return issuer.IssueDecisionSyncToken(r.Context(), req.Name, req.Platform, req.ClientID, credential, presented)
+	})
+}
+
+// The two issuance bodies have the same fields, so one decoder serves both.
+func (c *MobileController) issueScopedToken(w http.ResponseWriter, r *http.Request, route scopedTokenRoute, available bool,
+	issue func(IssueCoordinationTokenRequest, requestscope.Credential, string) (any, error)) {
+	credential := requestscope.CredentialFrom(r.Context())
+	if !isFullRemoteCredential(credential) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", route.issuerCode,
+			"A full remote-host credential is required.", nil)
+		return
+	}
+	if !available {
+		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", route.tokenCode, route.unavailable, nil)
 		return
 	}
 	var req IssueCoordinationTokenRequest
@@ -112,73 +166,86 @@ func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http
 			return
 		}
 	}
-	if req.ClientID == "" || !coordinationClientIDPattern.MatchString(req.ClientID) {
-		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_COORDINATION_CLIENT_ID",
-			"clientId is required and must contain only letters, numbers, underscores, or hyphens.", nil)
+	if req.ClientID == "" || !route.clientID.MatchString(req.ClientID) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", route.clientIDCode, route.clientIDMessage, nil)
 		return
 	}
-	presentedToken := ""
-	if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
-		presentedToken = strings.TrimPrefix(authorization, "Bearer ")
-	}
-	result, err := issuer.IssueCoordinationToken(r.Context(), req.Name, req.Platform, req.ClientID, credential, presentedToken)
+	result, err := issue(req, credential, bearerToken(r))
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeCoordinationInterrupted(w, r)
 		return
 	case errors.Is(err, errCoordinationIssuerRevoked):
-		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", route.issuerCode,
 			"The issuing credential is no longer valid.", nil)
 		return
 	case errors.Is(err, mobilebridge.ErrTooManyDevices):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "TOO_MANY_DEVICES", err.Error(), nil)
 		return
 	case err != nil:
-		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "COORDINATION_TOKEN",
-			"could not issue an agent coordination credential", nil)
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", route.tokenCode, route.issueFailed, nil)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	envelope.WriteJSON(w, http.StatusOK, result)
 }
 
+func bearerToken(r *http.Request) string {
+	if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
+		return strings.TrimPrefix(authorization, "Bearer ")
+	}
+	return ""
+}
+
 // RevokeCoordinationToken retires one route-filtered token without exposing the
 // desktop-only mobile-device control surface on the LAN listener.
 func (c *MobileController) RevokeCoordinationToken(w http.ResponseWriter, r *http.Request) {
-	if !isFullRemoteCredential(requestscope.CredentialFrom(r.Context())) {
-		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
-			"A full remote-host credential is required.", nil)
-		return
-	}
 	revoker, ok := c.Bridge.(interface {
 		RevokeCoordinationToken(context.Context, string, requestscope.Credential, string) (bool, error)
 	})
-	if !ok {
-		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "COORDINATION_TOKEN",
-			"agent coordination credentials are unavailable", nil)
+	c.revokeScopedToken(w, r, coordinationTokenRoute, ok, func(id string, credential requestscope.Credential, presented string) (bool, error) {
+		return revoker.RevokeCoordinationToken(r.Context(), id, credential, presented)
+	})
+}
+
+// RevokeDecisionSyncToken retires one decision sync token. A peer's own sync
+// token cannot reach this route; the person revokes it with a full credential.
+func (c *MobileController) RevokeDecisionSyncToken(w http.ResponseWriter, r *http.Request) {
+	revoker, ok := c.Bridge.(interface {
+		RevokeDecisionSyncToken(context.Context, string, requestscope.Credential, string) (bool, error)
+	})
+	c.revokeScopedToken(w, r, decisionSyncTokenRoute, ok, func(id string, credential requestscope.Credential, presented string) (bool, error) {
+		return revoker.RevokeDecisionSyncToken(r.Context(), id, credential, presented)
+	})
+}
+
+func (c *MobileController) revokeScopedToken(w http.ResponseWriter, r *http.Request, route scopedTokenRoute, available bool,
+	revoke func(string, requestscope.Credential, string) (bool, error)) {
+	credential := requestscope.CredentialFrom(r.Context())
+	if !isFullRemoteCredential(credential) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", route.issuerCode,
+			"A full remote-host credential is required.", nil)
 		return
 	}
-	presentedToken := ""
-	if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
-		presentedToken = strings.TrimPrefix(authorization, "Bearer ")
+	if !available {
+		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", route.tokenCode, route.unavailable, nil)
+		return
 	}
-	found, err := revoker.RevokeCoordinationToken(r.Context(), chi.URLParam(r, "deviceId"), requestscope.CredentialFrom(r.Context()), presentedToken)
+	found, err := revoke(chi.URLParam(r, "deviceId"), credential, bearerToken(r))
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeCoordinationInterrupted(w, r)
 		return
 	case errors.Is(err, errCoordinationIssuerRevoked):
-		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", route.issuerCode,
 			"The revoking credential is no longer valid.", nil)
 		return
 	case err != nil:
-		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "COORDINATION_TOKEN",
-			"could not revoke the agent coordination credential", nil)
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", route.tokenCode, route.revokeFailed, nil)
 		return
 	}
 	if !found {
-		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "COORDINATION_TOKEN_NOT_FOUND",
-			"Unknown agent coordination credential.", nil)
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", route.notFoundCode, route.notFoundMessage, nil)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1330,42 +1397,70 @@ func (b *BridgeService) PairDevice(code, name, platform string) (PairDeviceRespo
 // IssueCoordinationToken gives a headless client a route-filtered device token
 // after atomically revalidating the full credential that delegates its authority.
 func (b *BridgeService) IssueCoordinationToken(ctx context.Context, name, platform, clientID string, credential requestscope.Credential, presentedToken string) (CoordinationTokenResponse, error) {
-	if err := b.lockTransition(ctx); err != nil {
+	if strings.TrimSpace(name) == "" {
+		name = "Agent coordination"
+	}
+	device, token, err := b.issueScopedToken(ctx, mobilebridge.DeviceScopeAgentCoordination, name, platform, clientID, credential, presentedToken)
+	if err != nil {
 		return CoordinationTokenResponse{}, err
+	}
+	return CoordinationTokenResponse{
+		HostID: b.HostID, DeviceID: device.ID, Token: token,
+		Scope: mobilebridge.DeviceScopeAgentCoordination,
+	}, nil
+}
+
+// IssueDecisionSyncToken gives a peer machine a token limited to the two
+// decision sync routes, bound to the peer's host id (clientID). Reissuing for
+// the same peer replaces and disconnects the previous token.
+func (b *BridgeService) IssueDecisionSyncToken(ctx context.Context, name, platform, clientID string, credential requestscope.Credential, presentedToken string) (DecisionSyncTokenResponse, error) {
+	if strings.TrimSpace(name) == "" {
+		name = "Decision sync"
+	}
+	device, token, err := b.issueScopedToken(ctx, mobilebridge.DeviceScopeDecisionSync, name, platform, clientID, credential, presentedToken)
+	if err != nil {
+		return DecisionSyncTokenResponse{}, err
+	}
+	return DecisionSyncTokenResponse{
+		HostID: b.HostID, DeviceID: device.ID, Token: token,
+		Scope: mobilebridge.DeviceScopeDecisionSync,
+	}, nil
+}
+
+// issueScopedToken mints a single-scope token under transitionMu after
+// revalidating the full credential that delegates its authority, and
+// disconnects any token it replaced for the same client and scope.
+func (b *BridgeService) issueScopedToken(ctx context.Context, scope, name, platform, clientID string, credential requestscope.Credential, presentedToken string) (mobilebridge.AccessDevice, string, error) {
+	if err := b.lockTransition(ctx); err != nil {
+		return mobilebridge.AccessDevice{}, "", err
 	}
 	defer b.transitionMu.Unlock()
 	if b.afterCoordinationIssueLock != nil {
 		b.afterCoordinationIssueLock()
 	}
 	if err := ctx.Err(); err != nil {
-		return CoordinationTokenResponse{}, err
+		return mobilebridge.AccessDevice{}, "", err
 	}
 	if b.Devices == nil {
-		return CoordinationTokenResponse{}, errors.New("device pairing is unavailable")
+		return mobilebridge.AccessDevice{}, "", errors.New("device pairing is unavailable")
 	}
 	issuer, err := b.coordinationIssuerLocked(credential, presentedToken)
 	if err != nil {
-		return CoordinationTokenResponse{}, err
-	}
-	if strings.TrimSpace(name) == "" {
-		name = "Agent coordination"
+		return mobilebridge.AccessDevice{}, "", err
 	}
 	if strings.TrimSpace(platform) == "" {
 		platform = "cli"
 	}
-	device, token, replaced, err := b.Devices.IssueScopedByClient(name, platform, []string{mobilebridge.DeviceScopeAgentCoordination}, issuer, clientID, time.Now())
+	device, token, replaced, err := b.Devices.IssueScopedByClient(name, platform, []string{scope}, issuer, clientID, time.Now())
 	if err != nil {
-		return CoordinationTokenResponse{}, err
+		return mobilebridge.AccessDevice{}, "", err
 	}
 	if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
 		for _, previous := range replaced {
 			lan.DisconnectCredential(previous.TokenHash)
 		}
 	}
-	return CoordinationTokenResponse{
-		HostID: b.HostID, DeviceID: device.ID, Token: token,
-		Scope: mobilebridge.DeviceScopeAgentCoordination,
-	}, nil
+	return device, token, nil
 }
 
 func (b *BridgeService) coordinationIssuerLocked(credential requestscope.Credential, presentedToken string) (string, error) {
@@ -1483,6 +1578,16 @@ func (b *BridgeService) revokeDeviceLocked(id string, disconnectParent bool) (in
 // It shares transitionMu with issuance and parent revocation so a token cannot
 // appear between a lifecycle check and the matching removal.
 func (b *BridgeService) RevokeCoordinationToken(ctx context.Context, id string, credential requestscope.Credential, presentedToken string) (bool, error) {
+	return b.revokeScopedToken(ctx, mobilebridge.DeviceScopeAgentCoordination, id, credential, presentedToken)
+}
+
+// RevokeDecisionSyncToken removes only a decision sync device, under the same
+// rules as RevokeCoordinationToken.
+func (b *BridgeService) RevokeDecisionSyncToken(ctx context.Context, id string, credential requestscope.Credential, presentedToken string) (bool, error) {
+	return b.revokeScopedToken(ctx, mobilebridge.DeviceScopeDecisionSync, id, credential, presentedToken)
+}
+
+func (b *BridgeService) revokeScopedToken(ctx context.Context, scope, id string, credential requestscope.Credential, presentedToken string) (bool, error) {
 	if err := b.lockTransition(ctx); err != nil {
 		return false, err
 	}
@@ -1496,14 +1601,14 @@ func (b *BridgeService) RevokeCoordinationToken(ctx context.Context, id string, 
 	if _, err := b.coordinationIssuerLocked(credential, presentedToken); err != nil {
 		return false, err
 	}
-	coordination := false
+	matches := false
 	for _, device := range b.Devices.List() {
-		if device.ID == id && len(device.Scopes) == 1 && device.Scopes[0] == mobilebridge.DeviceScopeAgentCoordination {
-			coordination = true
+		if device.ID == id && len(device.Scopes) == 1 && device.Scopes[0] == scope {
+			matches = true
 			break
 		}
 	}
-	if !coordination {
+	if !matches {
 		return false, nil
 	}
 	device, found, err := b.Devices.Revoke(id)

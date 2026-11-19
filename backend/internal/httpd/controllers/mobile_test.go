@@ -1592,3 +1592,34 @@ func TestStatusReportsAnAccountLinkAOCloudRefuses(t *testing.T) {
 		t.Fatal("an accepted publish left the link refused")
 	}
 }
+
+func TestIssueDecisionSyncTokenReissueDisconnectsPrevious(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Enabled: true, Password: "secret12"}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lan := &fakeLAN{running: true}
+	bridge := &BridgeService{LAN: lan, ConfigPath: path, HostID: "h_test", Devices: devices}
+	password := requestscope.Credential{Kind: requestscope.CredentialPassword}
+	first, err := bridge.IssueDecisionSyncToken(context.Background(), "", "", "h_laptop", password, "secret12")
+	if err != nil || first.Scope != mobilebridge.DeviceScopeDecisionSync {
+		t.Fatalf("first = %+v, %v", first, err)
+	}
+	if device, ok := devices.Match(first.Token); !ok || device.Name != "Decision sync" || device.ClientID != "h_laptop" {
+		t.Fatalf("first device = %+v, %v", device, ok)
+	}
+	if _, err := bridge.IssueDecisionSyncToken(context.Background(), "", "", "h_laptop", password, "secret12"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := devices.Match(first.Token); ok {
+		t.Fatal("reissue left the previous sync token valid")
+	}
+	if !slices.Contains(lan.disconnected, mobilebridge.HashPassword(first.Token)) {
+		t.Fatalf("previous sync token was not disconnected: %v", lan.disconnected)
+	}
+}

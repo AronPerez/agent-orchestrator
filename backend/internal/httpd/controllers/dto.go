@@ -3661,6 +3661,31 @@ type CoordinationTokenResponse struct {
 	Scope    string `json:"scope" enum:"agent-coordination"`
 }
 
+// IssueDecisionSyncTokenRequest names the peer machine that will hold a
+// decision-sync credential for this host. ClientID is the peer's host id; a
+// retry for the same peer replaces its previous token.
+type IssueDecisionSyncTokenRequest struct {
+	Name     string `json:"name,omitempty" description:"Name shown in the host's device list, for example \"Decision sync from laptop\"."`
+	Platform string `json:"platform,omitempty" description:"The requesting machine's platform."`
+	ClientID string `json:"clientId" description:"Required host id of the requesting machine (h_ followed by letters, numbers or hyphens)."`
+}
+
+// DecisionSyncDeviceIDParam identifies a previously issued decision sync token.
+type DecisionSyncDeviceIDParam struct {
+	DeviceID string `path:"deviceId" description:"The decision sync token's device id."`
+}
+
+// DecisionSyncTokenResponse carries a host-bound credential limited to the two
+// decision sync routes. The token is returned once and only its hash is
+// persisted by the host. It can write any decision ledger entry, including
+// answers, so peers must protect it like the ledger itself.
+type DecisionSyncTokenResponse struct {
+	HostID   string `json:"hostId"`
+	DeviceID string `json:"deviceId"`
+	Token    string `json:"token"`
+	Scope    string `json:"scope" enum:"decision-sync"`
+}
+
 // SetRequireDeviceCredentialsRequest turns the pairing password off or on.
 type SetRequireDeviceCredentialsRequest struct {
 	Enabled bool `json:"enabled"`

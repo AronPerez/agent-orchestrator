@@ -2799,6 +2799,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/remote-host/decision-sync-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Issue a credential limited to decision ledger sync for one peer machine */
+        post: operations["issueRemoteHostDecisionSyncToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/remote-host/decision-sync-token/{deviceId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke one decision ledger sync credential */
+        delete: operations["revokeRemoteHostDecisionSyncToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/remote-host/devices": {
         parameters: {
             query?: never;
@@ -7711,6 +7745,13 @@ export interface components {
             undo: string;
             why: string;
         };
+        DecisionSyncTokenResponse: {
+            deviceId: string;
+            hostId: string;
+            /** @enum {string} */
+            scope: "decision-sync";
+            token: string;
+        };
         DegradedProject: {
             id: string;
             /** @enum {string} */
@@ -8064,6 +8105,14 @@ export interface components {
             /** @description Required stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client. */
             clientId: string;
             /** @description Name shown in the host's device list. */
+            name?: string;
+            /** @description The requesting machine's platform. */
+            platform?: string;
+        };
+        IssueDecisionSyncTokenRequest: {
+            /** @description Required host id of the requesting machine (h_ followed by letters, numbers or hyphens). */
+            clientId: string;
+            /** @description Name shown in the host's device list, for example "Decision sync from laptop". */
             name?: string;
             /** @description The requesting machine's platform. */
             platform?: string;
@@ -20147,6 +20196,114 @@ export interface operations {
             header?: never;
             path: {
                 /** @description The coordination token's device id. */
+                deviceId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    issueRemoteHostDecisionSyncToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IssueDecisionSyncTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionSyncTokenResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeRemoteHostDecisionSyncToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The decision sync token's device id. */
                 deviceId: string;
             };
             cookie?: never;

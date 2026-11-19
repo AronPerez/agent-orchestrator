@@ -74,7 +74,17 @@ func credentialScopeMiddleware(next http.Handler) http.Handler {
 }
 
 func credentialAllowsRequest(credential requestscope.Credential, method, path string) bool {
-	return credential.HasScope(mobilebridge.DeviceScopeAgentCoordination) && agentCoordinationRequestAllowed(method, path)
+	if credential.HasScope(mobilebridge.DeviceScopeAgentCoordination) && agentCoordinationRequestAllowed(method, path) {
+		return true
+	}
+	return credential.HasScope(mobilebridge.DeviceScopeDecisionSync) && decisionSyncRequestAllowed(method, path)
+}
+
+// decisionSyncRequestAllowed admits exactly the two decision ledger sync
+// routes. A peer's sync token can read and write ledger entries and nothing
+// else on this host.
+func decisionSyncRequestAllowed(method, path string) bool {
+	return method == http.MethodPost && (path == "/api/v1/decision-sync/exchange" || path == "/api/v1/decision-sync/entries")
 }
 
 // agentCoordinationRequestAllowed is deliberately an exact method/path
