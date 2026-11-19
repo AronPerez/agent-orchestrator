@@ -3,11 +3,16 @@ package notify
 import (
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 func enrich(intent Intent) (domain.NotificationRecord, error) {
+	if intent.Type.TargetsDecision() {
+		return enrichDecision(intent)
+	}
 	rec := domain.NotificationRecord{
 		SessionID: intent.SessionID,
 		ProjectID: intent.ProjectID,
@@ -110,4 +115,57 @@ func prLabel(intent Intent) string {
 		return "PR " + title
 	}
 	return "PR"
+}
+
+// enrichDecision renders the approved decision copy. The title names where the
+// call lives; the body is exactly the call's title. Nothing else from the call
+// (context, options, notes) is available here, so nothing else can leak into a
+// banner or lock screen.
+func enrichDecision(intent Intent) (domain.NotificationRecord, error) {
+	callID := strings.TrimSpace(intent.DecisionCallID)
+	origin := strings.TrimSpace(intent.DecisionOriginHostID)
+	body := oneLine(intent.DecisionTitle)
+	if callID == "" || origin == "" || body == "" || utf8.RuneCountInString(body) > domain.MaxDecisionTitle {
+		return domain.NotificationRecord{}, domain.ErrInvalidNotificationRecord
+	}
+	project := oneLine(intent.DecisionProjectName)
+	if project == "" {
+		project = oneLine(string(intent.ProjectID))
+	}
+	if project == "" {
+		project = "No project"
+	}
+	title := "Decision needed · " + project
+	if stream := oneLine(intent.DecisionStreamName); stream != "" {
+		title += " · " + stream
+	}
+	rec := domain.NotificationRecord{
+		Type:                 intent.Type,
+		Title:                title,
+		Body:                 body,
+		Status:               domain.NotificationUnread,
+		CreatedAt:            intent.CreatedAt,
+		SourceKey:            DecisionSourceKey(callID),
+		DecisionCallID:       callID,
+		DecisionOriginHostID: origin,
+	}
+	if err := rec.Validate(); err != nil {
+		return domain.NotificationRecord{}, err
+	}
+	return rec, nil
+}
+
+// DecisionSourceKey is the durable dedupe key for one call's notification.
+func DecisionSourceKey(callID string) string { return "decision:" + callID }
+
+// oneLine keeps recorded labels to one visible line: control and format
+// characters (newlines, bidi overrides) become spaces and runs collapse, the
+// same rule the push dispatcher applies to host labels.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, s)), " ")
 }

@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -68,5 +69,106 @@ func TestEnrichSessionStalledUsesSessionContextWithoutPR(t *testing.T) {
 	}
 	if rec.Body != "Your worker stopped without reporting after one automatic nudge." || rec.PRURL != "" {
 		t.Fatalf("record = %+v", rec)
+	}
+}
+
+func decisionIntent() Intent {
+	return Intent{
+		Type:                 domain.NotificationDecisionNeeded,
+		DecisionCallID:       "dec_1",
+		DecisionOriginHostID: "h_origin",
+		DecisionProjectName:  "agent-orchestrator",
+		DecisionTitle:        "Ship the bell badge now?",
+		CreatedAt:            time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+func TestEnrichDecisionProjectOnly(t *testing.T) {
+	t.Parallel()
+	rec, err := enrich(decisionIntent())
+	if err != nil {
+		t.Fatalf("enrich decision: %v", err)
+	}
+	if rec.Title != "Decision needed · agent-orchestrator" || rec.Body != "Ship the bell badge now?" {
+		t.Fatalf("copy title=%q body=%q", rec.Title, rec.Body)
+	}
+	if rec.SourceKey != "decision:dec_1" || rec.DecisionCallID != "dec_1" || rec.DecisionOriginHostID != "h_origin" {
+		t.Fatalf("identity = %+v", rec)
+	}
+	if rec.SessionID != "" || rec.ProjectID != "" || rec.PRURL != "" {
+		t.Fatalf("decision notification carried a local target: %+v", rec)
+	}
+}
+
+func TestEnrichDecisionProjectAndStream(t *testing.T) {
+	t.Parallel()
+	intent := decisionIntent()
+	intent.DecisionStreamName = "Bell work"
+	rec, err := enrich(intent)
+	if err != nil {
+		t.Fatalf("enrich decision: %v", err)
+	}
+	if rec.Title != "Decision needed · agent-orchestrator · Bell work" {
+		t.Fatalf("title = %q", rec.Title)
+	}
+}
+
+func TestEnrichDecisionNoProject(t *testing.T) {
+	t.Parallel()
+	intent := decisionIntent()
+	intent.DecisionProjectName = ""
+	rec, err := enrich(intent)
+	if err != nil || rec.Title != "Decision needed · No project" {
+		t.Fatalf("title=%q err=%v", rec.Title, err)
+	}
+	intent.ProjectID = "proj-remote"
+	rec, err = enrich(intent)
+	if err != nil || rec.Title != "Decision needed · proj-remote" || rec.ProjectID != "" {
+		t.Fatalf("project id fallback title=%q project=%q err=%v", rec.Title, rec.ProjectID, err)
+	}
+}
+
+func TestEnrichDecisionNormalizesLabelsToOneLine(t *testing.T) {
+	t.Parallel()
+	intent := decisionIntent()
+	intent.DecisionProjectName = "agent\n orchestrator\u202e"
+	intent.DecisionStreamName = "bell\twork"
+	rec, err := enrich(intent)
+	if err != nil {
+		t.Fatalf("enrich decision: %v", err)
+	}
+	if rec.Title != "Decision needed · agent orchestrator · bell work" {
+		t.Fatalf("title = %q", rec.Title)
+	}
+}
+
+func TestEnrichDecisionRejectsMissingIdentityOrTitle(t *testing.T) {
+	t.Parallel()
+	for name, mutate := range map[string]func(*Intent){
+		"call":   func(i *Intent) { i.DecisionCallID = "" },
+		"origin": func(i *Intent) { i.DecisionOriginHostID = "" },
+		"title":  func(i *Intent) { i.DecisionTitle = " " },
+		"long":   func(i *Intent) { i.DecisionTitle = strings.Repeat("x", domain.MaxDecisionTitle+1) },
+	} {
+		intent := decisionIntent()
+		mutate(&intent)
+		if _, err := enrich(intent); err == nil {
+			t.Fatalf("%s: enrich accepted an invalid decision intent", name)
+		}
+	}
+}
+
+func TestEnrichDecisionCopyNeverCarriesContext(t *testing.T) {
+	t.Parallel()
+	// The intent has no context/options field at all; the copy is exactly the
+	// recorded labels and title, so nothing else can reach a lock screen.
+	rec, err := enrich(decisionIntent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"context", "option", "recommend"} {
+		if strings.Contains(strings.ToLower(rec.Title+rec.Body), leak) {
+			t.Fatalf("copy contains %q: %q / %q", leak, rec.Title, rec.Body)
+		}
 	}
 }

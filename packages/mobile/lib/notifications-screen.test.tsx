@@ -12,7 +12,9 @@ const fixtures = vi.hoisted(() => {
 		clearNotification: vi.fn(async () => {}),
 		clearAllNotifications: vi.fn(async (_config: unknown) => {}),
 		alert: vi.fn(),
-		router: { navigate: vi.fn(), push: vi.fn(), back: vi.fn(), dismissTo: vi.fn(), canGoBack: () => false },
+		router: { navigate: vi.fn(), push: vi.fn(), back: vi.fn(), dismissTo: vi.fn(), setParams: vi.fn(), canGoBack: () => false },
+		params: {} as Record<string, string | undefined>,
+		markNotificationRead: vi.fn(async (_config: unknown, _id: string) => {}),
 		openPage: vi.fn(),
 		focus: (() => {
 			const listeners = new Set<() => void>();
@@ -80,6 +82,7 @@ vi.mock("expo-router", async () => {
 	return {
 		Stack: { Toolbar: Object.assign(host("StackToolbar"), { Button: host("StackToolbarButton"), View: host("StackToolbarView") }) },
 		useRouter: () => fixtures.router,
+		useLocalSearchParams: () => fixtures.params,
 		// Runs the effect while focused and its cleanup on blur, like react-navigation.
 		useFocusEffect: (effect: () => (() => void) | void) => {
 			const focused = React.useSyncExternalStore(fixtures.focus.subscribe, () => fixtures.focus.value);
@@ -99,7 +102,7 @@ vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ t
 vi.mock("./api", () => ({
 	getNotifications: fixtures.getNotifications,
 	markAllNotificationsRead: fixtures.markAllNotificationsRead,
-	markNotificationRead: vi.fn(async () => {}),
+	markNotificationRead: fixtures.markNotificationRead,
 	clearNotification: fixtures.clearNotification,
 	clearAllNotifications: fixtures.clearAllNotifications,
 }));
@@ -179,6 +182,9 @@ beforeEach(() => {
 	fixtures.alert.mockClear();
 	fixtures.offline.clear();
 	fixtures.focus.value = true;
+	fixtures.params = {};
+	fixtures.markNotificationRead.mockClear();
+	fixtures.router.setParams.mockClear();
 });
 
 afterEach(async () => {
@@ -415,5 +421,69 @@ describe("NotificationsScreen", () => {
 		} finally {
 			fixtures.getNotifications.mockImplementation(base);
 		}
+	});
+
+	describe("decision announcements", () => {
+		const decisionRow = (id: string, status: string) => ({
+			id, sessionId: "", projectId: "", prUrl: "", type: "decision_needed",
+			title: "Decision needed · Shop", body: "Ship it?", status, createdAt: "2026-10-08T10:30:00Z",
+			target: { kind: "decision", sessionId: "", callId: "dec_1", originHostId: "dev" },
+		});
+		let base: typeof fixtures.getNotifications extends { getMockImplementation: () => infer F } ? F : never;
+		beforeEach(() => {
+			base = fixtures.getNotifications.getMockImplementation()!;
+			fixtures.getNotifications.mockImplementation(async (config: { hostId: "dev" | "mac" }) => {
+				const page = await base!(config);
+				return { ...page, notifications: [decisionRow(`${config.hostId}-dec`, config.hostId === "dev" ? "read" : "unread"), ...page.notifications] };
+			});
+		});
+		afterEach(() => { fixtures.getNotifications.mockImplementation(base!); });
+
+		const decisionRows = () => renderer!.root.findAll((node) => String(node.type) === "Pressable" &&
+			String(node.props.accessibilityLabel).includes("Decision needed · Shop, Decision needed"));
+
+		it("shows one row for a call two machines announce, led by its origin machine", async () => {
+			await act(async () => { renderer = create(<NotificationsScreen />); });
+			const rows = decisionRows();
+			expect(rows).toHaveLength(1);
+			expect(rows[0].props.accessibilityLabel).toBe("Unread, Decision needed · Shop, Decision needed, Dev machine");
+			// Opening the feed acknowledges every machine's copy.
+			expect(fixtures.markAllNotificationsRead).toHaveBeenCalledWith(fixtures.configs.mac, expect.arrayContaining(["mac-dec"]));
+		});
+
+		it("keeps a tapped decision in the feed instead of opening a session or the PR list", async () => {
+			fixtures.focus.value = false;
+			await act(async () => { renderer = create(<NotificationsScreen />); });
+			fixtures.openPage.mockClear();
+			fixtures.router.navigate.mockClear();
+			act(() => { decisionRows()[0].props.onPress(); });
+			expect(fixtures.openPage).not.toHaveBeenCalled();
+			expect(fixtures.router.navigate).not.toHaveBeenCalled();
+			// Reading marks every unread copy; it does not answer or resolve the call.
+			expect(fixtures.markNotificationRead).toHaveBeenCalledWith(fixtures.configs.mac, "mac-dec");
+			expect(fixtures.markNotificationRead).not.toHaveBeenCalledWith(fixtures.configs.dev, "dev-dec");
+			const toast = renderer!.root.findAll((node) => node.type === ("ToastHost" as never));
+			expect(toast).toHaveLength(1);
+			expect(toast[0].findByType("Text" as never).props.children).toBe("Answer this decision in Orchestrator on your desktop.");
+		});
+
+		it("focuses the feed on the call a push opened and can show everything again", async () => {
+			fixtures.params = { decisionCallId: "dec_1", hostId: "dev" };
+			await act(async () => { renderer = create(<NotificationsScreen />); });
+			expect(decisionRows()).toHaveLength(1);
+			expect(renderer!.root.findAll((node) => node.props.accessibilityLabel === "Unread, First update, Needs input, Dev machine")).toHaveLength(0);
+			const texts = renderer!.root.findAll((node) => node.type === ("Text" as never)).map((node) => node.props.children);
+			expect(texts).toContain("Showing one decision.");
+			const showAll = renderer!.root.find((node) => node.type === ("Button" as never) && node.props.title === "Show all");
+			act(() => { showAll.props.onPress(); });
+			expect(fixtures.router.setParams).toHaveBeenCalledWith({ decisionCallId: undefined, hostId: undefined, hostUnavailable: undefined });
+		});
+
+		it("says when the machine that sent a decision is no longer paired", async () => {
+			fixtures.params = { decisionCallId: "dec_gone", hostUnavailable: "1" };
+			await act(async () => { renderer = create(<NotificationsScreen />); });
+			const texts = renderer!.root.findAll((node) => node.type === ("Text" as never)).map((node) => node.props.children);
+			expect(texts).toContain("The machine that sent this decision is no longer paired, so it can't be shown here.");
+		});
 	});
 });

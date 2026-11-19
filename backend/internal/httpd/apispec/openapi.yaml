@@ -23802,6 +23802,7 @@ components:
           - pr_closed_unmerged
           - review_completed
           - review_changes_requested
+          - decision_needed
           type: string
       required:
       - id
@@ -23817,10 +23818,15 @@ components:
       type: object
     NotificationTarget:
       properties:
+        callId:
+          type: string
         kind:
           enum:
           - session
           - pr
+          - decision
+          type: string
+        originHostId:
           type: string
         prUrl:
           type: string

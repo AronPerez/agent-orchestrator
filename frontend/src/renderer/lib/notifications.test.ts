@@ -45,16 +45,21 @@ import {
 	applyOptimisticNotificationDelete,
 	applyResolvedNotification,
 	clearAllNotifications,
+	claimDecisionToast,
 	createNotificationsTransport,
+	decisionAlertStateByCall,
+	decisionUnreadDuplicates,
 	deleteNotification,
 	fetchNotificationsPage,
 	getCachedNotifications,
 	getCachedUnreadCount,
+	groupNotifications,
 	isNotificationsCacheFromClear,
 	keepLatestNotificationsPage,
 	markAllCachedNotificationsRead,
 	mergeUnreadNotification,
 	NOTIFICATION_PAGE_SIZE,
+	notificationGroupKey,
 	recentNotificationsQueryKey,
 	reconcileNotifications,
 	rollbackOptimisticNotificationDelete,
@@ -916,5 +921,91 @@ describe("createNotificationsTransport", () => {
 		expect(first.closed).toBe(true);
 		expect(EventSourceStub.instances).toHaveLength(2);
 		expect(EventSourceStub.instances[1].url).toBe("http://127.0.0.1:4555/api/v1/notifications/stream");
+	});
+});
+
+describe("decision alert grouping", () => {
+	const decision = (id: string, overrides: Partial<NotificationDTO> = {}): NotificationDTO => notification({
+		id, type: "decision_needed", sessionId: "", projectId: "",
+		title: "Decision needed · Shop", body: "Ship it?",
+		target: { kind: "decision", sessionId: "", callId: "dec_1", originHostId: "h_origin" },
+		...overrides,
+	});
+
+	it("keys one call by its call id and every other row by host and id", () => {
+		expect(notificationGroupKey("local", decision("a"))).toBe("decision:dec_1");
+		expect(notificationGroupKey("h_remote", decision("b"))).toBe("decision:dec_1");
+		expect(notificationGroupKey("local", notification({ id: "n1" }))).toBe("local:n1");
+		expect(notificationGroupKey("h_remote", notification({ id: "n1" }))).toBe("h_remote:n1");
+		// An old or malformed decision row never shares one malformed key.
+		expect(notificationGroupKey("local", decision("c", { target: { kind: "session", sessionId: "" } }))).toBe("local:c");
+	});
+
+	it("groups copies of one call with a local primary and deterministic sources", () => {
+		const groups = groupNotifications([
+			{ hostId: "h_remote", notification: decision("r1", { createdAt: "2026-11-18T10:00:05Z" }) },
+			{ hostId: "local", notification: decision("l1", { status: "read" }) },
+			{ hostId: "local", notification: notification({ id: "n1" }) },
+			{ hostId: "h_remote", notification: notification({ id: "n1" }) },
+		]);
+		expect(groups.map((group) => group.key)).toEqual(["decision:dec_1", "local:n1", "h_remote:n1"]);
+		expect(groups[0].primary).toMatchObject({ hostId: "local", notification: { id: "l1" } });
+		expect(groups[0].sources.map((source) => `${source.hostId}:${source.notification.id}`)).toEqual(["h_remote:r1", "local:l1"]);
+	});
+
+	it("is unread while any copy is unread and resolved only when every copy is", () => {
+		const state = decisionAlertStateByCall(groupNotifications([
+			{ hostId: "local", notification: decision("l1", { status: "read", resolvedAt: "2026-11-18T11:00:00Z" }) },
+			{ hostId: "h_remote", notification: decision("r1", { status: "unread" }) },
+		])).get("dec_1");
+		expect(state).toMatchObject({ unread: true, resolved: false });
+		expect(state?.sources).toEqual([{ hostId: "h_remote", id: "r1" }, { hostId: "local", id: "l1" }]);
+		const settled = decisionAlertStateByCall(groupNotifications([
+			{ hostId: "local", notification: decision("l1", { status: "read", resolvedAt: "2026-11-18T11:00:00Z" }) },
+		])).get("dec_1");
+		expect(settled).toMatchObject({ unread: false, resolved: true });
+	});
+
+	it("never manufactures alert state for a malformed decision row", () => {
+		const state = decisionAlertStateByCall(groupNotifications([
+			{ hostId: "local", notification: decision("x", { target: { kind: "session", sessionId: "" } }) },
+		]));
+		expect(state.size).toBe(0);
+	});
+
+	it("counts the extra unread copies of one call so the badge counts it once", () => {
+		expect(decisionUnreadDuplicates([
+			{ hostId: "local", notification: decision("l1") },
+			{ hostId: "h_remote", notification: decision("r1") },
+			{ hostId: "h_other", notification: decision("o1", { status: "read" }) },
+			{ hostId: "local", notification: notification({ id: "n1" }) },
+			{ hostId: "h_remote", notification: notification({ id: "n1" }) },
+		])).toBe(1);
+	});
+
+	it("lets one toast through per call for the renderer's lifetime", () => {
+		expect(claimDecisionToast("dec_claim")).toBe(true);
+		expect(claimDecisionToast("dec_claim")).toBe(false);
+		expect(claimDecisionToast("dec_other")).toBe(true);
+	});
+
+	it("counts an open decision alert as unresolved in the caches", () => {
+		const qc = queryClient();
+		mergeUnreadNotification(qc, decision("live_dec", { target: { kind: "decision", sessionId: "", callId: "dec_live", originHostId: "h" } }));
+		const page = qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey)?.pages[0];
+		expect(page?.unresolvedCount).toBe(1);
+	});
+
+	it("raises one OS toast per call, keyed by the call", () => {
+		const qc = queryClient();
+		createNotificationsTransport(qc).connect();
+		const source = EventSourceStub.instances[0];
+		const first = decision("toast_1", { target: { kind: "decision", sessionId: "", callId: "dec_toast", originHostId: "h" } });
+		source.dispatch("notification_created", first);
+		source.dispatch("notification_created", { ...first, id: "toast_2" });
+		expect(showNotificationMock).toHaveBeenCalledTimes(1);
+		expect(showNotificationMock).toHaveBeenCalledWith({
+			id: "decision:dec_toast", title: "Decision needed · Shop", body: "Ship it?", type: "decision_needed", watched: false,
+		});
 	});
 });

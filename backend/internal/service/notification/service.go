@@ -255,10 +255,15 @@ func invalidCursor() error {
 }
 
 func notificationFromRecord(rec domain.NotificationRecord) Notification {
-	return Notification{NotificationRecord: rec, Target: targetForRecord(rec)}
+	return Notification{NotificationRecord: rec, Target: TargetForRecord(rec)}
 }
 
-func targetForRecord(rec domain.NotificationRecord) Target {
+// TargetForRecord derives where a dashboard navigates for a stored row. REST
+// list responses and live stream frames both use it so they cannot disagree.
+func TargetForRecord(rec domain.NotificationRecord) Target {
+	if rec.Type.TargetsDecision() {
+		return Target{Kind: TargetDecision, CallID: rec.DecisionCallID, OriginHostID: rec.DecisionOriginHostID}
+	}
 	if rec.PRURL != "" {
 		return Target{Kind: TargetPR, SessionID: rec.SessionID, PRURL: rec.PRURL}
 	}
