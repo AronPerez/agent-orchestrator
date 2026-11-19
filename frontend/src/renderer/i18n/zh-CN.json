@@ -1430,6 +1430,8 @@
 	"decisions.finishedAt": "完成于 {{time}}",
 	"decisions.keyboardHint": "使用方向键在决策之间移动，按 Enter 打开。",
 	"decisionInbox.unread": "未读",
+	"decisionInbox.answerUnconfirmed": "此回答可能已被记录。发送前请再次检查。",
+	"decisionInbox.checkAgain": "再次检查",
 	"pr.botSuffix": "{{name}} 机器人",
 	"pr.card.changesRequested": "请求修改",
 	"pr.card.checksFailing": "检查失败",

@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
 	answerDecisionInboxCall,
 	DECISION_SEARCH_LIMIT,
@@ -85,14 +85,31 @@ export function useDecisionInbox(enabled: boolean) {
 
 	const answerMutation = useDecisionAnswer();
 
+	// The daemon may record an answer whose response is lost. Until a read of
+	// that machine made after the failure succeeds, the bell cannot tell, so it
+	// sends nothing more for the call rather than risk delivering it twice.
+	const [lostAnswers, setLostAnswers] = useState<{ hostId: HostId; callId: string; at: number }[]>([]);
+	const readAt = useCallback((hostId: HostId) => hostId === LOCAL_HOST
+		? localQuery.dataUpdatedAt
+		: remoteQueries[connectedHosts.indexOf(hostId)]?.dataUpdatedAt ?? 0, [connectedHosts, localQuery.dataUpdatedAt, remoteQueries]);
+	const unconfirmed = useMemo(() => new Set(lostAnswers
+		.filter(({ hostId, at }) => !(readAt(hostId) > at))
+		.map(({ hostId, callId }) => `${hostId}:${callId}`)), [lostAnswers, readAt]);
+
 	const answer = useCallback((entry: DecisionInboxEntry, option: number, note?: string) => {
+		if (unconfirmed.has(`${entry.sourceHostId}:${entry.call.id}`)) return;
 		answerMutation.mutate({
 			sourceHostId: entry.sourceHostId,
 			callId: entry.call.id,
 			option,
 			note,
+		}, {
+			onError: () => setLostAnswers((current) => [
+				...current.filter((lost) => lost.hostId !== entry.sourceHostId || lost.callId !== entry.call.id),
+				{ hostId: entry.sourceHostId, callId: entry.call.id, at: Date.now() },
+			]),
 		});
-	}, [answerMutation.mutate]);
+	}, [answerMutation.mutate, unconfirmed]);
 	const retry = useCallback(() => {
 		void localQuery.refetch();
 		for (const query of remoteQueries) void query.refetch();
@@ -108,6 +125,8 @@ export function useDecisionInbox(enabled: boolean) {
 			callId: answerMutation.variables.callId,
 			message: answerMutation.error instanceof Error ? answerMutation.error.message : "Could not send decision",
 		} : undefined,
+		/** `${hostId}:${callId}` keys whose last answer may have been recorded unseen. */
+		unconfirmed,
 		answer,
 		retry,
 	};

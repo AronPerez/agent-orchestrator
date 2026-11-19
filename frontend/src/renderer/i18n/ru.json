@@ -1442,6 +1442,8 @@
 	"decisions.finishedAt": "Завершено {{time}}",
 	"decisions.keyboardHint": "Стрелками переходите между решениями, Enter открывает решение.",
 	"decisionInbox.unread": "Непрочитано",
+	"decisionInbox.answerUnconfirmed": "Этот ответ, возможно, уже записан. Проверьте ещё раз перед отправкой.",
+	"decisionInbox.checkAgain": "Проверить снова",
 	"pr.botSuffix": "{{name}} бот",
 	"pr.card.changesRequested": "Запрошены изменения",
 	"pr.card.checksFailing": "Есть ошибки проверок",

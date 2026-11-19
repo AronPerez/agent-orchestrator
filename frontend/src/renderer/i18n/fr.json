@@ -1464,6 +1464,8 @@
 	"decisions.finishedAt": "Terminée {{time}}",
 	"decisions.keyboardHint": "Utilisez les flèches pour passer d’une décision à l’autre et Entrée pour en ouvrir une.",
 	"decisionInbox.unread": "Non lu",
+	"decisionInbox.answerUnconfirmed": "Cette réponse a peut-être déjà été enregistrée. Vérifiez à nouveau avant d’envoyer.",
+	"decisionInbox.checkAgain": "Vérifier à nouveau",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Modifications demandées",
 	"pr.card.checksFailing": "Vérifications en échec",

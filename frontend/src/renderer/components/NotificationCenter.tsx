@@ -929,6 +929,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 							onRetry={decisionInbox.retry}
 							pending={decisionInbox.pending}
 							unreadCallIds={unreadCallIds}
+							unconfirmed={decisionInbox.unconfirmed}
 						/>
 						{rows.map((row) => {
 							if (row.kind === "cloud") {
