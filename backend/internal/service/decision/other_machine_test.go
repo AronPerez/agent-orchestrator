@@ -3,6 +3,7 @@ package decision
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -56,7 +57,7 @@ func assertOtherMachine(t *testing.T, err error) {
 	t.Helper()
 	assertAPICode(t, err, "DECISION_OTHER_MACHINE")
 	var apiErr *apierr.Error
-	_ = errorsAs(err, &apiErr)
+	_ = errors.As(err, &apiErr)
 	if !strings.Contains(apiErr.Message, "This call belongs to a session on laptop. Only that session can do this.") {
 		t.Fatalf("message = %q", apiErr.Message)
 	}
@@ -115,12 +116,4 @@ func TestPersonMayAnswerAndOverruleAnotherMachinesCall(t *testing.T) {
 	if overruled.Origin != "h_b" || overruled.Delivery != domain.DecisionDeliveryPending {
 		t.Fatalf("overruled = origin %s delivery %s, want h_b and pending until the owner delivers", overruled.Origin, overruled.Delivery)
 	}
-}
-
-func errorsAs(err error, target **apierr.Error) bool {
-	e, ok := err.(*apierr.Error)
-	if ok {
-		*target = e
-	}
-	return ok
 }
