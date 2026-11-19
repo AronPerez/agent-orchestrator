@@ -476,31 +476,26 @@ func trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(
 		(rec.IsTerminated || !trackerIntakeRuntimeReservationMatchesSession(rec, reservation))
 }
 
-func trackerIntakeLegacyRuntimeTeardown(
+func trackerIntakeBackendAbsentTeardownAllowed(
 	rec domain.SessionRecord,
 	reservation domain.TrackerIntakeRecoveryReservation,
-) (string, bool) {
-	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || !reservation.CapacityReleased ||
-		trackerIntakeRuntimeTeardownOutstanding(reservation) ||
-		len(uniqueTrackerIntakeHandles(reservation.ReleasedRuntimeHandleIDs)) != 0 {
-		return "", false
+	owner trackerIntakeRuntimeOwner,
+) bool {
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat ||
+		strings.TrimSpace(reservation.RuntimeLaunchID) != owner.launchID ||
+		!trackerIntakeHandleReserved(reservation.RuntimeHandleIDs, owner.handleID) {
+		return false
 	}
-	rowHandleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
-	rowLaunchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
-	handles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
-	reservationLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
 	releasedLaunchID := strings.TrimSpace(reservation.ReleasedRuntimeLaunchID)
-	if reservationLaunchID == "" || len(handles) != 1 ||
-		(releasedLaunchID != "" && releasedLaunchID != reservationLaunchID) {
-		return "", false
+	if releasedLaunchID != "" && releasedLaunchID != owner.launchID {
+		return false
 	}
-	if rowHandleID == "" && rowLaunchID == "" {
-		return handles[0], true
-	}
-	if rowHandleID != handles[0] || rowLaunchID != reservationLaunchID {
-		return "", false
-	}
-	return handles[0], true
+	// Older releases recorded only a reservation-wide capacity release, while a
+	// completed spawn rollback can confirm workspace cleanup before that release
+	// checkpoint lands. In both cases an explicitly absent backend authorizes an
+	// idempotent Destroy for this exact still-reserved candidate. Generic probe
+	// failures and conflicting generations remain fenced.
+	return reservation.CapacityReleased || (reservation.CleanupConfirmed && reservation.DeliveryPossible)
 }
 
 func trackerIntakeUnreleasedRuntimeHandles(reservation domain.TrackerIntakeRecoveryReservation) []string {
@@ -755,6 +750,11 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(
 				}
 			}
 		case ports.FencedUnknown:
+			owner := trackerIntakeRuntimeOwner{handleID: handleID, launchID: launchID}
+			if probe.Reason == ports.FencedReasonBackendAbsent &&
+				trackerIntakeBackendAbsentTeardownAllowed(rec, reservation, owner) {
+				continue
+			}
 			return fmt.Errorf("recover tracker intake %s: runtime %s remains unresolved: %s", rec.ID, handleID, probe.Reason)
 		default:
 			return fmt.Errorf("recover tracker intake %s: runtime %s returned invalid liveness %q", rec.ID, handleID, probe.Liveness)
@@ -1130,8 +1130,6 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 		return fmt.Errorf("pending tracker intake Chat controller remains unresolved")
 	}
 	checkpoint := reservation
-	legacyHandleID, legacyUnverified := trackerIntakeLegacyRuntimeTeardown(rec, reservation)
-	legacyLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
 	if pendingOwner, pending, err := trackerIntakePendingRuntimeTeardown(checkpoint); err != nil {
 		return err
 	} else if pending {
@@ -1212,11 +1210,12 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 		probe := m.runtime.ProbeFencedRuntime(ctx, ref)
 		shouldDestroy := probe.Liveness == ports.FencedDead || probe.Liveness == ports.FencedAlive
 		if probe.Liveness == ports.FencedUnknown && probe.Reason == ports.FencedReasonBackendAbsent &&
-			legacyUnverified && owner.handleID == legacyHandleID && owner.launchID == legacyLaunchID {
+			trackerIntakeBackendAbsentTeardownAllowed(rec, checkpoint, owner) {
 			// The prior release format cannot distinguish a successful Kill from a
-			// dead child whose terminal host survived. Destroy is idempotent and is
-			// the only operation that can prove the outer owner gone; checkpoint its
-			// exact identity first and fail closed if teardown cannot confirm it.
+			// dead child whose terminal host survived, and a completed rollback can
+			// lose its release checkpoint. Destroy is idempotent and is the only
+			// operation that can prove this exact outer owner gone; checkpoint its
+			// identity first and fail closed if teardown cannot confirm it.
 			shouldDestroy = true
 		}
 		if shouldDestroy {
@@ -1280,10 +1279,6 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 	if handled, err := m.preserveTrackerIntakeReplacementOwner(ctx, rec, reservation); handled {
 		return err
 	}
-	if reservation.CleanupConfirmed {
-		m.rollbackSpawnSeedRow(ctx, rec.ID)
-		return m.settleInterruptedTrackerIntakeClaim(ctx, rec.ID, reservation)
-	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 		if !reservation.CapacityReleased && (reservation.ControllerPossible || trackerIntakeHasChatEffect(rec)) {
 			if m.chat == nil {
@@ -1298,6 +1293,10 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 				return err
 			}
 			reservation.CapacityReleased = true
+		}
+		if reservation.CleanupConfirmed {
+			m.rollbackSpawnSeedRow(ctx, rec.ID)
+			return m.settleInterruptedTrackerIntakeClaim(ctx, rec.ID, reservation)
 		}
 		return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
 	}
@@ -1318,6 +1317,10 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 		if err != nil {
 			return err
 		}
+	}
+	if reservation.CleanupConfirmed {
+		m.rollbackSpawnSeedRow(ctx, rec.ID)
+		return m.settleInterruptedTrackerIntakeClaim(ctx, rec.ID, reservation)
 	}
 
 	return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
