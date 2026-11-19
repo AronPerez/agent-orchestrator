@@ -42,7 +42,10 @@ func (p *fakePeer) serve(w http.ResponseWriter, r *http.Request) {
 	p.mu.Unlock()
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/identity":
-		_ = json.NewEncoder(w).Encode(map[string]any{"hostId": p.hostID, "apiVersion": 1})
+		p.mu.Lock()
+		hostID := p.hostID
+		p.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"hostId": hostID, "apiVersion": 1})
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/remote-host/decision-sync-token":
 		if p.mintCode != 0 {
 			w.WriteHeader(p.mintCode)
@@ -77,6 +80,13 @@ func (s *memPeerStore) UpsertDecisionSyncPeer(_ context.Context, p domain.Decisi
 	defer s.mu.Unlock()
 	s.peers[p.HostID] = p
 	return nil
+}
+
+func (s *memPeerStore) GetDecisionSyncPeer(_ context.Context, hostID string) (domain.DecisionSyncPeer, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.peers[hostID]
+	return p, ok, nil
 }
 
 func (s *memPeerStore) DeleteDecisionSyncPeer(_ context.Context, hostID string) (bool, error) {
@@ -267,4 +277,76 @@ func TestLinkErrorsNeverEchoCredential(t *testing.T) {
 func domainFuture() domain.DecisionEntry {
 	e := domain.DecisionEntry{ID: "dent_local", CallID: "dec_1", Kind: "future_kind", Payload: json.RawMessage(`{}`), AuthorKind: domain.DecisionAuthorPerson}
 	return e
+}
+
+func TestUnlinkProbesIdentityBeforeRevoking(t *testing.T) {
+	peer := newFakePeer(t, "h_mini")
+	f := newLinkFixture(t)
+	if _, _, err := f.peers.Link(context.Background(), decisionsync.LinkInput{URL: peer.server.URL, Credential: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	// The address now answers as another machine.
+	peer.mu.Lock()
+	peer.hostID = "h_stranger"
+	peer.bearers = nil
+	peer.mu.Unlock()
+	if err := f.peers.Unlink(context.Background(), "h_mini"); err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+	for _, b := range peer.bearers {
+		if b != "" {
+			t.Fatalf("unlink sent the token to a different machine: %q", peer.bearers)
+		}
+	}
+	if len(peer.revoked) != 0 {
+		t.Fatalf("revoked on the wrong machine: %v", peer.revoked)
+	}
+	if len(f.secrets.List()) != 0 {
+		t.Fatal("unlink kept the token locally")
+	}
+}
+
+func TestUnlinkRefusesInboundOnlyPeer(t *testing.T) {
+	f := newLinkFixture(t)
+	if err := f.store.UpsertDecisionSyncPeer(context.Background(), domain.DecisionSyncPeer{HostID: "h_laptop2", Label: "laptop-2", Direction: domain.DecisionSyncInbound}); err != nil {
+		t.Fatal(err)
+	}
+	err := f.peers.Unlink(context.Background(), "h_laptop2")
+	if !errors.Is(err, decisionsync.ErrPeerInboundOnly) {
+		t.Fatalf("err = %v, want ErrPeerInboundOnly", err)
+	}
+	if f.store.get("h_laptop2").HostID == "" {
+		t.Fatal("refused unlink still deleted the inbound peer's row")
+	}
+}
+
+// failingUpsertStore fails to create status rows.
+type failingUpsertStore struct{ *memPeerStore }
+
+func (failingUpsertStore) UpsertDecisionSyncPeer(context.Context, domain.DecisionSyncPeer) error {
+	return errors.New("disk full")
+}
+
+func TestLinkRollsBackWhenTheStatusRowFails(t *testing.T) {
+	peer := newFakePeer(t, "h_mini")
+	path := decisionsync.PeerSecretsPath(t.TempDir())
+	secrets, err := decisionsync.LoadPeerSecrets(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers := decisionsync.NewPeers(decisionsync.PeersDeps{
+		Secrets: secrets, Store: failingUpsertStore{newMemPeerStore()}, API: decisionsync.NewHTTPClient(nil),
+		HostID: "h_laptop", Now: fixedNow(t0),
+	})
+	if _, _, err := peers.Link(context.Background(), decisionsync.LinkInput{URL: peer.server.URL, Credential: "pw"}); !errors.Is(err, decisionsync.ErrLinkFailed) {
+		t.Fatalf("err = %v, want ErrLinkFailed", err)
+	}
+	// After a restart, nothing links to the machine.
+	reloaded, err := decisionsync.LoadPeerSecrets(path)
+	if err != nil || len(reloaded.List()) != 0 {
+		t.Fatalf("token file after a failed link = %+v, %v", reloaded.List(), err)
+	}
+	if len(peer.revoked) != 1 || peer.revoked[0] != "dev_minted" {
+		t.Fatalf("minted token not revoked on the peer: %v", peer.revoked)
+	}
 }

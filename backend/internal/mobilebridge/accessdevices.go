@@ -266,6 +266,17 @@ func (r *AccessDevices) Match(token string) (AccessDevice, bool) {
 	return cloneAccessDevice(device), true
 }
 
+// Has reports whether a device with id is still registered (not revoked).
+func (r *AccessDevices) Has(id string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.devices[id]
+	return ok
+}
+
 // Touch updates the device's last-seen time.
 func (r *AccessDevices) Touch(id string, now time.Time) {
 	r.mu.RLock()

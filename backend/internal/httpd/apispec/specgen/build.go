@@ -1117,6 +1117,7 @@ func reportOperations() []operation {
 func decisionSyncOperations() []operation {
 	syncErrors := []respUnit{
 		{http.StatusBadRequest, envelope.APIError{}},
+		{http.StatusUnauthorized, envelope.APIError{}},
 		{http.StatusForbidden, envelope.APIError{}},
 		{http.StatusConflict, envelope.APIError{}},
 		{http.StatusRequestEntityTooLarge, envelope.APIError{}},
@@ -1180,6 +1181,7 @@ func decisionSyncOperations() []operation {
 				{http.StatusNoContent, nil},
 				{http.StatusForbidden, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},

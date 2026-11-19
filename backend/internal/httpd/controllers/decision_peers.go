@@ -109,6 +109,8 @@ func (c *DecisionPeersController) unlink(w http.ResponseWriter, r *http.Request)
 	switch err := c.Svc.Unlink(r.Context(), chi.URLParam(r, "hostId")); {
 	case errors.Is(err, decisionsync.ErrPeerNotLinked):
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "DECISION_PEER_NOT_FOUND", err.Error(), nil)
+	case errors.Is(err, decisionsync.ErrPeerInboundOnly):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "DECISION_PEER_INBOUND", err.Error(), nil)
 	case err != nil:
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "DECISION_PEERS", "could not unlink the machine", nil)
 	default:

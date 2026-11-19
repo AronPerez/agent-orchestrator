@@ -155,8 +155,17 @@ func (c *HTTPClient) MintToken(ctx context.Context, baseURL, expectedHostID, cre
 	return out, nil
 }
 
-// RevokeOwnToken asks the peer to revoke the sync token presented.
+// RevokeOwnToken asks the peer to revoke the sync token presented. It probes
+// the peer's identity first and sends nothing if the address now belongs to
+// another machine.
 func (c *HTTPClient) RevokeOwnToken(ctx context.Context, peer StoredPeer) error {
+	hostID, err := c.Identity(ctx, peer.URL)
+	if err != nil {
+		return err
+	}
+	if hostID != peer.HostID {
+		return fmt.Errorf("%w: expected %s, got %s", ErrPeerIdentityChanged, peer.HostID, hostID)
+	}
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,

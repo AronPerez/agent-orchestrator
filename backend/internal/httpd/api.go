@@ -253,7 +253,7 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
 		reports:       &controllers.ReportsController{Svc: deps.Reports},
 		decisions:     &controllers.DecisionsController{Svc: deps.Decisions},
-		decisionSync:  &controllers.DecisionSyncController{Svc: deps.DecisionSync},
+		decisionSync:  &controllers.DecisionSyncController{Svc: deps.DecisionSync, Devices: syncDeviceRegistry(deps.AccessDevices)},
 		decisionPeers: &controllers.DecisionPeersController{Svc: deps.DecisionPeers},
 		push:          &controllers.PushController{Registry: deps.Push, Devices: deps.AccessDevices, Access: requestDeviceRevoker(deps.DeviceAccess)},
 		imports:       &controllers.ImportController{Svc: deps.Import},
@@ -526,4 +526,13 @@ func agentBrowserURL(raw string) *url.URL {
 func userMessageRecorder(sessions any) controllers.UserMessageRecorder {
 	recorder, _ := sessions.(controllers.UserMessageRecorder)
 	return recorder
+}
+
+// syncDeviceRegistry lets the sync routes recheck a token after reading a
+// request. A nil registry (no remote access configured) checks nothing.
+func syncDeviceRegistry(devices *mobilebridge.AccessDevices) interface{ Has(string) bool } {
+	if devices == nil {
+		return nil
+	}
+	return devices
 }

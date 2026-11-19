@@ -20,6 +20,7 @@ var (
 	ErrLinkSelf          = errors.New("that address is this machine")
 	ErrLinkHostChanged   = errors.New("that address now belongs to a different machine than expected")
 	ErrPeerNotLinked     = errors.New("no linked machine has that host id")
+	ErrPeerInboundOnly   = errors.New("that machine links to this one; turn off its link on that machine, or revoke its \"Decision sync from\" device on this one")
 	ErrLinkCredentialBad = errors.New("the machine refused the credential")
 	ErrLinkUnreachable   = errors.New("could not reach the machine")
 	ErrLinkIncompatible  = errors.New("the machine needs a newer Orchestrator to sync decisions")
@@ -31,6 +32,7 @@ var (
 type PeerStore interface {
 	StatusSource
 	UpsertDecisionSyncPeer(context.Context, domain.DecisionSyncPeer) error
+	GetDecisionSyncPeer(context.Context, string) (domain.DecisionSyncPeer, bool, error)
 	DeleteDecisionSyncPeer(context.Context, string) (bool, error)
 }
 
@@ -117,14 +119,30 @@ func (m *Peers) Link(ctx context.Context, in LinkInput) (PeerStatus, []SecretWar
 		label = existing.Label
 	}
 	stored := StoredPeer{HostID: hostID, URL: base, Label: label, DeviceID: minted.DeviceID, Token: minted.Token}
+	previous, hadPrevious := m.deps.Secrets.Get(hostID)
+	// From here a failure undoes everything: the token file, the status row
+	// and the token minted on the peer, so a failed link never syncs later.
+	rollback := func() {
+		undo := context.WithoutCancel(ctx)
+		if hadPrevious {
+			_ = m.deps.Secrets.Put(previous)
+		} else {
+			_, _, _ = m.deps.Secrets.Delete(hostID)
+		}
+		revokeCtx, cancel := context.WithTimeout(undo, unlinkRevokeTimeout)
+		defer cancel()
+		_ = m.deps.API.RevokeOwnToken(revokeCtx, stored)
+	}
 	if err := m.deps.Secrets.Put(stored); err != nil {
+		rollback()
 		return PeerStatus{}, nil, ErrLinkFailed
 	}
 	peer := domain.DecisionSyncPeer{
 		HostID: hostID, Label: label, URL: base, Direction: domain.DecisionSyncOutbound,
 		DeviceID: minted.DeviceID, CreatedAt: m.deps.Now(),
 	}
-	if err := m.deps.Store.UpsertDecisionSyncPeer(ctx, peer); err != nil {
+	if err := m.deps.Store.UpsertDecisionSyncPeer(context.WithoutCancel(ctx), peer); err != nil {
+		rollback()
 		return PeerStatus{}, nil, ErrLinkFailed
 	}
 	if m.deps.OnChange != nil {
@@ -141,6 +159,17 @@ func (m *Peers) Link(ctx context.Context, in LinkInput) (PeerStatus, []SecretWar
 // stays on both machines.
 func (m *Peers) Unlink(ctx context.Context, hostID string) error {
 	stored, hadToken := m.deps.Secrets.Get(hostID)
+	if !hadToken {
+		// A peer that only links to this machine holds a token this machine
+		// issued; deleting its row here would leave that access in place.
+		row, found, err := m.deps.Store.GetDecisionSyncPeer(ctx, hostID)
+		if err != nil {
+			return ErrLinkFailed
+		}
+		if found && row.Direction == domain.DecisionSyncInbound {
+			return ErrPeerInboundOnly
+		}
+	}
 	hadRow, err := m.deps.Store.DeleteDecisionSyncPeer(ctx, hostID)
 	if err != nil {
 		return ErrLinkFailed
