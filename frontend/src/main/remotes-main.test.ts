@@ -1266,3 +1266,76 @@ describe("registerRemotesIpc", () => {
 		});
 	});
 });
+
+describe("remotes:setDecisionSync", () => {
+	type Call = { method: string; path: string; body?: unknown };
+	const setup = async (stored: string, daemon: (call: Call) => { status: number; body: string }) => {
+		const dir = await mkdtemp(join(tmpdir(), "ao-remotes-sync-"));
+		const file = join(dir, "remotes.json");
+		await writeFile(file, stored, "utf8");
+		await chmod(file, 0o600);
+		const calls: Call[] = [];
+		const ipc = fakeIpc();
+		registerRemotes(ipc.ipcMain, {
+			file, requireAccount: signedIn,
+			registry: new RemoteRegistry(async () => { throw new Error("proxy must not start"); }),
+			localDaemonRequest: async (method, path, body) => {
+				calls.push({ method, path, body });
+				return daemon({ method, path, body });
+			},
+		});
+		return { ipc, calls };
+	};
+
+	it("setDecisionSync sends the saved credential only to the local daemon", async () => {
+		const { ipc, calls } = await setup(
+			`{"remotes":[{"hostId":"h_mini","label":"mac-mini","url":"http://192.0.2.7:3011","password":"saved-secret-1"}]}`,
+			() => ({ status: 200, body: JSON.stringify({ peer: { hostId: "h_mini" }, warnings: [{ callId: "dec_1", field: "context" }] }) }),
+		);
+		const result = await ipc.invoke("remotes:setDecisionSync", "http://192.0.2.7:3011", true);
+		expect(calls).toEqual([{
+			method: "POST", path: "/api/v1/decision-peers",
+			body: { url: "http://192.0.2.7:3011", expectedHostId: "h_mini", label: "mac-mini", credential: "saved-secret-1" },
+		}]);
+		expect(result).toEqual({ ok: true, warnings: [{ callId: "dec_1", field: "context" }] });
+	});
+
+	it("setDecisionSync never returns the credential", async () => {
+		const { ipc } = await setup(
+			`{"remotes":[{"hostId":"h_mini","label":"mac-mini","url":"http://192.0.2.7:3011","password":"saved-secret-2"}]}`,
+			({ method }) => method === "DELETE"
+				? { status: 204, body: "" }
+				: { status: 400, body: JSON.stringify({ code: "DECISION_SYNC_LINK_REFUSED", message: "echo saved-secret-2 aoc_token" }) },
+		);
+		const result = await ipc.invoke("remotes:setDecisionSync", "http://192.0.2.7:3011", true);
+		expect(result).toEqual({ ok: false, code: "DECISION_SYNC_LINK_REFUSED" });
+		expect(JSON.stringify(result)).not.toContain("saved-secret-2");
+		const off = await ipc.invoke("remotes:setDecisionSync", "http://192.0.2.7:3011", false);
+		expect(off).toEqual({ ok: true, warnings: [] });
+	});
+
+	it("setDecisionSync uses the sealed password path", async () => {
+		const cipher = { encrypt: (plain: string) => `sealed:${plain}`, decrypt: (sealed: string) => sealed.replace(/^sealed:/, "") };
+		setPasswordCipher(() => cipher);
+		try {
+			const { ipc, calls } = await setup(
+				`{"remotes":[{"hostId":"h_mini","label":"mac-mini","url":"http://192.0.2.7:3011","sealedPassword":"sealed:keychain-secret"}]}`,
+				() => ({ status: 200, body: JSON.stringify({ peer: {}, warnings: [] }) }),
+			);
+			await ipc.invoke("remotes:setDecisionSync", "http://192.0.2.7:3011", true);
+			expect((calls[0].body as { credential: string }).credential).toBe("keychain-secret");
+		} finally {
+			setPasswordCipher(() => null);
+		}
+	});
+
+	it("setDecisionSync refuses a host never connected and one this account does not own", async () => {
+		const { ipc, calls } = await setup(
+			`{"remotes":[{"label":"old","url":"http://192.0.2.8:3011","password":"pw"},{"hostId":"h_other","label":"other","url":"http://192.0.2.9:3011","password":"pw","accountUserId":"someone-else"}]}`,
+			() => ({ status: 200, body: "{}" }),
+		);
+		expect(await ipc.invoke("remotes:setDecisionSync", "http://192.0.2.8:3011", true)).toEqual({ ok: false, code: "NO_HOST_ID" });
+		expect(await ipc.invoke("remotes:setDecisionSync", "http://192.0.2.9:3011", true)).toEqual({ ok: false, code: "NOT_FOUND" });
+		expect(calls).toEqual([]);
+	});
+});

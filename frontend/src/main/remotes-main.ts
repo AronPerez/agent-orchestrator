@@ -97,7 +97,14 @@ export type RemotesIpcDeps = {
 	deviceName?: () => Promise<string>;
 	/** Main-process retry loop for hidden cleanup tombstones. */
 	scheduleCleanupRetry?: (retry: () => Promise<void>) => void;
+	/** A loopback request to this computer's own daemon; paths start with /api/v1. */
+	localDaemonRequest?: (method: string, path: string, body?: unknown) => Promise<{ status: number; body: string }>;
 };
+
+/** What turning decision sync on or off for a saved host did. Never holds a credential or token. */
+export type DecisionSyncResult =
+	| { ok: true; warnings: { callId: string; field: string }[] }
+	| { ok: false; code: string };
 
 class LocalIdentityUnavailableError extends Error {
 	constructor() { super("Local AO identity is unavailable; remote connection is offline"); }
@@ -119,6 +126,7 @@ export function registerRemotesIpc(
 		revokeCoordination = revokeCoordinationToken,
 		authErrorCode = readAuthErrorCode, deviceName = computerName,
 		scheduleCleanupRetry = scheduleRemotesCleanupRetry,
+		localDaemonRequest,
 	}: RemotesIpcDeps,
 ): void {
 	const disconnect = (url: string) => registry.disconnect(url);
@@ -609,6 +617,29 @@ export function registerRemotesIpc(
 		await accountHosts("PUT", `/${encodeURIComponent(issued.hostId)}`, { body: issued.registration });
 	});
 	ipcMain.handle("remotes:disconnect", async (_event, url: string) => ordered(() => disconnect(url)));
+	// Linking a saved host for decision sync hands its saved (possibly
+	// keychain-sealed) credential to this computer's daemon over loopback, once.
+	// The daemon mints a sync-only token on that host and keeps only that; the
+	// renderer gets back neither the credential nor the token.
+	ipcMain.handle("remotes:setDecisionSync", async (_event, url: string, enabled: boolean): Promise<DecisionSyncResult> => ordered(async () => {
+		if (!localDaemonRequest) return { ok: false, code: "UNAVAILABLE" };
+		const entry = (await owned()).find((candidate) => candidate.url === url);
+		if (!entry) return { ok: false, code: "NOT_FOUND" };
+		if (!entry.hostId) return { ok: false, code: "NO_HOST_ID" };
+		if (!enabled) {
+			const response = await localDaemonRequest("DELETE", `/api/v1/decision-peers/${encodeURIComponent(entry.hostId)}`);
+			return response.status === 204 || response.status === 404 ? { ok: true, warnings: [] } : { ok: false, code: errorCode(response.body) };
+		}
+		// An account-linked host's saved secret is an account token, which the
+		// host does not accept for minting device credentials here yet.
+		if (holdsAccountToken(entry) || !entry.password) return { ok: false, code: "UNSUPPORTED_CREDENTIAL" };
+		const response = await localDaemonRequest("POST", "/api/v1/decision-peers", {
+			url: entry.url, expectedHostId: entry.hostId, label: entry.label, credential: entry.password,
+		});
+		if (response.status !== 200) return { ok: false, code: errorCode(response.body) };
+		const parsed = JSON.parse(response.body) as { warnings?: { callId: string; field: string }[] };
+		return { ok: true, warnings: (parsed.warnings ?? []).map(({ callId, field }) => ({ callId, field })) };
+	}));
 	ipcMain.handle("remotes:computerName", () => computerName());
 	ipcMain.handle("remotes:previewUrl", async (_event, hostId: string, sessionId: string, sourceUrl: string) => {
 		const account = await getAccountId();
@@ -635,4 +666,14 @@ export function registerRemotesIpc(
 		if (await getAccountId() !== account) throw new ExpectedIpcError("Account changed during remote connection.");
 		return registry.externalUrl(hostId, url);
 	});
+}
+
+/** The API error code from a daemon error body, never its message. */
+function errorCode(body: string): string {
+	try {
+		const code = (JSON.parse(body) as { code?: unknown }).code;
+		return typeof code === "string" && code ? code : "FAILED";
+	} catch {
+		return "FAILED";
+	}
 }
