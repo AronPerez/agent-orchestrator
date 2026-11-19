@@ -630,7 +630,7 @@ func TestDecisionDecideOverruleAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out != "Recorded dec_2\nao://decisions/dec_2\n" {
+	if out != "Recorded dec_2\nao://decisions/dec_2\nNow carry it out. If you do not, close it: ao decision outcome dec_2 --text \"Not carried out: <why>\"\n" {
 		t.Fatalf("decide output=%q", out)
 	}
 	var decide decisionDecideAPIRequest
@@ -693,7 +693,7 @@ func TestDecisionDecideWarnsWhenOutsidePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "Recorded dec_3") || !strings.Contains(out, "this kind of decision is now reserved for the person") {
+	if !strings.Contains(out, "Recorded dec_3") || !strings.Contains(out, "this kind of decision is now reserved for the person. Do not carry it out") || strings.Contains(out, "Now carry it out") {
 		t.Fatalf("out = %q", out)
 	}
 }

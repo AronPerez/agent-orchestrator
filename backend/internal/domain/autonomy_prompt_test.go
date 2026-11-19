@@ -51,6 +51,8 @@ func TestAutonomyInstructionsOnModeDecidesAndRecords(t *testing.T) {
 		"Not reserved:\n- Ticket hygiene (`ticket_hygiene`)",
 		"`ao decision decide --kind <id> --what <what you decided> --why <why> --undo <how to undo it>`",
 		"Decided for you",
+		"record the decision before you act on it",
+		"`ao decision outcome <id> --text \"Not carried out: <why>\"`",
 		`"I overruled the decision you made for me"`,
 		"When you are unsure which kind applies, or whether it can be undone, raise a call instead.",
 	} {

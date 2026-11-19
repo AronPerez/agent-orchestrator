@@ -37,9 +37,11 @@ func onInstructions(c AutonomyConfig) string {
 		"In this project you decide the kinds of decision the human has not reserved, and record each one so the human can review it and overrule it.\n\n" +
 		kindLists(c) +
 		"- Before any action of a reserved kind, raise a call with `--kind <id>` and wait for the answer.\n" +
-		"- For a kind that is not reserved, decide, act, and record it straight away: " +
+		"- For a kind that is not reserved, decide, then record the decision before you act on it: " +
 		"`ao decision decide --kind <id> --what <what you decided> --why <why> --undo <how to undo it>`, adding `--verify <how to tell it worked>` when there is a way to check. " +
-		"Write the undo note so the human could follow it without you. It appears on the Decisions page under Decided for you.\n" +
+		"Recording first means the human can always find what you did, even if you stop before you finish. Write the undo note so the human could follow it without you. " +
+		"The human sees it under Decided for you, or with `ao decision ls --decided`.\n" +
+		"- Then carry it out. If you end up not carrying it out, close the record: `ao decision outcome <id> --text \"Not carried out: <why>\"`.\n" +
 		"- If the human overrules a decision, a message arrives that begins \"I overruled the decision you made for me\". Undo it as its note says, then record what happened with the `ao decision outcome` command it gives.\n" +
 		"- When you are unsure which kind applies, or whether it can be undone, raise a call instead. `ao decision kinds` lists the kinds again."
 }

@@ -103,3 +103,21 @@ func (s *Service) Overrule(ctx context.Context, actor Actor, callID, note string
 	}
 	return s.append(ctx, actor, call.ID, domain.DecisionKindOverruled, domain.DecisionOverruledPayload{Note: note})
 }
+
+// closeStandingDecision records an outcome on a decision nobody overruled.
+// Sessions record a decision before acting on it, so this is how the owning
+// session says it did not, in the end, carry it out; the person may close it
+// too. The outcome names the decided entry, since there is no answer.
+func (s *Service) closeStandingDecision(ctx context.Context, actor Actor, call domain.DecisionCall, input OutcomeInput) (domain.DecisionCall, error) {
+	if actor.Session != "" && !s.owns(call, actor.Session) {
+		return domain.DecisionCall{}, notOwner()
+	}
+	if input.ForEntry != "" && input.ForEntry != call.Decided.EntryID {
+		return domain.DecisionCall{}, answerChanged(call)
+	}
+	payload := domain.DecisionOutcomePayload{ForEntry: call.Decided.EntryID, Text: strings.TrimSpace(input.Text), Link: strings.TrimSpace(input.Link)}
+	if err := domain.ValidateDecisionOutcome(payload); err != nil {
+		return domain.DecisionCall{}, invalidDecision(err)
+	}
+	return s.append(ctx, actor, call.ID, domain.DecisionKindOutcome, payload)
+}

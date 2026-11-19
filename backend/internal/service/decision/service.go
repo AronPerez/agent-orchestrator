@@ -575,6 +575,9 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 	}
 	defer unlock()
 	input.ForEntry = strings.TrimSpace(input.ForEntry)
+	if call.State == domain.DecisionStateDecided && call.Decided != nil {
+		return s.closeStandingDecision(ctx, actor, call, input)
+	}
 	if actor.Session != "" && !s.mayClose(call, input.ForEntry, actor.Session) {
 		return domain.DecisionCall{}, notOwner()
 	}

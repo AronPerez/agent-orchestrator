@@ -50,6 +50,9 @@ type DecisionOverruledPayload struct {
 // DecisionDecidedDetail is what a decided call carries beyond the fields it
 // shares with a raised call.
 type DecisionDecidedDetail struct {
+	// EntryID is the decided entry itself. An outcome recorded while the
+	// decision still stands (for example, "not carried out") names it.
+	EntryID       string `json:"entryId"`
 	Undo          string `json:"undo"`
 	Verify        string `json:"verify,omitempty"`
 	OutsidePolicy string `json:"outsidePolicy,omitempty"`

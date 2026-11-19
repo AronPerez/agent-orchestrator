@@ -136,7 +136,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Origin = entry.Origin
 			call.Raised = payload.raisedView()
 			call.RaisedAt = entry.WrittenAt
-			call.Decided = &DecisionDecidedDetail{Undo: payload.Undo, Verify: payload.Verify, OutsidePolicy: payload.OutsidePolicy}
+			call.Decided = &DecisionDecidedDetail{EntryID: entry.ID, Undo: payload.Undo, Verify: payload.Verify, OutsidePolicy: payload.OutsidePolicy}
 		case DecisionKindOverruled:
 			// Entries are ordered, so a decided call's own entry precedes any
 			// overrule of it; an overrule on any other call is ignored.
@@ -199,7 +199,10 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			// New outcomes name the immutable answer they carried out. If a
 			// newer answer already stands, keep the stale outcome in history but
 			// do not let it close that newer work. Empty preserves legacy entries.
-			if payload.ForEntry != "" && payload.ForEntry != standing.ID {
+			// An outcome on a decision that still stands names the decided
+			// entry itself, since there is no answer to name.
+			closesStandingDecision := standing.ID == "" && call.Decided != nil && payload.ForEntry == call.Decided.EntryID
+			if payload.ForEntry != "" && payload.ForEntry != standing.ID && !closesStandingDecision {
 				continue
 			}
 			if !hasClosing {

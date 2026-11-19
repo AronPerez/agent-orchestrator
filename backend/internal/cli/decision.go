@@ -629,9 +629,11 @@ func newDecisionDecideCommand(ctx *commandContext) *cobra.Command {
 			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Recorded %s\n%s\n", response.ID, response.Link); err != nil {
 				return err
 			}
-			if note := outsidePolicyNote(response.Decided); note != "" {
+			if note := outsidePolicyNote(response.ID, response.Decided); note != "" {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), note)
+				return err
 			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Now carry it out. If you do not, close it: ao decision outcome %s --text \"Not carried out: <why>\"\n", response.ID)
 			return err
 		},
 	}
@@ -648,18 +650,21 @@ func newDecisionDecideCommand(ctx *commandContext) *cobra.Command {
 }
 
 // outsidePolicyNote tells a session whose instructions are out of date that
-// its decision was kept but should have been a call.
-func outsidePolicyNote(decided *decisionDecidedAPI) string {
+// its record was kept but the decision is no longer its to make.
+func outsidePolicyNote(id string, decided *decisionDecidedAPI) string {
 	if decided == nil {
 		return ""
 	}
+	var why string
 	switch decided.OutsidePolicy {
 	case "autonomy_not_on":
-		return "Kept, but this project no longer lets sessions decide on the person's behalf. Tell the person what you did, and raise a call for every decision from now on."
+		why = "this project no longer lets sessions decide on the person's behalf"
 	case "kind_reserved":
-		return "Kept, but this kind of decision is now reserved for the person. Tell the person what you did, and raise a call for this kind from now on."
+		why = "this kind of decision is now reserved for the person"
+	default:
+		return ""
 	}
-	return ""
+	return fmt.Sprintf("Kept, but %s. Do not carry it out: close this record with ao decision outcome %s --text \"Not carried out: policy changed\" and raise a call instead. If you already acted, tell the person.", why, id)
 }
 
 func newDecisionOverruleCommand(ctx *commandContext) *cobra.Command {

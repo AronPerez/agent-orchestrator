@@ -117,3 +117,12 @@ func TestAutonomyOnModeAndCatchAll(t *testing.T) {
 		t.Fatal("other must stay reserved under a custom list")
 	}
 }
+
+func TestReduceOutcomeClosesAStandingDecidedCall(t *testing.T) {
+	decided := decisionEntry(t, "dent_d", 1, DecisionKindDecided, validDecided())
+	outcome := decisionEntry(t, "dent_x", 2, DecisionKindOutcome, DecisionOutcomePayload{ForEntry: "dent_d", Text: "Not carried out."})
+	call, _ := ReduceDecisionCall([]DecisionEntry{decided, outcome})
+	if call.State != DecisionStateDone || call.Outcome != "Not carried out." {
+		t.Fatalf("call = %+v", call)
+	}
+}

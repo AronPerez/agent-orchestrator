@@ -90,8 +90,9 @@ answered and how often the answer matched the prediction.
 ## Mode on: deciding for the human
 
 In mode `on`, raise a call before any action of a reserved kind, as in
-observe mode. For a kind that is not reserved, decide, act, and record it
-straight away:
+observe mode. For a kind that is not reserved, decide, then record the
+decision **before** you act on it, so the human can always find what you did
+even if you stop before you finish:
 
 ```bash
 ao decision decide \
@@ -102,11 +103,15 @@ ao decision decide \
   --verify "One open pull request remains for the ticket."
 ```
 
+Then carry it out. If you end up not carrying it out, close the record with
+`ao decision outcome <id> --text "Not carried out: <why>"`.
+
 `--undo` is required: write it so the human could follow it without you.
 `--verify` is optional. `other` is always reserved. If the project left
 mode `on`, or reserved the kind, after you started, the record is still kept
-so the human can see and overrule what you did, and the command says so: tell
-the human, and raise calls for that kind from then on. When you are unsure
+so the human can see it, and the command says so: do not carry it out, close the
+record with `ao decision outcome <id> --text "Not carried out: policy changed"`,
+and raise a call instead. When you are unsure
 which kind applies, or whether it can be undone, raise a call instead.
 
 The human sees the decision on the Decisions page under Decided for you, or

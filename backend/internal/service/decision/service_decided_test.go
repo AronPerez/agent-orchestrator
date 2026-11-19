@@ -179,3 +179,24 @@ func TestADecidedCallIsInItsSessionsOwnList(t *testing.T) {
 		t.Fatalf("mine = %+v", mine)
 	}
 }
+
+// A session records the decision before acting, so if it then does not
+// carry it out, it closes the record with an outcome saying so.
+func TestTheOwnerCanCloseADecisionItDidNotCarryOut(t *testing.T) {
+	fixture := newDecisionService(t)
+	setShopAutonomy(t, fixture, domain.AutonomyConfig{Mode: domain.AutonomyOn})
+	ctx := context.Background()
+	call, err := fixture.service.Decide(ctx, Actor{Session: fixture.w1}, validDecideInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.RecordOutcome(ctx, Actor{Session: fixture.w2}, call.ID, OutcomeInput{Text: "Not carried out."})
+	assertAPICode(t, err, "DECISION_NOT_OWNER")
+	done, err := fixture.service.RecordOutcome(ctx, Actor{Session: fixture.w1}, call.ID, OutcomeInput{Text: "Not carried out: #12 was merged first."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.State != domain.DecisionStateDone || done.Outcome != "Not carried out: #12 was merged first." {
+		t.Fatalf("done = %+v", done)
+	}
+}
