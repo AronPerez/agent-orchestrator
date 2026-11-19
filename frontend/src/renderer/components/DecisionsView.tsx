@@ -85,11 +85,15 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 		if (search.data && search.data.length > 0) {
 			body = (
 				<div aria-busy={search.isPlaceholderData || undefined}>
+					{search.isError ? (
+						// The last results stay; say that they could not be refreshed.
+						<LoadError error={search.error} fallback={t("decisionInbox.loadFailed")} onRetry={() => void search.refetch()} className="mx-(--space-4_5) my-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm" />
+					) : null}
 					{search.isPlaceholderData ? <p role="status" className="px-(--space-4_5) pt-2 text-caption text-passive">{t("decisions.updating")}</p> : null}
 					<DecisionSearchResults calls={search.data} selectedId={callId} onSelect={selectCall} />
 				</div>
 			);
-		} else if (search.data) {
+		} else if (search.data && !search.isError) {
 			body = (
 				<div className="flex flex-col items-center gap-3 px-6 py-16 text-center">
 					<p className="text-sm text-muted-foreground">{t("decisions.noMatches", { query: words })}</p>
@@ -116,7 +120,7 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} />
 			</>
 		);
-	} else if (board.data) {
+	} else if (board.data && !board.isError) {
 		body = (
 			<div className="flex flex-col items-center px-6 py-16 text-center">
 				<h2 className="text-heading-sm font-medium text-foreground">{t("decisions.emptyTitle")}</h2>

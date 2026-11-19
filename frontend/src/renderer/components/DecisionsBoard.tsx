@@ -85,19 +85,23 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 	// When the focused card leaves the board (its state changed, it was
 	// removed, or its band folded), keep focus on the board instead of losing
 	// it to the page.
+	// A card that changes lane is remounted in its new cell, which drops the
+	// focus it had; cardHadFocus remembers that a card held it.
 	const previousVisible = useRef(visible);
+	const cardHadFocus = useRef(false);
 	useLayoutEffect(() => {
 		const before = previousVisible.current;
 		previousVisible.current = visible;
-		if (!focusId || visibleIds.has(focusId)) return;
-		const replacement = replacementDecisionFocusId(before, focusId, visible);
-		setFocusId(replacement);
-		// Only when the focused card itself vanished: focus elsewhere (the
+		if (!focusId) return;
+		const stillVisible = visibleIds.has(focusId);
+		const target = stillVisible ? focusId : replacementDecisionFocusId(before, focusId, visible);
+		if (!stillVisible) setFocusId(target);
+		// Only when the focused card itself was lost: focus elsewhere (the
 		// search field, the panel) is never taken.
 		const active = document.activeElement;
-		if (replacement && (!active || active === document.body)) {
-			gridRef.current?.querySelector<HTMLElement>(`[data-decision-card="${CSS.escape(replacement)}"]`)?.focus();
-		}
+		if (!target || (active && active !== document.body)) return;
+		if (stillVisible && !cardHadFocus.current) return;
+		gridRef.current?.querySelector<HTMLElement>(`[data-decision-card="${CSS.escape(target)}"]`)?.focus();
 	}, [focusId, visible, visibleIds]);
 	const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
 		const id = (event.target as HTMLElement).getAttribute?.("data-decision-card");
@@ -119,7 +123,14 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 				onKeyDown={onKeyDown}
 				onFocus={(event) => {
 					const id = (event.target as HTMLElement).getAttribute?.("data-decision-card");
+					cardHadFocus.current = Boolean(id);
 					if (id) setFocusId(id);
+				}}
+				onBlur={(event) => {
+					// A card removed from the page may blur on its way out; that
+					// is not the person moving focus away.
+					if (!event.relatedTarget && !(event.target as HTMLElement).isConnected) return;
+					cardHadFocus.current = false;
 				}}
 			>
 				<div aria-hidden="true" className="hidden border-b border-border @3xl:block" />

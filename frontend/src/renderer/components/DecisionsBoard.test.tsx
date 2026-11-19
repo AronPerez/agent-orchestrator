@@ -175,6 +175,14 @@ describe("DecisionsBoard", () => {
 			expect(tabStops()).toEqual([card("orphan")]);
 		});
 
+		it("keeps focus on a card that moves to another lane", async () => {
+			const { rerender, onSelect } = renderBoard();
+			card("need").focus();
+			const moved = calls.map((item) => item.id === "need" ? { ...item, state: "in_progress" as const, stateLabel: "In progress", chosenLabel: "Ship", delivery: "pending" as const, answeredAt: "2026-11-18T11:30:00Z" } : item);
+			rerender(<DecisionsBoard model={buildDecisionBoard(moved)} now={NOW} onSelect={onSelect} />);
+			expect(card("need")).toHaveFocus();
+		});
+
 		it("opens a card with Enter", async () => {
 			const { onSelect } = renderBoard();
 			card("need").focus();
