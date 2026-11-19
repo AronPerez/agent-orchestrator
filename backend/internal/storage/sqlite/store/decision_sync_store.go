@@ -63,8 +63,8 @@ func (s *Store) DecisionOriginsLastHeard(ctx context.Context) (map[string]time.T
 // ListDecisionEntriesAfter returns one page of the entries a holder of have
 // lacks, origin by origin in ascending order and each origin in sequence
 // order. A page holds at most maxEntries entries and maxBytes of payload, and
-// always at least one entry when any is due. Entries of an origin with a
-// recorded conflict are held back from its lowest conflicted sequence on.
+// always at least one entry when any is due. An origin with a recorded
+// conflict is not served at all (see domain.PageDecisionEntries).
 // more reports whether anything due was left out.
 func (s *Store) ListDecisionEntriesAfter(ctx context.Context, have domain.DecisionVector, maxEntries, maxBytes int) ([]domain.DecisionEntry, bool, error) {
 	if maxEntries < 1 {

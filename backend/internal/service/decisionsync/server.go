@@ -63,31 +63,48 @@ func (s *Server) checkPeer(peerHostID, bodyHostID string) error {
 }
 
 // Exchange returns one page of the entries the peer lacks and this ledger's
-// position. It first compares the peer's heads with this ledger so a forked
-// origin is recorded before anything else moves.
+// position.
 func (s *Server) Exchange(ctx context.Context, peerHostID string, req ExchangeRequest) (ExchangeResponse, error) {
 	if err := s.checkPeer(peerHostID, req.HostID); err != nil {
 		return ExchangeResponse{}, err
 	}
-	if _, err := s.deps.Ledger.CheckDecisionHeads(ctx, peerHostID, req.Heads, s.deps.Now()); err != nil {
-		return ExchangeResponse{}, fmt.Errorf("check peer heads: %w", err)
-	}
-	return s.page(ctx, req.Have)
+	return s.page(ctx, peerHostID, req)
 }
 
-func (s *Server) page(ctx context.Context, have domain.DecisionVector) (ExchangeResponse, error) {
-	entries, more, err := s.deps.Ledger.ListDecisionEntriesAfter(ctx, have, s.deps.PageEntries, domain.MaxDecisionSyncPageBytes)
+// page reads one page for the peer, then compares the peer's heads with this
+// ledger. The order matters: an origin is paged from have[o]+1 only when this
+// ledger already holds have[o], and stored entries never change, so comparing
+// after the read checks exactly the entry the page builds on, even if this
+// machine appended more in between. An origin found forked is dropped from
+// the page before it is sent.
+func (s *Server) page(ctx context.Context, peerHostID string, req ExchangeRequest) (ExchangeResponse, error) {
+	entries, more, err := s.deps.Ledger.ListDecisionEntriesAfter(ctx, req.Have, s.deps.PageEntries, domain.MaxDecisionSyncPageBytes)
 	if err != nil {
 		return ExchangeResponse{}, fmt.Errorf("read sync page: %w", err)
+	}
+	if _, err := s.deps.Ledger.CheckDecisionHeads(ctx, peerHostID, req.Heads, s.deps.Now()); err != nil {
+		return ExchangeResponse{}, fmt.Errorf("check peer heads: %w", err)
 	}
 	heads, err := s.deps.Ledger.DecisionHeads(ctx)
 	if err != nil {
 		return ExchangeResponse{}, fmt.Errorf("read heads: %w", err)
 	}
+	entries = withoutStopped(entries, heads)
 	return ExchangeResponse{
 		Protocol: domain.DecisionSyncProtocol, HostID: s.deps.HostID, MachineLabel: s.deps.MachineLabel(),
 		Entries: entries, More: more, Have: heads.Vector(), Heads: heads, ServerTime: s.deps.Now(),
 	}, nil
+}
+
+// withoutStopped drops entries of origins the heads mark as stopped.
+func withoutStopped(entries []domain.DecisionEntry, heads domain.DecisionHeads) []domain.DecisionEntry {
+	kept := entries[:0:0]
+	for _, e := range entries {
+		if !heads[e.Origin].Stopped {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // Push applies one page of entries from the peer and returns this ledger's

@@ -113,7 +113,7 @@ func Delivered(callID string, owner domain.SessionID, forEntry string) domain.De
 func Future(callID string) domain.DecisionEntry {
 	return domain.DecisionEntry{
 		ID: NewEntryID(), CallID: callID, Kind: "future_kind",
-		Payload:    json.RawMessage(`{"z":1,  "a":"<&> é é","nested":{"unknown":[1,2.50]}}`),
+		Payload:    json.RawMessage(`{"z":1,  "a":"<&> é \u00e9","nested":{"unknown":[1,2.50]}}`),
 		AuthorKind: domain.DecisionAuthorPerson, AuthorSurface: "phone",
 	}
 }

@@ -63,7 +63,7 @@ func applySync(t *testing.T, s *sqlite.Store, peer string, entries []domain.Deci
 
 func TestApplyDecisionEntriesStoresVerbatim(t *testing.T) {
 	s := newTestStore(t)
-	payload := `{"note":"<&> é é","zz":{"b":1,  "a":[1,2]},"unknown":true}`
+	payload := `{"note":"<&> é \u00e9","zz":{"b":1,  "a":[1,2]},"unknown":true}`
 	e := syncEntry("h_b", 1, "dec_1", "future_kind", payload)
 	e.Stamp = domain.DecisionStamp{WallMS: 1234, Counter: 7}
 	if res := applySync(t, s, "h_b", []domain.DecisionEntry{e}); res.Applied != 1 {
@@ -305,8 +305,8 @@ func TestListDecisionEntriesAfterHoldsBackConflictedOrigin(t *testing.T) {
 	for _, e := range page {
 		got = append(got, fmt.Sprintf("%s:%d", e.Origin, e.OriginSeq))
 	}
-	if strings.Join(got, ",") != "h_a:1,h_a:2,h_b:1,h_b:2" {
-		t.Fatalf("page = %v, want h_a held back from 3", got)
+	if strings.Join(got, ",") != "h_b:1,h_b:2" {
+		t.Fatalf("page = %v, want h_a quarantined entirely", got)
 	}
 	if page, _, _ := s.ListDecisionEntriesAfter(ctx, domain.DecisionVector{"h_a": 2, "h_b": 2}, 500, 1<<20); len(page) != 0 {
 		t.Fatalf("page past the conflict = %d entries, want 0", len(page))
