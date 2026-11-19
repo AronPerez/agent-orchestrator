@@ -82,9 +82,9 @@ func (q *Queries) ForgetSessionArtifact(ctx context.Context, arg ForgetSessionAr
 
 const insertSessionArtifact = `-- name: InsertSessionArtifact :exec
 INSERT INTO session_artifacts (
-    id, session_id, path, registered_at, file_dev, file_ino, file_birth, file_generation, file_mtime, previous_paths, created_at
+    id, session_id, path, role, registered_at, file_dev, file_ino, file_birth, file_generation, file_mtime, previous_paths, created_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)
 ON CONFLICT (session_id, path) DO NOTHING
 `
 
@@ -92,6 +92,7 @@ type InsertSessionArtifactParams struct {
 	ID             string
 	SessionID      domain.SessionID
 	Path           string
+	Role           string
 	RegisteredAt   sql.NullTime
 	FileDev        int64
 	FileIno        int64
@@ -106,6 +107,7 @@ func (q *Queries) InsertSessionArtifact(ctx context.Context, arg InsertSessionAr
 		arg.ID,
 		arg.SessionID,
 		arg.Path,
+		arg.Role,
 		arg.RegisteredAt,
 		arg.FileDev,
 		arg.FileIno,
@@ -147,7 +149,7 @@ func (q *Queries) ListRegisteredSessionArtifactPaths(ctx context.Context, sessio
 }
 
 const listSessionArtifacts = `-- name: ListSessionArtifacts :many
-SELECT a.id, a.session_id, a.path, a.registered_at, a.file_dev, a.file_ino, a.file_birth, a.file_generation, a.file_mtime, a.previous_paths, a.created_at,
+SELECT a.id, a.session_id, a.path, a.registered_at, a.file_dev, a.file_ino, a.file_birth, a.file_generation, a.file_mtime, a.previous_paths, a.created_at, a.role,
     CAST(EXISTS (
         SELECT 1 FROM session_artifact_versions AS v
         WHERE v.session_id = a.session_id AND v.path = a.path
@@ -185,6 +187,7 @@ func (q *Queries) ListSessionArtifacts(ctx context.Context, sessionID domain.Ses
 			&i.SessionArtifact.FileMtime,
 			&i.SessionArtifact.PreviousPaths,
 			&i.SessionArtifact.CreatedAt,
+			&i.SessionArtifact.Role,
 			&i.HasVersions,
 		); err != nil {
 			return nil, err
@@ -201,7 +204,7 @@ func (q *Queries) ListSessionArtifacts(ctx context.Context, sessionID domain.Ses
 }
 
 const listSessionArtifactsForSessions = `-- name: ListSessionArtifactsForSessions :many
-SELECT a.id, a.session_id, a.path, a.registered_at, a.file_dev, a.file_ino, a.file_birth, a.file_generation, a.file_mtime, a.previous_paths, a.created_at,
+SELECT a.id, a.session_id, a.path, a.registered_at, a.file_dev, a.file_ino, a.file_birth, a.file_generation, a.file_mtime, a.previous_paths, a.created_at, a.role,
     CAST(EXISTS (
         SELECT 1 FROM session_artifact_versions AS v
         WHERE v.session_id = a.session_id AND v.path = a.path
@@ -237,6 +240,7 @@ func (q *Queries) ListSessionArtifactsForSessions(ctx context.Context, jsonEach 
 			&i.SessionArtifact.FileMtime,
 			&i.SessionArtifact.PreviousPaths,
 			&i.SessionArtifact.CreatedAt,
+			&i.SessionArtifact.Role,
 			&i.HasVersions,
 		); err != nil {
 			return nil, err
@@ -310,13 +314,15 @@ func (q *Queries) MoveSessionArtifactVersions(ctx context.Context, arg MoveSessi
 const registerSessionArtifact = `-- name: RegisterSessionArtifact :exec
 UPDATE session_artifacts
 SET registered_at = COALESCE(registered_at, ?1),
-    file_dev = ?2, file_ino = ?3, file_birth = ?4,
-    file_generation = ?5, file_mtime = ?6
-WHERE session_id = ?7 AND path = ?8
+    role = CASE WHEN role = '' THEN ?2 ELSE role END,
+    file_dev = ?3, file_ino = ?4, file_birth = ?5,
+    file_generation = ?6, file_mtime = ?7
+WHERE session_id = ?8 AND path = ?9
 `
 
 type RegisterSessionArtifactParams struct {
 	RegisteredAt   sql.NullTime
+	Role           string
 	FileDev        int64
 	FileIno        int64
 	FileBirth      int64
@@ -329,6 +335,7 @@ type RegisterSessionArtifactParams struct {
 func (q *Queries) RegisterSessionArtifact(ctx context.Context, arg RegisterSessionArtifactParams) error {
 	_, err := q.db.ExecContext(ctx, registerSessionArtifact,
 		arg.RegisteredAt,
+		arg.Role,
 		arg.FileDev,
 		arg.FileIno,
 		arg.FileBirth,

@@ -86,6 +86,27 @@ const (
 	SessionOutputPRAndArtifact SessionOutputType = "pr_artifact"
 )
 
+// PlanFirstState is the durable state of a worker's opt-in plan approval gate.
+// Empty means the session was not spawned with the gate.
+type PlanFirstState string
+
+// PlanFirstPending, PlanFirstApproved, and PlanFirstDeclined are the durable
+// outcomes that keep or release automatic work for a gated session.
+const (
+	PlanFirstPending  PlanFirstState = "pending"
+	PlanFirstApproved PlanFirstState = "approved"
+	PlanFirstDeclined PlanFirstState = "declined"
+)
+
+// Enabled reports whether this session was spawned with the plan-first gate.
+func (s PlanFirstState) Enabled() bool { return s != "" }
+
+// BlocksAutomation reports whether automatic implementation nudges must wait.
+// Unknown non-empty values fail closed instead of bypassing the gate.
+func (s PlanFirstState) BlocksAutomation() bool {
+	return s != "" && s != PlanFirstApproved
+}
+
 // RequestedOutput is the deliverable a spawn asks for. Empty is the ordinary
 // task flow; it does not change derived status or the Kanban column.
 type RequestedOutput string
@@ -139,6 +160,16 @@ const (
 	SessionArtifactGeneric  SessionArtifactKind = "file"
 )
 
+// SessionArtifactRole distinguishes internal workflow evidence from task
+// deliverables without coupling that identity to a filename.
+type SessionArtifactRole string
+
+const (
+	// SessionArtifactRolePlanApproval is the plan submitted to the human by a
+	// plan-first worker. The role stays with the artifact when it is renamed.
+	SessionArtifactRolePlanApproval SessionArtifactRole = "plan_approval"
+)
+
 // MaxArtifactRegistrationPaths bounds how many paths one ao artifact add sends.
 const MaxArtifactRegistrationPaths = 100
 
@@ -150,6 +181,7 @@ type SessionArtifactFile struct {
 	Path      string              `json:"path"`
 	Name      string              `json:"name"`
 	Kind      SessionArtifactKind `json:"kind" enum:"html,markdown,file"`
+	Role      SessionArtifactRole `json:"-"`
 	Size      int64               `json:"size"`
 	UpdatedAt time.Time           `json:"updatedAt"`
 	ShareURL  string              `json:"shareUrl,omitempty"`
@@ -188,12 +220,18 @@ type FileIdentity struct {
 type SessionArtifactRegistration struct {
 	Path string
 	File FileIdentity
+	Role SessionArtifactRole
 }
 
 // SameFile reports whether f and other name the same file, and both are
-// complete enough to tell.
+// complete enough to tell. Birth time or an inode generation protects against
+// inode reuse; where neither is available, device/inode plus nanosecond
+// modification time is the conservative rename fallback.
 func (f FileIdentity) SameFile(other FileIdentity) bool {
-	return f.Ino != 0 && f.Birth != 0 && f == other
+	if f.Ino == 0 || f != other {
+		return false
+	}
+	return f.Birth != 0 || f.Generation != 0 || (f.Dev != 0 && f.ModTime != 0)
 }
 
 // SessionArtifactRecord is the stored identity of one tracked file or bundle
@@ -203,6 +241,7 @@ type SessionArtifactRecord struct {
 	ID            string
 	SessionID     SessionID
 	Path          string
+	Role          SessionArtifactRole
 	RegisteredAt  *time.Time
 	File          FileIdentity
 	PreviousPaths []string
@@ -490,6 +529,7 @@ type SessionRecord struct {
 	TerminateOnPRMerge bool              `json:"terminateOnPrMerge"`
 	AutoInjectReview   bool              `json:"autoInjectReview"`
 	AutoInjectCI       bool              `json:"autoInjectCI"`
+	PlanFirstState     PlanFirstState    `json:"-"`
 	OutputType         SessionOutputType `json:"outputType" enum:"none,pr,artifact,pr_artifact"`
 	// RequestedOutput is the deliverable requested at spawn. It is fixed after
 	// insertion so restore and agent switching rebuild the same worker prompt.

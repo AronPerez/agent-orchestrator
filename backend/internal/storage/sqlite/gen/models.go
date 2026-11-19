@@ -442,6 +442,7 @@ type ConversationTurn struct {
 	BatchDeliveryKind     string
 	BatchDeliverySteerID  string
 	ArtifactsJson         string
+	ProviderDeliveryState string
 }
 
 type Cue struct {
@@ -879,6 +880,7 @@ type Session struct {
 	ContractStallEscalatedAt         sql.NullTime
 	ContractTimeboxPromptedAt        sql.NullTime
 	ParentHostID                     string
+	PlanFirstState                   string
 }
 
 type SessionAgentAccount struct {
@@ -900,6 +902,7 @@ type SessionArtifact struct {
 	FileMtime      int64
 	PreviousPaths  string
 	CreatedAt      time.Time
+	Role           string
 }
 
 type SessionArtifactVersion struct {

@@ -59,6 +59,49 @@ func TestSessionCreateAllowsFakeHarness(t *testing.T) {
 	}
 }
 
+func TestSessionPlanFirstStateRoundTripsAndTransitionsNarrowly(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec := sampleRecord("mer")
+	rec.PlanFirstState = domain.PlanFirstPending
+	created, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.PlanFirstState != domain.PlanFirstPending {
+		t.Fatalf("created state = %q", created.PlanFirstState)
+	}
+	if updated, err := s.SetSessionPlanFirstState(ctx, created.ID, domain.PlanFirstApproved); err != nil || !updated {
+		t.Fatalf("transition: updated=%v err=%v", updated, err)
+	}
+	got, ok, err := s.GetSession(ctx, created.ID)
+	if err != nil || !ok || got.PlanFirstState != domain.PlanFirstApproved {
+		t.Fatalf("persisted state=%q ok=%v err=%v", got.PlanFirstState, ok, err)
+	}
+}
+
+func TestPromoteTaskPreparationPersistsPlanFirstState(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	prepared := sampleRecord("mer")
+	prepared.IsTaskPreparation = true
+	prepared, err := s.CreateSession(ctx, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := sampleRecord("mer")
+	visible.PlanFirstState = domain.PlanFirstPending
+	if promoted, err := s.PromoteTaskPreparation(ctx, prepared.ID, visible); err != nil || !promoted {
+		t.Fatalf("promote: promoted=%v err=%v", promoted, err)
+	}
+	got, ok, err := s.GetSession(ctx, prepared.ID)
+	if err != nil || !ok || got.PlanFirstState != domain.PlanFirstPending {
+		t.Fatalf("promoted state=%q ok=%v err=%v", got.PlanFirstState, ok, err)
+	}
+}
+
 func TestSubagentFactsPersistWithActivityProjection(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -2560,6 +2603,37 @@ func TestSessionArtifactsAreReadPerSessionAndGoWithTheSession(t *testing.T) {
 	got, err = st.ListSessionArtifactsForSessions(ctx, []domain.SessionID{one.ID})
 	if err != nil || len(got) != 0 {
 		t.Fatalf("rows after deleting the session = %v, %v", got, err)
+	}
+}
+
+func TestSessionArtifactPlanApprovalRoleSurvivesRenameAndReregistration(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, st, "p1")
+	sess, err := st.CreateSession(ctx, sampleRecord("p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	registration := domain.SessionArtifactRegistration{Path: "plan.md", Role: domain.SessionArtifactRolePlanApproval}
+	if _, _, err := st.AddSessionArtifacts(ctx, sess.ID, []domain.SessionArtifactRegistration{registration}, now); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.ListSessionArtifacts(ctx, sess.ID)
+	if err != nil || len(rows) != 1 || rows[0].Role != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("registered rows=%+v err=%v", rows, err)
+	}
+	if _, err := st.ApplySessionArtifactChanges(ctx, sess.ID, domain.SessionArtifactChanges{Move: []domain.SessionArtifactMove{{
+		ID: rows[0].ID, From: "plan.md", To: "project-plan.md", PreviousPaths: []string{"plan.md"},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.AddSessionArtifacts(ctx, sess.ID, []domain.SessionArtifactRegistration{{Path: "project-plan.md"}}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = st.ListSessionArtifacts(ctx, sess.ID)
+	if err != nil || len(rows) != 1 || rows[0].Path != "project-plan.md" || rows[0].Role != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("renamed rows=%+v err=%v", rows, err)
 	}
 }
 

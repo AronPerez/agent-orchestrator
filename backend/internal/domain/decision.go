@@ -27,6 +27,9 @@ const (
 	MaxDecisionReference   = 64
 	MaxDecisionNote        = 1000
 	MaxDecisionOutcome     = 300
+	// PlanFirstDecisionReference identifies the one ledger call that can release
+	// a session's plan-first implementation gate.
+	PlanFirstDecisionReference = "plan-first"
 )
 
 // DecisionEntryKind identifies one fact appended to the decision ledger.
@@ -166,10 +169,14 @@ type DecisionDismissedPayload struct {
 	Note string `json:"note,omitempty"`
 }
 
-// DecisionDeliveredSent and DecisionDeliveredNoSession describe delivery attempts.
+// DecisionDeliveredSent and its peers describe delivery attempts.
 const (
 	DecisionDeliveredSent      = "sent"
 	DecisionDeliveredNoSession = "no_session"
+	// DecisionDeliveredSuperseded closes an undelivered historical answer after
+	// a newer standing answer replaces it. It is ledger history, not a public
+	// delivery state for the current answer.
+	DecisionDeliveredSuperseded = "superseded"
 )
 
 // DecisionDeliveredPayload records delivery of an answer to a session.

@@ -2036,6 +2036,51 @@ func TestSessionsAPI_SpawnPassesModelToService(t *testing.T) {
 	}
 }
 
+func TestSessionsAPI_SpawnPassesPlanFirstToService(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions",
+		`{"projectId":"ao","kind":"worker","harness":"codex","prompt":"fix","planFirst":true}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST session = %d, want 201; body=%s", status, body)
+	}
+	if !svc.lastSpawn.PlanFirst {
+		t.Fatal("service PlanFirst = false, want true")
+	}
+}
+
+func TestSessionsAPI_SpawnRejectsPlanFirstForUnsupportedSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "orchestrator", body: `{"projectId":"ao","kind":"orchestrator","harness":"codex","planFirst":true}`},
+		{name: "standalone", body: `{"kind":"worker","harness":"codex","planFirst":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newFakeSessionService()
+			srv := newSessionTestServer(t, svc)
+			body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions", tc.body)
+			assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_PLAN_FIRST")
+			if svc.lastSpawn.PlanFirst {
+				t.Fatalf("rejected request reached the service: %#v", svc.lastSpawn)
+			}
+		})
+	}
+}
+
+func TestSessionsAPI_SpawnRejectsPlanFirstWithoutATask(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions",
+		`{"projectId":"ao","kind":"worker","harness":"codex","planFirst":true}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_PLAN_FIRST")
+	if svc.lastSpawn.PlanFirst {
+		t.Fatalf("rejected request reached the service: %#v", svc.lastSpawn)
+	}
+}
+
 func TestSessionsAPI_SpawnAndDelegatePassWorkerContract(t *testing.T) {
 	svc := newFakeSessionService()
 	srv := newSessionTestServer(t, svc)

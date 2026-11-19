@@ -4,7 +4,7 @@ import "testing"
 
 const (
 	decisionNotificationsMigration int64 = 20261118232626352
-	beforeDecisionNotifications    int64 = 20261118045922851
+	beforeDecisionNotifications    int64 = 20261118195032454
 )
 
 func TestMigrationDecisionNotificationsRoundTrip(t *testing.T) {
