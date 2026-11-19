@@ -20,6 +20,7 @@ ao decision retire <id> [--undo]
 ao decision kinds [--project <id>] [--json]
 ao decision observe [--project <id>] [--json]
 ao decision decide --kind <id> --what <what-you-decided> --why <why> --undo <how-to-undo-it> [--verify <how-to-tell-it-worked>] [--link "<label>=<url>"]... [--ref <id>] [--json]
+ao decision carried-out <id>
 ao decision overrule <id> --note <what-to-do-instead>
 ao decision ls --decided
 ```
@@ -103,8 +104,12 @@ ao decision decide \
   --verify "One open pull request remains for the ticket."
 ```
 
-Then carry it out. If you end up not carrying it out, close the record with
-`ao decision outcome <id> --text "Not carried out: <why>"`.
+Then carry it out, and confirm straight away with `ao decision carried-out
+<id>`. Until you confirm, the record says only that you meant to, and an
+overrule tells whoever undoes it to check first. If you end up not carrying it
+out, close the record with `ao decision outcome <id> --text "Not carried out:
+<why>"`. After a restart, `ao decision ls` marks your decisions "Not confirmed
+carried out": check whether each happened, then confirm or close it.
 
 `--undo` is required: write it so the human could follow it without you.
 `--verify` is optional. `other` is always reserved. If the project left

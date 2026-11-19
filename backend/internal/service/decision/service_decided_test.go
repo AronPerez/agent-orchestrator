@@ -200,3 +200,37 @@ func TestTheOwnerCanCloseADecisionItDidNotCarryOut(t *testing.T) {
 		t.Fatalf("done = %+v", done)
 	}
 }
+
+func TestTheOwnerConfirmsADecisionWasCarriedOut(t *testing.T) {
+	fixture := newDecisionService(t)
+	setShopAutonomy(t, fixture, domain.AutonomyConfig{Mode: domain.AutonomyOn})
+	ctx := context.Background()
+	call, err := fixture.service.Decide(ctx, Actor{Session: fixture.w1}, validDecideInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.CarriedOut(ctx, Actor{Session: fixture.w2}, call.ID)
+	assertAPICode(t, err, "DECISION_NOT_OWNER")
+	_, err = fixture.service.CarriedOut(ctx, Actor{Surface: domain.RequestSurfaceDesktop}, call.ID)
+	assertAPICode(t, err, "DECISION_NOT_OWNER")
+	done, err := fixture.service.CarriedOut(ctx, Actor{Session: fixture.w1}, call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done.Decided.CarriedOut || done.State != domain.DecisionStateDecided {
+		t.Fatalf("done = %+v", done.Decided)
+	}
+	before := len(*fixture.appended)
+	if _, err := fixture.service.CarriedOut(ctx, Actor{Session: fixture.w1}, call.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(*fixture.appended) != before {
+		t.Fatal("a repeated confirmation must not append another entry")
+	}
+	question, err := fixture.service.Raise(ctx, Actor{Session: fixture.w1}, validRaiseInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.CarriedOut(ctx, Actor{Session: fixture.w1}, question.ID)
+	assertAPICode(t, err, "DECISION_NOT_DECIDED")
+}

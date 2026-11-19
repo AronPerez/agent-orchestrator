@@ -87,9 +87,11 @@ type decisionOverruleAPIRequest struct {
 }
 
 type decisionDecidedAPI struct {
-	Undo          string `json:"undo"`
-	Verify        string `json:"verify,omitempty"`
-	OutsidePolicy string `json:"outsidePolicy,omitempty"`
+	Undo          string     `json:"undo"`
+	Verify        string     `json:"verify,omitempty"`
+	OutsidePolicy string     `json:"outsidePolicy,omitempty"`
+	CarriedOut    bool       `json:"carriedOut"`
+	CarriedOutAt  *time.Time `json:"carriedOutAt,omitempty"`
 }
 
 type decisionCallAPI struct {
@@ -212,6 +214,7 @@ func newDecisionCommand(ctx *commandContext) *cobra.Command {
 		newDecisionObserveCommand(ctx),
 		newDecisionDecideCommand(ctx),
 		newDecisionOverruleCommand(ctx),
+		newDecisionCarriedOutCommand(ctx),
 	)
 	return cmd
 }
@@ -633,7 +636,7 @@ func newDecisionDecideCommand(ctx *commandContext) *cobra.Command {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), note)
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Now carry it out. If you do not, close it: ao decision outcome %s --text \"Not carried out: <why>\"\n", response.ID)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Now carry it out, then confirm: ao decision carried-out %s\nIf you do not carry it out, close it: ao decision outcome %s --text \"Not carried out: <why>\"\n", response.ID, response.ID)
 			return err
 		},
 	}
@@ -665,6 +668,29 @@ func outsidePolicyNote(id string, decided *decisionDecidedAPI) string {
 		return ""
 	}
 	return fmt.Sprintf("Kept, but %s. Do not carry it out: close this record with ao decision outcome %s --text \"Not carried out: policy changed\" and raise a call instead. If you already acted, tell the person.", why, id)
+}
+
+func newDecisionCarriedOutCommand(ctx *commandContext) *cobra.Command {
+	return &cobra.Command{
+		Use:   "carried-out <id>",
+		Short: "Confirm this session carried out a decision it recorded",
+		Args:  decisionIDArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := ctx.refuseRemoteDecisionSession("ao decision carried-out"); err != nil {
+				return err
+			}
+			id, err := decisionIDArg(args[0])
+			if err != nil {
+				return err
+			}
+			var response decisionCallAPI
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "carried-out"), struct{}{}, &response); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Confirmed %s as carried out\n", response.ID)
+			return err
+		},
+	}
 }
 
 func newDecisionOverruleCommand(ctx *commandContext) *cobra.Command {
@@ -883,6 +909,11 @@ func writeDecisionCall(w io.Writer, call decisionCallAPI, outcomeOwed bool) erro
 			return err
 		}
 	}
+	if call.Decided != nil && !call.Decided.CarriedOut && (call.State == "decided" || call.State == "in_progress") {
+		if _, err := fmt.Fprintf(w, "  Not confirmed carried out: ao decision carried-out %s\n", call.ID); err != nil {
+			return err
+		}
+	}
 	if outcomeOwed && call.State == "in_progress" {
 		_, err := fmt.Fprintf(w, "  Outcome owed: ao decision outcome %s --for-answer %s --text \"<what happened>\"\n", call.ID, call.StandingEntryID)
 		return err
@@ -949,7 +980,8 @@ func writeDecisionDetail(w io.Writer, detail decisionDetailAPIResponse) error {
 		lines = append(lines, fmt.Sprintf("Would have decided: %d. %s — %s (undo: %s)", prediction.Option, prediction.Label, prediction.Why, prediction.Undo))
 	}
 	if call.Decided != nil {
-		lines = append(lines, "Undo: "+call.Decided.Undo, "Verify: "+call.Decided.Verify, "Outside policy: "+call.Decided.OutsidePolicy)
+		lines = append(lines, "Undo: "+call.Decided.Undo, "Verify: "+call.Decided.Verify, "Outside policy: "+call.Decided.OutsidePolicy,
+			fmt.Sprintf("Carried out: %t", call.Decided.CarriedOut), "Carried out at: "+formatDecisionTime(call.Decided.CarriedOutAt))
 	}
 	if call.PredictionAgreed != nil {
 		if *call.PredictionAgreed {

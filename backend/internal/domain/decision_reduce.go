@@ -156,6 +156,15 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Note = payload.Note
 			call.AnsweredAt = entry.WrittenAt
 			call.AnswerSurface = entry.AuthorSurface
+		case DecisionKindCarriedOut:
+			var payload DecisionCarriedOutPayload
+			if call.Decided == nil || json.Unmarshal(entry.Payload, &payload) != nil || payload.ForEntry != call.Decided.EntryID {
+				continue
+			}
+			if !call.Decided.CarriedOut {
+				call.Decided.CarriedOut = true
+				call.Decided.CarriedOutAt = entry.WrittenAt
+			}
 		case DecisionKindAnswered:
 			var payload DecisionAnsweredPayload
 			if json.Unmarshal(entry.Payload, &payload) != nil {

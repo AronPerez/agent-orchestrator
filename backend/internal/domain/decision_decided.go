@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -42,6 +43,11 @@ type DecisionDecidedPayload struct {
 	OutsidePolicy string `json:"outsidePolicy,omitempty"`
 }
 
+// DecisionCarriedOutPayload confirms the decided entry it names was carried out.
+type DecisionCarriedOutPayload struct {
+	ForEntry string `json:"forEntry"`
+}
+
 // DecisionOverruledPayload records why the person overruled a decided call.
 type DecisionOverruledPayload struct {
 	Note string `json:"note"`
@@ -56,6 +62,9 @@ type DecisionDecidedDetail struct {
 	Undo          string `json:"undo"`
 	Verify        string `json:"verify,omitempty"`
 	OutsidePolicy string `json:"outsidePolicy,omitempty"`
+	// CarriedOut is true once the owning session confirmed it acted.
+	CarriedOut   bool      `json:"carriedOut,omitempty"`
+	CarriedOutAt time.Time `json:"carriedOutAt"`
 }
 
 // raisedView presents a decided call through the raised payload, so lists,

@@ -126,3 +126,26 @@ func TestReduceOutcomeClosesAStandingDecidedCall(t *testing.T) {
 		t.Fatalf("call = %+v", call)
 	}
 }
+
+func TestReduceCarriedOutConfirmsADecidedCall(t *testing.T) {
+	decided := decisionEntry(t, "dent_d", 1, DecisionKindDecided, validDecided())
+	call, _ := ReduceDecisionCall([]DecisionEntry{decided})
+	if call.Decided.CarriedOut {
+		t.Fatal("a recorded decision is not carried out until its session says so")
+	}
+	carried := decisionEntry(t, "dent_c", 2, DecisionKindCarriedOut, DecisionCarriedOutPayload{ForEntry: "dent_d"})
+	call, _ = ReduceDecisionCall([]DecisionEntry{carried, decided})
+	if !call.Decided.CarriedOut || call.State != DecisionStateDecided || call.Decided.CarriedOutAt.IsZero() {
+		t.Fatalf("carried out call = %+v decided = %+v", call, call.Decided)
+	}
+	stray := decisionEntry(t, "dent_s", 3, DecisionKindCarriedOut, DecisionCarriedOutPayload{ForEntry: "dent_other"})
+	call, _ = ReduceDecisionCall([]DecisionEntry{decided, stray})
+	if call.Decided.CarriedOut {
+		t.Fatal("a confirmation naming another entry must be ignored")
+	}
+	raised := decisionEntry(t, "dent_r", 1, DecisionKindRaised, validDecisionRaise())
+	call, _ = ReduceDecisionCall([]DecisionEntry{raised, decisionEntry(t, "dent_c", 2, DecisionKindCarriedOut, DecisionCarriedOutPayload{ForEntry: "dent_r"})})
+	if call.Decided != nil || call.State != DecisionStateNeedsYou {
+		t.Fatalf("a confirmation on an ordinary call must be ignored: %+v", call)
+	}
+}

@@ -168,6 +168,10 @@ type DecisionDecidedResponse struct {
 	// OutsidePolicy is set when the project's policy did not allow this
 	// decision when it was recorded. The record is kept so it can be overruled.
 	OutsidePolicy string `json:"outsidePolicy,omitempty" enum:"autonomy_not_on,kind_reserved"`
+	// CarriedOut is true once the owning session confirmed it acted. Until
+	// then the decision is recorded intent that may not have happened.
+	CarriedOut   bool       `json:"carriedOut"`
+	CarriedOutAt *time.Time `json:"carriedOutAt,omitempty"`
 }
 
 // DecideRequest records a decision the calling session made on the person's

@@ -124,7 +124,7 @@ func overruledMessageCall() domain.DecisionCall {
 	return domain.DecisionCall{
 		ID: "dec_9", State: domain.DecisionStateInProgress,
 		Raised:          domain.DecisionRaisedPayload{Title: "Closed the duplicate pull request #12", OwnerSessionName: "PR worker"},
-		Decided:         &domain.DecisionDecidedDetail{Undo: "Reopen #12; its branch is kept."},
+		Decided:         &domain.DecisionDecidedDetail{Undo: "Reopen #12; its branch is kept.", CarriedOut: true},
 		StandingEntryID: "dent_overrule", StandingKind: domain.DecisionKindOverruled, Note: "Keep both open.",
 	}
 }
@@ -146,5 +146,17 @@ func TestDeliveryMessageForAnOverrule(t *testing.T) {
 		if !strings.Contains(fallback, part) {
 			t.Errorf("fallback missing %q:\n%s", part, fallback)
 		}
+	}
+}
+
+func TestDeliveryMessageForAnOverruleOfAnUnconfirmedDecision(t *testing.T) {
+	call := overruledMessageCall()
+	call.Decided.CarriedOut = false
+	got := DeliveryMessage(call, false)
+	if !strings.Contains(got, "It was never confirmed as carried out. Check whether it happened before you undo anything.") {
+		t.Fatalf("message = %s", got)
+	}
+	if strings.Contains(DeliveryMessage(overruledMessageCall(), false), "never confirmed") {
+		t.Fatal("a confirmed decision needs no warning")
 	}
 }

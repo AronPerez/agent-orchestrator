@@ -88,6 +88,9 @@ func overruleMessage(call domain.DecisionCall, fallback bool) string {
 	if call.Decided != nil && call.Decided.Undo != "" {
 		fmt.Fprintf(&message, "Undo it: %s\n", call.Decided.Undo)
 	}
+	if call.Decided != nil && !call.Decided.CarriedOut {
+		fmt.Fprintln(&message, "It was never confirmed as carried out. Check whether it happened before you undo anything.")
+	}
 	if call.Note != "" {
 		fmt.Fprintf(&message, "Note: %s\n", call.Note)
 	}

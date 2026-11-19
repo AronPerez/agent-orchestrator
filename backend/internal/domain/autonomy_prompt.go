@@ -41,7 +41,9 @@ func onInstructions(c AutonomyConfig) string {
 		"`ao decision decide --kind <id> --what <what you decided> --why <why> --undo <how to undo it>`, adding `--verify <how to tell it worked>` when there is a way to check. " +
 		"Recording first means the human can always find what you did, even if you stop before you finish. Write the undo note so the human could follow it without you. " +
 		"The human sees it under Decided for you, or with `ao decision ls --decided`.\n" +
-		"- Then carry it out. If you end up not carrying it out, close the record: `ao decision outcome <id> --text \"Not carried out: <why>\"`.\n" +
+		"- Then carry it out, and confirm straight away with `ao decision carried-out <id>`. Until you confirm, the record says only that you meant to. " +
+		"If you end up not carrying it out, close the record instead: `ao decision outcome <id> --text \"Not carried out: <why>\"`. " +
+		"After a restart, `ao decision ls` marks your decisions not confirmed carried out: check whether each happened, then confirm or close it.\n" +
 		"- If the human overrules a decision, a message arrives that begins \"I overruled the decision you made for me\". Undo it as its note says, then record what happened with the `ao decision outcome` command it gives.\n" +
 		"- When you are unsure which kind applies, or whether it can be undone, raise a call instead. `ao decision kinds` lists the kinds again."
 }

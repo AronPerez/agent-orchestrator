@@ -67,6 +67,10 @@ const (
 	// DecisionKindOverruled records the person overruling a decided call. It
 	// stands like an answer and is delivered to the owning session.
 	DecisionKindOverruled DecisionEntryKind = "overruled"
+	// DecisionKindCarriedOut records the owning session confirming it did
+	// what a decided entry recorded. Sessions record before acting, so a
+	// decision without it is an intent that may not have happened.
+	DecisionKindCarriedOut DecisionEntryKind = "carried_out"
 )
 
 // DecisionAuthorKind identifies who wrote a ledger entry.

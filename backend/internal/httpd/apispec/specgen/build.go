@@ -1118,6 +1118,11 @@ func decisionOperations() []operation {
 			resps: append([]respUnit{{http.StatusCreated, controllers.DecisionCallResponse{}}}, actionErrors...),
 		},
 		{
+			method: http.MethodPost, path: "/api/v1/decisions/{id}/carried-out", id: "carriedOutDecision", tag: "decisions",
+			summary: "Confirm a decision made on the person's behalf was carried out", pathParams: []any{controllers.DecisionIDParam{}},
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/decisions/{id}/overrule", id: "overruleDecision", tag: "decisions",
 			summary: "Overrule a decision made on the person's behalf", pathParams: []any{controllers.DecisionIDParam{}},
 			reqBody: controllers.OverruleDecisionRequest{},

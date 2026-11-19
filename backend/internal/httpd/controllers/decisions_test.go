@@ -49,6 +49,13 @@ func (f *fakeDecisionService) Decide(_ context.Context, actor decisionsvc.Actor,
 	return decidedSampleCall(), nil
 }
 
+func (f *fakeDecisionService) CarriedOut(_ context.Context, actor decisionsvc.Actor, id string) (domain.DecisionCall, error) {
+	f.actor, f.id, f.action = actor, id, "carried-out"
+	call := decidedSampleCall()
+	call.Decided.CarriedOut = true
+	return call, f.err
+}
+
 func (f *fakeDecisionService) Overrule(_ context.Context, actor decisionsvc.Actor, id, note string) (domain.DecisionCall, error) {
 	f.actor, f.id, f.action, f.note = actor, id, "overrule", note
 	return f.actionResult()
@@ -519,5 +526,20 @@ func TestDecisionsAPI_DecideAndOverrule(t *testing.T) {
 	}
 	if body, status := decisionRequest(t, srv, http.MethodGet, "/api/v1/decisions?scope=decided", "", ""); status != http.StatusOK || svc.scope != decisionsvc.ScopeDecided {
 		t.Fatalf("decided scope status=%d body=%s scope=%q", status, body, svc.scope)
+	}
+}
+
+func TestDecisionsAPI_CarriedOut(t *testing.T) {
+	svc := &fakeDecisionService{}
+	body, status := decisionRequest(t, newDecisionServer(t, svc), http.MethodPost, "/api/v1/decisions/dec_2/carried-out", "", "w-1")
+	if status != http.StatusOK || svc.action != "carried-out" || svc.id != "dec_2" || svc.actor.Session != "w-1" {
+		t.Fatalf("status=%d body=%s svc=%+v", status, body, svc)
+	}
+	var got controllers.DecisionCallResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Decided == nil || !got.Decided.CarriedOut {
+		t.Fatalf("decided = %+v", got.Decided)
 	}
 }

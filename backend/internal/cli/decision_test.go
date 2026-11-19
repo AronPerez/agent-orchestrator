@@ -630,7 +630,7 @@ func TestDecisionDecideOverruleAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out != "Recorded dec_2\nao://decisions/dec_2\nNow carry it out. If you do not, close it: ao decision outcome dec_2 --text \"Not carried out: <why>\"\n" {
+	if out != "Recorded dec_2\nao://decisions/dec_2\nNow carry it out, then confirm: ao decision carried-out dec_2\nIf you do not carry it out, close it: ao decision outcome dec_2 --text \"Not carried out: <why>\"\n" {
 		t.Fatalf("decide output=%q", out)
 	}
 	var decide decisionDecideAPIRequest
@@ -654,14 +654,15 @@ func TestDecisionDecideOverruleAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requests[2].uri != "/api/v1/decisions?scope=decided" || !strings.Contains(out, "dec_2  Decided for you  Closed the duplicate pull request #12") {
+	if requests[2].uri != "/api/v1/decisions?scope=decided" || !strings.Contains(out, "dec_2  Decided for you  Closed the duplicate pull request #12") ||
+		!strings.Contains(out, "Not confirmed carried out: ao decision carried-out dec_2") {
 		t.Fatalf("ls --decided uri=%q out=%s", requests[2].uri, out)
 	}
 	out, _, err = executeCLI(t, deps, "decision", "show", "dec_2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Undo: Reopen #12.", "Verify: One open PR remains."} {
+	for _, want := range []string{"Undo: Reopen #12.", "Verify: One open PR remains.", "Carried out: false"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("show output missing %q:\n%s", want, out)
 		}
@@ -695,5 +696,22 @@ func TestDecisionDecideWarnsWhenOutsidePolicy(t *testing.T) {
 	}
 	if !strings.Contains(out, "Recorded dec_3") || !strings.Contains(out, "this kind of decision is now reserved for the person. Do not carry it out") || strings.Contains(out, "Now carry it out") {
 		t.Fatalf("out = %q", out)
+	}
+}
+
+func TestDecisionCarriedOut(t *testing.T) {
+	var uri, method string
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uri, method = r.URL.RequestURI(), r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"dec_2","link":"ao://decisions/dec_2","state":"decided","decided":{"undo":"u","carriedOut":true}}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "w-1")
+	out, _, err := executeCLI(t, deps, "decision", "carried-out", "ao://decisions/dec_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || uri != "/api/v1/decisions/dec_2/carried-out" || out != "Confirmed dec_2 as carried out\n" {
+		t.Fatalf("method=%s uri=%s out=%q", method, uri, out)
 	}
 }

@@ -121,3 +121,29 @@ func (s *Service) closeStandingDecision(ctx context.Context, actor Actor, call d
 	}
 	return s.append(ctx, actor, call.ID, domain.DecisionKindOutcome, payload)
 }
+
+// CarriedOut records the owning session confirming it did what it decided.
+// Sessions record a decision before acting, so until this is recorded the
+// decision is an intent that may not have happened. Confirming again is a
+// no-op. It is accepted while the decision stands or after an overrule, so
+// an undo always knows whether there is anything to undo.
+func (s *Service) CarriedOut(ctx context.Context, actor Actor, callID string) (domain.DecisionCall, error) {
+	call, unlock, err := s.lockedCall(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	defer unlock()
+	if call.Decided == nil {
+		return domain.DecisionCall{}, apierr.Conflict("DECISION_NOT_DECIDED", "Only a decision made for the person can be confirmed as carried out.", nil)
+	}
+	if !s.owns(call, actor.Session) {
+		return domain.DecisionCall{}, notOwner()
+	}
+	if call.State != domain.DecisionStateDecided && call.State != domain.DecisionStateInProgress {
+		return domain.DecisionCall{}, wrongState(call, `This decision is closed. Its state is "%s".`)
+	}
+	if call.Decided.CarriedOut {
+		return call, nil
+	}
+	return s.append(ctx, actor, call.ID, domain.DecisionKindCarriedOut, domain.DecisionCarriedOutPayload{ForEntry: call.Decided.EntryID})
+}
