@@ -88,6 +88,23 @@ func TestValidateDecisionRaiseNamesTheBrokenRule(t *testing.T) {
 		}},
 		{name: "link scheme", rule: "link_invalid", edit: func(p *DecisionRaisedPayload) { p.Links = []DecisionLink{{Label: "x", URL: "file:///etc/passwd"}} }},
 		{name: "reference too long", rule: "reference_too_long", edit: func(p *DecisionRaisedPayload) { p.Reference = strings.Repeat("x", 65) }},
+		{name: "urgency invalid", rule: "urgency_invalid", edit: func(p *DecisionRaisedPayload) { p.Urgency = "soon" }},
+		{name: "kind unknown", rule: "kind_unknown", edit: func(p *DecisionRaisedPayload) { p.Kind = "lunch" }},
+		{name: "prediction option range", rule: "prediction_option_range", edit: func(p *DecisionRaisedPayload) {
+			p.Prediction = &DecisionPrediction{Option: 3, Why: "w", Undo: "u"}
+		}},
+		{name: "prediction why required", rule: "prediction_why_required", edit: func(p *DecisionRaisedPayload) {
+			p.Prediction = &DecisionPrediction{Option: 1, Why: " ", Undo: "u"}
+		}},
+		{name: "prediction undo required", rule: "prediction_undo_required", edit: func(p *DecisionRaisedPayload) {
+			p.Prediction = &DecisionPrediction{Option: 1, Why: "w", Undo: ""}
+		}},
+		{name: "prediction why too long", rule: "prediction_why_too_long", edit: func(p *DecisionRaisedPayload) {
+			p.Prediction = &DecisionPrediction{Option: 1, Why: strings.Repeat("x", 301), Undo: "u"}
+		}},
+		{name: "prediction undo too long", rule: "prediction_undo_too_long", edit: func(p *DecisionRaisedPayload) {
+			p.Prediction = &DecisionPrediction{Option: 1, Why: "w", Undo: strings.Repeat("x", 301)}
+		}},
 	}
 
 	for _, tc := range tests {
@@ -111,6 +128,29 @@ func TestValidateDecisionRaiseAcceptsTheLimits(t *testing.T) {
 	p.Reference = strings.Repeat("x", 64)
 	if err := ValidateDecisionRaise(p); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateDecisionRaiseAcceptsAutonomyFields(t *testing.T) {
+	p := validDecisionRaise()
+	p.Urgency = DecisionUrgencyBlocking
+	p.Kind = "pr_hygiene"
+	p.Prediction = &DecisionPrediction{Option: 2, Why: strings.Repeat("x", 300), Undo: strings.Repeat("y", 300)}
+	if err := ValidateDecisionRaise(p); err != nil {
+		t.Fatalf("ValidateDecisionRaise() = %v", err)
+	}
+	p.Urgency = DecisionUrgencyCanWait
+	if err := ValidateDecisionRaise(p); err != nil {
+		t.Fatalf("ValidateDecisionRaise(can_wait) = %v", err)
+	}
+}
+
+func TestDecisionEffectiveUrgency(t *testing.T) {
+	if got := (DecisionRaisedPayload{}).EffectiveUrgency(); got != DecisionUrgencyCanWait {
+		t.Fatalf("empty urgency = %q, want can_wait", got)
+	}
+	if got := (DecisionRaisedPayload{Urgency: DecisionUrgencyBlocking}).EffectiveUrgency(); got != DecisionUrgencyBlocking {
+		t.Fatalf("blocking urgency = %q", got)
 	}
 }
 

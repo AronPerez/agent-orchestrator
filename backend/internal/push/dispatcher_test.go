@@ -2,10 +2,12 @@ package push
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -709,5 +711,131 @@ func TestDispatcherReceiptAmbiguitySurvivesCapacityEviction(t *testing.T) {
 	}
 	if len(d.pending) != maxPendingReceipts-1 {
 		t.Errorf("pending = %d, want %d unresolved fresh tickets", len(d.pending), maxPendingReceipts-1)
+	}
+}
+
+func decisionRecord(origin string) domain.NotificationRecord {
+	return domain.NotificationRecord{
+		ID: "ntf_dec", Type: domain.NotificationDecisionNeeded,
+		Title: "Decision needed · Shop · Checkout", Body: "Ship the bell badge now?",
+		DecisionCallID: "dec_1", DecisionOriginHostID: origin,
+	}
+}
+
+func TestDecisionMessageIsHostStableWithCollapseKeys(t *testing.T) {
+	a := messageFor(decisionRecord("h_origin"), "ExponentPushToken[a]", "h_origin", "Studio Mac")
+	b := messageFor(decisionRecord("h_origin"), "ExponentPushToken[a]", "h_other", "Laptop")
+	if a.Title != "Decision needed · Shop · Checkout" || a.Body != "Ship the bell badge now?" {
+		t.Fatalf("decision copy = %q / %q", a.Title, a.Body)
+	}
+	if a.Title != b.Title || a.Body != b.Body {
+		t.Fatalf("copy differs across dispatcher hosts: %q vs %q", a.Title, b.Title)
+	}
+	for _, m := range []Message{a, b} {
+		if m.CollapseID != "decision:dec_1" || m.Tag != "decision:dec_1" {
+			t.Fatalf("collapse/tag = %q/%q", m.CollapseID, m.Tag)
+		}
+		if m.Priority != "high" || m.Sound != "default" || m.ChannelID != "default" {
+			t.Fatalf("channel/priority/sound = %+v", m)
+		}
+	}
+	want := map[string]any{
+		"type": "decision_needed", "hostId": "h_other", "notificationId": "ntf_dec",
+		"decisionCallId": "dec_1", "decisionOriginHostId": "h_origin",
+	}
+	if !reflect.DeepEqual(b.Data, want) {
+		t.Fatalf("decision data = %#v, want %#v", b.Data, want)
+	}
+}
+
+func TestExistingMessagesCarryNoCollapseKeys(t *testing.T) {
+	m := messageFor(domain.NotificationRecord{ID: "ntf_1", SessionID: "s", Type: domain.NotificationNeedsInput, Title: "t", Body: "b"},
+		"ExponentPushToken[a]", "h_machine_a", "")
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "collapseId") || strings.Contains(string(raw), `"tag"`) {
+		t.Fatalf("existing message gained collapse keys: %s", raw)
+	}
+	if _, ok := m.Data["sessionId"]; !ok {
+		t.Fatalf("existing message lost its session key: %#v", m.Data)
+	}
+}
+
+func TestDecisionMessageSerializesCollapseAndTag(t *testing.T) {
+	raw, err := json.Marshal(messageFor(decisionRecord("h_origin"), "ExponentPushToken[a]", "h_origin", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"collapseId":"decision:dec_1"`, `"tag":"decision:dec_1"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("message JSON %s missing %s", raw, want)
+		}
+	}
+	for _, leak := range []string{"sessionId", "projectId", "prUrl"} {
+		if strings.Contains(string(raw), leak) {
+			t.Fatalf("decision message carries %s: %s", leak, raw)
+		}
+	}
+}
+
+func TestShouldPushDecisionPolicy(t *testing.T) {
+	session := domain.NotificationRecord{Type: domain.NotificationNeedsInput, SessionID: "s"}
+	malformed := decisionRecord("h_origin")
+	malformed.DecisionCallID = ""
+	for _, tc := range []struct {
+		name string
+		rec  domain.NotificationRecord
+		host string
+		mode DecisionPushMode
+		want bool
+	}{
+		{"existing kinds always", session, "h_any", DecisionPushOriginOnly, true},
+		{"origin host, origin-only", decisionRecord("h_origin"), "h_origin", DecisionPushOriginOnly, true},
+		{"other host, origin-only", decisionRecord("h_origin"), "h_other", DecisionPushOriginOnly, false},
+		{"other host, all hosts", decisionRecord("h_origin"), "h_other", DecisionPushAllHostsCollapse, true},
+		{"no call identity", malformed, "h_origin", DecisionPushAllHostsCollapse, false},
+	} {
+		if got := shouldPush(tc.rec, tc.host, tc.mode); got != tc.want {
+			t.Errorf("%s: shouldPush = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func runDispatcherOnce(t *testing.T, hostID string, rec domain.NotificationRecord) *fakeSender {
+	t.Helper()
+	sub := &fakeSubscriber{ch: make(chan domain.NotificationEvent, 1)}
+	store := &fakeDeviceStore{devices: []mobilebridge.PushDevice{{Token: "ExponentPushToken[a]"}}}
+	sender := newFakeSender([]Ticket{{Status: "ok"}})
+	d := NewDispatcher(sub, store, sender, hostID, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		d.Run(ctx)
+		close(done)
+	}()
+	sub.ch <- created(rec)
+	close(sub.ch)
+	<-done
+	return sender
+}
+
+// Two hosts can hold the same call once ledger sync exists. Until physical
+// devices prove collapseId/tag yield one interruption, only the origin pushes.
+func TestDispatcherPushesDecisionOnlyFromItsOrigin(t *testing.T) {
+	origin := runDispatcherOnce(t, "h_origin", decisionRecord("h_origin"))
+	origin.mu.Lock()
+	sentFromOrigin := len(origin.gotMsgs)
+	origin.mu.Unlock()
+	if sentFromOrigin != 1 {
+		t.Fatalf("origin host sent %d decision pushes, want 1", sentFromOrigin)
+	}
+	other := runDispatcherOnce(t, "h_other", decisionRecord("h_origin"))
+	other.mu.Lock()
+	defer other.mu.Unlock()
+	if other.sent {
+		t.Fatal("a non-origin host pushed a decision call")
 	}
 }

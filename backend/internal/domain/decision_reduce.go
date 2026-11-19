@@ -244,6 +244,16 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 	return call, true
 }
 
+// PredictionAgreed compares the session's prediction with the person's
+// standing answer. known is false until there is both a prediction and an
+// answer; "something else" counts as a different decision.
+func (c DecisionCall) PredictionAgreed() (agreed, known bool) {
+	if c.Raised.Prediction == nil || c.StandingKind != DecisionKindAnswered {
+		return false, false
+	}
+	return c.Choice == DecisionChoiceOption && c.Option == c.Raised.Prediction.Option, true
+}
+
 // ChosenLabel returns the label represented by the current answer.
 func (c DecisionCall) ChosenLabel() string {
 	if c.Choice == DecisionChoiceOther {

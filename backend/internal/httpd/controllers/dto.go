@@ -70,6 +70,19 @@ type RaiseDecisionRequest struct {
 	Options   []DecisionOptionPayload `json:"options"`
 	Links     []DecisionLinkPayload   `json:"links,omitempty"`
 	Reference string                  `json:"reference,omitempty" maxLength:"64"`
+	Urgency   string                  `json:"urgency,omitempty" enum:"blocking,can_wait" description:"How soon the person is needed. Blocking means all of the session's remaining work depends on the answer. Defaults to can_wait."`
+	Kind      string                  `json:"kind,omitempty" description:"Decision kind id from GET /api/v1/decisions/kinds. Required when the project is in observe mode."`
+	// Prediction is what the session would have decided on its own.
+	Prediction *DecisionPredictionPayload `json:"prediction,omitempty"`
+}
+
+// DecisionPredictionPayload is the option a session would have picked on its
+// own, why, and how the person could undo it.
+type DecisionPredictionPayload struct {
+	Option int    `json:"option" minimum:"1"`
+	Label  string `json:"label,omitempty" description:"Label of the predicted option. Set in responses only."`
+	Why    string `json:"why" maxLength:"300"`
+	Undo   string `json:"undo" maxLength:"300"`
 }
 
 // AnswerDecisionRequest records an offered option or a person-authored alternative.
@@ -132,6 +145,55 @@ type DecisionCallResponse struct {
 	DeliveredToName   string                  `json:"deliveredToName,omitempty"`
 	DeliveredFallback bool                    `json:"deliveredFallback,omitempty"`
 	ChangedAfterClose bool                    `json:"changedAfterClose,omitempty"`
+	Urgency           string                  `json:"urgency,omitempty" enum:"blocking,can_wait" description:"Effective urgency. This daemon always sets it; treat it as can_wait when absent, as from an older daemon."`
+	Kind              string                  `json:"kind,omitempty"`
+	KindLabel         string                  `json:"kindLabel,omitempty"`
+	Reserved          bool                    `json:"reserved,omitempty" description:"The project reserved this kind for the person when the call was raised."`
+	AutonomyMode      string                  `json:"autonomyMode,omitempty" enum:"off,observe" description:"The project's autonomy mode when the call was raised."`
+	// Prediction is what the session would have decided on its own.
+	Prediction *DecisionPredictionPayload `json:"prediction,omitempty"`
+	// PredictionAgreed is set once a predicted call has an answer: true when
+	// the person chose the predicted option.
+	PredictionAgreed *bool `json:"predictionAgreed,omitempty"`
+}
+
+// DecisionKindsQuery names the project whose decision kinds the person wants.
+type DecisionKindsQuery struct {
+	Project string `query:"project,omitempty" description:"Project id. Required from the person's surfaces; a calling session always gets its own project."`
+}
+
+// DecisionKindResponse is one decision kind and whether the project reserves it.
+type DecisionKindResponse struct {
+	ID                string `json:"id"`
+	Label             string `json:"label"`
+	Reserved          bool   `json:"reserved"`
+	ReservedByDefault bool   `json:"reservedByDefault"`
+}
+
+// DecisionKindsResponse is a project's autonomy mode and decision kinds.
+type DecisionKindsResponse struct {
+	ProjectID string                 `json:"projectId,omitempty"`
+	Mode      string                 `json:"mode" enum:"off,observe"`
+	Kinds     []DecisionKindResponse `json:"kinds"`
+}
+
+// DecisionObserveRowResponse counts one decision kind's calls raised in observe mode.
+type DecisionObserveRowResponse struct {
+	Kind     string `json:"kind"`
+	Label    string `json:"label"`
+	Reserved bool   `json:"reserved"`
+	Calls    int    `json:"calls" description:"Calls of this kind that were not withdrawn."`
+	Answered int    `json:"answered" description:"Calls with both a prediction and the person's answer."`
+	Agreed   int    `json:"agreed"`
+	Differed int    `json:"differed"`
+}
+
+// DecisionObserveResponse reports how often sessions predicted the person's
+// answer, per decision kind, for calls raised in observe mode.
+type DecisionObserveResponse struct {
+	ProjectID string                       `json:"projectId,omitempty"`
+	Mode      string                       `json:"mode" enum:"off,observe"`
+	Rows      []DecisionObserveRowResponse `json:"rows"`
 }
 
 // ListDecisionsQuery selects a decision scope or full-text search.
@@ -2996,9 +3058,13 @@ type NotificationIDParam struct {
 
 // NotificationTarget is the dashboard navigation target for a notification.
 type NotificationTarget struct {
-	Kind      string `json:"kind" enum:"session,pr"`
+	Kind      string `json:"kind" enum:"session,pr,decision"`
 	SessionID string `json:"sessionId"`
 	PRURL     string `json:"prUrl,omitempty"`
+	// CallID and OriginHostID identify a decision-ledger call. Set only when
+	// kind is decision; a decision target has no session.
+	CallID       string `json:"callId,omitempty"`
+	OriginHostID string `json:"originHostId,omitempty"`
 }
 
 // NotificationResponse is one stored notification returned by the API.
@@ -3007,7 +3073,7 @@ type NotificationResponse struct {
 	SessionID string    `json:"sessionId"`
 	ProjectID string    `json:"projectId"`
 	PRURL     string    `json:"prUrl"`
-	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
+	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested,decision_needed"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	Status    string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`

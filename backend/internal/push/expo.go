@@ -29,6 +29,11 @@ type Message struct {
 	Sound     string         `json:"sound,omitempty"`
 	Priority  string         `json:"priority,omitempty"`
 	ChannelID string         `json:"channelId,omitempty"`
+	// CollapseID coalesces messages in transit (Android and iOS) and replaces
+	// an already-displayed notification on iOS.
+	CollapseID string `json:"collapseId,omitempty"`
+	// Tag replaces an already-displayed notification on Android only.
+	Tag string `json:"tag,omitempty"`
 }
 
 // Ticket is Expo's synchronous per-message result. Status is "ok" or "error";
