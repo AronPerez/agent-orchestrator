@@ -953,3 +953,49 @@ func getDecisionCall(t *testing.T, fixture decisionServiceFixture, id string) do
 	}
 	return call
 }
+
+func overruledDecision(t *testing.T, fixture decisionServiceFixture, owner domain.SessionID) domain.DecisionCall {
+	t.Helper()
+	setShopAutonomy(t, fixture, domain.AutonomyConfig{Mode: domain.AutonomyOn})
+	call, err := fixture.service.Decide(context.Background(), Actor{Session: owner}, validDecideInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	overruled, err := fixture.service.Overrule(context.Background(), Actor{Surface: domain.RequestSurfaceDesktop}, call.ID, "Keep both open.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return overruled
+}
+
+func TestDelivererSendsAnOverruleToTheOwningSession(t *testing.T) {
+	fixture := newDecisionService(t)
+	overruled := overruledDecision(t, fixture, fixture.w1)
+	messenger := newFakeDecisionMessenger()
+	pending, err := newTestDeliverer(fixture.store, messenger, "h_a").RunDue(context.Background())
+	if err != nil || pending != 0 || len(messenger.messages) != 1 {
+		t.Fatalf("pending=%d messages=%+v err=%v", pending, messenger.messages, err)
+	}
+	sent := messenger.messages[0]
+	if sent.session != fixture.w1 || sent.text != DeliveryMessage(overruled, false) || !strings.HasPrefix(sent.text, "I overruled the decision you made for me") {
+		t.Fatalf("sent = %+v", sent)
+	}
+	stored := getDecisionCall(t, fixture, overruled.ID)
+	if stored.Delivery != domain.DecisionDeliverySent || stored.DeliveredTo != fixture.w1 {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
+func TestDelivererFallsBackForAnOverruleWhenTheOwnerEnded(t *testing.T) {
+	fixture := newDecisionService(t)
+	overruledDecision(t, fixture, fixture.w1)
+	terminateDecisionSession(t, fixture, fixture.w1)
+	messenger := newFakeDecisionMessenger()
+	if _, err := newTestDeliverer(fixture.store, messenger, "h_a").RunDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(messenger.messages) != 1 || messenger.messages[0].session != fixture.orch ||
+		!strings.HasPrefix(messenger.messages[0].text, "I overruled a decision made for me by") {
+		t.Fatalf("messages = %+v", messenger.messages)
+	}
+}

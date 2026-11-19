@@ -10,6 +10,7 @@ const STATE_DOT: Record<DecisionState, string> = {
 	done: "bg-status-ready",
 	dismissed: "bg-status-idle",
 	withdrawn: "bg-status-idle",
+	decided: "bg-status-idle",
 };
 
 /** The one translated name of a decision state, used on columns, cards and results. */
@@ -20,6 +21,7 @@ export function decisionStateLabel(state: DecisionState, t: TFunction): string {
 		case "done": return t("decisions.state.done");
 		case "dismissed": return t("decisions.state.dismissed");
 		case "withdrawn": return t("decisions.state.withdrawn");
+		case "decided": return t("decisions.state.decided");
 	}
 }
 

@@ -63,7 +63,7 @@ func TestAutonomyConfigValidate(t *testing.T) {
 		{"zero", AutonomyConfig{}, ""},
 		{"off", AutonomyConfig{Mode: AutonomyOff}, ""},
 		{"observe with list", AutonomyConfig{Mode: AutonomyObserve, Reserved: []DecisionKindID{"production", "other"}}, ""},
-		{"unknown mode", AutonomyConfig{Mode: "on"}, `autonomy.mode: unknown mode "on"`},
+		{"unknown mode", AutonomyConfig{Mode: "always"}, `autonomy.mode: unknown mode "always"`},
 		{"unknown kind", AutonomyConfig{Reserved: []DecisionKindID{"production", "lunch"}}, `autonomy.reserved: unknown decision kind "lunch"`},
 		{"duplicate kind", AutonomyConfig{Reserved: []DecisionKindID{"design", "design"}}, `autonomy.reserved: "design" is listed twice`},
 	}

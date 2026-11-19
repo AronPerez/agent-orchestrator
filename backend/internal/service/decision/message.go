@@ -14,6 +14,9 @@ func DeliveryMessage(call domain.DecisionCall, fallback bool) string {
 	if call.StandingKind == domain.DecisionKindDismissed {
 		return dismissalMessage(call, fallback)
 	}
+	if call.StandingKind == domain.DecisionKindOverruled {
+		return overruleMessage(call, fallback)
+	}
 	return answerMessage(call, fallback)
 }
 
@@ -71,5 +74,33 @@ func dismissalMessage(call domain.DecisionCall, fallback bool) string {
 	} else {
 		fmt.Fprintln(&message, "Do not wait for an answer on it. If you still need one, raise a new call that covers what was missing.")
 	}
+	return message.String()
+}
+
+func overruleMessage(call domain.DecisionCall, fallback bool) string {
+	var message strings.Builder
+	if fallback {
+		fmt.Fprintf(&message, "I overruled a decision made for me by %q, which has ended: %q\n", call.Raised.OwnerSessionName, call.Raised.Title)
+	} else {
+		fmt.Fprintf(&message, "I overruled the decision you made for me: %q\n", call.Raised.Title)
+	}
+	fmt.Fprintf(&message, "%s\n\n", domain.DecisionCallURL(call.ID))
+	if call.Decided != nil && call.Decided.Undo != "" {
+		fmt.Fprintf(&message, "Undo it: %s\n", call.Decided.Undo)
+	}
+	if call.Decided != nil && !call.Decided.CarriedOut {
+		fmt.Fprintln(&message, "It was never confirmed as carried out. Check whether it happened before you undo anything.")
+	}
+	if call.Note != "" {
+		fmt.Fprintf(&message, "Note: %s\n", call.Note)
+	}
+	fmt.Fprintln(&message)
+	fmt.Fprintln(&message, bindingLine)
+	if fallback {
+		fmt.Fprintln(&message, "Undo it, or hand it to a worker. When it is done, record what happened in one line:")
+	} else {
+		fmt.Fprintln(&message, "Undo it as the note says. When it is done, record what happened in one line:")
+	}
+	fmt.Fprintf(&message, "ao decision outcome %s --for-answer %s --text %q\n", call.ID, call.StandingEntryID, "<what happened>")
 	return message.String()
 }

@@ -17,6 +17,9 @@ const (
 	DecisionStateDone       DecisionCallState = "done"
 	DecisionStateDismissed  DecisionCallState = "dismissed"
 	DecisionStateWithdrawn  DecisionCallState = "withdrawn"
+	// DecisionStateDecided is a decision a session made on the person's
+	// behalf that nobody has overruled.
+	DecisionStateDecided DecisionCallState = "decided"
 )
 
 // Label is the one user-facing name for a decision state.
@@ -32,6 +35,8 @@ func (s DecisionCallState) Label() string {
 		return "Dismissed"
 	case DecisionStateWithdrawn:
 		return "Withdrawn"
+	case DecisionStateDecided:
+		return "Decided for you"
 	default:
 		return ""
 	}
@@ -73,6 +78,9 @@ type DecisionCall struct {
 	Redelivery        bool                  `json:"redelivery,omitempty"`
 	ChangedAfterClose bool                  `json:"changedAfterClose,omitempty"`
 	LastStamp         DecisionStamp         `json:"lastStamp"`
+	// Decided is set for a call that began as a decision made on the
+	// person's behalf rather than as a question.
+	Decided *DecisionDecidedDetail `json:"decided,omitempty"`
 }
 
 type reducedDelivery struct {
@@ -96,6 +104,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 	var hasClosing bool
 	var hasOutcome bool
 	var withdrawn bool
+	var closedUnconfirmed, reopened bool
 	answered := make(map[string]DecisionEntry)
 	deliveries := make([]reducedDelivery, 0)
 
@@ -115,6 +124,56 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Origin = entry.Origin
 			call.Raised = payload
 			call.RaisedAt = entry.WrittenAt
+		case DecisionKindDecided:
+			if raised {
+				continue
+			}
+			var payload DecisionDecidedPayload
+			if json.Unmarshal(entry.Payload, &payload) != nil {
+				continue
+			}
+			raised = true
+			call.ID = entry.CallID
+			call.Origin = entry.Origin
+			call.Raised = payload.raisedView()
+			call.RaisedAt = entry.WrittenAt
+			call.Decided = &DecisionDecidedDetail{EntryID: entry.ID, Key: payload.Key, Undo: payload.Undo, Verify: payload.Verify, OutsidePolicy: payload.OutsidePolicy}
+		case DecisionKindOverruled:
+			// Entries are ordered, so a decided call's own entry precedes any
+			// overrule of it; an overrule on any other call is ignored.
+			if call.Decided == nil {
+				continue
+			}
+			var payload DecisionOverruledPayload
+			if json.Unmarshal(entry.Payload, &payload) != nil {
+				continue
+			}
+			standing = entry
+			standingKind = entry.Kind
+			call.StandingEntryID = entry.ID
+			call.StandingKind = entry.Kind
+			call.Choice = ""
+			call.Option = 0
+			call.Note = payload.Note
+			call.AnsweredAt = entry.WrittenAt
+			call.AnswerSurface = entry.AuthorSurface
+		case DecisionKindCarriedOut:
+			var payload DecisionCarriedOutPayload
+			if call.Decided == nil || json.Unmarshal(entry.Payload, &payload) != nil || payload.ForEntry != call.Decided.EntryID {
+				continue
+			}
+			if !call.Decided.CarriedOut {
+				call.Decided.CarriedOut = true
+				call.Decided.CarriedOutAt = entry.WrittenAt
+			}
+			// A confirmation that arrives after the decision was closed while
+			// unconfirmed contradicts that close: the action did happen. Reopen
+			// it so it stays visible and overrulable; the close stays in history.
+			if closedUnconfirmed {
+				closedUnconfirmed, reopened = false, true
+				hasOutcome, hasClosing, closing = false, false, DecisionEntry{}
+				call.Outcome, call.OutcomeLink, call.OutcomeAt = "", "", time.Time{}
+			}
 		case DecisionKindAnswered:
 			var payload DecisionAnsweredPayload
 			if json.Unmarshal(entry.Payload, &payload) != nil {
@@ -158,13 +217,17 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			// New outcomes name the immutable answer they carried out. If a
 			// newer answer already stands, keep the stale outcome in history but
 			// do not let it close that newer work. Empty preserves legacy entries.
-			if payload.ForEntry != "" && payload.ForEntry != standing.ID {
+			// An outcome on a decision that still stands names the decided
+			// entry itself, since there is no answer to name.
+			closesStandingDecision := standing.ID == "" && call.Decided != nil && payload.ForEntry == call.Decided.EntryID
+			if payload.ForEntry != "" && payload.ForEntry != standing.ID && !closesStandingDecision {
 				continue
 			}
 			if !hasClosing {
 				closing, hasClosing = entry, true
 			}
 			hasOutcome = true
+			closedUnconfirmed = closesStandingDecision && !call.Decided.CarriedOut
 			call.Outcome = payload.Text
 			call.OutcomeLink = payload.Link
 			call.OutcomeAt = entry.WrittenAt
@@ -193,12 +256,17 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 		call.State = DecisionStateDone
 	} else if withdrawn {
 		call.State = DecisionStateWithdrawn
-	} else if standingKind == DecisionKindAnswered {
+	} else if standingKind == DecisionKindAnswered || standingKind == DecisionKindOverruled {
 		call.State = DecisionStateInProgress
 	} else if standingKind == DecisionKindDismissed {
 		call.State = DecisionStateDismissed
+	} else if call.Decided != nil {
+		call.State = DecisionStateDecided
 	} else {
 		call.State = DecisionStateNeedsYou
+	}
+	if reopened {
+		call.ChangedAfterClose = true
 	}
 	if hasClosing && standing.ID != "" && CompareDecisionEntries(closing, standing) < 0 {
 		call.ChangedAfterClose = true

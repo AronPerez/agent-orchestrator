@@ -54,7 +54,7 @@ SELECT * FROM decision_calls WHERE call_id = ?;
 SELECT calls.*
 FROM decision_calls AS calls
 JOIN decision_entries AS raised
-  ON raised.call_id = calls.call_id AND raised.kind = 'raised'
+  ON raised.call_id = calls.call_id AND raised.kind IN ('raised', 'decided')
 WHERE calls.origin = sqlc.arg(origin)
   AND (
     calls.owner_session_id = sqlc.arg(session_id)
@@ -89,7 +89,7 @@ WHERE current.stream_session_id IN (sqlc.slice('session_ids'))
       SELECT latest.call_id
       FROM decision_calls AS latest
       JOIN decision_entries AS raised
-        ON raised.call_id = latest.call_id AND raised.kind = 'raised'
+        ON raised.call_id = latest.call_id AND raised.kind IN ('raised', 'decided')
       WHERE latest.stream_session_id = current.stream_session_id
         AND latest.origin = current.origin
       ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
@@ -102,7 +102,7 @@ SELECT pending.*
 FROM decision_entries AS pending
 JOIN decision_calls AS calls ON calls.call_id = pending.call_id
 WHERE calls.origin = ?
-  AND pending.kind IN ('answered', 'dismissed')
+  AND pending.kind IN ('answered', 'dismissed', 'overruled')
   AND NOT EXISTS (
       SELECT 1
       FROM decision_entries AS delivered
@@ -124,7 +124,7 @@ WHERE current.stream_session_id <> ''
       SELECT latest.call_id
       FROM decision_calls AS latest
       JOIN decision_entries AS raised
-        ON raised.call_id = latest.call_id AND raised.kind = 'raised'
+        ON raised.call_id = latest.call_id AND raised.kind IN ('raised', 'decided')
       WHERE latest.origin = current.origin
         AND latest.stream_session_id = current.stream_session_id
       ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC

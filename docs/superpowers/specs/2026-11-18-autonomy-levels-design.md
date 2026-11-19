@@ -56,7 +56,7 @@ An empty `reserved` list means the kinds reserved by default:
 | --- | --- |
 | `off` (default) | As before. |
 | `observe` | Ask everything they would ask today, and also ask before any action of a reserved kind. Every call names its kind. For a kind that is not reserved, the call also records what the session would have decided, why, and how to undo it. The session still waits for the answer and follows it. |
-| `on` (a later slice) | Raise a call for reserved kinds. Decide the rest, act, and record a `decided` entry. |
+| `on` | Raise a call for reserved kinds. Decide the rest, record a `decided` entry **before** acting (so an interrupted session still leaves a record), then act; a decision not carried out after all is closed by its session with an outcome. Chosen in project settings (the person decided on 2026-11-18 to offer it there at once) or through project config. |
 
 The policy reaches sessions as a standing-instructions section, rendered only in observe (and later on) mode. Standing instructions are built when a session starts, so a change to the mode or the reserved list reaches sessions started after it. A running session keeps the instructions it started with, and its calls are never refused for lacking a kind it was never told to give. It is a guard rail, not a boundary: an agent can file a decision under the wrong kind. The observe period exists to find that out before any session acts alone.
 
@@ -81,14 +81,38 @@ A rule for every session, in every mode: an answer the person recorded in the le
 
 This was the largest single cost in the study, and without it the rest of this design adds a layer while the main cost stays.
 
-### 5. Decided entries and overrule (a later slice)
+### 5. Decided entries and overrule
 
-Two new entry kinds, written in this final shape when they ship:
+Two new entry kinds:
 
-- `decided`: written by a session in `on` mode for a kind the project has not reserved. Carries what was decided, why, **how to undo it (required)**, optionally how to know it worked, and the kind, plus the same Orchestrator-filled project, stream, machine and owner fields as `raised`. It forms a call in a new state, "Decided for you", listed on the Decisions page.
+- `decided`: written by a session in `on` mode for a kind the project has not reserved. Carries what was decided, why, **how to undo it (required)**, optionally how to know it worked, and the kind, plus the same Orchestrator-filled project, stream, machine and owner fields as `raised`. It forms a call in a new state, "Decided for you". Until the Decisions page lists these, the person reviews them with `ao decision ls --decided`.
+- `carried_out`: written by the owning session after it acts (`ao decision carried-out <id>`). Sessions record a decision before acting, so a `decided` entry alone is recorded intent; this entry confirms the action happened. Until it exists the call shows "not confirmed carried out", and an overrule tells the session to check whether the action happened before undoing it. A session that does not carry a decision out closes it with a "Not carried out" outcome instead.
 - `overruled`: written only by the person, with a required note. It becomes the call's standing entry and is delivered to the owning session like an answer, including the fallback to the project's orchestrator when that session has ended. The session undoes the decision and records an outcome, which closes the call.
 
-An older machine stores and passes on both kinds. With no `raised` entry it builds no call from a `decided` entry, and it ignores `overruled`.
+Sessions record one with `ao decision decide`. Because a session acts before it records, a record is never refused for policy reasons: if the project left mode `on` or reserved the kind after the session started, the record is kept with `outsidePolicy` set (`autonomy_not_on` or `kind_reserved`), so the person can still see it. The command then branches on whether the session has acted: if not, it should not act, should close the record with a "Not carried out" outcome, and raise a call; if it already acted (a session on an older prompt), it confirms the record as carried out and tells the person, so the action stays visible and overrulable. Malformed records, such as one without an undo note, are refused. the person overrules with `ao decision overrule <id> --note` or from the Decisions page, and lists them with `ao decision ls --decided` (`GET /api/v1/decisions?scope=decided`). The catch-all kind `other` is reserved under every policy, including a custom reserved list, so a decision that fits no kind is never made alone. An older machine stores and passes on both kinds. With no `raised` entry it builds no call from a `decided` entry, and it ignores `overruled`.
+
+#### Lifecycle of a decision made on the person's behalf
+
+States: **Decided** (unconfirmed or confirmed carried out), **In progress** (overruled, undo owed), **Done**. "Owner" is the session that recorded the decision.
+
+| # | Situation | State change | Who may do it | What happens | Test |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Record before acting | new → Decided, unconfirmed | Owner (`ao decision decide`) | Kept even if outside policy (see 10). Malformed records (no undo note) are refused. | `TestDecideRecordsADecisionMadeForThePerson` |
+| 2 | Retry after a lost response | same key → same record | Owner (`--key`) | A retry with the same owner and key returns the existing record in its current state; serialised per session. Without a key nothing is matched, so distinct operations with the same wording never merge | `TestLifecycleRetryWithTheSameKeyReturnsTheSameRecord` |
+| 2a | Retry after the policy changed | same record | Owner | The reply carries the current `outsidePolicy` flag, so the session is told not to act; the stored record stays as written | `TestLifecycleRetryAfterPolicyChangeIsFlagged` |
+| 2b | Retry after the person overruled | same record, In progress | Owner | The overruled call is returned; the CLI says "do not act" with the person's note and the outcome command, never "carry it out" | `TestLifecycleRetryAfterOverruleReturnsTheOverruledCall`, `TestDecisionDecideRetryReportsTheRecordsCurrentState` |
+| 3 | Crash between record and act, or act and confirm | Decided, unconfirmed (stays) | — | The owner finds it with `ao decision ls` ("Not confirmed carried out"), checks, then confirms or closes; the person sees it in `ao decision ls --decided` | `TestLifecycleCrashBeforeConfirmLeavesARecoverableRecord` |
+| 4 | Confirm carried out | Decided unconfirmed → confirmed | Owner only (`ao decision carried-out`); idempotent; also allowed after an overrule | Records that the action happened | `TestTheOwnerConfirmsADecisionWasCarriedOut` |
+| 5 | Not carried out after all | Decided unconfirmed → Done | Owner or person | Outcome "Not carried out: …" on the decided entry | `TestTheOwnerCanCloseADecisionItDidNotCarryOut` |
+| 6 | Close a confirmed decision | Decided confirmed → Done | **Person only**; the session is refused (`DECISION_CARRIED_OUT`) | A session cannot hide a completed action from review | `TestLifecycleConfirmedDecisionStaysOpenForThePerson` |
+| 7 | Overrule | Decided → In progress | Person only, note required, once | Delivered to the owner, or to the project orchestrator if the owner has ended; an unconfirmed decision's message says to check whether it happened before undoing | `TestOverruleGoesBackToTheOwningSession`, `TestDelivererSendsAnOverruleToTheOwningSession`, `TestDelivererFallsBackForAnOverruleWhenTheOwnerEnded`, `TestDeliveryMessageForAnOverruleOfAnUnconfirmedDecision` |
+| 8 | Overrule after the action | In progress → Done | Owner (or delivered fallback) records the outcome against the overrule | Undo, then outcome | `TestLifecycleOverruleAfterActThenOutcome` |
+| 9 | Overrule before confirming | In progress, unconfirmed → confirmed | Owner may still confirm | The undo then knows there is something to undo | `TestLifecycleOverruleBeforeConfirmThenConfirm` |
+| 10 | Mode switched off, or kind reserved, while the session runs | new → Decided, `outsidePolicy` set | Owner | Kept and marked in `ls`/`show`. The CLI branches: not acted yet → do not act, close as "Not carried out", raise a call; already acted → confirm and tell the person, so it stays overrulable | `TestDecideKeepsTheRecordWhenThePolicyChangedUnderTheSession`, `TestLifecycleOutsidePolicyRecordCanBeConfirmedAndOverruled`, `TestDecisionDecideWarnsWhenOutsidePolicy`, `TestDecisionListMarksOutsidePolicyDecisions` |
+| 11 | Question actions on a decided call | refused | — | Answer (`DECISION_NOT_A_QUESTION`), dismiss and withdraw (`DECISION_WRONG_STATE`) | `TestLifecycleQuestionActionsAreRefusedOnADecidedCall` |
+| 12 | Confirm or overrule a decision closed after an overrule, or after it was confirmed | refused | — | `DECISION_WRONG_STATE` | `TestLifecycleConfirmedDecisionStaysOpenForThePerson`, `TestOverruleGoesBackToTheOwningSession` |
+| 12a | Late confirmation after a close while unconfirmed | Done → Decided, confirmed, `changedAfterClose` | Owner | The action happened after all: the call reopens, stays overrulable, and the close stays in history. After an overrule's undo is recorded, a confirmation is still refused | `TestLifecycleLateConfirmationReopensADecisionClosedUnconfirmed`, `TestLifecycleConfirmationAfterUndoIsRefused`, `TestReduceLateConfirmationReopensADecisionClosedUnconfirmed` |
+| 13 | Entries in any arrival order, or from an older machine | — | — | Reducer is order-independent; an overrule or confirmation naming another call or entry is ignored; older machines store and pass on the new kinds and build no call from them | `TestReduceOverruledDecidedCall`, `TestReduceIgnoresOverruleOnAnOrdinaryCall`, `TestReduceCarriedOutConfirmsADecidedCall` |
 
 ## Changes to the ledger design
 

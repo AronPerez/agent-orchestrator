@@ -37,6 +37,9 @@ describe("project autonomy", () => {
 		expect(initialAutonomyDraft(undefined)).toEqual({ autonomyMode: "off", reservedKinds: undefined });
 		expect(initialAutonomyDraft({ mode: "observe", reserved: [] })).toEqual({ autonomyMode: "observe", reservedKinds: undefined });
 		expect(initialAutonomyDraft({ reserved: ["design"] })).toEqual({ autonomyMode: "off", reservedKinds: ["design"] });
+		// Mode on is set from the command line; the form must not downgrade it.
+		expect(initialAutonomyDraft({ mode: "on" })).toEqual({ autonomyMode: "on", reservedKinds: undefined });
+		expect(buildAutonomyConfig("on", undefined)).toEqual({ mode: "on" });
 	});
 });
 

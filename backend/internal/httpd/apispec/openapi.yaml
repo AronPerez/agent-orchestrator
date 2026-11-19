@@ -3789,6 +3789,7 @@ paths:
           enum:
           - mine
           - needs_you
+          - decided
           type: string
       - description: Search words. When given, the response is the search result.
         in: query
@@ -3989,6 +3990,63 @@ paths:
       summary: Answer a decision call
       tags:
       - decisions
+  /api/v1/decisions/{id}/carried-out:
+    post:
+      operationId: carriedOutDecision
+      parameters:
+      - description: Call identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Call identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionCallResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Confirm a decision made on the person's behalf was carried out
+      tags:
+      - decisions
   /api/v1/decisions/{id}/dismiss:
     post:
       operationId: dismissDecision
@@ -4112,6 +4170,69 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
       summary: Record the outcome of a decision call
+      tags:
+      - decisions
+  /api/v1/decisions/{id}/overrule:
+    post:
+      operationId: overruleDecision
+      parameters:
+      - description: Call identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Call identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OverruleDecisionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionCallResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Overrule a decision made on the person's behalf
       tags:
       - decisions
   /api/v1/decisions/{id}/retire:
@@ -4269,6 +4390,61 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
       summary: Get the Decisions page board
+      tags:
+      - decisions
+  /api/v1/decisions/decided:
+    post:
+      operationId: decideDecision
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecideRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionCallResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Record a decision a session made on the person's behalf
       tags:
       - decisions
   /api/v1/decisions/kinds:
@@ -18076,6 +18252,7 @@ components:
           enum:
           - "off"
           - observe
+          - "on"
           type: string
         reserved:
           items:
@@ -21738,6 +21915,44 @@ components:
       - createdAt
       - updatedAt
       type: object
+    DecideRequest:
+      properties:
+        key:
+          description: The session's own name for this one intended action. A retry
+            with the same key returns the existing record in its current state; without
+            a key, nothing is merged.
+          maxLength: 64
+          type: string
+        kind:
+          description: Decision kind id; must not be reserved by the project.
+          type: string
+        links:
+          items:
+            $ref: '#/components/schemas/DecisionLinkPayload'
+          type: array
+        reference:
+          maxLength: 64
+          type: string
+        undo:
+          description: How the person can undo it. Required.
+          maxLength: 300
+          type: string
+        verify:
+          description: How to tell it worked.
+          maxLength: 300
+          type: string
+        what:
+          maxLength: 120
+          type: string
+        why:
+          maxLength: 1000
+          type: string
+      required:
+      - kind
+      - what
+      - why
+      - undo
+      type: object
     DecisionBoardResponse:
       properties:
         calls:
@@ -21776,6 +21991,7 @@ components:
           enum:
           - "off"
           - observe
+          - "on"
           type: string
         changedAfterClose:
           type: boolean
@@ -21788,6 +22004,8 @@ components:
           type: string
         context:
           type: string
+        decided:
+          $ref: '#/components/schemas/DecisionDecidedResponse'
         deliveredFallback:
           type: boolean
         deliveredTo:
@@ -21867,6 +22085,7 @@ components:
           - done
           - dismissed
           - withdrawn
+          - decided
           type: string
         stateLabel:
           type: string
@@ -21898,6 +22117,30 @@ components:
       - ownerSessionName
       - raisedAt
       - retired
+      type: object
+    DecisionDecidedResponse:
+      properties:
+        carriedOut:
+          type: boolean
+        carriedOutAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        key:
+          type: string
+        outsidePolicy:
+          enum:
+          - autonomy_not_on
+          - kind_reserved
+          type: string
+        undo:
+          type: string
+        verify:
+          type: string
+      required:
+      - undo
+      - carriedOut
       type: object
     DecisionDetailResponse:
       properties:
@@ -21989,6 +22232,7 @@ components:
           enum:
           - "off"
           - observe
+          - "on"
           type: string
         projectId:
           type: string
@@ -22014,6 +22258,7 @@ components:
           enum:
           - "off"
           - observe
+          - "on"
           type: string
         projectId:
           type: string
@@ -23976,6 +24221,15 @@ components:
       required:
       - id
       - projectId
+      type: object
+    OverruleDecisionRequest:
+      properties:
+        note:
+          description: What to do instead. Required.
+          maxLength: 1000
+          type: string
+      required:
+      - note
       type: object
     PRAttachmentAccessResponse:
       properties:

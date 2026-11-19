@@ -598,3 +598,196 @@ func TestDecisionObserveWithNothingToShow(t *testing.T) {
 		t.Fatalf("output=%q", out)
 	}
 }
+
+func TestDecisionDecideOverruleAndList(t *testing.T) {
+	type seen struct{ method, uri, caller, body string }
+	var requests []seen
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/decisions") {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		requests = append(requests, seen{r.Method, r.URL.RequestURI(), r.Header.Get(caller.Header), string(body)})
+		w.Header().Set("Content-Type", "application/json")
+		call := `{"id":"dec_2","link":"ao://decisions/dec_2","state":"decided","stateLabel":"Decided for you","title":"Closed the duplicate pull request #12","context":"It repeats #11.","options":[],"links":[],"hostId":"h_a","machineLabel":"m","ownerSessionId":"w-1","ownerSessionName":"w-1","raisedAt":"2026-11-18T15:00:00Z","retired":false,"kind":"pr_hygiene","kindLabel":"Pull request hygiene","autonomyMode":"on","decided":{"undo":"Reopen #12.","verify":"One open PR remains."}}`
+		switch {
+		case r.URL.Path == "/api/v1/decisions/dec_2":
+			_, _ = io.WriteString(w, `{"call":`+call+`,"history":[]}`)
+		case r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, `{"calls":[`+call+`]}`)
+		case r.URL.Path == "/api/v1/decisions/decided":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, call)
+		default:
+			_, _ = io.WriteString(w, call)
+		}
+	}))
+
+	t.Setenv("AO_SESSION_ID", "w-1")
+	out, _, err := executeCLI(t, deps, "decision", "decide", "--key", "close-pr-12", "--kind", "pr_hygiene", "--what", "Closed the duplicate pull request #12",
+		"--why", "It repeats #11.", "--undo", "Reopen #12.", "--verify", "One open PR remains.", "--link", "PR=https://example.com/12", "--ref", "SKY-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "Recorded dec_2\nao://decisions/dec_2\nNow carry it out, then confirm: ao decision carried-out dec_2\nIf you do not carry it out, close it: ao decision outcome dec_2 --text \"Not carried out: <why>\"\n" {
+		t.Fatalf("decide output=%q", out)
+	}
+	var decide decisionDecideAPIRequest
+	if err := json.Unmarshal([]byte(requests[0].body), &decide); err != nil {
+		t.Fatal(err)
+	}
+	wantDecide := decisionDecideAPIRequest{Key: "close-pr-12", Kind: "pr_hygiene", What: "Closed the duplicate pull request #12", Why: "It repeats #11.", Undo: "Reopen #12.",
+		Verify: "One open PR remains.", Links: []decisionLinkAPI{{Label: "PR", URL: "https://example.com/12"}}, Reference: "SKY-1"}
+	if requests[0].method != http.MethodPost || requests[0].uri != "/api/v1/decisions/decided" || requests[0].caller != "w-1" || !reflect.DeepEqual(decide, wantDecide) {
+		t.Fatalf("decide request = %+v (%+v)", requests[0], decide)
+	}
+
+	t.Setenv("AO_SESSION_ID", "")
+	if _, _, err := executeCLI(t, deps, "decision", "overrule", "ao://decisions/dec_2", "--note", "Keep both open."); err != nil {
+		t.Fatal(err)
+	}
+	if got := requests[1]; got.method != http.MethodPost || got.uri != "/api/v1/decisions/dec_2/overrule" || got.body != `{"note":"Keep both open."}` {
+		t.Fatalf("overrule request = %+v", got)
+	}
+	out, _, err = executeCLI(t, deps, "decision", "ls", "--decided")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests[2].uri != "/api/v1/decisions?scope=decided" || !strings.Contains(out, "dec_2  Decided for you  Closed the duplicate pull request #12") ||
+		!strings.Contains(out, "Not confirmed carried out: ao decision carried-out dec_2") {
+		t.Fatalf("ls --decided uri=%q out=%s", requests[2].uri, out)
+	}
+	out, _, err = executeCLI(t, deps, "decision", "show", "dec_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Undo: Reopen #12.", "Verify: One open PR remains.", "Carried out: false"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("show output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDecisionDecideAndOverruleUsage(t *testing.T) {
+	for name, args := range map[string][]string{
+		"overrule without note": {"decision", "overrule", "dec_2"},
+		"ls with both scopes":   {"decision", "ls", "--decided", "--needs-you"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := executeCLI(t, Deps{}, args...)
+			if err == nil || ExitCode(err) != 2 {
+				t.Fatalf("err=%v exit=%d", err, ExitCode(err))
+			}
+		})
+	}
+}
+
+func TestDecisionDecideWarnsWhenOutsidePolicy(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "w-1")
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"dec_3","link":"ao://decisions/dec_3","state":"decided","decided":{"undo":"u","outsidePolicy":"kind_reserved"}}`)
+	}))
+	out, _, err := executeCLI(t, deps, "decision", "decide", "--kind", "pr_hygiene", "--what", "w", "--why", "y", "--undo", "u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Recorded dec_3",
+		"Kept, but this kind of decision is now reserved for the person.",
+		"If you have not acted yet, do not: close this record with ao decision outcome dec_3 --text \"Not carried out: policy changed\" and raise a call instead.",
+		"If you already acted, do not close it: confirm with ao decision carried-out dec_3 and tell the person, so they can overrule it.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("out missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Now carry it out") {
+		t.Fatalf("an outside-policy record must not be carried out: %q", out)
+	}
+}
+
+func TestDecisionCarriedOut(t *testing.T) {
+	var uri, method string
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uri, method = r.URL.RequestURI(), r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"dec_2","link":"ao://decisions/dec_2","state":"decided","decided":{"undo":"u","carriedOut":true}}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "w-1")
+	out, _, err := executeCLI(t, deps, "decision", "carried-out", "ao://decisions/dec_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || uri != "/api/v1/decisions/dec_2/carried-out" || out != "Confirmed dec_2 as carried out\n" {
+		t.Fatalf("method=%s uri=%s out=%q", method, uri, out)
+	}
+}
+
+func TestDecisionListMarksOutsidePolicyDecisions(t *testing.T) {
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"calls":[{"id":"dec_5","state":"decided","stateLabel":"Decided for you","title":"Closed #12","decided":{"undo":"u","outsidePolicy":"kind_reserved","carriedOut":true}}]}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "")
+	out, _, err := executeCLI(t, deps, "decision", "ls", "--decided")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Outside policy: this kind of decision is now reserved for the person") || strings.Contains(out, "Not confirmed carried out") {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+func TestDecisionDecideRetryReportsTheRecordsCurrentState(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		want string
+	}{
+		"overruled": {
+			`{"id":"dec_7","link":"ao://decisions/dec_7","state":"in_progress","standingEntryId":"dent_o","note":"Keep it open.","decided":{"undo":"u","key":"k"}}`,
+			"The person overruled this decision. Do not act on it. Note: Keep it open.",
+		},
+		"closed": {
+			`{"id":"dec_7","link":"ao://decisions/dec_7","state":"done","outcome":"Not carried out.","decided":{"undo":"u","key":"k"}}`,
+			"This decision is already closed: Not carried out. Do not act on it.",
+		},
+		"already confirmed": {
+			`{"id":"dec_7","link":"ao://decisions/dec_7","state":"decided","decided":{"undo":"u","key":"k","carriedOut":true}}`,
+			"Already confirmed as carried out. Nothing more to do.",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AO_SESSION_ID", "w-1")
+			deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			out, _, err := executeCLI(t, deps, "decision", "decide", "--key", "k", "--kind", "pr_hygiene", "--what", "w", "--why", "y", "--undo", "u")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out, tc.want) || strings.Contains(out, "Now carry it out") {
+				t.Fatalf("out = %q", out)
+			}
+		})
+	}
+}
+
+func TestDecisionCarriedOutReportsAReopenedDecision(t *testing.T) {
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"dec_2","state":"decided","changedAfterClose":true,"decided":{"undo":"u","carriedOut":true}}`)
+	}))
+	t.Setenv("AO_SESSION_ID", "w-1")
+	out, _, err := executeCLI(t, deps, "decision", "carried-out", "dec_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Confirmed dec_2 as carried out") || !strings.Contains(out, "It had been closed as not carried out, so it is open again for the person to review.") {
+		t.Fatalf("out = %q", out)
+	}
+}
