@@ -34,7 +34,7 @@ func decisionBoardTriggerNames(t *testing.T, db *sql.DB) []string {
 
 func decisionBoardOutcomes(t *testing.T, db *sql.DB) map[string]sql.NullString {
 	t.Helper()
-	rows, err := db.Query(`SELECT call_id, outcome_at FROM decision_calls`)
+	rows, err := db.Query(`SELECT call_id, CAST(outcome_at AS TEXT) FROM decision_calls`)
 	if err != nil {
 		t.Fatal(err)
 	}
