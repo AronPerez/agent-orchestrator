@@ -281,6 +281,23 @@ describe("DecisionCallPanel", () => {
 			});
 		});
 
+		it("keeps an outcome draft when the answer changes underneath it, and asks for a review first", async () => {
+			serve(inProgress);
+			const { client } = renderPanel();
+			await userEvent.type(await screen.findByLabelText("What happened"), "Shipped in PR 412");
+			serve({ ...inProgress, standingEntryId: "dent_answer_2", option: 2, chosenLabel: "Per-tenant API keys" });
+			await act(() => client.invalidateQueries());
+			expect(await screen.findByText("The answer changed after you started. Review it, then record the outcome.")).toBeInTheDocument();
+			expect(screen.getByLabelText("What happened")).toHaveValue("Shipped in PR 412");
+			await userEvent.click(screen.getByRole("button", { name: "Record outcome" }));
+			expect(postMock).not.toHaveBeenCalled();
+			await userEvent.click(screen.getByRole("button", { name: "Record outcome" }));
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/outcome", {
+				params: { path: { id: "dec_1" } },
+				body: { forEntry: "dent_answer_2", text: "Shipped in PR 412" },
+			});
+		});
+
 		it("dismisses only after a confirmation that takes an optional note", async () => {
 			serve(needsYou);
 			renderPanel();

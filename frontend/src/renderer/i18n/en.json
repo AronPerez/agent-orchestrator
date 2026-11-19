@@ -1428,6 +1428,7 @@
 	"decisions.history.decided": "Decided for you: {{text}}",
 	"decisions.history.overruled": "Overruled",
 	"decisions.history.carriedOut": "Carried out",
+	"decisions.outcomeAnswerChanged": "The answer changed after you started. Review it, then record the outcome.",
 	"decisionInbox.unread": "Unread",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "Changes requested",

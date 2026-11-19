@@ -1462,6 +1462,7 @@
 	"decisions.history.decided": "あなたの代わりに決定: {{text}}",
 	"decisions.history.overruled": "差し戻し済み",
 	"decisions.history.carriedOut": "実行済み",
+	"decisions.outcomeAnswerChanged": "入力を始めた後に回答が変わりました。確認してから結果を記録してください。",
 	"decisionInbox.unread": "未読",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "変更がリクエストされました",

@@ -1462,6 +1462,7 @@
 	"decisions.history.decided": "대신 결정됨: {{text}}",
 	"decisions.history.overruled": "번복됨",
 	"decisions.history.carriedOut": "실행됨",
+	"decisions.outcomeAnswerChanged": "작성을 시작한 뒤 답변이 바뀌었습니다. 확인한 다음 결과를 기록하세요.",
 	"decisionInbox.unread": "읽지 않음",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "변경 요청됨",

@@ -1428,6 +1428,7 @@
 	"decisions.history.decided": "Sizin yerinize karar verildi: {{text}}",
 	"decisions.history.overruled": "Geçersiz kılındı",
 	"decisions.history.carriedOut": "Uygulandı",
+	"decisions.outcomeAnswerChanged": "Siz başladıktan sonra yanıt değişti. İnceleyin, ardından sonucu kaydedin.",
 	"decisionInbox.unread": "Okunmadı",
 	"pr.botSuffix": "{{name}} botu",
 	"pr.card.changesRequested": "Değişiklik istendi",

@@ -1456,6 +1456,7 @@
 	"decisions.history.decided": "Решено за вас: {{text}}",
 	"decisions.history.overruled": "Решение отменено",
 	"decisions.history.carriedOut": "Выполнено",
+	"decisions.outcomeAnswerChanged": "Ответ изменился, пока вы писали. Проверьте его, затем запишите итог.",
 	"decisionInbox.unread": "Непрочитано",
 	"pr.botSuffix": "{{name}} бот",
 	"pr.card.changesRequested": "Запрошены изменения",

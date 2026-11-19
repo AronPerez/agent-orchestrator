@@ -1478,6 +1478,7 @@
 	"decisions.history.decided": "Decidida por ti: {{text}}",
 	"decisions.history.overruled": "Revocada",
 	"decisions.history.carriedOut": "Realizada",
+	"decisions.outcomeAnswerChanged": "La respuesta cambió después de que empezaras. Revísala y luego registra el resultado.",
 	"decisionInbox.unread": "No leído",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Cambios solicitados",

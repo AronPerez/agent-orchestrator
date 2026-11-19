@@ -1462,6 +1462,7 @@
 	"decisions.history.decided": "Für dich entschieden: {{text}}",
 	"decisions.history.overruled": "Aufgehoben",
 	"decisions.history.carriedOut": "Ausgeführt",
+	"decisions.outcomeAnswerChanged": "Die Antwort hat sich geändert, seit du begonnen hast. Prüfe sie und halte dann das Ergebnis fest.",
 	"decisionInbox.unread": "Ungelesen",
 	"pr.botSuffix": "{{name}}-Bot",
 	"pr.card.changesRequested": "Änderungen angefordert",

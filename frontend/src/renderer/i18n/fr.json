@@ -1478,6 +1478,7 @@
 	"decisions.history.decided": "Décidée pour vous : {{text}}",
 	"decisions.history.overruled": "Décision annulée",
 	"decisions.history.carriedOut": "Exécutée",
+	"decisions.outcomeAnswerChanged": "La réponse a changé depuis que vous avez commencé. Vérifiez-la, puis enregistrez le résultat.",
 	"decisionInbox.unread": "Non lu",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Modifications demandées",

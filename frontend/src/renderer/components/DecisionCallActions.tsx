@@ -79,7 +79,7 @@ export function DecisionCallActions({ call, extraActions }: { call: DecisionCall
 			) : extraActions ? <div className="flex flex-wrap items-center gap-2">{extraActions}</div> : null}
 			{call.state === "in_progress" ? (
 				<OutcomeForm
-					key={call.standingEntryId ?? ""}
+					forEntry={call.standingEntryId}
 					busy={busy}
 					onRecord={(text, link) => {
 						reset();
@@ -228,15 +228,24 @@ function AnswerForm({
 	);
 }
 
-function OutcomeForm({ busy, onRecord }: { busy: boolean; onRecord: (text: string, link: string) => void }) {
+function OutcomeForm({ forEntry, busy, onRecord }: { forEntry?: string; busy: boolean; onRecord: (text: string, link: string) => void }) {
 	const { t } = useTranslation();
 	const id = useId();
 	const [text, setText] = useState("");
 	const [link, setLink] = useState("");
 	const [errors, setErrors] = useState<{ text?: string; link?: string }>({});
+	// The answer this draft was written against. If another surface changes the
+	// answer meanwhile, the draft stays and the person reviews the new answer
+	// before recording, instead of losing what they typed.
+	const [draftFor, setDraftFor] = useState(forEntry);
+	const answerChanged = Boolean(text.trim() || link.trim()) && draftFor !== forEntry;
 	const submit = (event: FormEvent) => {
 		event.preventDefault();
 		if (busy) return;
+		if (answerChanged) {
+			setDraftFor(forEntry);
+			return;
+		}
 		const next: { text?: string; link?: string } = {};
 		const trimmed = text.trim();
 		if (!trimmed || /[\r\n]/.test(trimmed)) next.text = t("decisions.outcomeRequired");
@@ -258,7 +267,10 @@ function OutcomeForm({ busy, onRecord }: { busy: boolean; onRecord: (text: strin
 						disabled={busy}
 						aria-invalid={errors.text ? true : undefined}
 						aria-describedby={errors.text ? `${id}-text-error` : undefined}
-						onChange={(event) => setText(event.target.value)}
+						onChange={(event) => {
+							if (!text.trim() && !link.trim()) setDraftFor(forEntry);
+							setText(event.target.value);
+						}}
 					/>
 					{errors.text ? <p id={`${id}-text-error`} className="text-caption text-destructive">{errors.text}</p> : null}
 				</div>
@@ -277,6 +289,7 @@ function OutcomeForm({ busy, onRecord }: { busy: boolean; onRecord: (text: strin
 					{errors.link ? <p id={`${id}-link-error`} className="text-caption text-destructive">{errors.link}</p> : null}
 				</div>
 			</fieldset>
+			{answerChanged ? <p role="status" className="text-caption text-status-in-review">{t("decisions.outcomeAnswerChanged")}</p> : null}
 			<div>
 				<Button type="submit" variant="secondary" size="sm" disabled={busy} aria-busy={busy || undefined}>
 					{t("decisions.recordOutcome")}
