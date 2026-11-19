@@ -184,3 +184,44 @@ VALUES('dec_legacy','h_a','w-1','done',?,1,0,'{}',?)`, legacy, legacy); err != n
 		t.Fatalf("decision timestamps not normalized: raised=%q outcome=%q", raised, outcome)
 	}
 }
+
+// Normalizing a sync status row's stored timestamps is representation-only too:
+// its decision_sync_*_cdc_update triggers fire, and the repair removes those
+// events, so no decision_sync_updated reaches clients for it.
+func TestRepairDoesNotPublishDecisionSyncEvents(t *testing.T) {
+	db := openMigratedTestDB(t)
+	const legacy = "2026-10-21 09:00:00.123456789 +0530 IST"
+	if _, err := db.Exec(`INSERT INTO decision_sync_peers(host_id,direction,created_at,last_success_at) VALUES('h_peer','outbound',?,?)`, legacy, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO decision_sync_conflicts(origin,origin_seq,local_entry_id,remote_entry_id,peer_host_id,detected_at) VALUES('h_x',3,'a','b','h_peer',?)`, legacy); err != nil {
+		t.Fatal(err)
+	}
+	events := func() (count int64, head int64) {
+		t.Helper()
+		if err := db.QueryRow(`SELECT count(*),COALESCE((SELECT seq FROM sqlite_sequence WHERE name='change_log'),-1) FROM change_log WHERE event_type='decision_sync_updated'`).Scan(&count, &head); err != nil {
+			t.Fatal(err)
+		}
+		return count, head
+	}
+	beforeCount, beforeHead := events()
+	if beforeCount != 2 {
+		t.Fatalf("seeded sync events = %d, want the two inserts", beforeCount)
+	}
+	if err := repairTimestamps(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if count, head := events(); count != beforeCount || head != beforeHead {
+		t.Fatalf("repair published sync events: count %d->%d head %d->%d", beforeCount, count, beforeHead, head)
+	}
+	var created, detected string
+	if err := db.QueryRow(`SELECT CAST(created_at AS TEXT) FROM decision_sync_peers WHERE host_id='h_peer'`).Scan(&created); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT CAST(detected_at AS TEXT) FROM decision_sync_conflicts WHERE origin='h_x'`).Scan(&detected); err != nil {
+		t.Fatal(err)
+	}
+	if created != "2026-10-21 03:30:00.123456789 +0000 UTC" || detected != created {
+		t.Fatalf("sync timestamps not normalized: created=%q detected=%q", created, detected)
+	}
+}
