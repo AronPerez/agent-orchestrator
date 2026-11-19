@@ -15,6 +15,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync/ledgertest"
 )
 
 // fakePeer is a peer's remote listener: identity, mint and self-revoke.
@@ -348,5 +349,39 @@ func TestLinkRollsBackWhenTheStatusRowFails(t *testing.T) {
 	}
 	if len(peer.revoked) != 1 || peer.revoked[0] != "dev_minted" {
 		t.Fatalf("minted token not revoked on the peer: %v", peer.revoked)
+	}
+}
+
+func TestLinkWarnsAboutExistingSecretShapedEntries(t *testing.T) {
+	peer := newFakePeer(t, "h_mini")
+	f := newLinkFixture(t)
+	ledger := ledgertest.NewMemLedger("h_laptop")
+	raised := ledgertest.Raised("dec_leaky", "w-1", "laptop")
+	var payload map[string]any
+	_ = json.Unmarshal(raised.Payload, &payload)
+	payload["context"] = "deploy with " + "gh" + "p_" + strings.Repeat("A1b2", 9)
+	raised.Payload, _ = json.Marshal(payload)
+	ledger.Append(raised, t0)
+	ledger.Append(ledgertest.Raised("dec_clean", "w-1", "laptop"), t0)
+	peers := decisionsync.NewPeers(decisionsync.PeersDeps{
+		Secrets: f.secrets, Store: f.store, API: decisionsync.NewHTTPClient(nil), Entries: ledger,
+		HostID: "h_laptop", Now: fixedNow(t0),
+	})
+	_, warnings, err := peers.Link(context.Background(), decisionsync.LinkInput{URL: peer.server.URL, Credential: "pw"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 1 || warnings[0].CallID != "dec_leaky" || warnings[0].Field != "context" {
+		t.Fatalf("warnings = %+v, want one for dec_leaky's context", warnings)
+	}
+}
+
+func TestApplyAcceptsSecretShapedRemoteEntry(t *testing.T) {
+	ledger := ledgertest.NewMemLedger("h_laptop")
+	entry := ledgertest.Received("h_mini", 1, "dec_1", domain.DecisionKindAnswered,
+		`{"choice":"other","note":"`+"gh"+"p_"+strings.Repeat("A1b2", 9)+`"}`)
+	res, err := ledger.ApplyDecisionEntries(context.Background(), "h_mini", []domain.DecisionEntry{entry}, t0)
+	if err != nil || res.Applied != 1 {
+		t.Fatalf("apply = %+v, %v; received entries are never checked for credentials", res, err)
 	}
 }

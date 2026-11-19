@@ -54,7 +54,7 @@ func startDecisionSync(ctx context.Context, dataDir string, store *sqlite.Store,
 		Ledger: ledger, HostID: hostID, MachineLabel: label, OnApplied: onApplied,
 	})
 	rt.peers = decisionsync.NewPeers(decisionsync.PeersDeps{
-		Secrets: secrets, Store: store, API: client, HostID: hostID, MachineLabel: label,
+		Secrets: secrets, Store: store, API: client, HostID: hostID, MachineLabel: label, Entries: store,
 		OnChange: func() { rt.scheduler.Refresh() },
 	})
 	rt.scheduler = decisionsync.NewScheduler(decisionsync.SchedulerDeps{
