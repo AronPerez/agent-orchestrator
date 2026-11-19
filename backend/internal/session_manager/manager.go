@@ -5301,6 +5301,9 @@ func (m *Manager) ReconcileBackground(ctx context.Context) (resultErr error) {
 		}
 	}
 	m.startupProvisioningRetries = nil
+	if err := m.scheduleTrackerIntakeClaimInspection(ctx); err != nil {
+		m.logger.Warn("reconcile: pending tracker intake inspection scheduling deferred", "error", err)
+	}
 	recs, err := m.store.ListAllSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("reconcile: list sessions: %w", err)

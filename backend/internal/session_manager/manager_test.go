@@ -105,6 +105,7 @@ func TestValidateSpawnContractRejectsIncompleteOrNonWorkerContracts(t *testing.T
 
 type fakeStore struct {
 	cleanupMu                          sync.Mutex
+	trackerIntakeMu                    sync.RWMutex
 	cleanupFacts                       map[domain.SessionID]domain.SessionCleanupRecord
 	sessions                           map[domain.SessionID]domain.SessionRecord
 	pr                                 map[domain.SessionID]domain.PRFacts
@@ -179,6 +180,8 @@ func (f *fakeStore) CreateSession(_ context.Context, rec domain.SessionRecord) (
 	return rec, nil
 }
 func (f *fakeStore) CreateTrackerIntakeSession(ctx context.Context, rec domain.SessionRecord, limits domain.AutomatedSessionLimits) (domain.SessionRecord, error) {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
 	f.trackerIntakeLimits = append(f.trackerIntakeLimits, limits)
 	key := string(rec.ProjectID) + "\x00" + string(rec.IssueID)
 	if f.trackerIntakePending[key] != "" {
@@ -194,6 +197,8 @@ func (f *fakeStore) CreateTrackerIntakeSession(ctx context.Context, rec domain.S
 	return created, err
 }
 func (f *fakeStore) CommitTrackerIntakeSession(_ context.Context, id domain.SessionID, _ time.Time) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
 	for key, pendingID := range f.trackerIntakePending {
 		if pendingID == id {
 			delete(f.trackerIntakePending, key)
@@ -206,6 +211,8 @@ func (f *fakeStore) CommitTrackerIntakeSession(_ context.Context, id domain.Sess
 }
 
 func (f *fakeStore) CommitStoppedTrackerIntakeSession(_ context.Context, id domain.SessionID, _ time.Time) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
 	if f.trackerIntakeCommitStoppedErr != nil {
 		return f.trackerIntakeCommitStoppedErr
 	}
@@ -227,6 +234,8 @@ func (f *fakeStore) CommitStoppedTrackerIntakeSession(_ context.Context, id doma
 }
 
 func (f *fakeStore) ReserveTrackerIntakeRecovery(_ context.Context, id domain.SessionID, reservation domain.TrackerIntakeRecoveryReservation) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
 	for _, pendingID := range f.trackerIntakePending {
 		if pendingID == id {
 			if reservation.CleanupConfirmed {
@@ -244,6 +253,8 @@ func (f *fakeStore) GetPendingTrackerIntakeRecovery(_ context.Context, id domain
 	if f.trackerIntakeRecoveryHook != nil {
 		f.trackerIntakeRecoveryHook(id)
 	}
+	f.trackerIntakeMu.RLock()
+	defer f.trackerIntakeMu.RUnlock()
 	for _, pendingID := range f.trackerIntakePending {
 		if pendingID == id {
 			return f.trackerIntakeRecovery[id], true, nil
@@ -252,6 +263,8 @@ func (f *fakeStore) GetPendingTrackerIntakeRecovery(_ context.Context, id domain
 	return domain.TrackerIntakeRecoveryReservation{}, false, nil
 }
 func (f *fakeStore) ListPendingTrackerIntakeClaims(_ context.Context) ([]domain.TrackerIntakePendingClaim, error) {
+	f.trackerIntakeMu.RLock()
+	defer f.trackerIntakeMu.RUnlock()
 	claims := make([]domain.TrackerIntakePendingClaim, 0, len(f.trackerIntakePending))
 	for key, id := range f.trackerIntakePending {
 		project, issue, _ := strings.Cut(key, "\x00")
@@ -263,6 +276,8 @@ func (f *fakeStore) ListPendingTrackerIntakeClaims(_ context.Context) ([]domain.
 	return claims, nil
 }
 func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.SessionID, _ time.Time) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
 	rec, exists := f.sessions[id]
 	for key, pendingID := range f.trackerIntakePending {
 		if pendingID != id {
@@ -290,6 +305,8 @@ func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.S
 	return nil
 }
 func (f *fakeStore) ReleaseTrackerIntakeSession(_ context.Context, id domain.SessionID) error {
+	f.trackerIntakeMu.Lock()
+	defer f.trackerIntakeMu.Unlock()
 	if f.trackerIntakeReleaseErr != nil {
 		return f.trackerIntakeReleaseErr
 	}

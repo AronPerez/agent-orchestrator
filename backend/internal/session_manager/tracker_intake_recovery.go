@@ -58,6 +58,28 @@ func (m *Manager) ScheduleTrackerIntakeClaimReconciliation(ctx context.Context) 
 	return nil
 }
 
+// scheduleTrackerIntakeClaimInspection starts a read-only lookup for every
+// pending claim before startup health runs. A blocked lookup stays isolated in
+// its worker, while mutation-capable reconciliation is scheduled only after the
+// startup live and reap passes have finished.
+func (m *Manager) scheduleTrackerIntakeClaimInspection(ctx context.Context) error {
+	claims, err := m.store.ListPendingTrackerIntakeClaims(ctx)
+	if err != nil {
+		return err
+	}
+	for _, claim := range claims {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		m.runInBackground(func() {
+			if err := m.inspectTrackerIntakeClaim(m.backgroundContext, claim); err != nil {
+				m.logger.Warn("tracker intake: claim inspection deferred", "sessionID", claim.SessionID, "projectID", claim.ProjectID, "error", err)
+			}
+		})
+	}
+	return nil
+}
+
 func (m *Manager) beginTrackerIntakeRecovery(id domain.SessionID) bool {
 	m.trackerIntakeRecoveryMu.Lock()
 	defer m.trackerIntakeRecoveryMu.Unlock()
@@ -211,6 +233,13 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		return m.checkSessionHealth(recoveryCtx, rec)
 	}
 	return m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
+}
+
+func (m *Manager) inspectTrackerIntakeClaim(ctx context.Context, claim domain.TrackerIntakePendingClaim) error {
+	if _, _, err := m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID); err != nil {
+		return fmt.Errorf("inspect tracker intake %s: %w", claim.SessionID, err)
+	}
+	return nil
 }
 
 func trackerIntakeRuntimeFenceProbeable(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
