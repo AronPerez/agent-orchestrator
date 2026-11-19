@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -365,5 +366,47 @@ func TestDecisionStreamsForSessionsReadOnlyThoseStreams(t *testing.T) {
 	}
 	if streams, err := store.ListDecisionStreamsFor(ctx, nil); err != nil || len(streams) != 0 {
 		t.Fatalf("no sessions = %+v, %v", streams, err)
+	}
+}
+
+// A decision made for the person stands until it is overruled or closed, so
+// the board shows it like any other open call; it never counts as Needs you.
+func TestDecisionBoardIncludesStandingDecidedCalls(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	decidedAt := now.Add(-30 * 24 * time.Hour)
+	appendDecision(t, store, domain.DecisionEntry{
+		ID: "decided_1", Origin: "h_a", CallID: "dec_decided", Kind: domain.DecisionKindDecided,
+		Payload: mustDecisionJSON(domain.DecisionDecidedPayload{
+			What: "Pinned the Go toolchain", Why: "CI drifted", Undo: "Unpin it in go.mod", Kind: "dependency",
+			MachineLabel: "mac-mini", OwnerSessionID: "w-1", OwnerSessionName: "worker 1",
+		}),
+		WrittenAt: decidedAt, AuthorKind: domain.DecisionAuthorSession, AuthorSession: "w-1",
+	}, decidedAt)
+
+	board, err := store.ListDecisionCallsForBoard(ctx, now.Add(-7*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decisionIDs(board) != "dec_decided" || board[0].State != domain.DecisionStateDecided {
+		t.Fatalf("board = %q (%+v), want the standing decided call however old", decisionIDs(board), board)
+	}
+}
+
+// The stream lookup reads each requested stream's history once, so a stream
+// with a long completed history still names itself after its newest call.
+func TestDecisionStreamsForSessionsWithLongHistory(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_000_000).UTC()
+	for i := range 60 {
+		written := at.Add(time.Duration(i) * time.Second)
+		appendDecision(t, store, decisionRaised(fmt.Sprintf("dent_%d", i), "h_a", fmt.Sprintf("dec_%d", i), "w-1", "epic", fmt.Sprintf("Epic v%d", i), written), written)
+	}
+	streams, err := store.ListDecisionStreamsFor(ctx, []domain.SessionID{"epic"})
+	want := []domain.DecisionStream{{Origin: "h_a", SessionID: "epic", Name: "Epic v59"}}
+	if err != nil || !reflect.DeepEqual(streams, want) {
+		t.Fatalf("streams = %+v, err=%v; want %+v", streams, err, want)
 	}
 }

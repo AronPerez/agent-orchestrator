@@ -146,3 +146,32 @@ func TestDecisionBoardLooksUpOnlyItsOwnStreams(t *testing.T) {
 		}
 	}
 }
+
+// A decision made for the person stands on the board, with its stream, until
+// it is overruled or closed; it never counts as Needs you.
+func TestDecisionBoardShowsStandingDecisions(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	setShopAutonomy(t, fixture, domain.AutonomyConfig{Mode: domain.AutonomyOn})
+	decided, err := fixture.service.Decide(ctx, Actor{Session: fixture.w1}, validDecideInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	board, err := fixture.service.Board(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callIDs(board.Calls) != decided.ID || board.NeedsYouCount != 0 {
+		t.Fatalf("board = %q needsYou=%d, want the standing decision and no Needs you", callIDs(board.Calls), board.NeedsYouCount)
+	}
+	if got := board.Calls[0]; got.State != domain.DecisionStateDecided || got.Raised.StreamName != "Checkout epic" {
+		t.Fatalf("decided call = state %q stream %q", got.State, got.Raised.StreamName)
+	}
+	if _, err := fixture.service.Overrule(ctx, Actor{Surface: domain.RequestSurfaceDesktop}, decided.ID, "Keep #12 open"); err != nil {
+		t.Fatal(err)
+	}
+	board, err = fixture.service.Board(ctx)
+	if err != nil || len(board.Calls) != 1 || board.Calls[0].State != domain.DecisionStateInProgress {
+		t.Fatalf("after overrule board = %+v err=%v, want the call In progress", board.Calls, err)
+	}
+}

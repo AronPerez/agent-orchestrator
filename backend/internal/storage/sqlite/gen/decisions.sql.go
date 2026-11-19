@@ -151,12 +151,13 @@ func (q *Queries) ListDecisionCallsByState(ctx context.Context, arg ListDecision
 const listDecisionCallsForBoard = `-- name: ListDecisionCallsForBoard :many
 SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text, outcome_at
 FROM decision_calls
-WHERE state IN ('needs_you', 'in_progress')
+WHERE state IN ('needs_you', 'in_progress', 'decided')
    OR (state = 'done' AND retired = 0 AND outcome_at >= ?1)
 ORDER BY raised_at, call_id
 `
 
-// Every active call plus non-retired Done calls whose outcome landed at or
+// Every active call (Needs you, In progress, and decisions made for the person
+// that still stand) plus non-retired Done calls whose outcome landed at or
 // after done_since. Grouping and display order belong to the client.
 func (q *Queries) ListDecisionCallsForBoard(ctx context.Context, doneSince sql.NullTime) ([]DecisionCall, error) {
 	rows, err := q.db.QueryContext(ctx, listDecisionCallsForBoard, doneSince)
@@ -402,20 +403,20 @@ func (q *Queries) ListDecisionStreams(ctx context.Context) ([]ListDecisionStream
 }
 
 const listDecisionStreamsForSessions = `-- name: ListDecisionStreamsForSessions :many
-SELECT current.origin, current.stream_session_id, current.stream_name
-FROM decision_calls AS current
-WHERE current.stream_session_id IN (/*SLICE:session_ids*/?)
-  AND current.call_id = (
-      SELECT latest.call_id
-      FROM decision_calls AS latest
-      JOIN decision_entries AS raised
-        ON raised.call_id = latest.call_id AND raised.kind IN ('raised', 'decided')
-      WHERE latest.stream_session_id = current.stream_session_id
-        AND latest.origin = current.origin
-      ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
-      LIMIT 1
-  )
-ORDER BY current.origin, current.stream_session_id
+SELECT ranked.origin, ranked.stream_session_id, ranked.stream_name
+FROM (
+    SELECT calls.origin, calls.stream_session_id, calls.stream_name,
+        ROW_NUMBER() OVER (
+            PARTITION BY calls.origin, calls.stream_session_id
+            ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
+        ) AS position
+    FROM decision_calls AS calls
+    JOIN decision_entries AS raised
+      ON raised.call_id = calls.call_id AND raised.kind IN ('raised', 'decided')
+    WHERE calls.stream_session_id IN (/*SLICE:session_ids*/?)
+) AS ranked
+WHERE ranked.position = 1
+ORDER BY ranked.origin, ranked.stream_session_id
 `
 
 type ListDecisionStreamsForSessionsRow struct {
@@ -425,7 +426,9 @@ type ListDecisionStreamsForSessionsRow struct {
 }
 
 // The newest recorded name of each stream led by one of these sessions, on any
-// origin. Uses decision_calls_by_stream, so it reads only those streams' calls.
+// origin. Each requested stream's calls are read once through
+// decision_calls_by_stream and ranked by their raising entry, so the cost does
+// not multiply with the stream's completed history.
 func (q *Queries) ListDecisionStreamsForSessions(ctx context.Context, sessionIds []string) ([]ListDecisionStreamsForSessionsRow, error) {
 	query := listDecisionStreamsForSessions
 	var queryParams []interface{}
