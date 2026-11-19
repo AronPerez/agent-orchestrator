@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DecisionCall } from "./decision-inbox";
-import { buildDecisionBoard } from "./decision-board";
+import { buildDecisionBoard, initialDecisionFocusId, moveDecisionFocus, replacementDecisionFocusId, type DecisionTopologyRow } from "./decision-board";
 
 let serial = 0;
 function call(overrides: Partial<DecisionCall> & { id: string }): DecisionCall {
@@ -206,5 +206,51 @@ describe("buildDecisionBoard", () => {
 			["Checkout", "laptop"],
 			["Docs", undefined],
 		]);
+	});
+});
+
+describe("keyboard topology", () => {
+	// Two bands; row r2 has an empty In progress lane.
+	const topology: DecisionTopologyRow[] = [
+		{ bandKey: "a", rowKey: "r1", lanes: { needs_you: ["n1", "n2"], in_progress: ["i1"], done: ["d1", "d2", "d3"] } },
+		{ bandKey: "a", rowKey: "r2", lanes: { needs_you: ["n3"], in_progress: [], done: ["d4"] } },
+		{ bandKey: "b", rowKey: "r3", lanes: { needs_you: [], in_progress: ["i2"], done: [] } },
+	];
+
+	it("moves up and down within a lane across rows and bands, stopping at the ends", () => {
+		expect(moveDecisionFocus(topology, "n1", "down")).toBe("n2");
+		expect(moveDecisionFocus(topology, "n2", "down")).toBe("n3");
+		expect(moveDecisionFocus(topology, "n3", "down")).toBe("n3");
+		expect(moveDecisionFocus(topology, "i1", "down")).toBe("i2");
+		expect(moveDecisionFocus(topology, "i2", "up")).toBe("i1");
+		expect(moveDecisionFocus(topology, "n1", "up")).toBe("n1");
+	});
+
+	it("moves left and right to the nearest card of the next lane in the same row", () => {
+		expect(moveDecisionFocus(topology, "n2", "right")).toBe("i1");
+		expect(moveDecisionFocus(topology, "d3", "left")).toBe("i1");
+		expect(moveDecisionFocus(topology, "i1", "right")).toBe("d1");
+		// An empty lane is passed over within the row; a row edge stays put.
+		expect(moveDecisionFocus(topology, "n3", "right")).toBe("d4");
+		expect(moveDecisionFocus(topology, "d1", "right")).toBe("d1");
+		expect(moveDecisionFocus(topology, "i2", "left")).toBe("i2");
+	});
+
+	it("starts at the selected card, else the first Needs you card, else the first card", () => {
+		expect(initialDecisionFocusId(topology, "d4")).toBe("d4");
+		expect(initialDecisionFocusId(topology, "gone")).toBe("n1");
+		expect(initialDecisionFocusId([{ bandKey: "b", rowKey: "r", lanes: { needs_you: [], in_progress: [], done: ["d9"] } }], undefined)).toBe("d9");
+		expect(initialDecisionFocusId([], undefined)).toBeUndefined();
+	});
+
+	it("chooses where focus goes when its card leaves: next in lane, then previous, then first", () => {
+		const after: DecisionTopologyRow[] = [
+			{ bandKey: "a", rowKey: "r1", lanes: { needs_you: ["n2"], in_progress: ["i1"], done: ["d1", "d3"] } },
+		];
+		expect(replacementDecisionFocusId(topology, "d2", after)).toBe("d3");
+		expect(replacementDecisionFocusId(topology, "n1", after)).toBe("n2");
+		expect(replacementDecisionFocusId(topology, "d4", after)).toBe("d3");
+		expect(replacementDecisionFocusId(topology, "i2", [])).toBeUndefined();
+		expect(replacementDecisionFocusId(topology, "n3", [{ bandKey: "z", rowKey: "z", lanes: { needs_you: [], in_progress: ["x"], done: [] } }])).toBe("x");
 	});
 });

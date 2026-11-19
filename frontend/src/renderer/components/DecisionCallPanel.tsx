@@ -75,7 +75,12 @@ export function DecisionCallPanel({ callId, onClose }: DecisionCallPanelProps) {
 
 	let body: ReactNode;
 	if (detail.data) {
-		body = <DecisionCallDetail call={detail.data.call} history={detail.data.history} />;
+		body = (
+			<>
+				{detail.isError ? <RefreshError error={detail.error} onRetry={() => void detail.refetch()} /> : null}
+				<DecisionCallDetail call={detail.data.call} history={detail.data.history} />
+			</>
+		);
 	} else if (detail.data === null) {
 		body = <p role="status" className="px-4 py-6 text-sm text-muted-foreground">{t("decisions.unavailableTitle")}</p>;
 	} else if (detail.isError) {
@@ -112,6 +117,19 @@ export function DecisionCallPanel({ callId, onClose }: DecisionCallPanelProps) {
 			</div>
 			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{body}</div>
 		</aside>
+	);
+}
+
+/** A failed refresh over a call still on screen: the call stays, with a retry. */
+function RefreshError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+	const { t } = useTranslation();
+	const requestId = apiErrorRequestId(error instanceof Error ? error.cause : undefined);
+	return (
+		<div role="alert" className="mx-4 mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+			<span className="text-destructive">{error instanceof Error ? error.message : t("decisions.loadFailedOne")}</span>
+			{requestId ? <span className="font-mono text-caption text-muted-foreground">{t("decisions.requestId", { id: requestId })}</span> : null}
+			<Button size="sm" variant="secondary" onClick={onRetry}>{t("decisions.retry")}</Button>
+		</div>
 	);
 }
 

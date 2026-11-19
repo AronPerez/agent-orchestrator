@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DecisionCall, DecisionHistoryEntry } from "../lib/decision-inbox";
@@ -371,4 +371,15 @@ describe("DecisionCallPanel", () => {
 			expect(screen.getByText(reason)).toBeInTheDocument();
 		});
 	});
+
+	it("keeps the call and reports a failed refresh with a retry", async () => {
+		const { client } = renderPanel();
+		await screen.findByRole("heading", { level: 2, name: call.title });
+		getMock.mockResolvedValue({ error: { code: "DECISION_GET_FAILED", message: "Unable to get decision" }, response: { status: 500 } });
+		await act(() => client.invalidateQueries());
+		const alert = await screen.findByRole("alert", undefined, { timeout: 4_000 });
+		expect(alert).toHaveTextContent("Unable to get decision");
+		expect(within(alert).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+		expect(screen.getByRole("heading", { level: 2, name: call.title })).toBeInTheDocument();
+	}, 10_000);
 });

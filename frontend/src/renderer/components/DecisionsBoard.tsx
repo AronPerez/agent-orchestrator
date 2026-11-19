@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { ChevronRight, TriangleAlert } from "@/components/app-icons";
 import {
 	DECISION_LANES,
+	initialDecisionFocusId,
+	moveDecisionFocus,
+	replacementDecisionFocusId,
 	type DecisionBoardModel,
+	type DecisionFocusDirection,
 	type DecisionCardModel,
 	type DecisionLane,
 	type DecisionProjectBand,
@@ -40,6 +44,7 @@ function laneLabel(lane: DecisionLane, t: TFunction) {
  */
 export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBoardProps) {
 	const { t } = useTranslation();
+	const hintId = useId();
 	const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
 	const selectedBand = selectedId ? model.cardById.get(selectedId)?.bandKey : undefined;
 	// Opening a call always shows it, even inside a band the person folded away.
@@ -59,9 +64,60 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 		return next;
 	});
 
+	// Roving focus: one card is the board's tab stop; arrows move it.
+	const gridRef = useRef<HTMLDivElement>(null);
+	const visible = useMemo(() => model.topology.filter((row) => !collapsed.has(row.bandKey)), [model.topology, collapsed]);
+	const visibleIds = useMemo(() => new Set(visible.flatMap((row) => DECISION_LANES.flatMap((lane) => row.lanes[lane]))), [visible]);
+	const [focusId, setFocusId] = useState<string | undefined>(undefined);
+	const tabStop = focusId && visibleIds.has(focusId) ? focusId : initialDecisionFocusId(visible, selectedId);
+	const focusCard = (id: string) => {
+		setFocusId(id);
+		gridRef.current?.querySelector<HTMLElement>(`[data-decision-card="${CSS.escape(id)}"]`)?.focus();
+	};
+	// A route selection (a link, a search result) becomes the tab stop too.
+	useEffect(() => {
+		if (selectedId) setFocusId(selectedId);
+	}, [selectedId]);
+	// When the focused card leaves the board (its state changed, it was
+	// removed, or its band folded), keep focus on the board instead of losing
+	// it to the page.
+	const previousVisible = useRef(visible);
+	useLayoutEffect(() => {
+		const before = previousVisible.current;
+		previousVisible.current = visible;
+		if (!focusId || visibleIds.has(focusId)) return;
+		const replacement = replacementDecisionFocusId(before, focusId, visible);
+		setFocusId(replacement);
+		// Only when the focused card itself vanished: focus elsewhere (the
+		// search field, the panel) is never taken.
+		const active = document.activeElement;
+		if (replacement && (!active || active === document.body)) {
+			gridRef.current?.querySelector<HTMLElement>(`[data-decision-card="${CSS.escape(replacement)}"]`)?.focus();
+		}
+	}, [focusId, visible, visibleIds]);
+	const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+		const id = (event.target as HTMLElement).getAttribute?.("data-decision-card");
+		const direction: DecisionFocusDirection | undefined = event.key === "ArrowDown" ? "down" : event.key === "ArrowUp" ? "up" : event.key === "ArrowLeft" ? "left" : event.key === "ArrowRight" ? "right" : undefined;
+		if (!id || !direction) return;
+		event.preventDefault();
+		focusCard(moveDecisionFocus(visible, id, direction));
+	};
+
 	return (
 		<div className="@container min-w-0">
-			<div className={GRID_CLASS} aria-label={t("decisions.boardLabel")} role="group">
+			<p id={hintId} className="sr-only">{t("decisions.keyboardHint")}</p>
+			<div
+				ref={gridRef}
+				className={GRID_CLASS}
+				aria-label={t("decisions.boardLabel")}
+				aria-describedby={hintId}
+				role="group"
+				onKeyDown={onKeyDown}
+				onFocus={(event) => {
+					const id = (event.target as HTMLElement).getAttribute?.("data-decision-card");
+					if (id) setFocusId(id);
+				}}
+			>
 				<div aria-hidden="true" className="hidden border-b border-border @3xl:block" />
 				<ul aria-label={t("decisions.statesLabel")} className="contents">
 					{DECISION_LANES.map((lane) => (
@@ -84,6 +140,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 						collapsed={collapsed.has(band.key)}
 						onToggle={() => toggleBand(band.key)}
 						selectedId={selectedId}
+						tabStop={tabStop}
 						onSelect={onSelect}
 						now={now}
 					/>
@@ -98,6 +155,7 @@ function DecisionBand({
 	collapsed,
 	onToggle,
 	selectedId,
+	tabStop,
 	onSelect,
 	now,
 }: {
@@ -105,6 +163,7 @@ function DecisionBand({
 	collapsed: boolean;
 	onToggle: () => void;
 	selectedId?: string;
+	tabStop?: string;
 	onSelect: (callId: string) => void;
 	now: number;
 }) {
@@ -135,13 +194,13 @@ function DecisionBand({
 				</Pressable>
 			</div>
 			{collapsed ? null : band.rows.map((row) => (
-				<DecisionRow key={row.key} row={row} selectedId={selectedId} onSelect={onSelect} now={now} />
+				<DecisionRow key={row.key} row={row} selectedId={selectedId} tabStop={tabStop} onSelect={onSelect} now={now} />
 			))}
 		</section>
 	);
 }
 
-function DecisionRow({ row, selectedId, onSelect, now }: { row: DecisionStreamRow; selectedId?: string; onSelect: (callId: string) => void; now: number }) {
+function DecisionRow({ row, selectedId, tabStop, onSelect, now }: { row: DecisionStreamRow; selectedId?: string; tabStop?: string; onSelect: (callId: string) => void; now: number }) {
 	const { t } = useTranslation();
 	const name = row.projectWide
 		? t("decisions.projectWide")
@@ -166,7 +225,7 @@ function DecisionRow({ row, selectedId, onSelect, now }: { row: DecisionStreamRo
 				>
 					{row.lanes[lane].map((card) => (
 						<li key={card.id} className="min-w-0">
-							<DecisionCard card={card} selected={card.id === selectedId} onSelect={onSelect} now={now} />
+							<DecisionCard card={card} selected={card.id === selectedId} tabStop={card.id === tabStop} onSelect={onSelect} now={now} />
 						</li>
 					))}
 				</ul>
@@ -175,7 +234,7 @@ function DecisionRow({ row, selectedId, onSelect, now }: { row: DecisionStreamRo
 	);
 }
 
-function DecisionCard({ card, selected, onSelect, now }: { card: DecisionCardModel; selected: boolean; onSelect: (callId: string) => void; now: number }) {
+function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: DecisionCardModel; selected: boolean; tabStop: boolean; onSelect: (callId: string) => void; now: number }) {
 	const { t } = useTranslation();
 	const status = decisionStatusText(card.status, now, t);
 	const secondary = decisionSecondaryText(card.secondary, t);
@@ -183,6 +242,7 @@ function DecisionCard({ card, selected, onSelect, now }: { card: DecisionCardMod
 		<Pressable
 			aria-current={selected ? "true" : undefined}
 			data-decision-card={card.id}
+			tabIndex={tabStop ? 0 : -1}
 			onClick={() => onSelect(card.id)}
 			className={cn(
 				"block w-full min-w-0 rounded-md border border-border bg-card px-2 py-1.5 transition-colors duration-(--duration-fast) hover:bg-interactive-hover focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
