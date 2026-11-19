@@ -237,9 +237,10 @@ func policyRule(rule, message string) error {
 
 // KindPolicy is one decision kind and whether a project reserves it.
 type KindPolicy struct {
-	ID       domain.DecisionKindID
-	Label    string
-	Reserved bool
+	ID                domain.DecisionKindID
+	Label             string
+	Reserved          bool
+	ReservedByDefault bool
 }
 
 // Policy is a project's autonomy mode and its view of every decision kind.
@@ -259,7 +260,7 @@ func (s *Service) Kinds(ctx context.Context, actor Actor, projectID domain.Proje
 	kinds := domain.DecisionKinds()
 	policy := Policy{ProjectID: projectID, Mode: autonomy.EffectiveMode(), Kinds: make([]KindPolicy, len(kinds))}
 	for i, kind := range kinds {
-		policy.Kinds[i] = KindPolicy{ID: kind.ID, Label: kind.Label, Reserved: autonomy.IsReserved(kind.ID)}
+		policy.Kinds[i] = KindPolicy{ID: kind.ID, Label: kind.Label, Reserved: autonomy.IsReserved(kind.ID), ReservedByDefault: kind.ReservedByDefault}
 	}
 	return policy, nil
 }

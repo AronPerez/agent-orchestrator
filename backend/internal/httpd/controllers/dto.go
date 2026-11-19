@@ -164,9 +164,10 @@ type DecisionKindsQuery struct {
 
 // DecisionKindResponse is one decision kind and whether the project reserves it.
 type DecisionKindResponse struct {
-	ID       string `json:"id"`
-	Label    string `json:"label"`
-	Reserved bool   `json:"reserved"`
+	ID                string `json:"id"`
+	Label             string `json:"label"`
+	Reserved          bool   `json:"reserved"`
+	ReservedByDefault bool   `json:"reservedByDefault"`
 }
 
 // DecisionKindsResponse is a project's autonomy mode and decision kinds.

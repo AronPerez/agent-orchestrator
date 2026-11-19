@@ -163,6 +163,10 @@ func TestKindsReportsTheProjectPolicy(t *testing.T) {
 		if want := kind.ID == "design"; kind.Reserved != want {
 			t.Fatalf("kind %q reserved = %v, want %v", kind.ID, kind.Reserved, want)
 		}
+		info, _ := domain.LookupDecisionKind(string(kind.ID))
+		if kind.ReservedByDefault != info.ReservedByDefault {
+			t.Fatalf("kind %q reservedByDefault = %v", kind.ID, kind.ReservedByDefault)
+		}
 	}
 	personal, err := fixture.service.Kinds(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, "shop")
 	if err != nil || personal.Mode != domain.AutonomyObserve {

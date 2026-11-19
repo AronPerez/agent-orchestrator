@@ -18009,6 +18009,18 @@ components:
       - status
       - scheduledFor
       type: object
+    AutonomyConfig:
+      properties:
+        mode:
+          enum:
+          - "off"
+          - observe
+          type: string
+        reserved:
+          items:
+            type: string
+          type: array
+      type: object
     AwakeApplication:
       properties:
         id:
@@ -21874,10 +21886,13 @@ components:
           type: string
         reserved:
           type: boolean
+        reservedByDefault:
+          type: boolean
       required:
       - id
       - label
       - reserved
+      - reservedByDefault
       type: object
     DecisionKindsResponse:
       properties:
@@ -22243,18 +22258,6 @@ components:
       required:
       - state
       - lastActivityAt
-      type: object
-    DomainAutonomyConfig:
-      properties:
-        mode:
-          enum:
-          - "off"
-          - observe
-          type: string
-        reserved:
-          items:
-            type: string
-          type: array
       type: object
     DomainConversationBatchedDelivery:
       properties:
@@ -24210,7 +24213,7 @@ components:
         autoReview:
           type: boolean
         autonomy:
-          $ref: '#/components/schemas/DomainAutonomyConfig'
+          $ref: '#/components/schemas/AutonomyConfig'
         canonicalRepoURL:
           type: string
         collisionRadar:

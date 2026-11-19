@@ -137,7 +137,7 @@ func (c *DecisionsController) kinds(w http.ResponseWriter, r *http.Request) {
 		Kinds: make([]DecisionKindResponse, len(policy.Kinds)),
 	}
 	for i, kind := range policy.Kinds {
-		response.Kinds[i] = DecisionKindResponse{ID: string(kind.ID), Label: kind.Label, Reserved: kind.Reserved}
+		response.Kinds[i] = DecisionKindResponse{ID: string(kind.ID), Label: kind.Label, Reserved: kind.Reserved, ReservedByDefault: kind.ReservedByDefault}
 	}
 	envelope.WriteJSON(w, http.StatusOK, response)
 }

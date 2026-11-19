@@ -55,7 +55,7 @@ func (f *fakeDecisionService) Kinds(_ context.Context, actor decisionsvc.Actor, 
 		return decisionsvc.Policy{}, f.err
 	}
 	return decisionsvc.Policy{ProjectID: "shop", Mode: domain.AutonomyObserve, Kinds: []decisionsvc.KindPolicy{
-		{ID: "production", Label: "Production changes and deploys", Reserved: true},
+		{ID: "production", Label: "Production changes and deploys", Reserved: true, ReservedByDefault: true},
 		{ID: "pr_hygiene", Label: "Pull request hygiene"},
 	}}, nil
 }
@@ -442,7 +442,7 @@ func TestDecisionsAPI_Kinds(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode: %v body=%s", err, body)
 	}
-	if got.ProjectID != "shop" || got.Mode != "observe" || len(got.Kinds) != 2 || !got.Kinds[0].Reserved || got.Kinds[1].Reserved || got.Kinds[1].Label != "Pull request hygiene" {
+	if got.ProjectID != "shop" || got.Mode != "observe" || len(got.Kinds) != 2 || !got.Kinds[0].Reserved || got.Kinds[1].Reserved || got.Kinds[1].Label != "Pull request hygiene" || !got.Kinds[0].ReservedByDefault || got.Kinds[1].ReservedByDefault {
 		t.Fatalf("kinds = %+v", got)
 	}
 	if _, status := decisionRequest(t, srv, http.MethodGet, "/api/v1/decisions/kinds", "", "w-1"); status != http.StatusOK || svc.actor.Session != "w-1" {

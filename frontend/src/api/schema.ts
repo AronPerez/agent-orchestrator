@@ -6071,6 +6071,11 @@ export interface components {
             /** @enum {string} */
             status: "pending" | "spawning" | "running" | "completed" | "failed";
         };
+        AutonomyConfig: {
+            /** @enum {string} */
+            mode?: "off" | "observe";
+            reserved?: string[];
+        };
         AwakeApplication: {
             id: string;
             identity: string;
@@ -7548,6 +7553,7 @@ export interface components {
             id: string;
             label: string;
             reserved: boolean;
+            reservedByDefault: boolean;
         };
         DecisionKindsResponse: {
             kinds: components["schemas"]["DecisionKindResponse"][];
@@ -7670,11 +7676,6 @@ export interface components {
             /** Format: date-time */
             lastActivityAt: string;
             state: string;
-        };
-        DomainAutonomyConfig: {
-            /** @enum {string} */
-            mode?: "off" | "observe";
-            reserved?: string[];
         };
         DomainConversationBatchedDelivery: {
             deliveredWithTurnId: string;
@@ -8423,7 +8424,7 @@ export interface components {
             agentRules?: string;
             agentRulesFile?: string;
             autoReview?: boolean;
-            autonomy?: components["schemas"]["DomainAutonomyConfig"];
+            autonomy?: components["schemas"]["AutonomyConfig"];
             canonicalRepoURL?: string;
             collisionRadar?: components["schemas"]["CollisionRadarConfig"];
             containerReap?: components["schemas"]["ContainerReapConfig"];
