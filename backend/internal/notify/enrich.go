@@ -158,14 +158,22 @@ func enrichDecision(intent Intent) (domain.NotificationRecord, error) {
 // DecisionSourceKey is the durable dedupe key for one call's notification.
 func DecisionSourceKey(callID string) string { return "decision:" + callID }
 
-// oneLine keeps recorded labels to one visible line: control and format
-// characters (newlines, bidi overrides) become spaces and runs collapse, the
-// same rule the push dispatcher applies to host labels.
+// oneLine keeps recorded labels to one visible line: control characters
+// (newlines, tabs) and bidi embeddings, overrides and isolates become spaces,
+// and runs collapse. Other format characters stay: zero-width joiners and
+// non-joiners are part of emoji sequences and of words in many scripts, so a
+// valid title reaches the banner exactly.
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || isBidiControl(r) {
 			return ' '
 		}
 		return r
 	}, s)), " ")
+}
+
+// isBidiControl reports the explicit directional formatting characters that
+// can reorder what a banner shows (U+202A–U+202E, U+2066–U+2069).
+func isBidiControl(r rune) bool {
+	return (r >= '\u202A' && r <= '\u202E') || (r >= '\u2066' && r <= '\u2069')
 }

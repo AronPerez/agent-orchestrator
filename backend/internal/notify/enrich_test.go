@@ -172,3 +172,38 @@ func TestEnrichDecisionCopyNeverCarriesContext(t *testing.T) {
 		}
 	}
 }
+
+func TestEnrichDecisionKeepsJoinersInValidTitles(t *testing.T) {
+	t.Parallel()
+	// A ZWJ emoji sequence and a Persian word written with a ZWNJ are valid
+	// titles; the notification must carry them exactly.
+	for _, title := range []string{"Ship the \U0001F469\u200D\U0001F4BB build?", "Publish می\u200Cخواهم copy?"} {
+		intent := decisionIntent()
+		intent.DecisionTitle = title
+		intent.DecisionProjectName = "team\u200Dname"
+		rec, err := enrich(intent)
+		if err != nil {
+			t.Fatalf("enrich %q: %v", title, err)
+		}
+		if rec.Body != title {
+			t.Fatalf("body = %q, want the exact title %q", rec.Body, title)
+		}
+		if rec.Title != "Decision needed · team\u200Dname" {
+			t.Fatalf("title = %q", rec.Title)
+		}
+	}
+}
+
+func TestEnrichDecisionStripsBidiControls(t *testing.T) {
+	t.Parallel()
+	intent := decisionIntent()
+	intent.DecisionTitle = "Approve \u202Etxt.exe\u202C now?"
+	intent.DecisionStreamName = "a\u2066b\u2069"
+	rec, err := enrich(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Body != "Approve txt.exe now?" || rec.Title != "Decision needed · agent-orchestrator · a b" {
+		t.Fatalf("title=%q body=%q", rec.Title, rec.Body)
+	}
+}
