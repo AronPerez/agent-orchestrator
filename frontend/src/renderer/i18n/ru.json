@@ -1457,6 +1457,8 @@
 	"decisions.history.overruled": "Решение отменено",
 	"decisions.history.carriedOut": "Выполнено",
 	"decisions.outcomeAnswerChanged": "Ответ изменился, пока вы писали. Проверьте его, затем запишите итог.",
+	"decisions.answerUnconfirmed": "Ваш ответ, возможно, уже записан. Проверьте ещё раз, прежде чем отправлять его.",
+	"decisions.checkAgain": "Проверить ещё раз",
 	"decisionInbox.unread": "Непрочитано",
 	"pr.botSuffix": "{{name}} бот",
 	"pr.card.changesRequested": "Запрошены изменения",

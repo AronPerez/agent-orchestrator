@@ -1479,6 +1479,8 @@
 	"decisions.history.overruled": "Décision annulée",
 	"decisions.history.carriedOut": "Exécutée",
 	"decisions.outcomeAnswerChanged": "La réponse a changé depuis que vous avez commencé. Vérifiez-la, puis enregistrez le résultat.",
+	"decisions.answerUnconfirmed": "Votre réponse a peut-être été enregistrée. Vérifiez à nouveau avant de l'envoyer.",
+	"decisions.checkAgain": "Vérifier à nouveau",
 	"decisionInbox.unread": "Non lu",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Modifications demandées",

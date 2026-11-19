@@ -273,6 +273,18 @@ describe("answer reconciliation", () => {
 		await waitFor(() => expect(result.current.answer.isError).toBe(true));
 	});
 
+	it("takes a confirmed dismissal off the board and its count when the re-read fails", async () => {
+		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z"), decisionCall("dec_2", "2026-11-18T09:30:00Z")]);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => ({ board: useDecisionBoard(), action: useDecisionAction() }), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.board.data?.needsYouCount).toBe(2));
+		local.POST.mockResolvedValue({ data: { ...decisionCall("dec_1", "2026-11-18T09:00:00Z"), state: "dismissed", stateLabel: "Dismissed" } });
+		local.GET.mockResolvedValue({ error: { code: "DECISION_BOARD_FAILED", message: "Unable to load decisions" }, response: { status: 500 } });
+		await act(() => result.current.action.mutateAsync({ kind: "dismiss", callId: "dec_1" }));
+		await waitFor(() => expect(result.current.board.data?.calls.map((call) => call.id)).toEqual(["dec_2"]));
+		expect(result.current.board.data?.needsYouCount).toBe(1);
+	});
+
 	it("keeps the confirmed call when the re-read after an answer fails", async () => {
 		const local = setupLedger("local", [decisionCall("dec_1", "2026-11-18T09:00:00Z")]);
 		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

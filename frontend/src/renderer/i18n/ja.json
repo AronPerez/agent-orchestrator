@@ -1463,6 +1463,8 @@
 	"decisions.history.overruled": "差し戻し済み",
 	"decisions.history.carriedOut": "実行済み",
 	"decisions.outcomeAnswerChanged": "入力を始めた後に回答が変わりました。確認してから結果を記録してください。",
+	"decisions.answerUnconfirmed": "回答はすでに記録されている可能性があります。もう一度送る前に再確認してください。",
+	"decisions.checkAgain": "再確認",
 	"decisionInbox.unread": "未読",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "変更がリクエストされました",

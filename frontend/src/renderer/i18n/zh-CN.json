@@ -1445,6 +1445,8 @@
 	"decisions.history.overruled": "已推翻",
 	"decisions.history.carriedOut": "已执行",
 	"decisions.outcomeAnswerChanged": "你开始填写后答案已更改。请先查看，再记录结果。",
+	"decisions.answerUnconfirmed": "你的回答可能已被记录。再次发送前请先重新检查。",
+	"decisions.checkAgain": "重新检查",
 	"decisionInbox.unread": "未读",
 	"pr.botSuffix": "{{name}} 机器人",
 	"pr.card.changesRequested": "请求修改",

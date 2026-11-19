@@ -1429,6 +1429,8 @@
 	"decisions.history.overruled": "Overruled",
 	"decisions.history.carriedOut": "Carried out",
 	"decisions.outcomeAnswerChanged": "The answer changed after you started. Review it, then record the outcome.",
+	"decisions.answerUnconfirmed": "Your answer may have been recorded. Check again before sending it.",
+	"decisions.checkAgain": "Check again",
 	"decisionInbox.unread": "Unread",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "Changes requested",

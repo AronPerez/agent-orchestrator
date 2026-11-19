@@ -335,6 +335,52 @@ describe("DecisionCallPanel", () => {
 			expect(screen.queryByRole("button", { name: /Send decision|Dismiss|Record outcome|Mark/ })).not.toBeInTheDocument();
 		});
 
+		// The daemon may commit an answer whose response is lost. Until a fresh
+		// read says what the call is now, sending again could deliver it twice.
+		it("keeps Send disabled after an answer it could not confirm, until the call is read again", async () => {
+			serve(needsYou);
+			renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			postMock.mockRejectedValue(new Error("connection reset"));
+			getMock.mockRejectedValue(new Error("offline"));
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(await screen.findByText("Your answer may have been recorded. Check again before sending it.")).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Send decision" })).toBeDisabled();
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledTimes(1);
+
+			serve(needsYou);
+			await userEvent.click(screen.getByRole("button", { name: "Check again" }));
+			await vi.waitFor(() => expect(screen.getByRole("button", { name: "Send decision" })).toBeEnabled());
+			expect(screen.queryByText("Your answer may have been recorded. Check again before sending it.")).not.toBeInTheDocument();
+		});
+
+		it("shows an answer recorded despite a lost response and does not send it again", async () => {
+			serve(needsYou);
+			renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			postMock.mockRejectedValue(new Error("connection reset"));
+			serve({ ...inProgress, option: 2, chosenLabel: "Per-tenant API keys", standingEntryId: "dent_2" });
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(await screen.findByText("Sending a different pick delivers it to the session as an update.")).toBeInTheDocument();
+			await vi.waitFor(() => expect(screen.getByRole("button", { name: "Send decision" })).toBeDisabled());
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not resend an unchanged standing answer, but sends a changed pick or note", async () => {
+			serve(inProgress);
+			renderPanel();
+			const send = await screen.findByRole("button", { name: "Send decision" });
+			expect(send).toBeDisabled();
+			await userEvent.click(screen.getByRole("radio", { name: /Per-tenant API keys/ }));
+			expect(send).toBeEnabled();
+			await userEvent.click(screen.getByRole("radio", { name: /OAuth client credentials/ }));
+			expect(send).toBeDisabled();
+			await userEvent.type(screen.getByLabelText("Note for the session"), "Use staging first");
+			expect(send).toBeEnabled();
+		});
+
 		it("allows one action at a time and shows the daemon's refusal with its request id", async () => {
 			serve(inProgress);
 			let finish!: (value: unknown) => void;
@@ -450,6 +496,18 @@ describe("DecisionCallPanel", () => {
 			expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
 			expect(screen.queryByRole("button", { name: "Send decision" })).not.toBeInTheDocument();
 			expect(screen.queryByRole("button", { name: "Overrule" })).not.toBeInTheDocument();
+		});
+
+		it.each([["not yet confirmed", false], ["confirmed", true]])("lets the person close a standing decision %s with an outcome", async (_label, carriedOut) => {
+			serve({ ...decidedCall, decided: { ...decidedCall.decided!, carriedOut } }, decidedHistory);
+			renderPanel();
+			await userEvent.type(await screen.findByLabelText("What happened"), "Reviewed; #12 stays closed");
+			await userEvent.click(screen.getByRole("button", { name: "Record outcome" }));
+			expect(postMock).toHaveBeenCalledTimes(1);
+			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/outcome", {
+				params: { path: { id: "dec_1" } },
+				body: { text: "Reviewed; #12 stays closed" },
+			});
 		});
 
 		it("overrules only with a note saying what to do instead", async () => {

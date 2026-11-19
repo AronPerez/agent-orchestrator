@@ -69,9 +69,19 @@ function seedConfirmedCall(queryClient: ReturnType<typeof useQueryClient>, confi
 	queryClient.setQueryData<DecisionDetail | null>(decisionKeys.detail(confirmed.id), (current) =>
 		current ? { ...current, call: confirmed } : current,
 	);
-	queryClient.setQueryData<DecisionBoard>(decisionKeys.board(), (current) =>
-		current ? { ...current, calls: current.calls.map((call) => (call.id === confirmed.id ? confirmed : call)) } : current,
-	);
+	queryClient.setQueryData<DecisionBoard>(decisionKeys.board(), (current) => {
+		const before = current?.calls.find((call) => call.id === confirmed.id);
+		if (!current || !before) return current;
+		// Keep the board's own window and count true to the confirmed call.
+		const stays = confirmed.state === "needs_you" || confirmed.state === "in_progress" || confirmed.state === "decided" ||
+			(confirmed.state === "done" && !confirmed.retired && Date.parse(confirmed.outcomeAt ?? "") >= Date.parse(current.doneSince));
+		const needsYou = (call: DecisionCall) => (call.state === "needs_you" ? 1 : 0);
+		return {
+			...current,
+			calls: current.calls.flatMap((call) => (call.id !== confirmed.id ? [call] : stays ? [confirmed] : [])),
+			needsYouCount: current.needsYouCount - needsYou(before) + (stays ? needsYou(confirmed) : 0),
+		};
+	});
 }
 
 export function useDecisionInbox(enabled: boolean) {

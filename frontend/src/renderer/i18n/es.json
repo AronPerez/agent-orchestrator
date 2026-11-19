@@ -1479,6 +1479,8 @@
 	"decisions.history.overruled": "Revocada",
 	"decisions.history.carriedOut": "Realizada",
 	"decisions.outcomeAnswerChanged": "La respuesta cambió después de que empezaras. Revísala y luego registra el resultado.",
+	"decisions.answerUnconfirmed": "Es posible que tu respuesta se haya registrado. Vuelve a comprobarlo antes de enviarla.",
+	"decisions.checkAgain": "Volver a comprobar",
 	"decisionInbox.unread": "No leído",
 	"pr.botSuffix": "bot {{name}}",
 	"pr.card.changesRequested": "Cambios solicitados",

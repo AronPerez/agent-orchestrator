@@ -1463,6 +1463,8 @@
 	"decisions.history.overruled": "Aufgehoben",
 	"decisions.history.carriedOut": "Ausgeführt",
 	"decisions.outcomeAnswerChanged": "Die Antwort hat sich geändert, seit du begonnen hast. Prüfe sie und halte dann das Ergebnis fest.",
+	"decisions.answerUnconfirmed": "Deine Antwort wurde möglicherweise schon gespeichert. Prüfe erneut, bevor du sie sendest.",
+	"decisions.checkAgain": "Erneut prüfen",
 	"decisionInbox.unread": "Ungelesen",
 	"pr.botSuffix": "{{name}}-Bot",
 	"pr.card.changesRequested": "Änderungen angefordert",

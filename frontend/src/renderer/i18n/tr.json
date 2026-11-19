@@ -1429,6 +1429,8 @@
 	"decisions.history.overruled": "Geçersiz kılındı",
 	"decisions.history.carriedOut": "Uygulandı",
 	"decisions.outcomeAnswerChanged": "Siz başladıktan sonra yanıt değişti. İnceleyin, ardından sonucu kaydedin.",
+	"decisions.answerUnconfirmed": "Yanıtın kaydedilmiş olabilir. Göndermeden önce yeniden kontrol et.",
+	"decisions.checkAgain": "Yeniden kontrol et",
 	"decisionInbox.unread": "Okunmadı",
 	"pr.botSuffix": "{{name}} botu",
 	"pr.card.changesRequested": "Değişiklik istendi",
