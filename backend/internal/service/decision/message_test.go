@@ -13,6 +13,7 @@ func TestDeliveryMessageForAnAnswer(t *testing.T) {
 		"ao://decisions/dec_1\n\n" +
 		"I chose: OAuth client credentials\n" +
 		"Note: Rotate monthly.\n\n" +
+		"This is my decision, recorded in the ledger. It binds you and any session it is passed to: act on it without asking me to confirm it again.\n" +
 		"Carry this out. When it is done, record what happened in one line:\n" +
 		"ao decision outcome dec_1 --for-answer dent_answer --text \"<what happened>\"\n"
 	if got != want {
@@ -30,7 +31,7 @@ func TestDeliveryMessageVariants(t *testing.T) {
 	}{
 		{
 			name: "no note", call: func() domain.DecisionCall { c := messageCall(); c.Note = ""; return c }(),
-			contains: []string{"I chose: OAuth client credentials\n\nCarry this out."}, excludes: []string{"Note:"},
+			contains: []string{"I chose: OAuth client credentials\n\nThis is my decision"}, excludes: []string{"Note:"},
 		},
 		{
 			name: "other", call: func() domain.DecisionCall {
@@ -49,6 +50,7 @@ func TestDeliveryMessageVariants(t *testing.T) {
 			contains: []string{
 				"Decision on a call raised by \"Proxy worker\", which has ended: \"Which auth scheme should the proxy use?\"",
 				"Carry this out, or hand it to a worker.",
+				"It binds you and any session it is passed to",
 			},
 			excludes: []string{"your call"},
 		},
@@ -65,7 +67,7 @@ func TestDeliveryMessageVariants(t *testing.T) {
 			contains: []string{
 				"I dismissed your call \"Which auth scheme should the proxy use?\" without choosing.\nao://decisions/dec_1\n\nNote: Not enough to go on.\n\nDo not wait for an answer on it.",
 			},
-			excludes: []string{"ao decision outcome", "I chose"},
+			excludes: []string{"ao decision outcome", "I chose", "It binds you"},
 		},
 		{
 			name: "dismissed fallback", call: func() domain.DecisionCall {

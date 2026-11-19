@@ -288,7 +288,7 @@ func TestProjectConfigFlagsListsEveryFieldFlag(t *testing.T) {
 const storedProjectConfig = `{"sessionPrefix":"old","env":{"KEEP":"1"},"preRemove":["make clean"],"verify":["go test ./..."],` +
 	`"agentConfig":{"model":"m1","effort":"high"},"worker":{"agent":"codex","agentConfig":{"effort":"medium"}},` +
 	`"reviewers":[{"harness":"claude-code","agentConfig":{"effort":"max"}}],"workersRequestReview":true,` +
-	`"workerContracts":{"stallMinutes":17}}`
+	`"workerContracts":{"stallMinutes":17},"autonomy":{"mode":"observe","reserved":["production","design"]}}`
 
 type projectConfigCapture struct {
 	requests []string

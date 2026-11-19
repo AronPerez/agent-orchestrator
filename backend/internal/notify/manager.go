@@ -29,6 +29,12 @@ type Store interface {
 		typ domain.NotificationType,
 		at time.Time,
 	) ([]domain.NotificationRecord, error)
+	ResolveDecisionNotifications(
+		ctx context.Context,
+		callID string,
+		typ domain.NotificationType,
+		at time.Time,
+	) ([]domain.NotificationRecord, error)
 	ReconcileResolvedNotifications(ctx context.Context, at time.Time) ([]domain.NotificationRecord, error)
 }
 
@@ -118,6 +124,12 @@ func (m *Manager) Resolve(ctx context.Context, res Resolution) error {
 	if !res.Type.Valid() {
 		return fmt.Errorf("notify resolve: %w", domain.ErrInvalidNotificationType)
 	}
+	if res.Type.TargetsDecision() != (res.DecisionCallID != "") {
+		return errors.New("notify resolve: decision call id is required for, and only for, decision notifications")
+	}
+	if res.DecisionCallID != "" && (res.SessionID != "" || res.PRURL != "") {
+		return errors.New("notify resolve: a decision call cannot be combined with a session or pr target")
+	}
 	at := res.ResolvedAt
 	if at.IsZero() {
 		at = m.clock().UTC()
@@ -128,7 +140,9 @@ func (m *Manager) Resolve(ctx context.Context, res Resolution) error {
 		resolved []domain.NotificationRecord
 		err      error
 	)
-	if res.PRURL != "" {
+	if res.DecisionCallID != "" {
+		resolved, err = m.store.ResolveDecisionNotifications(ctx, res.DecisionCallID, res.Type, at)
+	} else if res.PRURL != "" {
 		resolved, err = m.store.ResolvePRNotifications(ctx, res.PRURL, res.Type, at)
 	} else {
 		if res.SessionID == "" {

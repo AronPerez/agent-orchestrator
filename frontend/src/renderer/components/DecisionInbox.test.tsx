@@ -139,4 +139,19 @@ describe("DecisionInbox", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Retry" }));
 		expect(onRetry).toHaveBeenCalledTimes(1);
 	});
+
+	it("marks a call whose announcement is unread the way unread notification rows are marked", () => {
+		render(
+			<DecisionInbox entries={[entry]} isLoading={false} loadFailed={false} onAnswer={vi.fn()} onRetry={vi.fn()} unreadCallIds={new Set(["dec_1"])} />,
+		);
+		const card = screen.getByRole("listitem");
+		expect(card).toHaveClass("bg-interactive-hover");
+		expect(screen.getByText("Unread")).toHaveClass("sr-only");
+	});
+
+	it("leaves a read call unmarked", () => {
+		render(<DecisionInbox entries={[entry]} isLoading={false} loadFailed={false} onAnswer={vi.fn()} onRetry={vi.fn()} unreadCallIds={new Set()} />);
+		expect(screen.getByRole("listitem")).not.toHaveClass("bg-interactive-hover");
+		expect(screen.queryByText("Unread")).not.toBeInTheDocument();
+	});
 });

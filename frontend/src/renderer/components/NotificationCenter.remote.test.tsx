@@ -345,3 +345,45 @@ it("shows only new remote OS notifications and opens their host-qualified sessio
 		params: { hostId: "host-b", projectId: "same-project", sessionId: "new-session" },
 	});
 });
+
+function decisionCopy(id: string, callId = "dec_shared"): NotificationDTO {
+	return {
+		id, sessionId: "", projectId: "", prUrl: "", type: "decision_needed",
+		title: "Decision needed · Shop", body: "Ship it?", status: "unread", createdAt: "2026-11-18T10:00:00Z",
+		target: { kind: "decision", sessionId: "", callId, originHostId: "h_a" },
+	};
+}
+
+it("counts one decision call once in the bell even when two hosts announce it", async () => {
+	remoteA = [decisionCopy("a-dec")];
+	remoteB = [decisionCopy("b-dec")];
+	const user = userEvent.setup();
+	render(
+		<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+			<TooltipProvider><NotificationCenter /></TooltipProvider>
+		</QueryClientProvider>,
+	);
+
+	// Local ping + one call (two copies) = 2, not 3.
+	await user.click(screen.getByRole("button", { name: "2 unread notifications" }));
+	const panel = within(await screen.findByRole("dialog", { name: "Notifications" }));
+	expect(panel.getByText("Local ping")).toBeInTheDocument();
+	expect(panel.queryByText("Ship it?")).toBeNull();
+	// Acknowledging reaches the copy on each host.
+	await waitFor(() => expect(mocks.markRemote).toHaveBeenCalledWith("host-a", "/api/v1/notifications/read-all", { body: { ids: ["a-dec"] } }));
+	await waitFor(() => expect(mocks.markRemote).toHaveBeenCalledWith("host-b", "/api/v1/notifications/read-all", { body: { ids: ["b-dec"] } }));
+});
+
+it("raises one OS notification for a decision call that two hosts announce", async () => {
+	const shown = vi.spyOn(aoBridge.notifications, "show").mockResolvedValue(undefined);
+	vi.spyOn(aoBridge.notifications, "onClick").mockImplementation(() => () => undefined);
+	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	const runtime = () => <QueryClientProvider client={queryClient}><NotificationRuntime /></QueryClientProvider>;
+	const view = render(runtime());
+
+	remoteA = [decisionCopy("a-dec", "dec_toast_once")];
+	remoteB = [decisionCopy("b-dec", "dec_toast_once")];
+	view.rerender(runtime());
+	await waitFor(() => expect(shown).toHaveBeenCalledTimes(1));
+	expect(shown).toHaveBeenCalledWith(expect.objectContaining({ id: "decision:dec_toast_once", title: "Host A: Decision needed · Shop" }));
+});
