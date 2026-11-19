@@ -2909,6 +2909,7 @@ func (m *Manager) trackerIntakeCapacityReleaseProof(
 	proof := owners
 	proof.CapacityReleased = true
 	proof.ReleasedRuntimeLaunchID = ""
+	proof.ReleasedRuntimeHandleIDs = nil
 	proof.ReleasedControllerGeneration = ""
 	if found {
 		proof.ReleasedRuntimeLaunchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
@@ -2919,6 +2920,10 @@ func (m *Manager) trackerIntakeCapacityReleaseProof(
 			proof.ReleasedControllerGeneration = reservedGeneration
 		}
 	}
+	if stoppedRuntimeHandleID != "" && stoppedRuntimeLaunchID != "" {
+		proof.ReleasedRuntimeLaunchID = stoppedRuntimeLaunchID
+		proof.ReleasedRuntimeHandleIDs = []string{stoppedRuntimeHandleID}
+	}
 	return proof, nil
 }
 
@@ -2927,13 +2932,21 @@ func (m *Manager) recordTrackerIntakeStoppedOwners(
 	rec domain.SessionRecord,
 	reservation domain.TrackerIntakeRecoveryReservation,
 ) (domain.TrackerIntakeRecoveryReservation, error) {
+	rowHandleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
 	reservation.CapacityReleased = true
 	reservation.ReleasedRuntimeLaunchID = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	reservation.ReleasedRuntimeHandleIDs = uniqueTrackerIntakeHandles([]string{rowHandleID})
 	reservation.ReleasedControllerGeneration = strings.TrimSpace(rec.Metadata.ControllerGeneration)
 	reservation.RuntimeLaunchID = reservation.ReleasedRuntimeLaunchID
 	reservation.RuntimeHandleIDs = nil
-	if handleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID); handleID != "" {
-		reservation.RuntimeHandleIDs = []string{handleID}
+	reservation.RuntimeTeardownHandleID = ""
+	reservation.RuntimeTeardownLaunchID = ""
+	reservation.RuntimeTeardownRestoreCapacity = false
+	reservation.RuntimeTeardownReservationOnly = false
+	reservation.RuntimeTeardownCompletedLaunchID = ""
+	reservation.RuntimeTeardownCompletedHandleIDs = nil
+	if rowHandleID != "" {
+		reservation.RuntimeHandleIDs = []string{rowHandleID}
 	}
 	if reservation.ControllerPossible {
 		reservation.ControllerGeneration = reservation.ReleasedControllerGeneration
@@ -3550,6 +3563,13 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	} else if pendingIntake && !intakeRecovery.CapacityReleased && trackerIntakeHasRuntimeEvidence(rec, intakeRecovery) {
 		if err := m.stopTrackerIntakeRuntimeOwners(ctx, persistedOwner, intakeRecovery); err != nil {
 			return KillResult{}, fmt.Errorf("kill %s: tracker intake runtime: %w", id, err)
+		}
+		intakeRecovery, pendingIntake, err = m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+		if err != nil {
+			return KillResult{}, fmt.Errorf("kill %s: reload stopped tracker intake owners: %w", id, err)
+		}
+		if !pendingIntake {
+			return KillResult{}, fmt.Errorf("kill %s: stopped tracker intake claim is missing", id)
 		}
 		if _, err := m.recordTrackerIntakeStoppedOwners(ctx, persistedOwner, intakeRecovery); err != nil {
 			return KillResult{}, fmt.Errorf("kill %s: release tracker intake capacity: %w", id, err)

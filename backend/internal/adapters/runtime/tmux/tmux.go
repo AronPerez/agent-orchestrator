@@ -807,6 +807,9 @@ func (r *Runtime) ProbeFencedRuntime(ctx context.Context, ref ports.FencedRuntim
 	}
 	alive, err := r.IsAlive(ctx, ref.Handle)
 	if err != nil {
+		if errors.Is(err, ports.ErrRuntimeUnavailable) {
+			return ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent}
+		}
 		return ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
 	}
 	if !alive {

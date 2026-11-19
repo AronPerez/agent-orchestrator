@@ -134,6 +134,7 @@ const (
 	FencedReasonIdentityMissing    FencedProbeReason = "identity_missing"
 	FencedReasonRegistryUnreadable FencedProbeReason = "registry_unreadable"
 	FencedReasonRegistryMalformed  FencedProbeReason = "registry_malformed"
+	FencedReasonBackendAbsent      FencedProbeReason = "backend_absent"
 	FencedReasonProbeFailed        FencedProbeReason = "probe_failed"
 	FencedReasonGenerationMismatch FencedProbeReason = "generation_mismatch"
 )

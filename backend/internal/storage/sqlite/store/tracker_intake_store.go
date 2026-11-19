@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -209,6 +210,9 @@ func (s *Store) reconcileTrackerIntakeSessionLocked(ctx context.Context, q *gen.
 		if recoveryErr != nil {
 			return recoveryErr
 		}
+		if pending && trackerIntakeRecoveryHasOutstandingRuntimeTeardown(reservation) {
+			return nil
+		}
 		if pending && reservation.CleanupConfirmed && reservation.DeliveryPossible {
 			return s.commitTrackerIntakeSessionLocked(ctx, q, id, handledAt)
 		}
@@ -225,6 +229,9 @@ func (s *Store) reconcileTrackerIntakeSessionLocked(ctx context.Context, q *gen.
 		reservation, pending, recoveryErr := getPendingTrackerIntakeRecovery(ctx, q, id)
 		if recoveryErr != nil {
 			return recoveryErr
+		}
+		if pending && trackerIntakeRecoveryHasOutstandingRuntimeTeardown(reservation) {
+			return nil
 		}
 		if pending && reservation.CleanupConfirmed && reservation.DeliveryPossible {
 			return s.commitTrackerIntakeSessionLocked(ctx, q, id, handledAt)
@@ -337,7 +344,34 @@ func getPendingTrackerIntakeRecovery(ctx context.Context, q *gen.Queries, id dom
 
 func trackerIntakeRecoveryNeedsFence(reservation domain.TrackerIntakeRecoveryReservation) bool {
 	return reservation.DeliveryPossible || reservation.ControllerPossible ||
-		strings.TrimSpace(reservation.WorkspacePath) != "" || len(reservation.RuntimeHandleIDs) != 0
+		strings.TrimSpace(reservation.WorkspacePath) != "" || len(reservation.RuntimeHandleIDs) != 0 ||
+		trackerIntakeRecoveryHasOutstandingRuntimeTeardown(reservation)
+}
+
+func trackerIntakeRecoveryHasOutstandingRuntimeTeardown(reservation domain.TrackerIntakeRecoveryReservation) bool {
+	if strings.TrimSpace(reservation.RuntimeTeardownHandleID) != "" ||
+		strings.TrimSpace(reservation.RuntimeTeardownLaunchID) != "" ||
+		reservation.RuntimeTeardownReservationOnly ||
+		strings.TrimSpace(reservation.RuntimeTeardownCompletedLaunchID) != "" ||
+		len(reservation.RuntimeTeardownCompletedHandleIDs) != 0 {
+		return true
+	}
+	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+	handles := normalizeTrackerIntakeRuntimeHandles(reservation.RuntimeHandleIDs)
+	if launchID == "" {
+		return len(handles) != 0
+	}
+	if len(handles) == 0 || !reservation.CapacityReleased ||
+		strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) != launchID {
+		return true
+	}
+	released := normalizeTrackerIntakeRuntimeHandles(reservation.ReleasedRuntimeHandleIDs)
+	for _, handleID := range handles {
+		if !slices.Contains(released, handleID) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryReservation) domain.TrackerIntakeRecoveryReservation {
@@ -345,9 +379,20 @@ func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryRese
 	reservation.WorkspacePath = strings.TrimSpace(reservation.WorkspacePath)
 	reservation.WorkspaceRepoPath = strings.TrimSpace(reservation.WorkspaceRepoPath)
 	reservation.RuntimeLaunchID = strings.TrimSpace(reservation.RuntimeLaunchID)
-	seen := make(map[string]struct{}, len(reservation.RuntimeHandleIDs))
-	handles := make([]string, 0, len(reservation.RuntimeHandleIDs))
-	for _, handle := range reservation.RuntimeHandleIDs {
+	reservation.RuntimeTeardownHandleID = strings.TrimSpace(reservation.RuntimeTeardownHandleID)
+	reservation.RuntimeTeardownLaunchID = strings.TrimSpace(reservation.RuntimeTeardownLaunchID)
+	reservation.RuntimeTeardownCompletedLaunchID = strings.TrimSpace(reservation.RuntimeTeardownCompletedLaunchID)
+	reservation.ReleasedRuntimeLaunchID = strings.TrimSpace(reservation.ReleasedRuntimeLaunchID)
+	reservation.RuntimeHandleIDs = normalizeTrackerIntakeRuntimeHandles(reservation.RuntimeHandleIDs)
+	reservation.RuntimeTeardownCompletedHandleIDs = normalizeTrackerIntakeRuntimeHandles(reservation.RuntimeTeardownCompletedHandleIDs)
+	reservation.ReleasedRuntimeHandleIDs = normalizeTrackerIntakeRuntimeHandles(reservation.ReleasedRuntimeHandleIDs)
+	return reservation
+}
+
+func normalizeTrackerIntakeRuntimeHandles(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	handles := make([]string, 0, len(values))
+	for _, handle := range values {
 		handle = strings.TrimSpace(handle)
 		if handle == "" {
 			continue
@@ -358,8 +403,7 @@ func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryRese
 		seen[handle] = struct{}{}
 		handles = append(handles, handle)
 	}
-	reservation.RuntimeHandleIDs = handles
-	return reservation
+	return handles
 }
 
 // ReleaseTrackerIntakeSession removes id's pending claim after lifecycle code

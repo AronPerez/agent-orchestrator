@@ -131,6 +131,7 @@ type fakeStore struct {
 	trackerIntakeReleaseErr                        error
 	trackerIntakeCommitStoppedErr                  error
 	trackerIntakeRecoveryErr                       error
+	trackerIntakeReserveErrSequence                []error
 	trackerIntakeRecoveryHook                      func(domain.SessionID)
 	trackerIntakeCleanupConfirmedBeforeTermination bool
 	trackerIntakeLimits                            []domain.AutomatedSessionLimits
@@ -237,6 +238,13 @@ func (f *fakeStore) CommitStoppedTrackerIntakeSession(_ context.Context, id doma
 func (f *fakeStore) ReserveTrackerIntakeRecovery(_ context.Context, id domain.SessionID, reservation domain.TrackerIntakeRecoveryReservation) error {
 	f.trackerIntakeMu.Lock()
 	defer f.trackerIntakeMu.Unlock()
+	if len(f.trackerIntakeReserveErrSequence) > 0 {
+		err := f.trackerIntakeReserveErrSequence[0]
+		f.trackerIntakeReserveErrSequence = f.trackerIntakeReserveErrSequence[1:]
+		if err != nil {
+			return err
+		}
+	}
 	for _, pendingID := range f.trackerIntakePending {
 		if pendingID == id {
 			if reservation.CleanupConfirmed {
@@ -288,6 +296,23 @@ func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.S
 			continue
 		}
 		reservation := f.trackerIntakeRecovery[id]
+		teardownOutstanding := reservation.RuntimeTeardownHandleID != "" || reservation.RuntimeTeardownLaunchID != "" ||
+			reservation.RuntimeTeardownReservationOnly || reservation.RuntimeTeardownCompletedLaunchID != "" ||
+			len(reservation.RuntimeTeardownCompletedHandleIDs) != 0
+		runtimeLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+		runtimeHandles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
+		if !teardownOutstanding && runtimeLaunchID != "" {
+			teardownOutstanding = len(runtimeHandles) == 0 || !reservation.CapacityReleased ||
+				strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) != runtimeLaunchID
+			for _, handleID := range runtimeHandles {
+				if !trackerIntakeHandleReserved(reservation.ReleasedRuntimeHandleIDs, handleID) {
+					teardownOutstanding = true
+				}
+			}
+		}
+		if teardownOutstanding {
+			return nil
+		}
 		if reservation.CleanupConfirmed && reservation.DeliveryPossible {
 			delete(f.trackerIntakePending, key)
 			delete(f.trackerIntakeRecovery, id)
@@ -295,7 +320,8 @@ func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.S
 			return nil
 		}
 		needsFence := reservation.DeliveryPossible || reservation.ControllerPossible ||
-			reservation.WorkspacePath != "" || len(reservation.RuntimeHandleIDs) != 0
+			reservation.WorkspacePath != "" || len(reservation.RuntimeHandleIDs) != 0 ||
+			teardownOutstanding
 		externalEffect := rec.Metadata.WorkspacePath != "" || rec.Metadata.RuntimeHandleID != "" || rec.Metadata.AgentSessionID != "" ||
 			rec.Metadata.ProviderConversationID != "" || rec.Metadata.ControllerGeneration != "" || rec.Metadata.NativeTranscriptPath != ""
 		if (!exists && (reservation.CleanupConfirmed || !needsFence)) ||
@@ -3324,7 +3350,7 @@ func TestReconcileTrackerIntakeClaimsSettlesPossibleDeliveryAfterTermination(t *
 	if got := st.trackerIntakeHandled[key]; got != id {
 		t.Fatalf("handled delivery claim = %q, want %q", got, id)
 	}
-	if len(rt.fencedRefs) == 0 || rt.destroyed != 0 || ws.destroyed != 1 {
+	if len(rt.fencedRefs) == 0 || rt.destroyed != 1 || ws.destroyed != 1 {
 		t.Fatalf("settled delivery cleanup: probes=%+v runtimeDestroy=%d workspaceDestroy=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
 	}
 }
@@ -3482,6 +3508,677 @@ func TestReconcileTrackerIntakeClaimsSettlesExitedDirectChildWithRetainedHost(t 
 	}
 	if rt.destroyed != 0 || ws.destroyed != 0 {
 		t.Fatalf("completed direct session cleanup runtime=%d workspace=%d, want preserved", rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsStopsExitedUnpublishedHostBeforeCleanup(t *testing.T) {
+	tests := []struct {
+		name                          string
+		capacityReleased              bool
+		cleanupConfirmed              bool
+		destroyErr                    error
+		wantErr                       bool
+		wantCapacityReleasedOnFailure bool
+		wantWorkspaceDestroy          int
+	}{
+		{name: "teardown succeeds", wantWorkspaceDestroy: 1},
+		{
+			name: "teardown fails", destroyErr: errors.New("terminal host is still alive"),
+			wantErr: true,
+		},
+		{name: "legacy released teardown succeeds", capacityReleased: true, wantWorkspaceDestroy: 1},
+		{
+			name: "legacy released teardown fails", capacityReleased: true,
+			destroyErr: errors.New("terminal host is still alive"), wantErr: true,
+		},
+		{
+			name:             "legacy released cleanup confirmed teardown succeeds",
+			capacityReleased: true, cleanupConfirmed: true,
+		},
+		{
+			name:             "legacy released cleanup confirmed teardown fails",
+			capacityReleased: true, cleanupConfirmed: true,
+			destroyErr: errors.New("terminal host is still alive"), wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, st, rt, ws := newManager()
+			id := domain.SessionID("exited-unpublished-child")
+			issueID := domain.IssueID("github:acme/mer#10903")
+			key := "mer\x00" + string(issueID)
+			handleID := "direct-10903"
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/exited-unpublished-child", RuntimeLaunchID: "launch-10903",
+				RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+				CapacityReleased: tt.capacityReleased, CleanupConfirmed: tt.cleanupConfirmed,
+			}
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+			}
+			rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited}
+			rt.aliveByHandle = map[string]bool{handleID: true}
+			rt.destroyErr = tt.destroyErr
+			runtimeStoppedBeforeWorkspace := false
+			ws.destroyHook = func() {
+				runtimeStoppedBeforeWorkspace = rt.destroyed > 0 && !rt.aliveByHandle[handleID]
+			}
+
+			err := m.ReconcileTrackerIntakeClaims(context.Background())
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), tt.destroyErr.Error()) {
+					t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want failed host teardown", err)
+				}
+				if rt.destroyed != 2 || ws.destroyed != 0 {
+					t.Fatalf("failed teardown cleanup runtime=%d workspace=%d", rt.destroyed, ws.destroyed)
+				}
+				if st.trackerIntakePending[key] != id ||
+					st.trackerIntakeRecovery[id].CapacityReleased != tt.wantCapacityReleasedOnFailure {
+					t.Fatalf("failed teardown claim pending=%q recovery=%+v", st.trackerIntakePending[key], st.trackerIntakeRecovery[id])
+				}
+				if _, found := st.sessions[id]; !found {
+					t.Fatal("failed teardown removed the seed session")
+				}
+				if tt.cleanupConfirmed {
+					err = m.ReconcileTrackerIntakeClaims(context.Background())
+					if err == nil || !strings.Contains(err.Error(), tt.destroyErr.Error()) {
+						t.Fatalf("second ReconcileTrackerIntakeClaims() error = %v, want failed host teardown", err)
+					}
+					if rt.destroyed != 4 || ws.destroyed != 0 || st.trackerIntakePending[key] != id {
+						t.Fatalf("second failed teardown runtime=%d workspace=%d pending=%q",
+							rt.destroyed, ws.destroyed, st.trackerIntakePending[key])
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+			}
+			if rt.destroyed != 1 || ws.destroyed != tt.wantWorkspaceDestroy ||
+				(tt.wantWorkspaceDestroy != 0 && !runtimeStoppedBeforeWorkspace) {
+				t.Fatalf("successful teardown runtime=%d workspace=%d stoppedBeforeWorkspace=%t",
+					rt.destroyed, ws.destroyed, runtimeStoppedBeforeWorkspace)
+			}
+			if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+				t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+			}
+		})
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsTrustsConclusiveTerminatedHandleTeardown(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-owner-with-teardown-proof")
+	issueID := domain.IssueID("github:acme/mer#10906")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10906"
+	launchID := "launch-10906"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-owner-with-teardown-proof", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID, ReleasedRuntimeHandleIDs: []string{handleID},
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		IsTerminated: true,
+		Metadata:     domain.SessionMetadata{RuntimeHandleID: handleID, RuntimeLaunchID: launchID},
+	}
+	// A destroyed tmux server is unavailable to a later exact probe. The
+	// durable per-handle teardown proof must let workspace cleanup continue
+	// without treating that unavailable backend as unresolved ownership.
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 0 || rt.destroyed != 0 {
+		t.Fatalf("runtime was revalidated after conclusive teardown: probes=%v destroys=%d", rt.fencedRefs, rt.destroyed)
+	}
+	if ws.destroyed != 1 {
+		t.Fatalf("workspace cleanup = %d, want 1", ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsRevalidatesPriorSuccessfulKillTeardown(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-owner-with-prior-version-proof")
+	issueID := domain.IssueID("github:acme/mer#10908")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10908"
+	launchID := "launch-10908"
+	st.trackerIntakePending[key] = id
+	// This is the ambiguous recovery JSON shape written before per-handle proof:
+	// it can mean Kill succeeded, or only that an exact child exited. The
+	// idempotent outer-host teardown must establish the missing proof.
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-owner-with-prior-version-proof", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		IsTerminated: true,
+		Metadata:     domain.SessionMetadata{RuntimeHandleID: handleID, RuntimeLaunchID: launchID},
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent}
+	ws.destroyErr = ports.ErrWorkspaceDirty
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "workspace cleanup remains unresolved") {
+		t.Fatalf("first ReconcileTrackerIntakeClaims() error = %v, want dirty workspace retry", err)
+	}
+	if got := st.trackerIntakeRecovery[id]; got.RuntimeLaunchID != "" || len(got.RuntimeHandleIDs) != 0 {
+		t.Fatalf("revalidated legacy owner was not retired: %+v", got)
+	}
+	if len(rt.fencedRefs) != 1 || rt.destroyed != 1 {
+		t.Fatalf("prior successful teardown probes=%v destroys=%d, want one idempotent teardown", rt.fencedRefs, rt.destroyed)
+	}
+
+	ws.destroyErr = nil
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("retry ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || rt.destroyed != 1 {
+		t.Fatalf("cleanup retry revalidated runtime again: probes=%v destroys=%d", rt.fencedRefs, rt.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsRevalidatesMissingLegacyOwnerWhenBackendAbsent(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("missing-owner-with-prior-version-proof")
+	issueID := domain.IssueID("github:acme/mer#10913")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10913"
+	launchID := "launch-10913"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/missing-owner-with-prior-version-proof", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID, CleanupConfirmed: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || !reflect.DeepEqual(rt.destroyedIDs, []string{handleID}) {
+		t.Fatalf("missing legacy owner probes=%v destroys=%v", rt.fencedRefs, rt.destroyedIDs)
+	}
+	if ws.destroyed != 0 {
+		t.Fatalf("cleanup-confirmed missing owner destroyed workspace %d times", ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsRevalidatesMissingLegacyOwnerWithoutReleasedLaunchWhenBackendAbsent(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("missing-owner-without-released-launch")
+	issueID := domain.IssueID("github:acme/mer#10919")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10919"
+	launchID := "launch-10919"
+	st.trackerIntakePending[key] = id
+	// Older capacity-release checkpoints could omit the released launch ID when
+	// the session row had not been published. A conclusively absent backend
+	// still permits an idempotent outer-host teardown for this single candidate.
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/missing-owner-without-released-launch", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		CleanupConfirmed: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || !reflect.DeepEqual(rt.destroyedIDs, []string{handleID}) {
+		t.Fatalf("missing legacy owner probes=%v destroys=%v", rt.fencedRefs, rt.destroyedIDs)
+	}
+	if ws.destroyed != 0 {
+		t.Fatalf("cleanup-confirmed missing owner destroyed workspace %d times", ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsKeepsLegacyOwnerFencedWhenGenerationProbeFails(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-owner-with-inconclusive-legacy-host")
+	issueID := domain.IssueID("github:acme/mer#10914")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10914"
+	launchID := "launch-10914"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-owner-with-inconclusive-legacy-host", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID, CleanupConfirmed: true,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		IsTerminated: true,
+		Metadata:     domain.SessionMetadata{RuntimeHandleID: handleID, RuntimeLaunchID: launchID},
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if err == nil || !strings.Contains(err.Error(), string(ports.FencedReasonProbeFailed)) {
+		t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want inconclusive probe", err)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || !rt.aliveByHandle[handleID] {
+		t.Fatalf("inconclusive legacy owner cleanup runtime=%d workspace=%d alive=%t",
+			rt.destroyed, ws.destroyed, rt.aliveByHandle[handleID])
+	}
+	if st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("fenced claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsStopsLegacyExitedHostBeforeTrustingRelease(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-owner-with-live-legacy-host")
+	issueID := domain.IssueID("github:acme/mer#10912")
+	key := "mer\x00" + string(issueID)
+	handleID := "direct-10912"
+	launchID := "launch-10912"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-owner-with-live-legacy-host", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		IsTerminated: true,
+		Metadata:     domain.SessionMetadata{RuntimeHandleID: handleID, RuntimeLaunchID: launchID},
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || !reflect.DeepEqual(rt.destroyedIDs, []string{handleID}) ||
+		rt.aliveByHandle[handleID] || ws.destroyed != 1 {
+		t.Fatalf("legacy host cleanup probes=%v destroys=%v alive=%t workspace=%d",
+			rt.fencedRefs, rt.destroyedIDs, rt.aliveByHandle[handleID], ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsRetriesDestroyAfterTeardownCheckpointFailure(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("unpublished-owner-with-interrupted-teardown")
+	issueID := domain.IssueID("github:acme/mer#10909")
+	key := "mer\x00" + string(issueID)
+	handleID := "tmux-10909"
+	launchID := "launch-10909"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/unpublished-owner-with-interrupted-teardown", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: launchID,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+	checkpointErr := errors.New("teardown completion checkpoint unavailable")
+	st.trackerIntakeReserveErrSequence = []error{nil, checkpointErr}
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if err == nil || !strings.Contains(err.Error(), checkpointErr.Error()) {
+		t.Fatalf("first ReconcileTrackerIntakeClaims() error = %v, want checkpoint failure", err)
+	}
+	checkpoint := st.trackerIntakeRecovery[id]
+	if checkpoint.RuntimeTeardownHandleID != handleID || checkpoint.RuntimeTeardownLaunchID != launchID ||
+		!checkpoint.RuntimeTeardownRestoreCapacity || checkpoint.CapacityReleased {
+		t.Fatalf("durable teardown intent = %+v", checkpoint)
+	}
+	if rt.destroyed != 1 || ws.destroyed != 0 || len(rt.fencedRefs) != 1 {
+		t.Fatalf("first attempt probes=%v destroys=%d workspace=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	}
+
+	// The host is now gone and an exact tmux probe would be unavailable. The
+	// durable intent authorizes only an idempotent retry of this exact handle.
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("retry ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if rt.destroyed != 2 || len(rt.fencedRefs) != 1 || ws.destroyed != 1 {
+		t.Fatalf("retry probes=%v destroys=%d workspace=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsCheckpointsEachRuntimeBeforeStoppingNext(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("unpublished-multi-owner-with-partial-teardown")
+	issueID := domain.IssueID("github:acme/mer#10910")
+	key := "mer\x00" + string(issueID)
+	firstHandleID := "direct-10910"
+	secondHandleID := "tmux-10910"
+	launchID := "launch-10910"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/unpublished-multi-owner-with-partial-teardown", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{firstHandleID, secondHandleID}, DeliveryPossible: true,
+		CapacityReleased: true,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+	}
+	rt.fencedResults = map[string]ports.FencedProbeResult{
+		firstHandleID:  {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited},
+		secondHandleID: {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited},
+	}
+	rt.aliveByHandle = map[string]bool{firstHandleID: true, secondHandleID: true}
+	secondDestroyErr := errors.New("second terminal host is still alive")
+	rt.destroyErrSequence = []error{nil, secondDestroyErr, secondDestroyErr}
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if err == nil || !strings.Contains(err.Error(), secondDestroyErr.Error()) {
+		t.Fatalf("first ReconcileTrackerIntakeClaims() error = %v, want second teardown failure", err)
+	}
+	checkpoint := st.trackerIntakeRecovery[id]
+	if !reflect.DeepEqual(checkpoint.RuntimeHandleIDs, []string{secondHandleID}) ||
+		checkpoint.RuntimeTeardownHandleID != secondHandleID || checkpoint.RuntimeTeardownLaunchID != launchID ||
+		!reflect.DeepEqual(checkpoint.RuntimeTeardownCompletedHandleIDs, []string{firstHandleID}) {
+		t.Fatalf("partial teardown checkpoint = %+v", checkpoint)
+	}
+	if !reflect.DeepEqual(rt.destroyedIDs, []string{firstHandleID, secondHandleID, secondHandleID}) ||
+		len(rt.fencedRefs) != 2 || ws.destroyed != 0 {
+		t.Fatalf("first attempt probes=%v destroys=%v workspace=%d", rt.fencedRefs, rt.destroyedIDs, ws.destroyed)
+	}
+
+	rt.fencedResults[firstHandleID] = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+	rt.fencedResults[secondHandleID] = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("retry ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if !reflect.DeepEqual(rt.destroyedIDs, []string{firstHandleID, secondHandleID, secondHandleID, secondHandleID}) ||
+		len(rt.fencedRefs) != 2 || ws.destroyed != 1 {
+		t.Fatalf("retry probes=%v destroys=%v workspace=%d", rt.fencedRefs, rt.destroyedIDs, ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsRetiresAbsentBackendAfterPartialRuntimeTeardown(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("unpublished-multi-owner-with-absent-backend")
+	issueID := domain.IssueID("github:acme/mer#10920")
+	key := "mer\x00" + string(issueID)
+	firstHandleID := "direct-10920"
+	secondHandleID := "tmux-10920"
+	launchID := "launch-10920"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/unpublished-multi-owner-with-absent-backend", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{firstHandleID, secondHandleID}, DeliveryPossible: true,
+		CapacityReleased: true,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+	}
+	rt.fencedResults = map[string]ports.FencedProbeResult{
+		firstHandleID:  {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited},
+		secondHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent},
+	}
+	rt.aliveByHandle = map[string]bool{firstHandleID: true}
+	secondDestroyErr := errors.New("absent tmux teardown checkpoint retry")
+	rt.destroyErrSequence = []error{nil, secondDestroyErr, secondDestroyErr}
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if err == nil || !strings.Contains(err.Error(), secondDestroyErr.Error()) {
+		t.Fatalf("first ReconcileTrackerIntakeClaims() error = %v, want second teardown failure", err)
+	}
+	checkpoint := st.trackerIntakeRecovery[id]
+	if !reflect.DeepEqual(checkpoint.RuntimeHandleIDs, []string{secondHandleID}) ||
+		checkpoint.RuntimeTeardownHandleID != secondHandleID || checkpoint.RuntimeTeardownLaunchID != launchID ||
+		!reflect.DeepEqual(checkpoint.RuntimeTeardownCompletedHandleIDs, []string{firstHandleID}) {
+		t.Fatalf("partial absent-backend teardown checkpoint = %+v", checkpoint)
+	}
+	if !reflect.DeepEqual(rt.destroyedIDs, []string{firstHandleID, secondHandleID, secondHandleID}) ||
+		len(rt.fencedRefs) != 2 || ws.destroyed != 0 {
+		t.Fatalf("first attempt probes=%v destroys=%v workspace=%d", rt.fencedRefs, rt.destroyedIDs, ws.destroyed)
+	}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("retry ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if !reflect.DeepEqual(rt.destroyedIDs, []string{firstHandleID, secondHandleID, secondHandleID, secondHandleID}) ||
+		len(rt.fencedRefs) != 2 || ws.destroyed != 1 {
+		t.Fatalf("retry probes=%v destroys=%v workspace=%d", rt.fencedRefs, rt.destroyedIDs, ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsRetiresOnlyUnreleasedRuntimeHandles(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("terminated-owner-with-partial-teardown-proof")
+	issueID := domain.IssueID("github:acme/mer#10907")
+	key := "mer\x00" + string(issueID)
+	releasedHandleID := "direct-10907"
+	unreleasedHandleID := "tmux-10907"
+	launchID := "launch-10907"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/terminated-owner-with-partial-teardown-proof", RuntimeLaunchID: launchID,
+		RuntimeHandleIDs: []string{releasedHandleID, unreleasedHandleID}, DeliveryPossible: true,
+		CapacityReleased: true, ReleasedRuntimeLaunchID: launchID,
+		ReleasedRuntimeHandleIDs: []string{releasedHandleID},
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		IsTerminated: true,
+		Metadata:     domain.SessionMetadata{RuntimeHandleID: releasedHandleID, RuntimeLaunchID: launchID},
+	}
+	rt.fencedResults = map[string]ports.FencedProbeResult{
+		releasedHandleID:   {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+		unreleasedHandleID: {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited},
+	}
+	rt.aliveByHandle = map[string]bool{unreleasedHandleID: true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if len(rt.fencedRefs) != 1 || rt.fencedRefs[0].Handle.ID != unreleasedHandleID {
+		t.Fatalf("runtime probes = %v, want only %q", rt.fencedRefs, unreleasedHandleID)
+	}
+	if !reflect.DeepEqual(rt.destroyedIDs, []string{unreleasedHandleID}) || ws.destroyed != 1 {
+		t.Fatalf("cleanup runtimes=%v workspace=%d", rt.destroyedIDs, ws.destroyed)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsPreservesReplacementDuringLegacyTeardown(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("released-owner-with-replacement")
+	issueID := domain.IssueID("github:acme/mer#10904")
+	key := "mer\x00" + string(issueID)
+	oldHandleID := "direct-10904-old"
+	newHandleID := "tmux-10904-new"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/released-owner-with-replacement", RuntimeLaunchID: "launch-10904-old",
+		RuntimeHandleIDs: []string{oldHandleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: "launch-10904-prior",
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		Metadata: domain.SessionMetadata{RuntimeHandleID: newHandleID, RuntimeLaunchID: "launch-10904-new"},
+	}
+	rt.fencedResults = map[string]ports.FencedProbeResult{
+		oldHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonBackendAbsent},
+		newHandleID: {Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+	}
+	rt.aliveByHandle = map[string]bool{oldHandleID: true, newHandleID: true}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if rt.destroyed != 1 || len(rt.destroyedIDs) != 1 || rt.destroyedIDs[0] != oldHandleID {
+		t.Fatalf("destroyed runtimes = %v, want only %q", rt.destroyedIDs, oldHandleID)
+	}
+	if !rt.aliveByHandle[newHandleID] || ws.destroyed != 0 {
+		t.Fatalf("replacement preserved alive=%t workspace cleanup=%d", rt.aliveByHandle[newHandleID], ws.destroyed)
+	}
+	if got := st.sessions[id]; got.IsTerminated || got.Metadata.RuntimeHandleID != newHandleID ||
+		got.Metadata.RuntimeLaunchID != "launch-10904-new" {
+		t.Fatalf("replacement session mutated: %+v", got)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsPreservesReplacementAcrossLegacyTeardownRetry(t *testing.T) {
+	tests := []struct {
+		name              string
+		destroyErr        error
+		checkpointErr     error
+		wantDestroyCalls  int
+		wantFirstAliveOld bool
+	}{
+		{
+			name: "destroy fails", destroyErr: errors.New("legacy host teardown failed"),
+			wantDestroyCalls: 3, wantFirstAliveOld: true,
+		},
+		{
+			name: "completion checkpoint fails", checkpointErr: errors.New("teardown completion unavailable"),
+			wantDestroyCalls: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, st, rt, ws := newManager()
+			id := domain.SessionID("released-owner-with-replacement-retry")
+			issueID := domain.IssueID("github:acme/mer#10911")
+			key := "mer\x00" + string(issueID)
+			oldHandleID := "direct-10911-old"
+			newHandleID := "tmux-10911-new"
+			oldLaunchID := "launch-10911-old"
+			newLaunchID := "launch-10911-new"
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/released-owner-with-replacement-retry", RuntimeLaunchID: oldLaunchID,
+				RuntimeHandleIDs: []string{oldHandleID}, DeliveryPossible: true, CapacityReleased: true,
+				ReleasedRuntimeLaunchID: oldLaunchID,
+			}
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+				Metadata: domain.SessionMetadata{RuntimeHandleID: newHandleID, RuntimeLaunchID: newLaunchID},
+			}
+			rt.fencedResults = map[string]ports.FencedProbeResult{
+				oldHandleID: {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactExited},
+				newHandleID: {Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch},
+			}
+			rt.aliveByHandle = map[string]bool{oldHandleID: true, newHandleID: true}
+			rt.destroyErr = tt.destroyErr
+			if tt.checkpointErr != nil {
+				st.trackerIntakeReserveErrSequence = []error{nil, tt.checkpointErr}
+			}
+
+			err := m.ReconcileTrackerIntakeClaims(context.Background())
+			wantErr := tt.destroyErr
+			if wantErr == nil {
+				wantErr = tt.checkpointErr
+			}
+			if err == nil || !strings.Contains(err.Error(), wantErr.Error()) {
+				t.Fatalf("first ReconcileTrackerIntakeClaims() error = %v, want %v", err, wantErr)
+			}
+			checkpoint := st.trackerIntakeRecovery[id]
+			if !checkpoint.RuntimeTeardownReservationOnly || checkpoint.RuntimeTeardownHandleID != oldHandleID ||
+				checkpoint.RuntimeTeardownLaunchID != oldLaunchID {
+				t.Fatalf("replacement-scoped teardown checkpoint = %+v", checkpoint)
+			}
+			if rt.aliveByHandle[oldHandleID] != tt.wantFirstAliveOld || !rt.aliveByHandle[newHandleID] || ws.destroyed != 0 {
+				t.Fatalf("first pass oldAlive=%t newAlive=%t workspace=%d",
+					rt.aliveByHandle[oldHandleID], rt.aliveByHandle[newHandleID], ws.destroyed)
+			}
+
+			rt.destroyErr = nil
+			if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+				t.Fatalf("retry ReconcileTrackerIntakeClaims(): %v", err)
+			}
+			if len(rt.destroyedIDs) != tt.wantDestroyCalls {
+				t.Fatalf("destroyed runtimes = %v, want %d old-owner calls", rt.destroyedIDs, tt.wantDestroyCalls)
+			}
+			for _, handleID := range rt.destroyedIDs {
+				if handleID != oldHandleID {
+					t.Fatalf("destroyed replacement runtime %q in %v", handleID, rt.destroyedIDs)
+				}
+			}
+			if !rt.aliveByHandle[newHandleID] || ws.destroyed != 0 {
+				t.Fatalf("replacement after retry alive=%t workspace=%d", rt.aliveByHandle[newHandleID], ws.destroyed)
+			}
+			if got := st.sessions[id]; got.IsTerminated || got.Metadata.RuntimeHandleID != newHandleID ||
+				got.Metadata.RuntimeLaunchID != newLaunchID {
+				t.Fatalf("replacement session after retry = %+v", got)
+			}
+			if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+				t.Fatalf("completed claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+			}
+		})
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsDefersLegacyTeardownWhenReplacementSharesHandle(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("shared-handle-replacement")
+	issueID := domain.IssueID("github:acme/mer#10905")
+	key := "mer\x00" + string(issueID)
+	handleID := "shared-10905"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/shared-handle-replacement", RuntimeLaunchID: "launch-10905-old",
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true, CapacityReleased: true,
+		ReleasedRuntimeLaunchID: "launch-10905-old",
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		Metadata: domain.SessionMetadata{RuntimeHandleID: handleID, RuntimeLaunchID: "launch-10905-new"},
+	}
+	rt.fencedResult = ports.FencedProbeResult{
+		Liveness: ports.FencedUnknown, Reason: ports.FencedReasonGenerationMismatch,
+	}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if err == nil || !strings.Contains(err.Error(), string(ports.FencedReasonGenerationMismatch)) {
+		t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want generation mismatch", err)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 0 || !rt.aliveByHandle[handleID] {
+		t.Fatalf("replacement cleanup runtime=%d workspace=%d alive=%t", rt.destroyed, ws.destroyed, rt.aliveByHandle[handleID])
+	}
+	if st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("deferred claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if got := st.sessions[id]; got.IsTerminated || got.Metadata.RuntimeLaunchID != "launch-10905-new" {
+		t.Fatalf("replacement session mutated: %+v", got)
 	}
 }
 
@@ -5601,6 +6298,9 @@ func TestKillTrackerIntakeReleasesCapacityWhileDirtyWorkspaceRemainsFenced(t *te
 	reservation := st.trackerIntakeRecovery[id]
 	if !reservation.CapacityReleased || st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
 		t.Fatalf("post-kill claim = %+v pending=%q handled=%q", reservation, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if !reflect.DeepEqual(reservation.ReleasedRuntimeHandleIDs, []string{rec.Metadata.RuntimeHandleID}) {
+		t.Fatalf("released runtime handles = %v, want [%s]", reservation.ReleasedRuntimeHandleIDs, rec.Metadata.RuntimeHandleID)
 	}
 }
 
