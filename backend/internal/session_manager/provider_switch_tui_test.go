@@ -209,6 +209,48 @@ func TestSwitchTUIProviderKeepsReservedReplacementFenced(t *testing.T) {
 	}
 }
 
+func TestSwitchTUIProviderRetainsPublishedRuntimeStop(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	rec := mkLive("mer-1")
+	rec.Harness, rec.Mode, rec.Kind = domain.HarnessCodex, domain.SessionModeTUI, domain.KindWorker
+	rec.Activity.State = domain.ActivityIdle
+	rec.IssueID = "github:acme/mer#stopped-published-runtime"
+	rec.Metadata.AgentSessionID = "source-native"
+	rec.Metadata.RuntimeLaunchID = "published-generation"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: rec.Metadata.RuntimeLaunchID, RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID},
+		DeliveryPossible: true,
+	}
+	baseRuntime := &fakeRuntime{
+		aliveByHandle: map[string]bool{rec.Metadata.RuntimeHandleID: true},
+		fencedResults: map[string]ports.FencedProbeResult{
+			rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+		},
+	}
+	runtime := &childProbeRuntime{fakeRuntime: baseRuntime, childAlive: true}
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: &recordingAgent{}}, Store: &launchOptionsFakeStore{fakeStore: st},
+		Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if err := m.SwitchTUIProvider(context.Background(), rec.ID, domain.ProviderSwitchRequest{
+		TargetHarness: domain.HarnessClaudeCode, HandoffNote: "handoff",
+	}); err != nil {
+		t.Fatalf("SwitchTUIProvider(): %v", err)
+	}
+	if baseRuntime.created != 1 {
+		t.Fatalf("target runtime creates = %d, want 1", baseRuntime.created)
+	}
+	if len(baseRuntime.fencedRefs) != 0 {
+		t.Fatalf("already-stopped source was probed again: %+v", baseRuntime.fencedRefs)
+	}
+}
+
 func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

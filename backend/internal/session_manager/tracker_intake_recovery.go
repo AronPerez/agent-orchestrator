@@ -723,6 +723,7 @@ func (m *Manager) ensureTrackerIntakePriorRuntimeStopped(
 	rec domain.SessionRecord,
 	reservation domain.TrackerIntakeRecoveryReservation,
 	controllerStopped bool,
+	stoppedRuntimeHandleID, stoppedRuntimeLaunchID string,
 ) error {
 	type candidate struct {
 		handleID string
@@ -730,9 +731,17 @@ func (m *Manager) ensureTrackerIntakePriorRuntimeStopped(
 	}
 	candidates := make([]candidate, 0, len(reservation.RuntimeHandleIDs)+1)
 	seen := make(map[string]struct{}, len(reservation.RuntimeHandleIDs)+1)
+	stoppedRuntimeHandleID = strings.TrimSpace(stoppedRuntimeHandleID)
+	stoppedRuntimeLaunchID = strings.TrimSpace(stoppedRuntimeLaunchID)
+	stoppedRuntimeMatched := false
 	add := func(handleID, launchID string, released bool) error {
 		handleID = strings.TrimSpace(handleID)
 		launchID = strings.TrimSpace(launchID)
+		if handleID != "" && launchID != "" &&
+			handleID == stoppedRuntimeHandleID && launchID == stoppedRuntimeLaunchID {
+			stoppedRuntimeMatched = true
+			return nil
+		}
 		if released {
 			return nil
 		}
@@ -782,7 +791,7 @@ func (m *Manager) ensureTrackerIntakePriorRuntimeStopped(
 	}
 	chatOwnerStopped := controllerStopped && reservation.ControllerPossible
 	if len(candidates) == 0 && ((!controllerStopped && reservation.ControllerPossible) ||
-		(!chatOwnerStopped && (reservation.DeliveryPossible || reservation.RelaunchPublished))) &&
+		(!chatOwnerStopped && !stoppedRuntimeMatched && (reservation.DeliveryPossible || reservation.RelaunchPublished))) &&
 		!reservedRuntimeReleased && !reservedControllerReleased {
 		return fmt.Errorf("pending tracker intake runtime has no probeable owner: %w", ports.ErrRuntimeProbeInconclusive)
 	}

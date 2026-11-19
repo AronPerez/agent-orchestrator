@@ -2824,17 +2824,26 @@ func (m *Manager) prepareTrackerIntakeChatRelaunch(
 }
 
 func (m *Manager) markTrackerIntakeCapacityReleased(ctx context.Context, id domain.SessionID) error {
-	return m.markTrackerIntakeCapacityReleasedForStoppedOwner(ctx, id, false)
+	return m.markTrackerIntakeCapacityReleasedForStoppedOwner(ctx, id, false, "", "")
 }
 
 func (m *Manager) markTrackerIntakeCapacityReleasedAfterControllerStop(ctx context.Context, id domain.SessionID) error {
-	return m.markTrackerIntakeCapacityReleasedForStoppedOwner(ctx, id, true)
+	return m.markTrackerIntakeCapacityReleasedForStoppedOwner(ctx, id, true, "", "")
+}
+
+func (m *Manager) markTrackerIntakeCapacityReleasedAfterRuntimeStop(
+	ctx context.Context,
+	id domain.SessionID,
+	handleID, launchID string,
+) error {
+	return m.markTrackerIntakeCapacityReleasedForStoppedOwner(ctx, id, false, handleID, launchID)
 }
 
 func (m *Manager) markTrackerIntakeCapacityReleasedForStoppedOwner(
 	ctx context.Context,
 	id domain.SessionID,
 	controllerStopped bool,
+	stoppedRuntimeHandleID, stoppedRuntimeLaunchID string,
 ) error {
 	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
 	if err != nil {
@@ -2843,7 +2852,9 @@ func (m *Manager) markTrackerIntakeCapacityReleasedForStoppedOwner(
 	if !pending {
 		return nil
 	}
-	reservation, err = m.trackerIntakeCapacityReleaseProof(ctx, id, reservation, controllerStopped)
+	reservation, err = m.trackerIntakeCapacityReleaseProof(
+		ctx, id, reservation, controllerStopped, stoppedRuntimeHandleID, stoppedRuntimeLaunchID,
+	)
 	if err != nil {
 		return err
 	}
@@ -2858,6 +2869,7 @@ func (m *Manager) trackerIntakeCapacityReleaseProof(
 	id domain.SessionID,
 	reservation domain.TrackerIntakeRecoveryReservation,
 	controllerStopped bool,
+	stoppedRuntimeHandleID, stoppedRuntimeLaunchID string,
 ) (domain.TrackerIntakeRecoveryReservation, error) {
 	rec, found, err := m.store.GetSession(ctx, id)
 	if err != nil {
@@ -2889,7 +2901,9 @@ func (m *Manager) trackerIntakeCapacityReleaseProof(
 	// Verify the unreleased owner set before constructing a stopped-generation
 	// proof. Setting ReleasedRuntimeLaunchID first would incorrectly exempt every
 	// fallback handle that shares the published row's generation.
-	if err := m.ensureTrackerIntakePriorRuntimeStopped(ctx, rec, owners, controllerStopped); err != nil {
+	if err := m.ensureTrackerIntakePriorRuntimeStopped(
+		ctx, rec, owners, controllerStopped, stoppedRuntimeHandleID, stoppedRuntimeLaunchID,
+	); err != nil {
 		return reservation, fmt.Errorf("verify tracker intake owners before releasing capacity: %w", err)
 	}
 	proof := owners
@@ -2950,7 +2964,7 @@ func (m *Manager) confirmTrackerIntakeCleanup(ctx context.Context, id domain.Ses
 		return fmt.Errorf("confirm tracker intake cleanup for %s: pending claim is missing", id)
 	}
 	reservation.CleanupConfirmed = true
-	reservation, err = m.trackerIntakeCapacityReleaseProof(cleanupCtx, id, reservation, false)
+	reservation, err = m.trackerIntakeCapacityReleaseProof(cleanupCtx, id, reservation, false, "", "")
 	if err != nil {
 		return err
 	}
@@ -4520,7 +4534,7 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: load pending tracker intake claim: %w", operation, rec.ID, err))
 	}
 	if trackerIntakePending {
-		if err := m.ensureTrackerIntakePriorRuntimeStopped(ctx, rec, trackerIntakePriorReservation, false); err != nil {
+		if err := m.ensureTrackerIntakePriorRuntimeStopped(ctx, rec, trackerIntakePriorReservation, false, "", ""); err != nil {
 			return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: verify prior tracker intake owner: %w", operation, rec.ID, err))
 		}
 	}

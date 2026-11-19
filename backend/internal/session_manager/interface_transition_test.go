@@ -1139,6 +1139,17 @@ func awaitTransition(t *testing.T, store *transitionStore, id string) domain.Ses
 
 func TestInterfaceTransitionTUIToChatStopsBeforeStartingAndReusesNativeConversation(t *testing.T) {
 	manager, store, runtime, chat, log := newTransitionManager(t, domain.SessionModeTUI)
+	rec := store.sessions["session-1"]
+	rec.IssueID = "github:acme/repo#stopped-published-runtime"
+	store.sessions[rec.ID] = rec
+	store.trackerIntakePending["proj\x00"+string(rec.IssueID)] = rec.ID
+	store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: rec.Metadata.RuntimeLaunchID, RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID},
+		DeliveryPossible: true,
+	}
+	runtime.fencedResults = map[string]ports.FencedProbeResult{
+		rec.Metadata.RuntimeHandleID: {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+	}
 	manager.browserCapabilities = &scriptedBrowserCapabilities{issues: []browserCapabilityIssue{{
 		token: "transition-chat-token", verifier: "transition-chat-verifier",
 	}}}
@@ -1150,7 +1161,7 @@ func TestInterfaceTransitionTUIToChatStopsBeforeStartingAndReusesNativeConversat
 	if settled.Phase != domain.SessionInterfaceTransitionCompleted {
 		t.Fatalf("phase = %s, error = %s", settled.Phase, settled.ErrorDetail)
 	}
-	rec := store.sessions["session-1"]
+	rec = store.sessions["session-1"]
 	if rec.Mode != domain.SessionModeChat {
 		t.Fatalf("mode = %s, want chat", rec.Mode)
 	}
@@ -1171,6 +1182,9 @@ func TestInterfaceTransitionTUIToChatStopsBeforeStartingAndReusesNativeConversat
 	}
 	if got := fmt.Sprint(*log); got != "[stop:tui:runtime-1 start:chat]" {
 		t.Fatalf("controller order = %s", got)
+	}
+	if len(runtime.fencedRefs) != 0 {
+		t.Fatalf("already-stopped source was probed again: %+v", runtime.fencedRefs)
 	}
 }
 

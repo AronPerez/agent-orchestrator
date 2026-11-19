@@ -149,7 +149,9 @@ func (m *Manager) SwitchTUIProvider(ctx context.Context, id domain.SessionID, re
 		}
 		return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalUnavailable, Detail: what + ": " + cause.Error(), Cause: cause}
 	}
-	if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+	if err := m.markTrackerIntakeCapacityReleasedAfterRuntimeStop(
+		ctx, rec.ID, rec.Metadata.RuntimeHandleID, rec.Metadata.RuntimeLaunchID,
+	); err != nil {
 		// A pending intake reservation may name a replacement generation that was
 		// never published to the row. If that owner is live or inconclusive, putting
 		// the old source back would create a second writer and discard its only

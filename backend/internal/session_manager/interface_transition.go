@@ -590,7 +590,11 @@ func (m *Manager) runInterfaceTransition(
 		return
 	}
 	sourceStopped = true
-	markStopped := m.markTrackerIntakeCapacityReleased
+	markStopped := func(ctx context.Context, id domain.SessionID) error {
+		return m.markTrackerIntakeCapacityReleasedAfterRuntimeStop(
+			ctx, id, rec.Metadata.RuntimeHandleID, rec.Metadata.RuntimeLaunchID,
+		)
+	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 		markStopped = m.markTrackerIntakeCapacityReleasedAfterControllerStop
 	}
