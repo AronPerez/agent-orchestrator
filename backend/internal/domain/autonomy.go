@@ -69,8 +69,8 @@ const (
 	// would have decided on its own.
 	AutonomyObserve AutonomyMode = "observe"
 	// AutonomyOn lets sessions decide kinds the person has not reserved, act,
-	// and record a decided entry the person can overrule. It is set through
-	// project config; the settings page does not offer it yet.
+	// and record a decided entry the person can overrule. The person chooses
+	// it in project settings or through project config.
 	AutonomyOn AutonomyMode = "on"
 )
 

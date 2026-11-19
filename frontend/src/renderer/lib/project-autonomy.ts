@@ -1,7 +1,6 @@
 import type { components } from "../../api/schema";
 
 export type AutonomyConfig = components["schemas"]["AutonomyConfig"];
-/** "on" is set from the command line; the settings page shows it but does not offer it. */
 export type AutonomyMode = "off" | "observe" | "on";
 
 /** One decision kind as the project's daemon reports it. */

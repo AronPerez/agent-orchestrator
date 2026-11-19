@@ -954,6 +954,7 @@ describe("ProjectSettingsForm", () => {
 		expect(screen.queryByRole("switch", { name: "Pull request hygiene" })).not.toBeInTheDocument();
 
 		await userEvent.click(mode);
+		expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Off", "Observe", "On"]);
 		await userEvent.click(screen.getByRole("menuitem", { name: "Observe" }));
 		expect(screen.getByRole("switch", { name: "Production changes and deploys" })).toBeChecked();
 		const prHygiene = screen.getByRole("switch", { name: "Pull request hygiene" });
@@ -966,7 +967,37 @@ describe("ProjectSettingsForm", () => {
 		expect(putMock.mock.calls[0]?.[1]?.body.config.autonomy).toEqual({ mode: "observe", reserved: ["production", "pr_hygiene", "other"] });
 	});
 
-	it("keeps a project in mode on, which only the command line can set", async () => {
+	it("turns on mode on from the settings page", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			config: { worker: { agent: "codex" }, orchestrator: { agent: "claude-code" } },
+		});
+		const projectGet = getMock.getMockImplementation()!;
+		getMock.mockImplementation(async (path: string, init?: unknown) => {
+			if (path === "/api/v1/decisions/kinds") {
+				return { data: { projectId: "proj-1", mode: "off", kinds: [
+					{ id: "production", label: "Production changes and deploys", reserved: true, reservedByDefault: true },
+					{ id: "pr_hygiene", label: "Pull request hygiene", reserved: false, reservedByDefault: false },
+				] }, error: undefined };
+			}
+			return projectGet(path, init);
+		});
+
+		renderSettings("proj-1", undefined, "general");
+		await userEvent.click(await screen.findByRole("button", { name: "Autonomy" }));
+		await userEvent.click(screen.getByRole("menuitem", { name: "On" }));
+		expect(screen.getByRole("switch", { name: "Production changes and deploys" })).toBeChecked();
+		submitSettings();
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+		expect(putMock.mock.calls[0]?.[1]?.body.config.autonomy).toEqual({ mode: "on" });
+	});
+
+	it("keeps a project in mode on when saving another setting", async () => {
 		mockProject({
 			id: "proj-1",
 			name: "Project One",
@@ -989,10 +1020,10 @@ describe("ProjectSettingsForm", () => {
 
 		renderSettings("proj-1", undefined, "general");
 		const mode = await screen.findByRole("button", { name: "Autonomy" });
-		expect(mode).toHaveTextContent("On (set from the command line)");
+		expect(mode).toHaveTextContent("On");
 		expect(screen.getByRole("switch", { name: "Pull request hygiene" })).not.toBeChecked();
 		await userEvent.click(mode);
-		expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Off", "Observe", "On (set from the command line)"]);
+		expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Off", "Observe", "On"]);
 		await userEvent.keyboard("{Escape}");
 
 		await userEvent.click(screen.getByRole("switch", { name: "Workers request a built-in review" }));
