@@ -163,6 +163,7 @@ type DecisionCallResponse struct {
 // DecisionDecidedResponse is what a decision made on the person's behalf
 // carries beyond an ordinary call.
 type DecisionDecidedResponse struct {
+	Key    string `json:"key,omitempty"`
 	Undo   string `json:"undo"`
 	Verify string `json:"verify,omitempty"`
 	// OutsidePolicy is set when the project's policy did not allow this
@@ -177,6 +178,7 @@ type DecisionDecidedResponse struct {
 // DecideRequest records a decision the calling session made on the person's
 // behalf, in a project whose autonomy mode is on.
 type DecideRequest struct {
+	Key       string                `json:"key,omitempty" maxLength:"64" description:"The session's own name for this one intended action. A retry with the same key returns the existing record in its current state; without a key, nothing is merged."`
 	Kind      string                `json:"kind" description:"Decision kind id; must not be reserved by the project."`
 	What      string                `json:"what" maxLength:"120"`
 	Why       string                `json:"why" maxLength:"1000"`

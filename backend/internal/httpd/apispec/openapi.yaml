@@ -21856,6 +21856,12 @@ components:
       type: object
     DecideRequest:
       properties:
+        key:
+          description: The session's own name for this one intended action. A retry
+            with the same key returns the existing record in its current state; without
+            a key, nothing is merged.
+          maxLength: 64
+          type: string
         kind:
           description: Decision kind id; must not be reserved by the project.
           type: string
@@ -22036,6 +22042,8 @@ components:
           type:
           - "null"
           - string
+        key:
+          type: string
         outsidePolicy:
           enum:
           - autonomy_not_on

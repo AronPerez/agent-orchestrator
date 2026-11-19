@@ -73,6 +73,7 @@ type decisionObserveAPIResponse struct {
 }
 
 type decisionDecideAPIRequest struct {
+	Key       string            `json:"key,omitempty"`
 	Kind      string            `json:"kind"`
 	What      string            `json:"what"`
 	Why       string            `json:"why"`
@@ -87,6 +88,7 @@ type decisionOverruleAPIRequest struct {
 }
 
 type decisionDecidedAPI struct {
+	Key           string     `json:"key,omitempty"`
 	Undo          string     `json:"undo"`
 	Verify        string     `json:"verify,omitempty"`
 	OutsidePolicy string     `json:"outsidePolicy,omitempty"`
@@ -632,6 +634,10 @@ func newDecisionDecideCommand(ctx *commandContext) *cobra.Command {
 			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Recorded %s\n%s\n", response.ID, response.Link); err != nil {
 				return err
 			}
+			if note := retryStateNote(response); note != "" {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), note)
+				return err
+			}
 			if note := outsidePolicyNote(response.ID, response.Decided); note != "" {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), note)
 				return err
@@ -641,6 +647,7 @@ func newDecisionDecideCommand(ctx *commandContext) *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
+	f.StringVar(&request.Key, "key", "", "Your own short name for this action (e.g. close-pr-12); reuse it when you retry")
 	f.StringVar(&request.Kind, "kind", "", "Kind of decision; it must not be reserved (see ao decision kinds)")
 	f.StringVar(&request.What, "what", "", "What you decided, in one line")
 	f.StringVar(&request.Why, "why", "", "Why you decided it")
@@ -650,6 +657,27 @@ func newDecisionDecideCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&request.Reference, "ref", "", "Issue or plan reference")
 	f.BoolVar(&jsonOutput, "json", false, "Print JSON")
 	return cmd
+}
+
+// retryStateNote describes a record a retried decide returned in a state
+// other than freshly recorded, so the session is never told to act on a
+// decision the person overruled or that is already closed or confirmed.
+func retryStateNote(call decisionCallAPI) string {
+	switch {
+	case call.Decided == nil:
+		return ""
+	case call.State == "in_progress":
+		note := "The person overruled this decision. Do not act on it."
+		if call.Note != "" {
+			note += " Note: " + call.Note
+		}
+		return note + fmt.Sprintf("\nIf you had already acted, undo it and record what happened: ao decision outcome %s --for-answer %s --text \"<what happened>\"", call.ID, call.StandingEntryID)
+	case call.State == "done":
+		return "This decision is already closed: " + call.Outcome + " Do not act on it."
+	case call.Decided.CarriedOut:
+		return "Already confirmed as carried out. Nothing more to do."
+	}
+	return ""
 }
 
 // outsidePolicyNote tells a session whose instructions are out of date that
@@ -684,7 +712,12 @@ func newDecisionCarriedOutCommand(ctx *commandContext) *cobra.Command {
 			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "carried-out"), struct{}{}, &response); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Confirmed %s as carried out\n", response.ID)
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Confirmed %s as carried out\n", response.ID); err != nil {
+				return err
+			}
+			if response.ChangedAfterClose {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), "It had been closed as not carried out, so it is open again for the person to review.")
+			}
 			return err
 		},
 	}

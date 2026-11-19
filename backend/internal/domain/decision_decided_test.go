@@ -149,3 +149,36 @@ func TestReduceCarriedOutConfirmsADecidedCall(t *testing.T) {
 		t.Fatalf("a confirmation on an ordinary call must be ignored: %+v", call)
 	}
 }
+
+func TestReduceLateConfirmationReopensADecisionClosedUnconfirmed(t *testing.T) {
+	decided := decisionEntry(t, "dent_d", 1, DecisionKindDecided, validDecided())
+	closed := decisionEntry(t, "dent_x", 2, DecisionKindOutcome, DecisionOutcomePayload{ForEntry: "dent_d", Text: "Not carried out."})
+	late := decisionEntry(t, "dent_c", 3, DecisionKindCarriedOut, DecisionCarriedOutPayload{ForEntry: "dent_d"})
+	call, _ := ReduceDecisionCall([]DecisionEntry{late, closed, decided})
+	if call.State != DecisionStateDecided || !call.Decided.CarriedOut || !call.ChangedAfterClose || call.Outcome != "" {
+		t.Fatalf("reopened call = %+v decided = %+v", call, call.Decided)
+	}
+	// Confirmed first, then closed by the person: an ordinary close.
+	early := decisionEntry(t, "dent_c", 2, DecisionKindCarriedOut, DecisionCarriedOutPayload{ForEntry: "dent_d"})
+	personClose := decisionEntry(t, "dent_x", 3, DecisionKindOutcome, DecisionOutcomePayload{ForEntry: "dent_d", Text: "Reviewed."})
+	call, _ = ReduceDecisionCall([]DecisionEntry{decided, early, personClose})
+	if call.State != DecisionStateDone || call.ChangedAfterClose {
+		t.Fatalf("confirmed-then-closed call = %+v", call)
+	}
+}
+
+func TestValidateDecisionDecidedKey(t *testing.T) {
+	p := validDecided()
+	p.Key = strings.Repeat("k", 65)
+	assertDecisionRule(t, ValidateDecisionDecided(p), "key_too_long")
+	p.Key = "close pr\n12"
+	assertDecisionRule(t, ValidateDecisionDecided(p), "key_one_line")
+	p.Key = "close-pr-12"
+	if err := ValidateDecisionDecided(p); err != nil {
+		t.Fatal(err)
+	}
+	call, _ := ReduceDecisionCall([]DecisionEntry{decisionEntry(t, "dent_d", 1, DecisionKindDecided, p)})
+	if call.Decided.Key != "close-pr-12" {
+		t.Fatalf("key lost: %+v", call.Decided)
+	}
+}

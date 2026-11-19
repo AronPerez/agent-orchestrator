@@ -206,7 +206,7 @@ func (c *DecisionsController) decide(w http.ResponseWriter, r *http.Request) {
 		links[i] = domain.DecisionLink{Label: link.Label, URL: link.URL}
 	}
 	call, err := c.Svc.Decide(r.Context(), decisionActor(r), decisionsvc.DecideInput{
-		Kind: req.Kind, What: req.What, Why: req.Why, Undo: req.Undo, Verify: req.Verify, Links: links, Reference: req.Reference,
+		Key: req.Key, Kind: req.Kind, What: req.What, Why: req.Why, Undo: req.Undo, Verify: req.Verify, Links: links, Reference: req.Reference,
 	})
 	if err != nil {
 		envelope.WriteErrorWithCode(w, r, err, "DECISION_DECIDE_FAILED", "Unable to record decision")
@@ -390,7 +390,7 @@ func decisionCallResponse(call domain.DecisionCall) DecisionCallResponse {
 		response.PredictionAgreed = &agreed
 	}
 	if call.Decided != nil {
-		response.Decided = &DecisionDecidedResponse{Undo: call.Decided.Undo, Verify: call.Decided.Verify, OutsidePolicy: call.Decided.OutsidePolicy, CarriedOut: call.Decided.CarriedOut}
+		response.Decided = &DecisionDecidedResponse{Key: call.Decided.Key, Undo: call.Decided.Undo, Verify: call.Decided.Verify, OutsidePolicy: call.Decided.OutsidePolicy, CarriedOut: call.Decided.CarriedOut}
 		if !call.Decided.CarriedOutAt.IsZero() {
 			carriedOutAt := call.Decided.CarriedOutAt
 			response.Decided.CarriedOutAt = &carriedOutAt

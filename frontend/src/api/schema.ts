@@ -7517,6 +7517,8 @@ export interface components {
             updatedAt: string;
         };
         DecideRequest: {
+            /** @description The session's own name for this one intended action. A retry with the same key returns the existing record in its current state; without a key, nothing is merged. */
+            key?: string;
             /** @description Decision kind id; must not be reserved by the project. */
             kind: string;
             links?: components["schemas"]["DecisionLinkPayload"][];
@@ -7591,6 +7593,7 @@ export interface components {
             carriedOut: boolean;
             /** Format: date-time */
             carriedOutAt?: null | string;
+            key?: string;
             /** @enum {string} */
             outsidePolicy?: "autonomy_not_on" | "kind_reserved";
             undo: string;

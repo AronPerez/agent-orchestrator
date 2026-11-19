@@ -68,7 +68,7 @@ func decidedSampleCall() domain.DecisionCall {
 			Title: "Closed the duplicate pull request #12", Context: "It repeats #11.", Kind: "pr_hygiene",
 			AutonomyMode: domain.AutonomyOn, MachineLabel: "mac-mini", OwnerSessionID: "w-1", OwnerSessionName: "Worker one",
 		},
-		Decided: &domain.DecisionDecidedDetail{Undo: "Reopen #12.", Verify: "One open PR remains."},
+		Decided: &domain.DecisionDecidedDetail{Key: "close-pr-12", Undo: "Reopen #12.", Verify: "One open PR remains."},
 	}
 }
 
@@ -502,12 +502,12 @@ func TestDecisionsAPI_Observe(t *testing.T) {
 func TestDecisionsAPI_DecideAndOverrule(t *testing.T) {
 	svc := &fakeDecisionService{}
 	srv := newDecisionServer(t, svc)
-	body := `{"kind":"pr_hygiene","what":"Closed the duplicate pull request #12","why":"It repeats #11.","undo":"Reopen #12.","verify":"One open PR remains.","links":[{"label":"PR","url":"https://example.com/12"}],"reference":"SKY-1"}`
+	body := `{"key":"close-pr-12","kind":"pr_hygiene","what":"Closed the duplicate pull request #12","why":"It repeats #11.","undo":"Reopen #12.","verify":"One open PR remains.","links":[{"label":"PR","url":"https://example.com/12"}],"reference":"SKY-1"}`
 	response, status := decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/decided", body, "w-1")
 	if status != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", status, response)
 	}
-	want := decisionsvc.DecideInput{Kind: "pr_hygiene", What: "Closed the duplicate pull request #12", Why: "It repeats #11.", Undo: "Reopen #12.", Verify: "One open PR remains.",
+	want := decisionsvc.DecideInput{Key: "close-pr-12", Kind: "pr_hygiene", What: "Closed the duplicate pull request #12", Why: "It repeats #11.", Undo: "Reopen #12.", Verify: "One open PR remains.",
 		Links: []domain.DecisionLink{{Label: "PR", URL: "https://example.com/12"}}, Reference: "SKY-1"}
 	if svc.actor.Session != "w-1" || !reflect.DeepEqual(svc.decide, want) {
 		t.Fatalf("decide=%+v actor=%+v", svc.decide, svc.actor)
@@ -516,7 +516,7 @@ func TestDecisionsAPI_DecideAndOverrule(t *testing.T) {
 	if err := json.Unmarshal(response, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "decided" || got.StateLabel != "Decided for you" || got.Decided == nil || got.Decided.Undo != "Reopen #12." || got.Decided.Verify != "One open PR remains." || got.AutonomyMode != "on" {
+	if got.State != "decided" || got.StateLabel != "Decided for you" || got.Decided == nil || got.Decided.Undo != "Reopen #12." || got.Decided.Verify != "One open PR remains." || got.Decided.Key != "close-pr-12" || got.AutonomyMode != "on" {
 		t.Fatalf("response = %+v", got)
 	}
 

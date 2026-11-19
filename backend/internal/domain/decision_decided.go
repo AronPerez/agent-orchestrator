@@ -10,6 +10,9 @@ import (
 // MaxDecisionVerify bounds the optional "how we'll know it worked" note.
 const MaxDecisionVerify = 300
 
+// MaxDecisionKey bounds the session-chosen name of one intended action.
+const MaxDecisionKey = 64
+
 // DecisionOutsidePolicyNotOn and DecisionOutsidePolicyReserved say why a
 // decided entry falls outside the project's policy when it is recorded. A
 // session acts before it records, so a record is never refused for policy:
@@ -23,6 +26,9 @@ const (
 // what it decided, why, how to undo it, and optionally how to tell it worked.
 // Orchestrator fills in the same origin fields as a raised call.
 type DecisionDecidedPayload struct {
+	// Key is the session's own name for this one intended action. A retry
+	// with the same owner and key returns the existing record.
+	Key              string         `json:"key,omitempty"`
 	What             string         `json:"what"`
 	Why              string         `json:"why"`
 	Undo             string         `json:"undo"`
@@ -59,6 +65,7 @@ type DecisionDecidedDetail struct {
 	// EntryID is the decided entry itself. An outcome recorded while the
 	// decision still stands (for example, "not carried out") names it.
 	EntryID       string `json:"entryId"`
+	Key           string `json:"key,omitempty"`
 	Undo          string `json:"undo"`
 	Verify        string `json:"verify,omitempty"`
 	OutsidePolicy string `json:"outsidePolicy,omitempty"`
@@ -107,6 +114,13 @@ func ValidateDecisionDecided(p DecisionDecidedPayload) error {
 	}
 	if n := utf8.RuneCountInString(strings.TrimSpace(p.Verify)); n > MaxDecisionVerify {
 		return decisionRule("verify_too_long", fmt.Sprintf("The note on how to tell it worked is %d characters; the limit is 300.", n))
+	}
+	key := strings.TrimSpace(p.Key)
+	if strings.ContainsAny(key, "\r\n") {
+		return decisionRule("key_one_line", "The key must be one line.")
+	}
+	if n := utf8.RuneCountInString(key); n > MaxDecisionKey {
+		return decisionRule("key_too_long", fmt.Sprintf("The key is %d characters; the limit is 64.", n))
 	}
 	if p.Kind == "" {
 		return decisionRule("kind_required", "Say what kind of decision it was with --kind. Run ao decision kinds to list them.")

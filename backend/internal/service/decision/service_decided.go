@@ -12,6 +12,9 @@ import (
 // DecideInput is the session-authored part of a decision made on the
 // person's behalf.
 type DecideInput struct {
+	// Key is the session's own name for this one intended action. A retry
+	// with the same key returns the existing record in its current state.
+	Key       string
 	Kind      string
 	What      string
 	Why       string
@@ -40,6 +43,7 @@ func (s *Service) Decide(ctx context.Context, actor Actor, input DecideInput) (d
 		links[i] = domain.DecisionLink{Label: strings.TrimSpace(link.Label), URL: strings.TrimSpace(link.URL)}
 	}
 	payload := domain.DecisionDecidedPayload{
+		Key:  strings.TrimSpace(input.Key),
 		What: strings.TrimSpace(input.What), Why: strings.TrimSpace(input.Why),
 		Undo: strings.TrimSpace(input.Undo), Verify: strings.TrimSpace(input.Verify),
 		Kind: domain.DecisionKindID(strings.TrimSpace(input.Kind)), Links: links, Reference: strings.TrimSpace(input.Reference),
@@ -59,25 +63,32 @@ func (s *Service) Decide(ctx context.Context, actor Actor, input DecideInput) (d
 	case origin.autonomy.IsReserved(payload.Kind):
 		payload.OutsidePolicy = domain.DecisionOutsidePolicyReserved
 	}
-	// A session that retries after losing the response must not leave two
-	// records of one action, so an identical open record is returned. The
-	// current policy still applies to the reply: if it no longer allows the
-	// decision, the reply carries the flag so the session is told not to
-	// act. The stored record is left as written.
-	unlock, err := s.mutationGate.acquire(ctx, "decide:"+string(session.ID))
-	if err != nil {
-		return domain.DecisionCall{}, err
-	}
-	defer unlock()
-	if existing, found, err := s.openIdenticalDecision(ctx, session.ID, payload); err != nil || found {
-		if found && existing.Decided.OutsidePolicy == "" && payload.OutsidePolicy != "" {
-			decided := *existing.Decided
-			decided.OutsidePolicy = payload.OutsidePolicy
-			existing.Decided = &decided
+	// A session that retries after losing the response passes the same key,
+	// and gets the existing record in whatever state it is now: overruled,
+	// closed, or still standing. Without a key nothing is merged, so two
+	// distinct operations with the same wording stay two records. If the
+	// current policy no longer allows a standing record, the reply carries
+	// the flag so the session is told not to act; the stored record is left
+	// as written.
+	if payload.Key != "" {
+		unlock, err := s.mutationGate.acquire(ctx, "decide:"+string(session.ID))
+		if err != nil {
+			return domain.DecisionCall{}, err
 		}
-		return existing, err
+		defer unlock()
+		existing, found, err := s.decisionByKey(ctx, session.ID, payload.Key)
+		if err != nil {
+			return domain.DecisionCall{}, err
+		}
+		if found {
+			if existing.State == domain.DecisionStateDecided && existing.Decided.OutsidePolicy == "" && payload.OutsidePolicy != "" {
+				decided := *existing.Decided
+				decided.OutsidePolicy = payload.OutsidePolicy
+				existing.Decided = &decided
+			}
+			return existing, nil
+		}
 	}
-
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -164,7 +175,11 @@ func (s *Service) CarriedOut(ctx context.Context, actor Actor, callID string) (d
 	if !s.owns(call, actor.Session) {
 		return domain.DecisionCall{}, notOwner()
 	}
-	if call.State != domain.DecisionStateDecided && call.State != domain.DecisionStateInProgress {
+	// A decision the person (or its session) closed while it was still
+	// unconfirmed may have been carried out meanwhile; a late confirmation
+	// reopens it. One closed after an overrule's undo stays closed.
+	closedUnconfirmed := call.State == domain.DecisionStateDone && call.StandingEntryID == "" && !call.Decided.CarriedOut
+	if call.State != domain.DecisionStateDecided && call.State != domain.DecisionStateInProgress && !closedUnconfirmed {
 		return domain.DecisionCall{}, wrongState(call, `This decision is closed. Its state is "%s".`)
 	}
 	if call.Decided.CarriedOut {
@@ -173,14 +188,13 @@ func (s *Service) CarriedOut(ctx context.Context, actor Actor, callID string) (d
 	return s.append(ctx, actor, call.ID, domain.DecisionKindCarriedOut, domain.DecisionCarriedOutPayload{ForEntry: call.Decided.EntryID})
 }
 
-func (s *Service) openIdenticalDecision(ctx context.Context, session domain.SessionID, payload domain.DecisionDecidedPayload) (domain.DecisionCall, bool, error) {
+func (s *Service) decisionByKey(ctx context.Context, session domain.SessionID, key string) (domain.DecisionCall, bool, error) {
 	calls, err := s.store.ListDecisionCallsForSession(ctx, s.hostID, session, -1)
 	if err != nil {
 		return domain.DecisionCall{}, false, err
 	}
 	for _, call := range calls {
-		if call.Decided != nil && call.State == domain.DecisionStateDecided &&
-			call.Raised.Title == payload.What && call.Raised.Kind == payload.Kind && call.Decided.Undo == payload.Undo {
+		if call.Decided != nil && call.Decided.Key == key {
 			return call, true, nil
 		}
 	}

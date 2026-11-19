@@ -104,6 +104,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 	var hasClosing bool
 	var hasOutcome bool
 	var withdrawn bool
+	var closedUnconfirmed, reopened bool
 	answered := make(map[string]DecisionEntry)
 	deliveries := make([]reducedDelivery, 0)
 
@@ -136,7 +137,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Origin = entry.Origin
 			call.Raised = payload.raisedView()
 			call.RaisedAt = entry.WrittenAt
-			call.Decided = &DecisionDecidedDetail{EntryID: entry.ID, Undo: payload.Undo, Verify: payload.Verify, OutsidePolicy: payload.OutsidePolicy}
+			call.Decided = &DecisionDecidedDetail{EntryID: entry.ID, Key: payload.Key, Undo: payload.Undo, Verify: payload.Verify, OutsidePolicy: payload.OutsidePolicy}
 		case DecisionKindOverruled:
 			// Entries are ordered, so a decided call's own entry precedes any
 			// overrule of it; an overrule on any other call is ignored.
@@ -164,6 +165,14 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			if !call.Decided.CarriedOut {
 				call.Decided.CarriedOut = true
 				call.Decided.CarriedOutAt = entry.WrittenAt
+			}
+			// A confirmation that arrives after the decision was closed while
+			// unconfirmed contradicts that close: the action did happen. Reopen
+			// it so it stays visible and overrulable; the close stays in history.
+			if closedUnconfirmed {
+				closedUnconfirmed, reopened = false, true
+				hasOutcome, hasClosing, closing = false, false, DecisionEntry{}
+				call.Outcome, call.OutcomeLink, call.OutcomeAt = "", "", time.Time{}
 			}
 		case DecisionKindAnswered:
 			var payload DecisionAnsweredPayload
@@ -218,6 +227,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 				closing, hasClosing = entry, true
 			}
 			hasOutcome = true
+			closedUnconfirmed = closesStandingDecision && !call.Decided.CarriedOut
 			call.Outcome = payload.Text
 			call.OutcomeLink = payload.Link
 			call.OutcomeAt = entry.WrittenAt
@@ -254,6 +264,9 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 		call.State = DecisionStateDecided
 	} else {
 		call.State = DecisionStateNeedsYou
+	}
+	if reopened {
+		call.ChangedAfterClose = true
 	}
 	if hasClosing && standing.ID != "" && CompareDecisionEntries(closing, standing) < 0 {
 		call.ChangedAfterClose = true

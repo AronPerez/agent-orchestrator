@@ -38,7 +38,8 @@ func onInstructions(c AutonomyConfig) string {
 		kindLists(c) +
 		"- Before any action of a reserved kind, raise a call with `--kind <id>` and wait for the answer.\n" +
 		"- For a kind that is not reserved, decide, then record the decision before you act on it: " +
-		"`ao decision decide --kind <id> --what <what you decided> --why <why> --undo <how to undo it>`, adding `--verify <how to tell it worked>` when there is a way to check. " +
+		"`ao decision decide --key <your short name for this action> --kind <id> --what <what you decided> --why <why> --undo <how to undo it>`, adding `--verify <how to tell it worked>` when there is a way to check. " +
+		"If the command fails or you are unsure it went through, run it again with the same key: you get the same record back, and its reply says if the human has overruled or closed it, in which case do not act. " +
 		"Recording first means the human can always find what you did, even if you stop before you finish. Write the undo note so the human could follow it without you. " +
 		"The human reviews these with `ao decision ls --decided`.\n" +
 		"- Then carry it out, and confirm straight away with `ao decision carried-out <id>`. Until you confirm, the record says only that you meant to. " +

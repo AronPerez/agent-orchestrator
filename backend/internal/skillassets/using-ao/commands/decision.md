@@ -19,7 +19,7 @@ ao decision withdraw <id>
 ao decision retire <id> [--undo]
 ao decision kinds [--project <id>] [--json]
 ao decision observe [--project <id>] [--json]
-ao decision decide --kind <id> --what <what-you-decided> --why <why> --undo <how-to-undo-it> [--verify <how-to-tell-it-worked>] [--link "<label>=<url>"]... [--ref <id>] [--json]
+ao decision decide --key <name> --kind <id> --what <what-you-decided> --why <why> --undo <how-to-undo-it> [--verify <how-to-tell-it-worked>] [--link "<label>=<url>"]... [--ref <id>] [--json]
 ao decision carried-out <id>
 ao decision overrule <id> --note <what-to-do-instead>
 ao decision ls --decided
@@ -97,6 +97,7 @@ even if you stop before you finish:
 
 ```bash
 ao decision decide \
+  --key close-pr-12 \
   --kind pr_hygiene \
   --what "Closed the duplicate pull request #12" \
   --why "It repeats #11, which is further along." \
@@ -110,6 +111,12 @@ overrule tells whoever undoes it to check first. If you end up not carrying it
 out, close the record with `ao decision outcome <id> --text "Not carried out:
 <why>"`. After a restart, `ao decision ls` marks your decisions "Not confirmed
 carried out": check whether each happened, then confirm or close it.
+
+Give every decision its own `--key`, a short name for this one action. If the
+command fails or you are unsure it went through, run it again with the same
+key: you get the same record back instead of a second one, and the reply says
+if the human has since overruled or closed it, in which case do not act.
+Without a key nothing is matched, so a retry would create a second record.
 
 `--undo` is required: write it so the human could follow it without you.
 `--verify` is optional. `other` is always reserved. If the project left
