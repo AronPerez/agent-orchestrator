@@ -4430,6 +4430,16 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		)
 	}
 
+	trackerIntakePriorReservation, trackerIntakePending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
+	if err != nil {
+		return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: load pending tracker intake claim: %w", operation, rec.ID, err))
+	}
+	if trackerIntakePending {
+		if err := m.ensureTrackerIntakePriorRuntimeStopped(ctx, rec, trackerIntakePriorReservation); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: verify prior tracker intake owner: %w", operation, rec.ID, err))
+		}
+	}
+
 	var env map[string]string
 	preparedImportEnv := rec.Metadata.ImportSource != nil && rec.NeedsImportResume()
 	if preparedImportEnv {
@@ -4600,12 +4610,6 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 	// that reservation, while after-start delivery is fenced at the prompt write.
 	// Native restore and handoff/switch prompts do not replay the issue.
 	trackerIntakeSavedPrompt := mode == RestoreModeSavedPrompt && !switching && !savedNote && strings.TrimSpace(savedPrompt) != ""
-	var trackerIntakePriorReservation domain.TrackerIntakeRecoveryReservation
-	trackerIntakePriorReservation, trackerIntakePending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, rec.ID)
-	if err != nil {
-		m.cleanupSystemPromptDir(rec.ID)
-		return RestoreResult{}, relaunchFailed("tracker intake recovery", fmt.Errorf("%s %s: load pending tracker intake claim: %w", operation, rec.ID, err))
-	}
 	trackerIntakeDeliveryPossible := trackerIntakePriorReservation.DeliveryPossible ||
 		(trackerIntakeSavedPrompt && delivery == ports.PromptDeliveryInCommand)
 	markTrackerIntakeDelivery := func() error {

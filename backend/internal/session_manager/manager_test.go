@@ -8902,6 +8902,54 @@ func TestResume_SavedPromptRestartErrorRequiresExplicitNoEffectToClearFence(t *t
 	}
 }
 
+func TestResume_PendingTrackerIntakeKeepsInconclusivePriorOwnerFenced(t *testing.T) {
+	st := newFakeStore()
+	issueID := domain.IssueID("github:acme/mer#1191")
+	key := "mer\x00" + string(issueID)
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Activity: domain.Activity{State: domain.ActivityExited},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task",
+			RuntimeHandleID: "ptyhost-v1:mer-1", RuntimeLaunchID: "old-launch", AgentSessionID: "native-1",
+		},
+	}
+	st.trackerIntakePending[key] = "mer-1"
+	prior := domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-1", RuntimeLaunchID: "old-launch",
+		RuntimeHandleIDs: []string{"ptyhost-v1:mer-1", "mer-1"}, DeliveryPossible: true,
+	}
+	st.trackerIntakeRecovery["mer-1"] = prior
+	rt := &fakeRuntime{
+		aliveByHandle: map[string]bool{"ptyhost-v1:mer-1": false, "mer-1": false},
+		supervisedErr: errors.New("conpty listener refused connection while host may still live"),
+		fencedResults: map[string]ports.FencedProbeResult{
+			"ptyhost-v1:mer-1": {Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed},
+			"mer-1":            {Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent},
+		},
+	}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); !errors.Is(err, ports.ErrRuntimeProbeInconclusive) {
+		t.Fatalf("ResumeAgentWithMode error = %v, want ErrRuntimeProbeInconclusive", err)
+	}
+	if rt.created != 0 {
+		t.Fatalf("runtime creates = %d, want 0 while prior owner is unresolved", rt.created)
+	}
+	if got := st.trackerIntakeRecovery["mer-1"]; !reflect.DeepEqual(got, prior) {
+		t.Fatalf("reservation after refused resume = %+v, want prior fence %+v", got, prior)
+	}
+	if len(rt.fencedRefs) != 1 || rt.fencedRefs[0].Handle.ID != "ptyhost-v1:mer-1" ||
+		rt.fencedRefs[0].Generation != "old-launch" {
+		t.Fatalf("fenced probes = %+v, want exact prior direct-host generation", rt.fencedRefs)
+	}
+}
+
 func TestRestore_PendingUndeliveredNativeOwnerSurvivesClaimReconciliation(t *testing.T) {
 	st := newFakeStore()
 	issueID := domain.IssueID("github:acme/mer#120")

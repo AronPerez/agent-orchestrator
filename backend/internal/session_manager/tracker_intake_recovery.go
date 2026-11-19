@@ -716,6 +716,81 @@ func trackerIntakeHasRuntimeEvidence(rec domain.SessionRecord, reservation domai
 		strings.TrimSpace(reservation.RuntimeLaunchID) != "" || reservation.DeliveryPossible
 }
 
+// ensureTrackerIntakePriorRuntimeStopped keeps a relaunch from replacing the
+// only durable fence for a possibly-live earlier generation.
+func (m *Manager) ensureTrackerIntakePriorRuntimeStopped(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	reservation domain.TrackerIntakeRecoveryReservation,
+) error {
+	type candidate struct {
+		handleID string
+		launchID string
+	}
+	candidates := make([]candidate, 0, len(reservation.RuntimeHandleIDs)+1)
+	seen := make(map[string]struct{}, len(reservation.RuntimeHandleIDs)+1)
+	add := func(handleID, launchID string, released bool) error {
+		handleID = strings.TrimSpace(handleID)
+		launchID = strings.TrimSpace(launchID)
+		if released {
+			return nil
+		}
+		if handleID == "" || launchID == "" {
+			return fmt.Errorf("pending tracker intake runtime has incomplete ownership evidence: %w", ports.ErrRuntimeProbeInconclusive)
+		}
+		key := handleID + "\x00" + launchID
+		if _, ok := seen[key]; ok {
+			return nil
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, candidate{handleID: handleID, launchID: launchID})
+		return nil
+	}
+
+	reservedLaunchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+	reservedReleased := reservation.CapacityReleased && reservedLaunchID != "" &&
+		strings.TrimSpace(reservation.ReleasedRuntimeLaunchID) == reservedLaunchID
+	reservedHandles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
+	if len(reservedHandles) == 0 && reservedLaunchID != "" && !reservedReleased {
+		return fmt.Errorf("pending tracker intake runtime has no handle fence: %w", ports.ErrRuntimeProbeInconclusive)
+	}
+	for _, handleID := range reservedHandles {
+		if err := add(handleID, reservedLaunchID, reservedReleased); err != nil {
+			return err
+		}
+	}
+
+	rowHandleID := strings.TrimSpace(rec.Metadata.RuntimeHandleID)
+	rowLaunchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	rowReleased := rec.RuntimeReleased() || (reservedReleased && rowLaunchID == reservedLaunchID)
+	if rowHandleID != "" || rowLaunchID != "" {
+		if err := add(rowHandleID, rowLaunchID, rowReleased); err != nil {
+			return err
+		}
+	}
+	if len(candidates) == 0 && (reservation.DeliveryPossible || reservation.RelaunchPublished) && !reservedReleased {
+		return fmt.Errorf("pending tracker intake runtime has no probeable owner: %w", ports.ErrRuntimeProbeInconclusive)
+	}
+
+	for _, owner := range candidates {
+		probe := m.runtime.ProbeFencedRuntime(ctx, ports.FencedRuntimeRef{
+			Handle: ports.RuntimeHandle{ID: owner.handleID}, SessionID: rec.ID,
+			Generation: owner.launchID, NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
+		})
+		switch probe.Liveness {
+		case ports.FencedDead:
+			continue
+		case ports.FencedAlive:
+			return fmt.Errorf("pending tracker intake runtime %s generation %s is still alive: %w",
+				owner.handleID, owner.launchID, ErrAgentNotExited)
+		default:
+			return fmt.Errorf("pending tracker intake runtime %s generation %s remains unresolved (%s): %w",
+				owner.handleID, owner.launchID, probe.Reason, ports.ErrRuntimeProbeInconclusive)
+		}
+	}
+	return nil
+}
+
 // stopTrackerIntakeRuntimeOwners proves every candidate from the durable
 // reservation absent or stops its exact launch. A row can hold only the
 // selected handle, so ignoring the other candidates would let Kill release the
