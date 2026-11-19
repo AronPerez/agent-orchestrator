@@ -24,6 +24,7 @@ type Observation struct {
 	// quick holds what the walk's stat reported for each observed path. On
 	// Linux it lacks the birth time, which only fullIdentity reads.
 	quick map[string]domain.FileIdentity
+	pins  map[string]domain.FileIdentity
 	dir   string
 }
 
@@ -35,7 +36,7 @@ func Observe(ctx context.Context, dir string, registered []string) (Observation,
 		return Observation{}, err
 	}
 	observeBundles(dir, files, quick)
-	return Observation{Files: files, quick: quick, dir: dir}, nil
+	return Observation{Files: files, quick: quick, pins: loadPlanApprovalPins(dir), dir: dir}, nil
 }
 
 // observeBundles adds the identity of each bundle directory that holds an
@@ -102,6 +103,19 @@ func (o Observation) Changes(rows []domain.SessionArtifactRecord, now time.Time,
 	for _, path := range candidates {
 		full[path] = o.fullIdentity(path)
 	}
+	// Platforms without a useful quick identity (notably Windows) put every
+	// path in candidates. A full identity match is unchanged and must not cause
+	// a SetFile write on every list refresh.
+	candidates = slices.DeleteFunc(candidates, func(path string) bool {
+		row, ok := byPath[path]
+		return ok && row.File.SameFile(full[path])
+	})
+	if len(candidates) == 0 {
+		for _, row := range gone {
+			forgetOrClear(&changes, row)
+		}
+		return changes
+	}
 
 	// A row is a rename source when its file left its path: the path is gone,
 	// or holds another file now.
@@ -116,7 +130,7 @@ func (o Observation) Changes(rows []domain.SessionArtifactRecord, now time.Time,
 	}
 	matches := make(map[string]domain.SessionArtifactRecord)
 	for _, path := range candidates {
-		if source, ok := sources[full[path]]; ok && source.Path != path {
+		if source, ok := renameSource(sources, full[path], o.pins); ok && source.Path != path {
 			matches[path] = source
 		}
 	}
@@ -224,6 +238,37 @@ func addSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, row
 	}
 }
 
+// renameSource uses the exact identity first. A plan-approval row gets a narrow
+// fallback when birth/generation metadata or its private hard-link pin proves
+// the inode is still the same file after an edit. If the file system exposes
+// none of those witnesses, a registered approval conservatively follows the
+// same device+inode: a rare recycled-inode match can under-count a deliverable,
+// but the approved plan can never be mistaken for finished work.
+func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, observed domain.FileIdentity, pins map[string]domain.FileIdentity) (domain.SessionArtifactRecord, bool) {
+	if source, ok := sources[observed]; ok {
+		return source, true
+	}
+	for _, source := range sources {
+		stored := source.File
+		if source.Role == domain.SessionArtifactRolePlanApproval &&
+			stored.Ino != 0 && stored.Dev == observed.Dev && stored.Ino == observed.Ino &&
+			stored.Birth == observed.Birth && stored.Generation == observed.Generation &&
+			(stored.Birth != 0 || stored.Generation != 0) {
+			return source, true
+		}
+		pin := pins[source.ID]
+		if source.Role == domain.SessionArtifactRolePlanApproval && pin.SameFile(observed) {
+			return source, true
+		}
+		if source.Role == domain.SessionArtifactRolePlanApproval && source.RegisteredAt != nil && pin.Ino == 0 &&
+			stored.Birth == 0 && observed.Birth == 0 && stored.Generation == 0 && observed.Generation == 0 &&
+			stored.Dev != 0 && stored.Dev == observed.Dev && stored.Ino != 0 && stored.Ino == observed.Ino {
+			return source, true
+		}
+	}
+	return domain.SessionArtifactRecord{}, false
+}
+
 // sameQuick reports whether quick, which may lack the birth time and
 // generation, names the file stored. The modification time counts only where
 // it is part of the stored identity.
@@ -250,17 +295,25 @@ func previousPaths(previous []string, from, to string) []string {
 // bundle directory is registered with it.
 func (o Observation) Apply(rows []domain.SessionArtifactRecord) []domain.SessionArtifactFile {
 	byPath := make(map[string]domain.SessionArtifactRecord, len(rows))
+	byFile := make(map[domain.FileIdentity]domain.SessionArtifactRecord, len(rows))
 	registered := make(map[string]bool)
 	for _, row := range rows {
 		byPath[row.Path] = row
+		if row.File.SameFile(row.File) {
+			byFile[row.File] = row
+		}
 		if row.RegisteredAt != nil {
 			registered[row.Path] = true
 		}
 	}
 	files := slices.Clone(o.Files)
 	for i := range files {
-		row := byPath[files[i].Path]
+		row, found := byPath[files[i].Path]
+		if !found {
+			row, _ = renameSource(byFile, o.fullIdentity(files[i].Path), o.pins)
+		}
 		files[i].ID = row.ID
+		files[i].Role = row.Role
 		files[i].PreviousPaths = row.PreviousPaths
 		files[i].Registered = namedBy(files[i].Path, registered)
 	}

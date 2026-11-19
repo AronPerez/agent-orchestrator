@@ -18,6 +18,7 @@ type decisionServiceFixture struct {
 	service  *Service
 	store    *sqlite.Store
 	appended *[]domain.DecisionEntry
+	now      *time.Time
 	orch     domain.SessionID
 	epic     domain.SessionID
 	w1       domain.SessionID
@@ -72,7 +73,7 @@ func newDecisionService(t *testing.T) decisionServiceFixture {
 		Now: clock, NewID: newID, OnAppended: func(entry domain.DecisionEntry) { appended = append(appended, entry) },
 	})
 	return decisionServiceFixture{
-		service: service, store: store, appended: &appended,
+		service: service, store: store, appended: &appended, now: &now,
 		orch: orch, epic: epic, w1: w1, w2: w2, loose: loose,
 	}
 }

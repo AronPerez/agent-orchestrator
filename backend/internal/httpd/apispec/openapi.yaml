@@ -27233,6 +27233,8 @@ components:
           type: string
         parentSessionId:
           type: string
+        planFirst:
+          type: boolean
         projectId:
           type: string
         prompt:

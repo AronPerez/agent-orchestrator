@@ -48,6 +48,65 @@ func TestRegisterArtifactsReportsWhatStaysUnlisted(t *testing.T) {
 	}
 }
 
+func TestRegisterArtifactsMarksThePendingPlanApprovalByRole(t *testing.T) {
+	svc, st, dir := registrationFixture(t, "plan.md")
+	rec := st.sessions["mer-1"]
+	rec.PlanFirstState = domain.PlanFirstPending
+	st.sessions["mer-1"] = rec
+
+	if _, err := svc.RegisterArtifacts(context.Background(), "mer-1", []string{"plan.md"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.artifactRoles["mer-1"]["plan.md"]; got != domain.SessionArtifactRolePlanApproval {
+		t.Fatalf("plan role = %q, want %q", got, domain.SessionArtifactRolePlanApproval)
+	}
+	rows, err := st.ListSessionArtifactsForSessions(context.Background(), []domain.SessionID{"mer-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := filepath.Join(dir, ".versions", "plan-approval-pins", rows["mer-1"][0].ID)
+	planInfo, err := os.Stat(filepath.Join(dir, "plan.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinInfo, err := os.Stat(pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(planInfo, pinInfo) {
+		t.Fatal("plan approval pin is not a hard link to plan.md")
+	}
+}
+
+func TestUnregisterArtifactRemovesThePlanApprovalPin(t *testing.T) {
+	svc, st, dir := registrationFixture(t, "plan.md")
+	rec := st.sessions["mer-1"]
+	rec.PlanFirstState = domain.PlanFirstPending
+	st.sessions["mer-1"] = rec
+	ctx := context.Background()
+
+	if _, err := svc.RegisterArtifacts(ctx, "mer-1", []string{"plan.md"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.ListSessionArtifactsForSessions(ctx, []domain.SessionID{"mer-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := filepath.Join(dir, ".versions", "plan-approval-pins", rows["mer-1"][0].ID)
+	if err := os.Remove(filepath.Join(dir, "plan.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UnregisterArtifact(ctx, "mer-1", "plan.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(pin); !os.IsNotExist(err) {
+		t.Fatalf("plan approval pin still exists after deletion: %v", err)
+	}
+	if paths := st.artifacts["mer-1"]; len(paths) != 0 {
+		t.Fatalf("stored paths = %v, want none", paths)
+	}
+}
+
 func TestRegisterArtifactsReportsOnlyNewFilesBySourceCategoryAndSize(t *testing.T) {
 	_, st, dir := registrationFixture(t, "brand.html", "notes.html", "shot.png", "app.icon/icon.json", "app.icon/a.png")
 	big := filepath.Join(dir, "deck.pdf")
