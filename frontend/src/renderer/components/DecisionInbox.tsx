@@ -2,6 +2,7 @@ import { LoaderCircle } from "@/components/app-icons";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { DecisionInboxAnswer, DecisionInboxEntry } from "../lib/decision-inbox";
+import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -14,6 +15,8 @@ type DecisionInboxProps = {
 	answerError?: Omit<DecisionInboxAnswer, "option"> & { message: string };
 	onAnswer: (entry: DecisionInboxEntry, option: number, note?: string) => void;
 	onRetry: () => void;
+	/** Calls whose durable announcement is unread (or was when the panel opened). */
+	unreadCallIds?: ReadonlySet<string>;
 };
 
 function sameCall(entry: DecisionInboxEntry, target?: { sourceHostId: string; callId: string }): boolean {
@@ -28,6 +31,7 @@ export function DecisionInbox({
 	answerError,
 	onAnswer,
 	onRetry,
+	unreadCallIds,
 }: DecisionInboxProps) {
 	const { t } = useTranslation();
 	const [notes, setNotes] = useState<Record<string, string>>({});
@@ -53,8 +57,14 @@ export function DecisionInbox({
 				const callKey = `${entry.sourceHostId}:${call.id}`;
 				const callPending = sameCall(entry, pending);
 				const error = sameCall(entry, answerError) ? answerError?.message : undefined;
+				const unread = unreadCallIds?.has(call.id) ?? false;
 				return (
-					<article className="border-t border-border px-3 py-3 first:border-t-0" key={`${entry.sourceHostId}:${call.id}`} role="listitem">
+					<article
+						className={cn("border-t border-border px-3 py-3 first:border-t-0", unread && "bg-interactive-hover")}
+						key={`${entry.sourceHostId}:${call.id}`}
+						role="listitem"
+					>
+						{unread ? <span className="sr-only">{t("decisionInbox.unread")}</span> : null}
 						<p className="text-caption font-medium text-status-needs-you">
 							{call.projectName ? t("decisionInbox.neededForProject", { project: call.projectName }) : t("decisionInbox.needed")}
 						</p>

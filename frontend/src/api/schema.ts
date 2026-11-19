@@ -8272,11 +8272,13 @@ export interface components {
             target: components["schemas"]["NotificationTarget"];
             title: string;
             /** @enum {string} */
-            type: "needs_input" | "session_stalled" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested";
+            type: "needs_input" | "session_stalled" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested" | "decision_needed";
         };
         NotificationTarget: {
+            callId?: string;
             /** @enum {string} */
-            kind: "session" | "pr";
+            kind: "session" | "pr" | "decision";
+            originHostId?: string;
             prUrl?: string;
             sessionId: string;
         };

@@ -329,3 +329,19 @@ func TestClearAllReturnsCommittedResultWhenPublishFails(t *testing.T) {
 		t.Fatalf("logs = %q", logs.String())
 	}
 }
+
+func TestListAddsDecisionTarget(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	st := &fakeStore{rows: []domain.NotificationRecord{{
+		ID: "n_dec", Type: domain.NotificationDecisionNeeded, Title: "Decision needed · ao", Body: "Ship it?",
+		Status: domain.NotificationUnread, CreatedAt: now, DecisionCallID: "dec_1", DecisionOriginHostID: "h_origin",
+	}}}
+	got, err := New(Deps{Store: st}).List(context.Background(), ListFilter{Status: ListAll, Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := Target{Kind: TargetDecision, CallID: "dec_1", OriginHostID: "h_origin"}
+	if len(got.Notifications) != 1 || got.Notifications[0].Target != want {
+		t.Fatalf("target = %+v, want %+v", got.Notifications, want)
+	}
+}

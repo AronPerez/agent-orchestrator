@@ -1327,6 +1327,7 @@
 	"decisionInbox.neededForProject": "Karar gerekiyor · {{project}}",
 	"decisionInbox.recommended": "Önerilen",
 	"decisionInbox.title": "Sizi bekleyen kararlar",
+	"decisionInbox.unread": "Okunmadı",
 	"pr.botSuffix": "{{name}} botu",
 	"pr.card.changesRequested": "Değişiklik istendi",
 	"pr.card.checksFailing": "Denetimler başarısız",

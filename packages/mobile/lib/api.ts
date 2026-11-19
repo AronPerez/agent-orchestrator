@@ -1100,7 +1100,17 @@ export type NotificationType =
 	| "pr_merged"
 	| "pr_closed_unmerged"
 	| "review_completed"
-	| "review_changes_requested";
+	| "review_changes_requested"
+	| "decision_needed";
+
+/** Where a notification navigates. A decision target names a call, not a session. */
+export type NotificationTarget = {
+	kind: "session" | "pr" | "decision" | string;
+	sessionId: string;
+	prUrl?: string;
+	callId?: string;
+	originHostId?: string;
+};
 
 export type NotificationRecord = {
 	id: string;
@@ -1112,6 +1122,8 @@ export type NotificationRecord = {
 	body: string;
 	status: "unread" | "read" | string;
 	createdAt: string;
+	/** Absent from older daemons. */
+	target?: NotificationTarget;
 };
 
 export type NotificationPage = {

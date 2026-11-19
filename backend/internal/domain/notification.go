@@ -24,13 +24,17 @@ const (
 	NotificationReviewCompleted NotificationType = "review_completed"
 	// NotificationReviewChangesRequested means an AO reviewer found changes to make.
 	NotificationReviewChangesRequested NotificationType = "review_changes_requested"
+	// NotificationDecisionNeeded means a decision-ledger call is waiting in
+	// Needs you. It targets the call, not a session: a synced call may have no
+	// local session or project.
+	NotificationDecisionNeeded NotificationType = "decision_needed"
 )
 
 // Valid reports whether t is one of the v1 notification kinds.
 func (t NotificationType) Valid() bool {
 	switch t {
 	case NotificationNeedsInput, NotificationSessionStalled, NotificationReadyToMerge, NotificationPRMerged, NotificationPRClosedUnmerged,
-		NotificationReviewCompleted, NotificationReviewChangesRequested:
+		NotificationReviewCompleted, NotificationReviewChangesRequested, NotificationDecisionNeeded:
 		return true
 	default:
 		return false
@@ -42,7 +46,13 @@ func (t NotificationType) Valid() bool {
 // Terminal facts — a PR that merged or closed — describe something that already
 // happened, so they are surfaced once as unseen and never held as unresolved.
 func (t NotificationType) NeedsResolution() bool {
-	return t == NotificationNeedsInput || t == NotificationReadyToMerge
+	return t == NotificationNeedsInput || t == NotificationReadyToMerge || t == NotificationDecisionNeeded
+}
+
+// TargetsDecision reports whether t is keyed by a decision call rather than a
+// session or pull request.
+func (t NotificationType) TargetsDecision() bool {
+	return t == NotificationDecisionNeeded
 }
 
 // NotificationStatus is the seen state for a stored notification. The stored
@@ -108,6 +118,12 @@ type NotificationRecord struct {
 	// SourceKey identifies the durable transition that produced a terminal
 	// notification. It is internal dedupe metadata and is not exposed over HTTP.
 	SourceKey string
+	// DecisionCallID identifies the decision-ledger call a decision_needed
+	// notification announces. Empty for every other type.
+	DecisionCallID string
+	// DecisionOriginHostID is the host that raised the call. Empty for every
+	// other type.
+	DecisionOriginHostID string
 }
 
 // Resolved reports whether the issue behind this notification is closed.
@@ -147,8 +163,18 @@ var (
 )
 
 // Validate checks the required fields and enum values for a stored notification.
+// Decision notifications target exactly one call and carry no session or PR;
+// every other type targets a session and carries no decision identity, so a
+// record never has ambiguous navigation.
 func (r NotificationRecord) Validate() error {
-	if r.SessionID == "" || r.Title == "" || r.CreatedAt.IsZero() {
+	if r.Title == "" || r.CreatedAt.IsZero() {
+		return ErrInvalidNotificationRecord
+	}
+	if r.Type.TargetsDecision() {
+		if r.DecisionCallID == "" || r.DecisionOriginHostID == "" || r.SessionID != "" || r.PRURL != "" {
+			return ErrInvalidNotificationRecord
+		}
+	} else if r.SessionID == "" || r.DecisionCallID != "" || r.DecisionOriginHostID != "" {
 		return ErrInvalidNotificationRecord
 	}
 	if !r.Type.Valid() {
