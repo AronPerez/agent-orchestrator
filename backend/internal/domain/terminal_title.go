@@ -26,7 +26,7 @@ func NormalizeTerminalTitle(raw string) string {
 		switch {
 		case r == '\t' || r == '\n' || r == '\r':
 			return ' '
-		case unicode.IsControl(r) || isBidiControl(r):
+		case unicode.IsControl(r) || IsBidiControl(r):
 			return -1
 		}
 		return r
@@ -47,7 +47,11 @@ func isSpinnerDot(r rune) bool {
 	return r == '·' || r == '•' || r == '∙' || r == '⋅'
 }
 
-func isBidiControl(r rune) bool {
+// IsBidiControl reports the invisible directional formatting characters that
+// can reorder how surrounding text is displayed: the Arabic letter mark, the
+// left-to-right and right-to-left marks, and the embeddings, overrides and
+// isolates (U+202A–U+202E, U+2066–U+2069).
+func IsBidiControl(r rune) bool {
 	return r == '\u061c' || r == '\u200e' || r == '\u200f' ||
 		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
 }

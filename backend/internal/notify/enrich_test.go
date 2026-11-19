@@ -207,3 +207,25 @@ func TestEnrichDecisionStripsBidiControls(t *testing.T) {
 		t.Fatalf("title=%q body=%q", rec.Title, rec.Body)
 	}
 }
+
+func TestEnrichDecisionStripsBidiMarks(t *testing.T) {
+	t.Parallel()
+	// U+061C, U+200E and U+200F are invisible bidi marks that can move
+	// neighbouring text in a banner; joiners are kept.
+	for _, mark := range []string{"\u061C", "\u200E", "\u200F"} {
+		intent := decisionIntent()
+		intent.DecisionTitle = "Keep " + mark + "(v2)" + mark + " keys?"
+		intent.DecisionProjectName = "pay" + mark + "ments"
+		intent.DecisionStreamName = "team\u200Dname"
+		rec, err := enrich(intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(rec.Body+rec.Title, mark) {
+			t.Fatalf("mark %U survived: title=%q body=%q", []rune(mark)[0], rec.Title, rec.Body)
+		}
+		if rec.Body != "Keep (v2) keys?" || rec.Title != "Decision needed · pay ments · team\u200Dname" {
+			t.Fatalf("title=%q body=%q", rec.Title, rec.Body)
+		}
+	}
+}

@@ -159,21 +159,15 @@ func enrichDecision(intent Intent) (domain.NotificationRecord, error) {
 func DecisionSourceKey(callID string) string { return "decision:" + callID }
 
 // oneLine keeps recorded labels to one visible line: control characters
-// (newlines, tabs) and bidi embeddings, overrides and isolates become spaces,
-// and runs collapse. Other format characters stay: zero-width joiners and
-// non-joiners are part of emoji sequences and of words in many scripts, so a
-// valid title reaches the banner exactly.
+// (newlines, tabs) and bidi controls (marks, embeddings, overrides, isolates)
+// become spaces, and runs collapse. Other format characters stay: zero-width
+// joiners and non-joiners are part of emoji sequences and of words in many
+// scripts, so a valid title reaches the banner exactly.
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || isBidiControl(r) {
+		if unicode.IsControl(r) || domain.IsBidiControl(r) {
 			return ' '
 		}
 		return r
 	}, s)), " ")
-}
-
-// isBidiControl reports the explicit directional formatting characters that
-// can reorder what a banner shows (U+202A–U+202E, U+2066–U+2069).
-func isBidiControl(r rune) bool {
-	return (r >= '\u202A' && r <= '\u202E') || (r >= '\u2066' && r <= '\u2069')
 }
