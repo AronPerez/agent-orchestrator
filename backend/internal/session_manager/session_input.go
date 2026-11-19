@@ -98,8 +98,14 @@ func (m *Manager) SessionMutationInProgress(id domain.SessionID) bool {
 // operations: Kill and Resume remain available to resolve an inconclusive
 // external owner.
 func (m *Manager) SessionObservationInProgress(id domain.SessionID) bool {
-	return m.SessionMutationInProgress(id) || m.trackerIntakeReaperFenceActive(id) ||
-		m.statusRecoveryReaperFenceActive(id)
+	return m.SessionMutationInProgress(id) || m.SessionOwnershipObservationInProgress(id)
+}
+
+// SessionOwnershipObservationInProgress is narrower than a normal session
+// mutation: uncertain ownership suppresses workload-death facts too, while an
+// interface transition still needs that fact to finish draining its source.
+func (m *Manager) SessionOwnershipObservationInProgress(id domain.SessionID) bool {
+	return m.trackerIntakeReaperFenceActive(id) || m.statusRecoveryReaperFenceActive(id)
 }
 
 func (m *Manager) agentOperationActiveLocked(id domain.SessionID) bool {

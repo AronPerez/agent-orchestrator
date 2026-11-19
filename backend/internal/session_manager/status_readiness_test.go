@@ -132,8 +132,9 @@ func TestStatusReadinessDiscoveryFailureIsUnavailable(t *testing.T) {
 	}
 }
 
-func TestStatusReadinessClaimLookupFailureIsUnavailable(t *testing.T) {
+func TestStatusReadinessClaimLookupFailureRetriesThenIsUnavailable(t *testing.T) {
 	m, st, _, _ := newManager()
+	m.startupHealthRetryDelays = []time.Duration{time.Millisecond}
 	rec := domain.SessionRecord{
 		ID: "chat-claim-lookup", ProjectID: "mer", Harness: domain.HarnessClaudeCode,
 		Mode: domain.SessionModeChat, Activity: domain.Activity{State: domain.ActivityActive},
@@ -148,9 +149,12 @@ func TestStatusReadinessClaimLookupFailureIsUnavailable(t *testing.T) {
 	if err := m.ReconcileBackground(context.Background()); err != nil {
 		t.Fatalf("reconcile background: %v", err)
 	}
-	if got := m.SessionStatusReadiness(rec); got != "unavailable" {
-		t.Fatalf("claim lookup failure readiness = %s, want unavailable", got)
+	if got := m.SessionStatusReadiness(rec); got != "checking" {
+		t.Fatalf("claim lookup failure readiness during retry = %s, want checking", got)
 	}
+	waitFor(t, "claim lookup retries to finish", func() bool {
+		return m.SessionStatusReadiness(rec) == "unavailable"
+	})
 }
 
 func TestStatusReadinessFreshSpawnAfterDiscoveryFailureIsReady(t *testing.T) {

@@ -24,16 +24,17 @@ func (s *failingPendingClaimListStore) ListPendingTrackerIntakeClaims(context.Co
 	return nil, errors.New("pending claim list unavailable")
 }
 
-type failPendingRecoveryOnceStore struct {
+type failPendingRecoveryStore struct {
 	*sqlite.Store
-	calls atomic.Int32
+	failures int32
+	calls    atomic.Int32
 }
 
-func (s *failPendingRecoveryOnceStore) GetPendingTrackerIntakeRecovery(
+func (s *failPendingRecoveryStore) GetPendingTrackerIntakeRecovery(
 	ctx context.Context,
 	id domain.SessionID,
 ) (domain.TrackerIntakeRecoveryReservation, bool, error) {
-	if s.calls.Add(1) == 1 {
+	if s.calls.Add(1) <= s.failures {
 		return domain.TrackerIntakeRecoveryReservation{}, false, errors.New("pending claim lookup unavailable")
 	}
 	return s.Store.GetPendingTrackerIntakeRecovery(ctx, id)
@@ -105,7 +106,7 @@ func TestStartupHealthKeepsDeadTerminalOrchestratorThroughTheReaper(t *testing.T
 	}
 }
 
-func TestStartupHealthRetriesClaimLookupBeforeTheBootReaper(t *testing.T) {
+func TestStartupHealthRetriesClaimLookupBeyondLivePassBeforeTheBootReaper(t *testing.T) {
 	ctx := context.Background()
 	base, err := sqlite.Open(t.TempDir())
 	if err != nil {
@@ -134,7 +135,7 @@ func TestStartupHealthRetriesClaimLookupBeforeTheBootReaper(t *testing.T) {
 		t.Fatalf("seed session: %v", err)
 	}
 
-	store := &failPendingRecoveryOnceStore{Store: base}
+	store := &failPendingRecoveryStore{Store: base, failures: 2}
 	runtime := &fakeRuntime{} // the terminal died while AO was down
 	lcm := lifecycle.New(base, nil)
 	m := New(Deps{
@@ -143,18 +144,29 @@ func TestStartupHealthRetriesClaimLookupBeforeTheBootReaper(t *testing.T) {
 		DataDir: t.TempDir(),
 	})
 	lcm.SetSessionOperationGate(m)
+	m.startupHealthRetryDelays = []time.Duration{50 * time.Millisecond, time.Millisecond}
 
 	if err := m.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if store.calls.Load() < 2 {
-		t.Fatalf("pending claim lookups = %d, want the failed read retried", store.calls.Load())
+	if got := store.calls.Load(); got != 2 {
+		t.Fatalf("pending claim lookups before delayed retry = %d, want both live-pass reads to fail", got)
 	}
-	if m.SessionObservationInProgress("mer-1") {
-		t.Fatal("successful startup health retry left the reaper fence active")
+	if !m.SessionObservationInProgress("mer-1") {
+		t.Fatal("failed startup health reads did not leave the reaper fence active")
 	}
 	if err := reaper.New(lcm, base, runtime, reaper.Config{}).Tick(ctx); err != nil {
 		t.Fatalf("reaper tick: %v", err)
+	}
+	if rec, ok, err := base.GetSession(ctx, "mer-1"); err != nil || !ok || rec.IsTerminated {
+		t.Fatalf("session before delayed retry: ok=%v terminated=%v err=%v", ok, rec.IsTerminated, err)
+	}
+	waitFor(t, "the delayed claim lookup retry", func() bool { return store.calls.Load() >= 3 })
+	waitFor(t, "the successful retry to clear the reaper fence", func() bool {
+		return !m.SessionObservationInProgress("mer-1")
+	})
+	if err := reaper.New(lcm, base, runtime, reaper.Config{}).Tick(ctx); err != nil {
+		t.Fatalf("reaper tick after retry: %v", err)
 	}
 	rec, ok, err := base.GetSession(ctx, "mer-1")
 	if err != nil || !ok {

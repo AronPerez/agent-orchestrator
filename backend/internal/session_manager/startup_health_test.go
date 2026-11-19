@@ -557,7 +557,7 @@ func TestStartupChatCheckRetriesTransientFailure(t *testing.T) {
 			m, st, rt, ws := newLifecycleManager()
 			launcher := &flakyStartupLauncher{failures: 2, err: cause}
 			m.chat = launcher
-			m.startupChatRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+			m.startupHealthRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 			rec := startupChatRecord()
 			st.sessions[rec.ID] = rec
 			if err := m.ReconcileBackground(ctx); err != nil {
@@ -586,7 +586,7 @@ func TestStartupChatCheckDoesNotRetryPermanentFailure(t *testing.T) {
 	m, st, _, _ := newLifecycleManager()
 	launcher := &flakyStartupLauncher{failures: -1, err: errors.New("provider rejected the permission mode")}
 	m.chat = launcher
-	m.startupChatRetryDelays = []time.Duration{time.Millisecond}
+	m.startupHealthRetryDelays = []time.Duration{time.Millisecond}
 	rec := startupChatRecord()
 	st.sessions[rec.ID] = rec
 	if err := m.ReconcileBackground(ctx); err != nil {
@@ -607,7 +607,7 @@ func TestStartupChatCheckRetryStopsOnceReattached(t *testing.T) {
 	m, st, _, _ := newLifecycleManager()
 	launcher := &flakyStartupLauncher{failures: -1, err: ports.ErrChatRecoveryInconclusive}
 	m.chat = launcher
-	m.startupChatRetryDelays = []time.Duration{20 * time.Millisecond, time.Millisecond}
+	m.startupHealthRetryDelays = []time.Duration{20 * time.Millisecond, time.Millisecond}
 	rec := startupChatRecord()
 	st.sessions[rec.ID] = rec
 	if err := m.ReconcileBackground(ctx); err != nil {
@@ -629,7 +629,7 @@ func TestStartupChatCheckStaysCheckingWhileRetryPending(t *testing.T) {
 	m, st, _, _ := newLifecycleManager()
 	launcher := &flakyStartupLauncher{failures: 1, err: ports.ErrChatRecoveryInconclusive}
 	m.chat = launcher
-	m.startupChatRetryDelays = []time.Duration{100 * time.Millisecond}
+	m.startupHealthRetryDelays = []time.Duration{100 * time.Millisecond}
 	rec := startupChatRecord()
 	st.sessions[rec.ID] = rec
 	if err := m.ReconcileBackground(ctx); err != nil {
@@ -650,7 +650,7 @@ func TestStartupChatCheckRetryGivesUpAfterSchedule(t *testing.T) {
 	m, st, _, _ := newLifecycleManager()
 	launcher := &flakyStartupLauncher{failures: -1, err: ports.ErrChatRecoveryInconclusive}
 	m.chat = launcher
-	m.startupChatRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	m.startupHealthRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	rec := startupChatRecord()
 	st.sessions[rec.ID] = rec
 	if err := m.ReconcileBackground(ctx); err != nil {

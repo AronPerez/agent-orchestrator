@@ -310,6 +310,23 @@ func (g fixedSessionOperationGate) SessionObservationInProgress(domain.SessionID
 	return bool(g)
 }
 
+type splitSessionOperationGate struct {
+	mutation  bool
+	ownership bool
+}
+
+func (g splitSessionOperationGate) SessionMutationInProgress(domain.SessionID) bool {
+	return g.mutation
+}
+
+func (g splitSessionOperationGate) SessionObservationInProgress(domain.SessionID) bool {
+	return g.mutation || g.ownership
+}
+
+func (g splitSessionOperationGate) SessionOwnershipObservationInProgress(domain.SessionID) bool {
+	return g.ownership
+}
+
 type telemetrySink struct {
 	events []ports.TelemetryEvent
 }
@@ -749,6 +766,24 @@ func TestRuntimeObservation_ExitedWorkloadIsSuppressedDuringSessionObservation(t
 	}
 	if got := st.sessions[rec.ID]; !reflect.DeepEqual(got, rec) {
 		t.Fatalf("fenced workload observation mutated session: got %+v, want %+v", got, rec)
+	}
+}
+
+func TestRuntimeObservation_ExitedWorkloadIsRecordedDuringInterfaceTransition(t *testing.T) {
+	m, st, _ := newManager()
+	m.SetSessionOperationGate(splitSessionOperationGate{mutation: true})
+	rec := working("mer-1")
+	rec.Metadata.RuntimeLaunchID = "launch-1"
+	st.sessions[rec.ID] = rec
+
+	if err := m.ApplyRuntimeObservation(ctx, rec.ID, ports.RuntimeFacts{
+		Runtime: ports.ProbeAlive, Workload: ports.ProbeDead, LaunchID: "launch-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := st.sessions[rec.ID]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited {
+		t.Fatalf("workload death during transition = %+v, want live/exited so the source can drain", got)
 	}
 }
 

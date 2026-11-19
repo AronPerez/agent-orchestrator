@@ -565,7 +565,7 @@ type Manager struct {
 	statusRecoveryRevision      uint64
 	statusRecoveries            map[domain.SessionID]statusRecovery
 	statusVerificationLimit     time.Duration
-	startupChatRetryDelays      []time.Duration
+	startupHealthRetryDelays    []time.Duration
 	agentOpMu                   sync.Mutex
 	agentOperations             map[domain.SessionID]agentOperationKind
 	// launchStartWait bounds the wait to see a new supervised launch alive.
@@ -1096,7 +1096,7 @@ func New(d Deps) *Manager {
 	}
 	m.statusRecoveries = make(map[domain.SessionID]statusRecovery)
 	m.statusVerificationLimit = statusVerificationLimit
-	m.startupChatRetryDelays = defaultStartupChatRetryDelays
+	m.startupHealthRetryDelays = defaultStartupHealthRetryDelays
 	if m.reconcileWorkers < 1 {
 		m.reconcileWorkers = 1
 	}
@@ -5491,7 +5491,7 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 	jobs := make(chan domain.SessionRecord)
 	var wg sync.WaitGroup
 	var retryMu sync.Mutex
-	var retryChats []domain.SessionID
+	var retrySessions []domain.SessionID
 	wg.Add(workers)
 	for range workers {
 		go func() {
@@ -5504,8 +5504,9 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 					defer cancel()
 					return m.checkSessionHealth(recoveryCtx, rec)
 				}()
-				retry := err != nil && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat &&
-					retryableStartupChatCheck(err) && len(m.startupChatRetryDelays) > 0
+				retry := err != nil && len(m.startupHealthRetryDelays) > 0 &&
+					(m.statusRecoveryReaperFenceActive(rec.ID) ||
+						domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat && retryableStartupChatCheck(err))
 				if !retry {
 					// A scheduled reattach keeps the session checking; its last attempt settles it.
 					m.finishStatusRecovery(ctx, rec, err)
@@ -5518,7 +5519,7 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 				}
 				if retry {
 					retryMu.Lock()
-					retryChats = append(retryChats, rec.ID)
+					retrySessions = append(retrySessions, rec.ID)
 					retryMu.Unlock()
 				}
 			}
@@ -5529,8 +5530,8 @@ func (m *Manager) reconcileLivePass(ctx context.Context, recs []domain.SessionRe
 	}
 	close(jobs)
 	wg.Wait()
-	if len(retryChats) > 0 && ctx.Err() == nil {
-		go m.retryStartupChatChecks(ctx, retryChats)
+	if len(retrySessions) > 0 && ctx.Err() == nil {
+		go m.retryStartupHealthChecks(ctx, retrySessions)
 	}
 }
 
