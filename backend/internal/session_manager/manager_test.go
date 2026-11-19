@@ -3520,6 +3520,82 @@ func TestKillFencesEveryReservedTrackerIntakeRuntime(t *testing.T) {
 	}
 }
 
+func TestKillTrackerIntakeDestroysLiveTerminalAfterWorkloadExit(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("dead-workload-live-terminal-kill")
+	issueID := domain.IssueID("github:acme/mer#1101")
+	handleID := "runtime-1101"
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/dead-workload-live-terminal-kill", RuntimeLaunchID: "launch-1101",
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+	}
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+	runtimeStoppedBeforeWorkspace := false
+	ws.destroyHook = func() {
+		runtimeStoppedBeforeWorkspace = rt.destroyed == 1 && !rt.aliveByHandle[handleID]
+	}
+
+	freed, err := m.Kill(context.Background(), id)
+	if err != nil || !freed {
+		t.Fatalf("Kill() = %t, %v, want terminal and workspace removed", freed, err)
+	}
+	if rt.destroyed != 1 || ws.destroyed != 1 || !runtimeStoppedBeforeWorkspace {
+		t.Fatalf("Kill() teardown order: runtime=%d workspace=%d runtimeStoppedBeforeWorkspace=%t",
+			rt.destroyed, ws.destroyed, runtimeStoppedBeforeWorkspace)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != id {
+		t.Fatalf("claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestKillTrackerIntakeFailedTerminalDestroyPreservesWorkspace(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("failed-terminal-destroy-kill")
+	issueID := domain.IssueID("github:acme/mer#1102")
+	handleID := "runtime-1102"
+	key := "mer\x00" + string(issueID)
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+	}
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/failed-terminal-destroy-kill", RuntimeLaunchID: "launch-1102",
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+	}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+	rt.destroyErr = errors.New("terminal host is still alive")
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
+	probeCalls := 0
+	rt.onFencedProbe = func(_ ports.FencedRuntimeRef, _ ports.FencedProbeResult) {
+		probeCalls++
+		if probeCalls == 1 {
+			rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+		}
+	}
+
+	if _, err := m.Kill(context.Background(), id); err == nil || !strings.Contains(err.Error(), "terminal host is still alive") {
+		t.Fatalf("Kill() error = %v, want failed terminal teardown", err)
+	}
+	if rt.destroyed != 2 || ws.destroyed != 0 {
+		t.Fatalf("Kill() cleanup after failed terminal teardown: runtime=%d workspace=%d", rt.destroyed, ws.destroyed)
+	}
+	if got := st.trackerIntakePending[key]; got != id {
+		t.Fatalf("pending claim = %q, want %q", got, id)
+	}
+	if got := st.trackerIntakeRecovery[id]; got.CapacityReleased {
+		t.Fatalf("capacity released after failed terminal teardown: %+v", got)
+	}
+	if st.sessions[id].IsTerminated {
+		t.Fatal("session terminated after failed terminal teardown")
+	}
+}
+
 func TestKillTrackerIntakeUsesReservedWorkspaceBeforePublication(t *testing.T) {
 	m, st, rt, ws := newManager()
 	id := domain.SessionID("reserved-workspace-kill")

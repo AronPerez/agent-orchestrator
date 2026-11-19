@@ -896,9 +896,10 @@ func (m *Manager) stopTrackerIntakeRuntimeOwners(
 		}
 		probe := m.runtime.ProbeFencedRuntime(ctx, ref)
 		switch probe.Liveness {
-		case ports.FencedDead:
-			continue
-		case ports.FencedAlive:
+		case ports.FencedDead, ports.FencedAlive:
+			// FencedDead proves the exact managed child absent, not the terminal
+			// host absent. Destroy is idempotent and must settle that outer owner
+			// before Kill releases capacity or touches the workspace.
 			if err := m.stopSourceRuntime(ctx, ref); err != nil {
 				return fmt.Errorf("stop pending tracker intake runtime %s: %w", owner.handleID, err)
 			}

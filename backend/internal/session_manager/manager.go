@@ -4108,14 +4108,15 @@ func (m *Manager) stopAgentController(ctx context.Context, rec domain.SessionRec
 	})
 }
 
-// stopSourceRuntime stops one fenced TUI runtime. A failed destroy is checked
-// against the runtime's own liveness and retried once before it is reported.
+// stopSourceRuntime stops one fenced TUI runtime. Destroy is idempotent, so a
+// retry is safe, but only a successful Destroy proves the terminal host gone.
+// Exact-generation probes observe the managed child, which can be dead while
+// tmux or the pty host still owns the session.
 func (m *Manager) stopSourceRuntime(ctx context.Context, ref ports.FencedRuntimeRef) error {
 	if strings.TrimSpace(ref.Handle.ID) == "" {
 		return ErrIncompleteHandle
 	}
 	var errs []error
-	var probe ports.FencedProbeResult
 	for range 2 {
 		err := m.runtime.Destroy(ctx, ref.Handle)
 		if err == nil {
@@ -4125,11 +4126,8 @@ func (m *Manager) stopSourceRuntime(ctx context.Context, ref ports.FencedRuntime
 		if ctx.Err() != nil {
 			return errors.Join(append(errs, ctx.Err())...)
 		}
-		if probe = m.runtime.ProbeFencedRuntime(ctx, ref); probe.Liveness == ports.FencedDead {
-			return nil
-		}
 	}
-	return errors.Join(append(errs, fmt.Errorf("runtime ownership remains unresolved: %s", probe.Reason))...)
+	return fmt.Errorf("runtime terminal teardown remains unresolved: %w", errors.Join(errs...))
 }
 
 func (m *Manager) recordAgentExited(ctx context.Context, rec domain.SessionRecord) error {
