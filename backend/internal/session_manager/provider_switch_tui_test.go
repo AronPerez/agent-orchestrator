@@ -161,9 +161,18 @@ func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing
 			rec.Metadata.AgentSessionID = ""
 			if tc.override != nil {
 				rec.IssueID = "github:acme/mer#123"
+				rec.Activity.State = domain.ActivityExited
+				rec.Metadata.RuntimeLaunchID = "launch-old"
+				rec.Metadata.RuntimeReleasedLaunchID = "launch-old"
 				key := "mer\x00" + string(rec.IssueID)
 				st.trackerIntakePending[key] = rec.ID
-				st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{WorkspacePath: rec.Metadata.WorkspacePath}
+				st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+					WorkspacePath:           rec.Metadata.WorkspacePath,
+					RuntimeLaunchID:         rec.Metadata.RuntimeLaunchID,
+					RuntimeHandleIDs:        []string{rec.Metadata.RuntimeHandleID},
+					CapacityReleased:        true,
+					ReleasedRuntimeLaunchID: rec.Metadata.RuntimeLaunchID,
+				}
 			}
 			st.sessions[rec.ID] = rec
 			store := &launchOptionsFakeStore{fakeStore: st, options: domain.AgentLaunchOptions{HandoffNote: tc.savedNote}}

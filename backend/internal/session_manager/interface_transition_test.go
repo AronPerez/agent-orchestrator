@@ -2626,7 +2626,8 @@ func TestInterfaceTransitionChatToTUIInterruptsThenStopsBeforeStarting(t *testin
 	rec := store.sessions["session-1"]
 	rec.IssueID = "github:acme/repo#123"
 	store.sessions[rec.ID] = rec
-	store.trackerIntakePending["proj\x00"+string(rec.IssueID)] = rec.ID
+	claimKey := "proj\x00" + string(rec.IssueID)
+	store.trackerIntakePending[claimKey] = rec.ID
 	store.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
 		ControllerPossible: true, ControllerGeneration: rec.Metadata.ControllerGeneration, DeliveryPossible: true,
 	}
@@ -2662,10 +2663,14 @@ func TestInterfaceTransitionChatToTUIInterruptsThenStopsBeforeStarting(t *testin
 	if runtime.created != 1 {
 		t.Fatalf("terminal runtime created %d times, want 1", runtime.created)
 	}
-	reservation := store.trackerIntakeRecovery[rec.ID]
-	if !reservation.DeliveryPossible || reservation.RuntimeLaunchID != rec.Metadata.RuntimeLaunchID ||
-		reservation.ControllerPossible || reservation.CapacityReleased {
-		t.Fatalf("tracker intake ownership after Chat-to-TUI switch = %+v, want fenced terminal generation", reservation)
+	if got := store.trackerIntakeHandled[claimKey]; got != rec.ID {
+		t.Fatalf("handled tracker intake claim = %q, want %q", got, rec.ID)
+	}
+	if got := store.trackerIntakePending[claimKey]; got != "" {
+		t.Fatalf("pending tracker intake claim = %q, want committed", got)
+	}
+	if reservation, exists := store.trackerIntakeRecovery[rec.ID]; exists {
+		t.Fatalf("tracker intake recovery after handled Chat-to-TUI switch = %+v, want cleared", reservation)
 	}
 	if got := fmt.Sprint(*log); got != "[prepare:chat:interrupt stop:chat start:tui]" {
 		t.Fatalf("controller order = %s", got)
