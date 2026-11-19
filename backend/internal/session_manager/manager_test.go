@@ -3410,6 +3410,44 @@ func TestReconcileTrackerIntakeClaimsSettlesAbsentReservedCandidates(t *testing.
 	}
 }
 
+func TestReconcileTrackerIntakeClaimsKeepsPreStartSupervisorFenced(t *testing.T) {
+	m, st, rt, ws := newManager()
+	id := domain.SessionID("pre-start-supervisor")
+	key := "mer\x00github:acme/mer#10901"
+	handleID := "tmux-10901"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/pre-start-supervisor", RuntimeLaunchID: "launch-10901",
+		RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", IssueID: "github:acme/mer#10901", Kind: domain.KindWorker,
+	}
+	// The exact supervisor owns a live terminal but has not started its child yet.
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+	rt.aliveByHandle = map[string]bool{handleID: true}
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if !errors.Is(err, ports.ErrRuntimeProbeInconclusive) {
+		t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want runtime ownership inconclusive", err)
+	}
+	if got := st.trackerIntakePending[key]; got != id {
+		t.Fatalf("pending claim = %q, want %q", got, id)
+	}
+	if got := st.trackerIntakeHandled[key]; got != "" {
+		t.Fatalf("handled claim = %q, want empty", got)
+	}
+	if st.trackerIntakeRecovery[id].CapacityReleased {
+		t.Fatal("live pre-start supervisor released intake capacity")
+	}
+	if !m.trackerIntakeReaperFenceActive(id) {
+		t.Fatal("live pre-start supervisor lost its reaper fence")
+	}
+	if ws.destroyed != 0 || rt.destroyed != 0 {
+		t.Fatalf("live pre-start supervisor was cleaned up: runtime=%d workspace=%d", rt.destroyed, ws.destroyed)
+	}
+}
+
 func TestReconcileTrackerIntakeAdoptionRevalidatesAfterKill(t *testing.T) {
 	m, st, rt, _ := newManager()
 	lcm := &fakeLCM{store: st}

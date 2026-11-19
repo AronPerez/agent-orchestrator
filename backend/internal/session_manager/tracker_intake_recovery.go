@@ -551,6 +551,21 @@ func (m *Manager) reconcileLiveTrackerIntakeRuntime(
 		case ports.FencedAlive:
 			alive = append(alive, handleID)
 		case ports.FencedDead:
+			publishedExit := rec.Activity.State == domain.ActivityExited &&
+				trackerIntakeRuntimeReservationMatchesSession(rec, reservation)
+			if !publishedExit {
+				// FencedDead proves only the managed child absent; its live terminal
+				// may still have a supervisor that can start that child.
+				terminalAlive, err := m.runtime.IsAlive(ctx, ports.RuntimeHandle{ID: handleID})
+				if err != nil {
+					return fmt.Errorf("recover tracker intake %s: runtime %s terminal ownership remains unresolved: %w",
+						rec.ID, handleID, errors.Join(ports.ErrRuntimeProbeInconclusive, err))
+				}
+				if terminalAlive {
+					return fmt.Errorf("recover tracker intake %s: runtime %s supervisor can still launch: %w",
+						rec.ID, handleID, ports.ErrRuntimeProbeInconclusive)
+				}
+			}
 		case ports.FencedUnknown:
 			return fmt.Errorf("recover tracker intake %s: runtime %s remains unresolved: %s", rec.ID, handleID, probe.Reason)
 		default:
