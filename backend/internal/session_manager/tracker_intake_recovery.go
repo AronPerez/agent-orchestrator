@@ -349,6 +349,22 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 	if found && (rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID) {
 		return nil
 	}
+	if !found {
+		rec = domain.SessionRecord{
+			ID: claim.SessionID, ProjectID: claim.ProjectID, IssueID: claim.IssueID,
+			Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
+		}
+		if claim.Recovery.ControllerPossible {
+			rec.Mode = domain.SessionModeChat
+		}
+	}
+	if trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(rec, claim.Recovery) {
+		// Builds predating exact host teardown could release capacity after the
+		// tracked child exited while retaining an unpublished terminal host. The
+		// release bit is not ownership proof for that host: settle it before any
+		// resumed-owner shortcut or workspace cleanup can discard its fence.
+		return m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
+	}
 	if found && !rec.IsTerminated && claim.Recovery.CapacityReleased && !claim.Recovery.ReleasesCapacityFor(rec) {
 		// Resume rotated the owner after an earlier generation was proved
 		// stopped, so that proof cannot authorize cleanup of this workspace.
@@ -401,15 +417,6 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 		// resumable workspace.
 		return m.store.CommitStoppedTrackerIntakeSession(ctx, rec.ID, m.clock())
 	}
-	if !found {
-		rec = domain.SessionRecord{
-			ID: claim.SessionID, ProjectID: claim.ProjectID, IssueID: claim.IssueID,
-			Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
-		}
-		if claim.Recovery.ControllerPossible {
-			rec.Mode = domain.SessionModeChat
-		}
-	}
 	if found && trackerIntakeClaimDefersToSessionHealth(rec, claim.Recovery) {
 		return nil
 	}
@@ -439,6 +446,17 @@ func trackerIntakeRuntimeFenceProbeable(rec domain.SessionRecord, reservation do
 		(reservation.DeliveryPossible || reservation.RelaunchPublished) &&
 		strings.TrimSpace(reservation.RuntimeLaunchID) != "" &&
 		len(uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)) != 0
+}
+
+func trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(
+	rec domain.SessionRecord,
+	reservation domain.TrackerIntakeRecoveryReservation,
+) bool {
+	return reservation.CapacityReleased &&
+		domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat &&
+		strings.TrimSpace(reservation.RuntimeLaunchID) != "" &&
+		len(uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)) != 0 &&
+		(rec.IsTerminated || !trackerIntakeRuntimeReservationMatchesSession(rec, reservation))
 }
 
 func trackerIntakeRuntimeNeedsStartupHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
@@ -945,7 +963,7 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 		return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
 	}
 
-	if !reservation.CapacityReleased {
+	if !reservation.CapacityReleased || trackerIntakeReleasedUnpublishedRuntimeNeedsTeardown(persistedOwner, reservation) {
 		if err := m.stopTrackerIntakeRuntimeOwners(ctx, persistedOwner, reservation); err != nil {
 			return fmt.Errorf("check session %s: %w", rec.ID, err)
 		}

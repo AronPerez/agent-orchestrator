@@ -3487,12 +3487,20 @@ func TestReconcileTrackerIntakeClaimsSettlesExitedDirectChildWithRetainedHost(t 
 
 func TestReconcileTrackerIntakeClaimsStopsExitedUnpublishedHostBeforeCleanup(t *testing.T) {
 	tests := []struct {
-		name       string
-		destroyErr error
-		wantErr    bool
+		name                          string
+		capacityReleased              bool
+		destroyErr                    error
+		wantErr                       bool
+		wantCapacityReleasedOnFailure bool
 	}{
 		{name: "teardown succeeds"},
 		{name: "teardown fails", destroyErr: errors.New("terminal host is still alive"), wantErr: true},
+		{name: "legacy released teardown succeeds", capacityReleased: true},
+		{
+			name: "legacy released teardown fails", capacityReleased: true,
+			destroyErr: errors.New("terminal host is still alive"), wantErr: true,
+			wantCapacityReleasedOnFailure: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3505,6 +3513,7 @@ func TestReconcileTrackerIntakeClaimsStopsExitedUnpublishedHostBeforeCleanup(t *
 			st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
 				WorkspacePath: "/ws/exited-unpublished-child", RuntimeLaunchID: "launch-10903",
 				RuntimeHandleIDs: []string{handleID}, DeliveryPossible: true,
+				CapacityReleased: tt.capacityReleased,
 			}
 			st.sessions[id] = domain.SessionRecord{
 				ID: id, ProjectID: "mer", IssueID: issueID, Kind: domain.KindWorker, Mode: domain.SessionModeTUI,
@@ -3525,7 +3534,8 @@ func TestReconcileTrackerIntakeClaimsStopsExitedUnpublishedHostBeforeCleanup(t *
 				if rt.destroyed != 2 || ws.destroyed != 0 {
 					t.Fatalf("failed teardown cleanup runtime=%d workspace=%d", rt.destroyed, ws.destroyed)
 				}
-				if st.trackerIntakePending[key] != id || st.trackerIntakeRecovery[id].CapacityReleased {
+				if st.trackerIntakePending[key] != id ||
+					st.trackerIntakeRecovery[id].CapacityReleased != tt.wantCapacityReleasedOnFailure {
 					t.Fatalf("failed teardown claim pending=%q recovery=%+v", st.trackerIntakePending[key], st.trackerIntakeRecovery[id])
 				}
 				if _, found := st.sessions[id]; !found {
