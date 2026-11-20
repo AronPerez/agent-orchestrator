@@ -128,7 +128,10 @@ func ValidateDecisionDecided(p DecisionDecidedPayload) error {
 	if _, ok := LookupDecisionKind(string(p.Kind)); !ok {
 		return decisionRule("kind_unknown", fmt.Sprintf("%q is not a decision kind. Run ao decision kinds to list them.", p.Kind))
 	}
-	return validateDecisionLinksAndReference(p.Links, p.Reference)
+	if err := validateDecisionLinksAndReference(p.Links, p.Reference); err != nil {
+		return err
+	}
+	return validateDecidedSecrets(p)
 }
 
 // ValidateDecisionOverrule checks the person's note on an overrule. It is

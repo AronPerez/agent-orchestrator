@@ -190,6 +190,16 @@ ao decision retire <id> [--undo]
 
 Sessions raise calls themselves; use these commands to inspect, answer, dismiss, or retire them.
 
+To keep one ledger across your machines, link them from your own shell. See [Sync decisions between machines](/configuration/decision-sync).
+
+```bash
+ao decision link add --host <saved machine>
+ao decision link add <address> --password-stdin [--label <name>]
+ao decision link ls
+ao decision link rm <machine>
+ao decision sync [<machine>]
+```
+
 ### `ao orchestrator ls`
 
 Lists orchestrator sessions. Add `--json` for structured output.

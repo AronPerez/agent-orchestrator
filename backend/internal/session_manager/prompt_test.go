@@ -542,6 +542,18 @@ func TestBuildSystemPrompt_DoesNotReuseUnansweredCallsAcrossProjects(t *testing.
 	}
 }
 
+func TestDecisionPromptMentionsLinkedMachines(t *testing.T) {
+	worker := buildSystemPromptText(systemPromptConfig{
+		Role: sessionPromptRoleWorker, Project: promptProject{ID: "project-a"}, OrchestratorSessionID: "project-a-1",
+	})
+	want := "- Search covers every machine linked to this one. A result marked \"On <machine>\" was raised there. " +
+		"If an unanswered call in your project was raised on another machine and covers your question, do not raise a second one: " +
+		"its answer goes to that machine, so check it with `ao decision show <call-link>` when you resume, and report it as blocking with the call link."
+	if !strings.Contains(worker, want) {
+		t.Fatalf("decision prompt missing the linked-machines rule:\n%s", want)
+	}
+}
+
 func TestBuildTaskPromptPreservesExplicitPublishingScope(t *testing.T) {
 	for _, prompt := range []string{"Fix the issue, push the branch, and open a PR.", "Fix the issue locally. Do not push or open a PR."} {
 		got := buildTaskPrompt(taskPromptConfig{Role: sessionPromptRoleWorker, Prompt: prompt, IssueID: "42"})

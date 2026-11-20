@@ -77,8 +77,11 @@ describe("useDecisionInbox", () => {
 			["remote-a", "dec_old"],
 			["local", "dec_new"],
 		]);
-		expect(local.GET).toHaveBeenCalledTimes(1);
+		expect(pathCalls(local, "/api/v1/decisions")).toBe(1);
 		expect(remote.GET).toHaveBeenCalledTimes(1);
+		// The remote-only call is looked up on this computer's ledger, once.
+		await waitFor(() => expect(lookups(local)).toEqual(["dec_old"]));
+		expect(lookups(remote)).toEqual([]);
 	});
 
 	it("does not query any ledger until the bell opens", () => {
@@ -134,8 +137,12 @@ function setupLedger(hostId: string, calls: ReturnType<typeof decisionCall>[]) {
 	return client;
 }
 
+// Reads of path, not counting the bell's id lookup on this computer's ledger.
 const pathCalls = (client: { GET: ReturnType<typeof vi.fn> }, path: string) =>
-	client.GET.mock.calls.filter(([called]) => called === path).length;
+	client.GET.mock.calls.filter(([called, init]) => called === path && !isLookup(init)).length;
+const isLookup = (init: unknown) => Boolean((init as { params?: { query?: { ids?: string } } } | undefined)?.params?.query?.ids);
+const lookups = (client: { GET: ReturnType<typeof vi.fn> }) =>
+	client.GET.mock.calls.filter(([, init]) => isLookup(init)).map(([, init]) => (init as { params: { query: { ids: string } } }).params.query.ids);
 
 describe("decision page hooks", () => {
 	it("keeps the bell's needs-you key on the shared host branch", () => {
