@@ -97,7 +97,7 @@ func (a *authState) authenticate(tok string, pairing bool) (credential requestsc
 		if device, found := a.devices.Match(tok); found {
 			return requestscope.Credential{
 				Kind: requestscope.CredentialDevice, DeviceID: device.ID,
-				Scopes: append([]string(nil), device.Scopes...),
+				Scopes: append([]string(nil), device.Scopes...), ClientID: device.ClientID,
 			}, true, false
 		}
 	}

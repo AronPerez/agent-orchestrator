@@ -162,3 +162,19 @@ it("requires confirmation before forgetting a host", async () => {
 	expect(await screen.findByText("No hosts yet. Add one below.")).toBeVisible();
 	expect(cloud.deleteAccountRemoteHost).not.toHaveBeenCalled();
 });
+
+it("keeps an account host in the directory when this computer refuses to forget it", async () => {
+	account.status = "authenticated";
+	saved.entries = [{ hostId: "cloud-box", label: "Account host", url: "https://cloud-box.example" }];
+	remotes.remove.mockImplementationOnce(async () => { throw new Error("That machine links to this computer to sync decisions, so it was not removed."); });
+	renderSettings();
+	fireEvent.click(await screen.findByRole("button", { name: "Remove Account host" }));
+	fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+	expect(await screen.findByText(/links to this computer to sync decisions/)).toBeVisible();
+	expect(cloud.deleteAccountRemoteHost).not.toHaveBeenCalled();
+
+	remotes.remove.mockImplementationOnce(async () => { saved.entries = []; });
+	fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+	await waitFor(() => expect(cloud.deleteAccountRemoteHost).toHaveBeenCalledWith("https://cloud.example", "cloud-box"));
+	expect(remotes.remove.mock.invocationCallOrder[1]).toBeLessThan(cloud.deleteAccountRemoteHost.mock.invocationCallOrder[0]);
+});

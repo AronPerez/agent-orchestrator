@@ -67,7 +67,7 @@ func TestDecisionNotificationWiringRepairsAtStartupAndWakesOnAppend(t *testing.T
 	ledger.add("dec_before_start")
 	writer := &wiringNotificationWriter{created: map[string]bool{}}
 	ctx, cancel := context.WithCancel(context.Background())
-	projector, done := startDecisionNotifications(ctx, ledger, writer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	projector, done := startDecisionNotifications(ctx, ledger, writer, "h_test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer func() {
 		cancel()
 		<-done
@@ -89,7 +89,7 @@ func TestDecisionNotificationWiringAppendNeverBlocksOnNotificationIO(t *testing.
 	ledger.add("dec_1")
 	writer := &wiringNotificationWriter{created: map[string]bool{}, gate: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
-	projector, done := startDecisionNotifications(ctx, ledger, writer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	projector, done := startDecisionNotifications(ctx, ledger, writer, "h_test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	onAppended := decisionAppendHook(projector.Wake)
 	returned := make(chan struct{})
 	go func() {

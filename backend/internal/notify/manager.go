@@ -98,13 +98,16 @@ func (m *Manager) Notify(ctx context.Context, intent Intent) error {
 		return fmt.Errorf("notify enrich: %w", err)
 	}
 	rec.ID = m.newID()
+	if intent.InitiallyRead {
+		rec.Status = domain.NotificationRead
+	}
 	m.barrier.Lock()
 	defer m.barrier.Unlock()
 	created, inserted, err := m.store.CreateNotification(ctx, rec)
 	if err != nil {
 		return fmt.Errorf("notify store: %w", err)
 	}
-	if !inserted || m.publisher == nil {
+	if !inserted || m.publisher == nil || intent.InitiallyRead {
 		return nil
 	}
 	if err := m.publisher.Publish(ctx, domain.NotificationEvent{Kind: domain.NotificationCreated, Record: created}); err != nil {

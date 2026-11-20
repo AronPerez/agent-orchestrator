@@ -177,8 +177,30 @@ export function runDecisionAction(action: DecisionAction): Promise<DecisionCall>
 	}
 }
 
-/** Prefer the local copy once ledger replication makes the same call visible on several hosts. */
-export function mergeDecisionInboxSources(sources: DecisionInboxSource[]): DecisionInboxEntry[] {
+/** The most calls one id lookup may name; the daemon refuses more. */
+export const MAX_DECISION_LOOKUP_IDS = 100;
+
+/** This computer's copies of the given calls; ids it does not hold are left out. */
+export async function fetchDecisionLookup(ids: string[], signal?: AbortSignal): Promise<DecisionCall[]> {
+	if (ids.length === 0) return [];
+	const { data, error } = await clientForSessionHost(LOCAL_HOST).GET("/api/v1/decisions", {
+		params: { query: { ids: ids.slice(0, MAX_DECISION_LOOKUP_IDS).join(",") } },
+		signal,
+	});
+	if (error || !data) throw apiErrorException(error, "Could not look up decisions");
+	return data.calls;
+}
+
+/**
+ * One entry per call, this computer's ledger winning. A connected host that has
+ * not yet synced an answer still lists the call; when this computer knows the
+ * call has left Needs you (localStates), that stale copy is dropped. A call
+ * this computer does not hold at all (an unlinked host) is kept.
+ */
+export function mergeDecisionInboxSources(
+	sources: DecisionInboxSource[],
+	localStates: ReadonlyMap<string, DecisionCall["state"]> = new Map(),
+): DecisionInboxEntry[] {
 	const seen = new Set<string>();
 	return sources
 		.flatMap((source) => source.calls.map((call) => ({
@@ -186,8 +208,10 @@ export function mergeDecisionInboxSources(sources: DecisionInboxSource[]): Decis
 			sourceHostLabel: source.label,
 			call,
 		})))
-		.filter(({ call }) => {
+		.filter(({ call, sourceHostId }) => {
 			if (seen.has(call.id)) return false;
+			const local = localStates.get(call.id);
+			if (sourceHostId !== LOCAL_HOST && local !== undefined && local !== "needs_you") return false;
 			seen.add(call.id);
 			return true;
 		})

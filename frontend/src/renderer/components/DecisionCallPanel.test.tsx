@@ -91,6 +91,27 @@ function serve(next: DecisionCall, entries: DecisionHistoryEntry[] = history) {
 }
 
 describe("DecisionCallPanel", () => {
+	it("shows the origin line only for open remote calls", async () => {
+		const syncStatus = { hostId: "h_me", machineLabel: "laptop", peers: [], conflicts: [], origins: [{ hostId: "h_a", machineLabel: "mac-mini", lastHeardAt: "2026-11-18T09:00:00Z" }] };
+		const respond = (next: DecisionCall) => getMock.mockImplementation((path: string) => Promise.resolve(path === "/api/v1/decision-sync/status"
+			? { data: syncStatus, response: { status: 200 } }
+			: { data: { call: next, history }, response: { status: 200 } }));
+		respond(call);
+		renderPanel();
+		const line = await screen.findByText("On mac-mini. Answers reach it when it syncs.");
+		expect(line).toBeInTheDocument();
+	});
+
+	it("shows no origin line for this computer's call or a closed remote call", async () => {
+		const own = { hostId: "h_a", machineLabel: "mac-mini", peers: [], conflicts: [], origins: [] };
+		getMock.mockImplementation((path: string) => Promise.resolve(path === "/api/v1/decision-sync/status"
+			? { data: own, response: { status: 200 } }
+			: { data: { call, history }, response: { status: 200 } }));
+		const view = renderPanel();
+		await screen.findByText(call.title);
+		expect(view.container.querySelector("[data-decision-origin-line]")).toBeNull();
+	});
+
 	it("names the project, work stream, machine and session before the call itself", async () => {
 		renderPanel();
 		const title = await screen.findByRole("heading", { level: 2, name: call.title });

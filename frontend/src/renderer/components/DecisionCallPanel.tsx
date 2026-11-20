@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { useId, type KeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -7,6 +8,7 @@ import { useDecisionSessionTarget } from "../hooks/useDecisionSessionTarget";
 import { useNavigateToSession } from "../lib/navigate-to-session";
 import { apiErrorRequestId } from "../lib/api-client";
 import type { DecisionCall, DecisionHistoryEntry } from "../lib/decision-inbox";
+import { decisionSyncKey, fetchDecisionSyncStatus, originFreshness } from "../lib/decision-sync";
 import { openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { formatTimeCompact } from "../lib/format-time";
 import { cn } from "../lib/utils";
@@ -133,16 +135,27 @@ function RefreshError({ error, onRetry }: { error: unknown; onRetry: () => void 
 	);
 }
 
+/** States in which an answer or overrule still has to reach the owning machine. */
+const DECISION_OPEN_STATES = new Set<string>(["needs_you", "in_progress", "decided"]);
+
 function DecisionCallDetail({ call, history, onRecheck }: { call: DecisionCall; history: DecisionHistoryEntry[]; onRecheck: () => void }) {
 	const { t } = useTranslation();
 	const exactTime = useExactTime();
 	const place = decisionPlace(call);
+	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
+	const servingHostId = Array.isArray(sync.data?.peers) ? sync.data.hostId : undefined;
+	const remoteMachine = servingHostId && call.hostId && call.hostId !== servingHostId && DECISION_OPEN_STATES.has(call.state)
+		? originFreshness(call.hostId, sync.data, new Date()).machine
+		: undefined;
 	return (
 		<div className="flex flex-col gap-4 px-4 py-3">
 			<header className="flex flex-col gap-1">
 				{place ? <p className="truncate text-caption text-muted-foreground" title={place}>{place}</p> : null}
 				<p className="truncate text-caption text-muted-foreground">{decisionOwner(call)}</p>
 				<h2 className="mt-1 text-subtitle font-semibold leading-snug text-foreground">{call.title}</h2>
+				{remoteMachine ? (
+					<p className="text-caption text-muted-foreground" data-decision-origin-line="">{t("decisions.panel.onMachine", { machine: remoteMachine })}</p>
+				) : null}
 				<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-caption">
 					<span className="inline-flex items-center gap-1.5 font-medium text-foreground">
 						<DecisionStateDot state={call.state} />

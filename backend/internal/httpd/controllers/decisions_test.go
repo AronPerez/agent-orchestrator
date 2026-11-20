@@ -3,6 +3,7 @@ package controllers_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -552,6 +553,48 @@ func TestDecisionsAPI_CarriedOut(t *testing.T) {
 	}
 	if got.Decided == nil || !got.Decided.CarriedOut {
 		t.Fatalf("decided = %+v", got.Decided)
+	}
+}
+
+type lookupDecisionService struct {
+	*fakeDecisionService
+	asked []string
+}
+
+func (f *lookupDecisionService) Lookup(_ context.Context, ids []string) ([]domain.DecisionCall, error) {
+	f.asked = ids
+	if len(ids) > 100 {
+		return nil, apierr.Invalid("DECISION_IDS_TOO_MANY", "Look up at most 100 calls at a time.", nil)
+	}
+	return []domain.DecisionCall{{ID: ids[0], State: domain.DecisionStateDone}}, nil
+}
+
+func TestDecisionsAPI_LookupByIDs(t *testing.T) {
+	svc := &lookupDecisionService{fakeDecisionService: &fakeDecisionService{}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Decisions: svc}, httpd.ControlDeps{}))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/v1/decisions?ids=dec_a,dec_b&ids=dec_c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body controllers.ListDecisionsResponse
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || len(body.Calls) != 1 || body.Calls[0].ID != "dec_a" || strings.Join(svc.asked, ",") != "dec_a,dec_b,dec_c" {
+		t.Fatalf("lookup: status %d calls %+v asked %v", resp.StatusCode, body.Calls, svc.asked)
+	}
+	ids := make([]string, 101)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("dec_%d", i)
+	}
+	resp, err = http.Get(srv.URL + "/api/v1/decisions?ids=" + strings.Join(ids, ","))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("101 ids: status %d, want 400", resp.StatusCode)
 	}
 }
 

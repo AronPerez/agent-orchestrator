@@ -635,7 +635,7 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 		return s.closeStandingDecision(ctx, actor, call, input)
 	}
 	if actor.Session != "" && !s.mayClose(call, input.ForEntry, actor.Session) {
-		return domain.DecisionCall{}, notOwner()
+		return domain.DecisionCall{}, s.refuseSession(call)
 	}
 	if call.State != domain.DecisionStateInProgress {
 		return domain.DecisionCall{}, wrongState(call, `An outcome can be recorded once a call is "In progress". This one is "%s".`)
@@ -668,7 +668,7 @@ func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (dom
 	}
 	defer unlock()
 	if !s.owns(call, actor.Session) {
-		return domain.DecisionCall{}, notOwner()
+		return domain.DecisionCall{}, s.refuseSession(call)
 	}
 	if call.State != domain.DecisionStateNeedsYou {
 		return domain.DecisionCall{}, wrongState(call, `Only a call in "Needs you" can be withdrawn. This one is "%s".`)
@@ -965,6 +965,22 @@ func personOnly() error {
 
 func notOwner() error {
 	return apierr.Forbidden("DECISION_NOT_OWNER", "Only the session that raised this call can do that.")
+}
+
+// refuseSession refuses a session acting on a call it does not own. A call
+// raised on another machine names that machine, so the person and the agent
+// know why and where the action belongs.
+func (s *Service) refuseSession(call domain.DecisionCall) error {
+	if call.Origin == s.hostID {
+		return notOwner()
+	}
+	machine := strings.TrimSpace(call.Raised.MachineLabel)
+	if machine == "" {
+		machine = call.Origin
+	}
+	return apierr.New(apierr.KindForbidden, "DECISION_OTHER_MACHINE",
+		"This call belongs to a session on "+machine+". Only that session can do this.",
+		map[string]any{"origin": call.Origin, "machine": machine})
 }
 
 func wrongState(call domain.DecisionCall, message string) error {

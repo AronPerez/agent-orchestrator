@@ -74,7 +74,25 @@ func credentialScopeMiddleware(next http.Handler) http.Handler {
 }
 
 func credentialAllowsRequest(credential requestscope.Credential, method, path string) bool {
-	return credential.HasScope(mobilebridge.DeviceScopeAgentCoordination) && agentCoordinationRequestAllowed(method, path)
+	if credential.HasScope(mobilebridge.DeviceScopeAgentCoordination) && agentCoordinationRequestAllowed(method, path) {
+		return true
+	}
+	return credential.HasScope(mobilebridge.DeviceScopeDecisionSync) && decisionSyncRequestAllowed(method, path)
+}
+
+// decisionSyncRequestAllowed admits exactly the two decision ledger sync
+// routes, plus revoking a sync token, which the handler limits to the token
+// revoking itself. A peer's sync token can read and write ledger entries and
+// nothing else on this host.
+func decisionSyncRequestAllowed(method, path string) bool {
+	switch method {
+	case http.MethodPost:
+		return path == "/api/v1/decision-sync/exchange" || path == "/api/v1/decision-sync/entries"
+	case http.MethodDelete:
+		id, ok := strings.CutPrefix(path, "/api/v1/remote-host/decision-sync-token/")
+		return ok && id != "" && !strings.Contains(id, "/")
+	}
+	return false
 }
 
 // agentCoordinationRequestAllowed is deliberately an exact method/path
@@ -141,6 +159,9 @@ var lanControlBlockedPrefixes = []string{
 	"/api/v1/settings/computer-use",
 	"/api/v1/agents/codex/accounts",
 	"/api/v1/agents/codex/account-switches",
+	// Linking machines takes a full credential for another machine and
+	// manages this machine's sync tokens: the person's own desktop and shell only.
+	"/api/v1/decision-peers",
 }
 
 // lanControlBlock returns 404 for any request whose path is, or is nested

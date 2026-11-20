@@ -116,7 +116,24 @@ func (c *DecisionsController) list(w http.ResponseWriter, r *http.Request) {
 		calls []domain.DecisionCall
 		err   error
 	)
-	if hasQuery {
+	if rawIDs, hasIDs := values["ids"]; hasIDs {
+		lookup, ok := c.Svc.(interface {
+			Lookup(context.Context, []string) ([]domain.DecisionCall, error)
+		})
+		if !ok {
+			apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/decisions?ids=")
+			return
+		}
+		var ids []string
+		for _, raw := range rawIDs {
+			for _, id := range strings.Split(raw, ",") {
+				if id = strings.TrimSpace(id); id != "" {
+					ids = append(ids, id)
+				}
+			}
+		}
+		calls, err = lookup.Lookup(r.Context(), ids)
+	} else if hasQuery {
 		limit, ok := decisionSearchLimit(values)
 		if !ok {
 			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "DECISION_LIMIT_INVALID",

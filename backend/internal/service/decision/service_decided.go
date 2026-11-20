@@ -140,7 +140,7 @@ func (s *Service) Overrule(ctx context.Context, actor Actor, callID, note string
 // too. The outcome names the decided entry, since there is no answer.
 func (s *Service) closeStandingDecision(ctx context.Context, actor Actor, call domain.DecisionCall, input OutcomeInput) (domain.DecisionCall, error) {
 	if actor.Session != "" && !s.owns(call, actor.Session) {
-		return domain.DecisionCall{}, notOwner()
+		return domain.DecisionCall{}, s.refuseSession(call)
 	}
 	// Once confirmed as carried out, the action happened: only the person
 	// may close the record, so a session cannot hide it from review.
@@ -173,7 +173,7 @@ func (s *Service) CarriedOut(ctx context.Context, actor Actor, callID string) (d
 		return domain.DecisionCall{}, apierr.Conflict("DECISION_NOT_DECIDED", "Only a decision made for the person can be confirmed as carried out.", nil)
 	}
 	if !s.owns(call, actor.Session) {
-		return domain.DecisionCall{}, notOwner()
+		return domain.DecisionCall{}, s.refuseSession(call)
 	}
 	// A decision the person (or its session) closed while it was still
 	// unconfirmed may have been carried out meanwhile; a late confirmation
