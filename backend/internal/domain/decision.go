@@ -221,6 +221,22 @@ type DecisionAnsweredPayload struct {
 	// call is not appended. Only the digest is kept: the key is client text
 	// and must never be stored or synced as written.
 	IdempotencyKeyDigest string `json:"idempotencyKeyDigest,omitempty"`
+	// LegacyIdempotencyKey is the raw key the first idempotency release stored.
+	// It is read so those entries (and ones synced from a machine still on that
+	// release) keep deduplicating retries; new answers never set it.
+	LegacyIdempotencyKey string `json:"idempotencyKey,omitempty"`
+}
+
+// KeyDigest is the digest of the key this answer was sent with, whichever
+// release wrote it; empty when it was sent without one.
+func (p DecisionAnsweredPayload) KeyDigest() string {
+	if p.IdempotencyKeyDigest != "" {
+		return p.IdempotencyKeyDigest
+	}
+	if p.LegacyIdempotencyKey != "" {
+		return DecisionIdempotencyKeyDigest(p.LegacyIdempotencyKey)
+	}
+	return ""
 }
 
 // DecisionIdempotencyKeyDigest is the stored form of an answer's idempotency key.

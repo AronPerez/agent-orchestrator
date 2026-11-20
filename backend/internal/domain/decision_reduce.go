@@ -209,7 +209,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Note = payload.Note
 			call.AnsweredAt = entry.WrittenAt
 			call.AnswerSurface = entry.AuthorSurface
-			call.AnswerKeyDigest = payload.IdempotencyKeyDigest
+			call.AnswerKeyDigest = payload.KeyDigest()
 		case DecisionKindDismissed:
 			var payload DecisionDismissedPayload
 			if json.Unmarshal(entry.Payload, &payload) != nil {

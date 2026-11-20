@@ -608,3 +608,40 @@ func TestAnswerKeepsOnlyADigestOfTheIdempotencyKey(t *testing.T) {
 		t.Fatalf("keyless answer kept digest %q", changed.AnswerKeyDigest)
 	}
 }
+
+// The first idempotency release stored the raw key; entries written by it (or
+// synced from a machine still running it) must keep deduplicating retries.
+func TestAnswerRecognisesKeysInEntriesFromThePreviousVersion(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	call := raiseDecision(t, fixture, fixture.w1)
+	at := time.UnixMilli(2_000_000).UTC()
+	legacy := domain.DecisionEntry{
+		ID: "dent_legacy", Origin: "h_old", CallID: call.ID, Kind: domain.DecisionKindAnswered,
+		Payload:   json.RawMessage(`{"choice":"option","option":2,"idempotencyKey":"ans_old"}`),
+		WrittenAt: at, AuthorKind: domain.DecisionAuthorPerson, AuthorSurface: domain.RequestSurfaceDesktop,
+	}
+	_, projected, err := fixture.store.AppendDecisionEntry(ctx, legacy, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected.AnswerKeyDigest != domain.DecisionIdempotencyKeyDigest("ans_old") {
+		t.Fatalf("legacy answer digest = %q", projected.AnswerKeyDigest)
+	}
+
+	retried, err := fixture.service.Answer(ctx, Actor{Surface: domain.RequestSurfaceDesktop}, call.ID,
+		AnswerInput{Choice: domain.DecisionChoiceOption, Option: 2, IdempotencyKey: "ans_old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.StandingEntryID != "dent_legacy" {
+		t.Fatalf("retry returned %+v, want the legacy answer", retried)
+	}
+	entries, err := fixture.store.ListDecisionEntries(ctx, call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := answeredEntries(entries, call.ID); n != 1 {
+		t.Fatalf("answered entries = %d, want 1 (the retry must match the legacy key)", n)
+	}
+}

@@ -531,7 +531,7 @@ func (s *Service) answeredWithKey(ctx context.Context, callID, key string) (bool
 			continue
 		}
 		var payload domain.DecisionAnsweredPayload
-		if json.Unmarshal(entry.Payload, &payload) == nil && payload.IdempotencyKeyDigest == digest {
+		if json.Unmarshal(entry.Payload, &payload) == nil && payload.KeyDigest() == digest {
 			return true, nil
 		}
 	}
