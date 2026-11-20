@@ -221,6 +221,9 @@ func writeDecisionSyncError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, decisionsync.ErrPeerIdentityMismatch):
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "DECISION_SYNC_HOST_MISMATCH",
 			"hostId does not match the machine this credential was issued to.", nil)
+	case errors.Is(err, decisionsync.ErrSyncPaused):
+		envelope.WriteAPIError(w, r, http.StatusServiceUnavailable, "unavailable", "DECISION_SYNC_PAUSED",
+			"This machine is finishing an identity repair and syncs again after it restarts.", nil)
 	case errors.Is(err, decisionsync.ErrOriginIDsInvalid):
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "DECISION_SYNC_ORIGIN_IDS_INVALID",
 			"origin is required and from must be at least 1.", nil)

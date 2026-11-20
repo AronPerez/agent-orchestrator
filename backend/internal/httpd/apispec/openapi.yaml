@@ -3775,6 +3775,94 @@ paths:
         shell terminal
       tags:
       - cues
+  /api/v1/decision-identity:
+    get:
+      operationId: getDecisionIdentity
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionIdentityResponse'
+          description: OK
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: This machine's decision identity and any identity repair (loopback
+        only, person only)
+      tags:
+      - decisions
+  /api/v1/decision-identity/repair:
+    post:
+      operationId: repairDecisionIdentity
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionRepairRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionRepairResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Request Entity Too Large
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Propose, or stage, giving up an identity shared with a copied data
+        directory (loopback only, person only)
+      tags:
+      - decisions
   /api/v1/decision-peers:
     get:
       operationId: listDecisionPeers
@@ -22693,6 +22781,18 @@ components:
       - hostId
       - authorKind
       type: object
+    DecisionIdentityResponse:
+      properties:
+        hostId:
+          type: string
+        machineLabel:
+          type: string
+        repair:
+          $ref: '#/components/schemas/DecisionRepairStatus'
+      required:
+      - hostId
+      - machineLabel
+      type: object
     DecisionKindResponse:
       properties:
         id:
@@ -22899,6 +22999,97 @@ components:
       - option
       - why
       - undo
+      type: object
+    DecisionRepairLink:
+      properties:
+        hostId:
+          type: string
+        label:
+          type: string
+      required:
+      - hostId
+      - label
+      type: object
+    DecisionRepairRequest:
+      properties:
+        forkIds:
+          items:
+            type: string
+          type: array
+        fromSeq:
+          format: int64
+          type: integer
+        stage:
+          description: Stage the repair. fromSeq and forkIds must match a fresh proposal.
+          type: boolean
+      type: object
+    DecisionRepairResponse:
+      properties:
+        callIds:
+          items:
+            type: string
+          type: array
+        forkIds:
+          items:
+            type: string
+          type: array
+        fromSeq:
+          format: int64
+          type: integer
+        links:
+          description: Outbound links the repair removes; add them again afterwards.
+          items:
+            $ref: '#/components/schemas/DecisionRepairLink'
+          type: array
+        origin:
+          type: string
+        peersAsked:
+          type: integer
+        peersFailed:
+          type: integer
+        staged:
+          $ref: '#/components/schemas/DecisionRepairStatus'
+      required:
+      - origin
+      - fromSeq
+      - forkIds
+      - callIds
+      - links
+      - peersAsked
+      - peersFailed
+      type: object
+    DecisionRepairStatus:
+      properties:
+        entries:
+          description: How many of this machine's entries are re-issued under the
+            new identity.
+          type: integer
+        fromSeq:
+          format: int64
+          type: integer
+        newHostId:
+          type: string
+        origin:
+          description: The identity given up.
+          type: string
+        stagedAt:
+          format: date-time
+          type: string
+        state:
+          description: staged, identity_switched, reissued, archived or done. Every
+            state but done finishes when Orchestrator restarts.
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+      required:
+      - state
+      - origin
+      - fromSeq
+      - newHostId
+      - entries
+      - stagedAt
+      - updatedAt
       type: object
     DecisionSecretWarning:
       properties:

@@ -7,7 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	decisionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/decision"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
@@ -20,7 +23,57 @@ type decisionSyncRuntime struct {
 	server    *decisionsync.Server
 	scheduler *decisionsync.Scheduler
 	peers     *decisionsync.Peers
+	repairer  *decisionsync.Repairer
 	done      <-chan struct{}
+	// stopScheduler ends every link's worker; pause uses it.
+	stopScheduler context.CancelFunc
+}
+
+// pause stops sync in both directions until the daemon restarts: a staged
+// identity repair must not let any peer see the old identity again.
+func (rt *decisionSyncRuntime) pause() {
+	rt.server.Pause()
+	rt.stopScheduler()
+}
+
+// resumeDecisionRepair finishes the local steps of a staged identity repair:
+// switch the host identity, re-issue the fork under it, and move the
+// originals out of the log. It runs before the daemon reads its identity, so
+// everything after starts under the new one. On failure the repair stays
+// staged and sync stays off; the next start tries again.
+func resumeDecisionRepair(ctx context.Context, dataDir string, store *sqlite.Store, log *slog.Logger) {
+	identity := mobilebridge.IdentityPath(dataDir)
+	rec, found, err := decisionsync.ResumeRepair(ctx, decisionsync.ResumeDeps{
+		Path: decisionsync.RepairPath(dataDir), Store: store,
+		ReadHostID:  func() (string, error) { return mobilebridge.ReadHostID(identity) },
+		WriteHostID: func(id string) error { return mobilebridge.ReplaceHostID(identity, id) },
+		NewID:       func() string { return "dent_" + uuid.NewString() },
+	})
+	switch {
+	case err != nil:
+		log.Error("decision identity repair did not finish; decision sync stays off until it does", "state", rec.State, "err", err)
+	case found && rec.SyncHeld():
+		log.Info("decision identity repair: identity switched and entries re-issued", "from", rec.Plan.Origin, "to", rec.Plan.NewOrigin)
+	}
+}
+
+// finishDecisionRepairLinks removes the outbound links of a repair whose
+// local steps are done, and reports whether sync must stay off.
+func finishDecisionRepairLinks(ctx context.Context, dataDir string, peers *decisionsync.Peers, log *slog.Logger) bool {
+	path := decisionsync.RepairPath(dataDir)
+	rec, found, err := decisionsync.LoadRepair(path)
+	if err == nil && (!found || !rec.SyncHeld()) {
+		return false
+	}
+	if err == nil && rec.State == decisionsync.RepairArchived {
+		rec, err = decisionsync.FinishRepairLinks(ctx, path, peers, time.Now())
+	}
+	if err != nil || rec.SyncHeld() {
+		log.Warn("decision sync stays off: an identity repair has not finished", "state", rec.State, "err", err)
+		return true
+	}
+	log.Info("decision identity repair finished; this machine's links were removed and must be added again", "identity", rec.Plan.NewOrigin)
+	return false
 }
 
 // startDecisionSync wires sync over the store and starts the scheduler.
@@ -60,6 +113,13 @@ func startDecisionSync(ctx context.Context, dataDir string, store *sqlite.Store,
 	rt.scheduler = decisionsync.NewScheduler(decisionsync.SchedulerDeps{
 		Engine: engine, Links: rt.peers, Remote: client.Remote, Store: store, Log: log,
 	})
+	schedulerCtx, stopScheduler := context.WithCancel(ctx)
+	rt.stopScheduler = stopScheduler
+	rt.repairer = decisionsync.NewRepairer(decisionsync.RepairerDeps{
+		Store: store, HostID: hostID, MachineLabel: label, Path: decisionsync.RepairPath(dataDir),
+		Links: rt.peers, Remote: client.Remote, Pause: rt.pause,
+		NewID: func(prefix string) string { return prefix + uuid.NewString() },
+	})
 	if gaps, err := store.AuditDecisionOrigins(ctx); err != nil {
 		log.Warn("decision sync: audit origins", "err", err)
 	} else {
@@ -71,7 +131,14 @@ func startDecisionSync(ctx context.Context, dataDir string, store *sqlite.Store,
 		<-ctx.Done()
 		rt.server.Stop()
 	}()
-	rt.done = rt.scheduler.Start(ctx)
+	if finishDecisionRepairLinks(ctx, dataDir, rt.peers, log) {
+		rt.pause()
+		done := make(chan struct{})
+		close(done)
+		rt.done = done
+		return rt
+	}
+	rt.done = rt.scheduler.Start(schedulerCtx)
 	return rt
 }
 

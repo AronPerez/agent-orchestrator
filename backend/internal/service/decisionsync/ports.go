@@ -122,6 +122,9 @@ var (
 	// ErrSameIdentity reports a peer claiming this machine's own host id, as a
 	// copied data directory would.
 	ErrSameIdentity = errors.New("decision sync peer shares this machine's identity")
+	// ErrSyncPaused reports a machine whose identity repair is staged: it
+	// syncs again once it has restarted under its new identity.
+	ErrSyncPaused = errors.New("decision sync is paused for an identity repair")
 	// ErrOriginIDsInvalid reports an origin-ids request without an origin or
 	// with a sequence below 1.
 	ErrOriginIDsInvalid = errors.New("decision sync origin-ids request is invalid")

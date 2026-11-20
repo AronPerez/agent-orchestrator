@@ -163,6 +163,8 @@ var lanControlBlockedPrefixes = []string{
 	// Linking machines takes a full credential for another machine and
 	// manages this machine's sync tokens: the person's own desktop and shell only.
 	"/api/v1/decision-peers",
+	// Identity repair rewrites this machine's host identity.
+	"/api/v1/decision-identity",
 }
 
 // lanControlBlock returns 404 for any request whose path is, or is nested

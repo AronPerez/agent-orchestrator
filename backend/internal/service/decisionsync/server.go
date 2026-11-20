@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -55,6 +56,7 @@ type Server struct {
 
 	stopOnce sync.Once
 	stop     chan struct{}
+	paused   atomic.Bool
 }
 
 type inboundMark struct {
@@ -123,7 +125,15 @@ func (s *Server) recordInbound(ctx context.Context, peerHostID, label string, pr
 	}
 }
 
+// Pause refuses every exchange, push and id list from now on. An identity
+// repair stages itself this way: until the restart that finishes it, no peer
+// may receive this machine's old identity again.
+func (s *Server) Pause() { s.paused.Store(true) }
+
 func (s *Server) checkPeer(peerHostID, bodyHostID string) error {
+	if s.paused.Load() {
+		return ErrSyncPaused
+	}
 	if peerHostID == s.deps.HostID {
 		return ErrSameIdentity
 	}

@@ -110,11 +110,12 @@ type RepairProposal struct {
 
 // RepairerDeps configures identity repair on a running daemon.
 type RepairerDeps struct {
-	Store  RepairStore
-	HostID string
-	Path   string
-	Links  LinkSource
-	Remote func(StoredPeer) Remote
+	Store        RepairStore
+	HostID       string
+	MachineLabel func() string
+	Path         string
+	Links        LinkSource
+	Remote       func(StoredPeer) Remote
 	// NewID returns prefix plus a fresh unique id.
 	NewID func(prefix string) string
 	Now   func() time.Time
@@ -139,6 +140,16 @@ func NewRepairer(deps RepairerDeps) *Repairer {
 // Status returns the staged or finished repair, if any.
 func (r *Repairer) Status() (RepairRecord, bool, error) {
 	return LoadRepair(r.deps.Path)
+}
+
+// Identity is this machine's host id and name, as the repair command shows
+// them and asks the person to type.
+func (r *Repairer) Identity() (hostID, machineLabel string) {
+	label := r.deps.HostID
+	if r.deps.MachineLabel != nil {
+		label = r.deps.MachineLabel()
+	}
+	return r.deps.HostID, label
 }
 
 // Propose finds where this machine's history of its own identity parted

@@ -1443,6 +1443,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decision-identity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** This machine's decision identity and any identity repair (loopback only, person only) */
+        get: operations["getDecisionIdentity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decision-identity/repair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Propose, or stage, giving up an identity shared with a copied data directory (loopback only, person only) */
+        post: operations["repairDecisionIdentity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/decision-peers": {
         parameters: {
             query?: never;
@@ -7814,6 +7848,11 @@ export interface components {
             /** Format: date-time */
             writtenAt: string;
         };
+        DecisionIdentityResponse: {
+            hostId: string;
+            machineLabel: string;
+            repair?: components["schemas"]["DecisionRepairStatus"];
+        };
         DecisionKindResponse: {
             id: string;
             label: string;
@@ -7889,6 +7928,44 @@ export interface components {
             option: number;
             undo: string;
             why: string;
+        };
+        DecisionRepairLink: {
+            hostId: string;
+            label: string;
+        };
+        DecisionRepairRequest: {
+            forkIds?: string[];
+            /** Format: int64 */
+            fromSeq?: number;
+            /** @description Stage the repair. fromSeq and forkIds must match a fresh proposal. */
+            stage?: boolean;
+        };
+        DecisionRepairResponse: {
+            callIds: string[];
+            forkIds: string[];
+            /** Format: int64 */
+            fromSeq: number;
+            /** @description Outbound links the repair removes; add them again afterwards. */
+            links: components["schemas"]["DecisionRepairLink"][];
+            origin: string;
+            peersAsked: number;
+            peersFailed: number;
+            staged?: components["schemas"]["DecisionRepairStatus"];
+        };
+        DecisionRepairStatus: {
+            /** @description How many of this machine's entries are re-issued under the new identity. */
+            entries: number;
+            /** Format: int64 */
+            fromSeq: number;
+            newHostId: string;
+            /** @description The identity given up. */
+            origin: string;
+            /** Format: date-time */
+            stagedAt: string;
+            /** @description staged, identity_switched, reissued, archived or done. Every state but done finishes when Orchestrator restarts. */
+            state: string;
+            /** Format: date-time */
+            updatedAt: string;
         };
         DecisionSecretWarning: {
             callId: string;
@@ -15807,6 +15884,131 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getDecisionIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionIdentityResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    repairDecisionIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionRepairRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionRepairResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
