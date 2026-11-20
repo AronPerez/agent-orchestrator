@@ -138,28 +138,25 @@ func (c *DecisionSyncController) entries(w http.ResponseWriter, r *http.Request)
 	push := decisionsync.PushRequest{
 		Protocol: req.Protocol, HostID: req.HostID, Entries: EntriesFromDTO(req.Entries), Heads: headsFromDTO(req.Heads),
 	}
-	var resp decisionsync.PushResponse
-	var err error
-	// The page is applied while the device is held live, so revoking it
-	// returns only after this write, and a write after that is refused.
+	ctx := r.Context()
+	// Each write of the page runs while the sending device is held live, so
+	// revoking it returns only after that write, and a write after that is
+	// refused. Waits (the plan gate) happen outside, so revoking never stalls.
 	if live, ok := c.Devices.(interface {
 		WhileLive(string, func() error) (bool, error)
 	}); ok {
-		found, _ := live.WhileLive(requestscope.CredentialFrom(r.Context()).DeviceID, func() error {
-			resp, err = c.Svc.Push(r.Context(), peer, push)
-			return nil
+		deviceID := requestscope.CredentialFrom(ctx).DeviceID
+		ctx = decisionsync.WithApplyGuard(ctx, func(fn func() error) error {
+			found, err := live.WhileLive(deviceID, fn)
+			if !found {
+				return decisionsync.ErrCredentialRevoked
+			}
+			return err
 		})
-		if !found {
-			envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "DEVICE_REVOKED",
-				"This decision sync credential was revoked.", nil)
-			return
-		}
-	} else {
-		if !c.stillValid(w, r) {
-			return
-		}
-		resp, err = c.Svc.Push(r.Context(), peer, push)
+	} else if !c.stillValid(w, r) {
+		return
 	}
+	resp, err := c.Svc.Push(ctx, peer, push)
 	if err != nil {
 		writeDecisionSyncError(w, r, err)
 		return
@@ -208,6 +205,9 @@ func writeDecisionSyncError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		envelope.WriteAPIError(w, r, http.StatusServiceUnavailable, "unavailable", "DECISION_SYNC_INTERRUPTED",
 			"The sync request ended before it finished.", nil)
+	case errors.Is(err, decisionsync.ErrCredentialRevoked):
+		envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "DEVICE_REVOKED",
+			"This decision sync credential was revoked.", nil)
 	case errors.Is(err, decisionsync.ErrSameIdentity):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "DECISION_SYNC_SAME_IDENTITY",
 			"The linked machine has this machine's own identity. One of them is a copy of the other's data directory.", nil)

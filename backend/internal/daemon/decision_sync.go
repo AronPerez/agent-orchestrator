@@ -88,6 +88,10 @@ type gatedSyncLedger struct {
 	decisions *decisionsvc.Service
 }
 
+// GuardsApply marks the ledger as running only its store write inside the
+// sync request's guard, after the plan gates (decisionsync.SelfGuardedLedger).
+func (gatedSyncLedger) GuardsApply() {}
+
 func (l gatedSyncLedger) ApplyDecisionEntries(ctx context.Context, peerHostID string, entries []domain.DecisionEntry, now time.Time) (domain.DecisionApplyResult, error) {
 	return l.decisions.ApplySyncedEntries(ctx, peerHostID, entries, now)
 }
