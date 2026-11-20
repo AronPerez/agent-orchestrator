@@ -154,4 +154,41 @@ describe("decision answer guard", () => {
 		expect(next).not.toBe(first);
 		expect(guard.begin("local", "dec_2")).not.toBe(next);
 	});
+
+	// After a lost response, what the refreshed view shows decides whether the
+	// next send is a retry of that attempt (same key) or a deliberate change
+	// to an answer that was in fact recorded (new key, or the change is lost).
+	it("starts a new key once a fresh detail read shows the lost answer was recorded", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		const lost = guard.begin("local", "dec_1");
+		guard.settle("local", "dec_1", false);
+		await client.fetchQuery({ ...viewQueryOf(guard, panel), queryFn: () => guardedDecisionRead(guard, panel, async () => ({ call: { id: "dec_1", state: "in_progress" }, history: [] })) });
+		expect(guard.state("local", "dec_1", panel)).toBeUndefined();
+		expect(guard.begin("local", "dec_1")).not.toBe(lost);
+	});
+
+	it("keeps the key for a retry when a fresh detail read still shows the call waiting", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		const lost = guard.begin("local", "dec_1");
+		guard.settle("local", "dec_1", false);
+		await client.fetchQuery({ ...viewQueryOf(guard, panel), queryFn: () => guardedDecisionRead(guard, panel, async () => ({ call: { id: "dec_1", state: "needs_you" }, history: [] })) });
+		expect(guard.begin("local", "dec_1")).toBe(lost);
+	});
+
+	it("starts a new key once a fresh needs-you list no longer has the call, but keeps other views held", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		const lost = guard.begin("local", "dec_1");
+		guard.settle("local", "dec_1", false);
+		await client.fetchQuery({ ...viewQueryOf(guard, bell), queryFn: () => guardedDecisionRead(guard, bell, async () => [{ id: "dec_2", state: "needs_you" }]) });
+		// The panel has not re-read: it still shows its cached copy as waiting.
+		expect(guard.state("local", "dec_1", panel)).toBe("unconfirmed");
+		expect(guard.begin("local", "dec_1")).not.toBe(lost);
+	});
 });
+
+function viewQueryOf(guard: ReturnType<typeof decisionAnswerGuard>, view: string) {
+	return { queryKey: ["decisions", "test", view], meta: decisionViewMeta(view), retry: false as const, queryFn: () => guardedDecisionRead(guard, view, async () => null) };
+}

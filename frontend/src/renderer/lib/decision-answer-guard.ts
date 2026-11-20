@@ -1,4 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
+import { LOCAL_HOST } from "./hosts";
 
 /**
  * Why a call's answer cannot be sent right now: one is in flight, or one
@@ -7,8 +8,13 @@ import type { QueryClient } from "@tanstack/react-query";
  */
 export type DecisionAnswerHold = "sending" | "unconfirmed";
 
-/** `key` names the person's current answer attempt for the daemon's idempotency check. */
-type Entry = { sending: number; failedAt?: number; key: string };
+/**
+ * `key` names the person's current answer attempt for the daemon's idempotency
+ * check. `keyRetired` is set once a fresh read shows the call left Needs you:
+ * the lost attempt was recorded (or the call closed), so the next send is a
+ * deliberate change and must not reuse the key.
+ */
+type Entry = { sending: number; failedAt?: number; key: string; keyRetired?: boolean };
 
 /**
  * One record per host and call of answers whose result is unknown, shared by
@@ -47,8 +53,9 @@ export class DecisionAnswerGuard {
 	 */
 	begin(hostId: string, callId: string): string {
 		const id = key(hostId, callId);
-		const entry = this.entries.get(id) ?? { sending: 0, key: newAttemptKey() };
-		this.entries.set(id, { ...entry, sending: entry.sending + 1 });
+		const existing = this.entries.get(id);
+		const entry = existing && !existing.keyRetired ? existing : { ...existing, sending: existing?.sending ?? 0, key: newAttemptKey() };
+		this.entries.set(id, { ...entry, keyRetired: false, sending: entry.sending + 1 });
 		this.changed();
 		return entry.key;
 	}
@@ -80,9 +87,28 @@ export class DecisionAnswerGuard {
 	 * result of the latest fetch it started (a cancelled one is discarded), so
 	 * that fetch's start is what the view now reflects.
 	 */
-	fetchApplied(view: string): void {
+	fetchApplied(view: string, data?: unknown): void {
 		const startedAt = this.fetchStarts.get(view);
-		if (startedAt !== undefined) this.viewRead(view, startedAt);
+		if (startedAt === undefined) return;
+		this.viewRead(view, startedAt);
+		this.retireObservedKeys(view, startedAt, data);
+	}
+
+	/**
+	 * A read that started after an answer failed shows whether that answer
+	 * landed: a call no longer waiting means it did (or the call closed), so
+	 * its key is retired. A call still waiting keeps its key for a retry.
+	 */
+	private retireObservedKeys(view: string, startedAt: number, data: unknown): void {
+		const scope = viewScope(view);
+		if (!scope) return;
+		for (const [id, entry] of this.entries) {
+			const [hostId, callId] = JSON.parse(id) as [string, string];
+			if (hostId !== scope.hostId || (scope.callId !== undefined && callId !== scope.callId)) continue;
+			if (entry.sending > 0 || entry.failedAt === undefined || startedAt <= entry.failedAt || entry.keyRetired) continue;
+			if (stillWaiting(scope, callId, data)) continue;
+			this.entries.set(id, { ...entry, keyRetired: true });
+		}
 	}
 
 	/** `view` successfully applied a read that started at `startedAt`. */
@@ -110,9 +136,9 @@ export class DecisionAnswerGuard {
 export const decisionViewMeta = (view: string) => ({ decisionAnswerView: view });
 
 /** The bell's needs-you list for one machine. */
-export const needsYouView = (hostId: string) => `needs-you:${hostId}`;
+export const needsYouView = (hostId: string) => `${NEEDS_YOU}${hostId}`;
 /** This computer's detail for one call (the Decisions panel). */
-export const detailView = (callId: string) => `detail:${callId}`;
+export const detailView = (callId: string) => `${DETAIL}${callId}`;
 
 /**
  * The query function wrapper for an answer-bearing view: records when the
@@ -145,7 +171,7 @@ export function decisionAnswerGuard(queryClient: QueryClient): DecisionAnswerGua
 		queryClient.getQueryCache().subscribe((event) => {
 			if (event.type !== "updated" || event.action.type !== "success" || event.action.manual) return;
 			const view = event.query.meta?.decisionAnswerView;
-			if (typeof view === "string") created.fetchApplied(view);
+			if (typeof view === "string") created.fetchApplied(view, event.action.data);
 		});
 		guards.set(queryClient, created);
 		guard = created;
@@ -154,6 +180,26 @@ export function decisionAnswerGuard(queryClient: QueryClient): DecisionAnswerGua
 }
 
 const newAttemptKey = () => `ans_${crypto.randomUUID()}`;
+
+const NEEDS_YOU = "needs-you:";
+const DETAIL = "detail:";
+
+/** The host and call(s) a view's data describes. Detail views are this computer's. */
+function viewScope(view: string): { hostId: string; callId?: string } | undefined {
+	if (view.startsWith(NEEDS_YOU)) return { hostId: view.slice(NEEDS_YOU.length) };
+	if (view.startsWith(DETAIL)) return { hostId: LOCAL_HOST, callId: view.slice(DETAIL.length) };
+	return undefined;
+}
+
+/** Whether the view's freshly applied data still shows the call in Needs you. */
+function stillWaiting(scope: { callId?: string }, callId: string, data: unknown): boolean {
+	if (scope.callId === undefined) {
+		// A needs-you list: the call is waiting exactly when it is listed.
+		return Array.isArray(data) && data.some((call) => (call as { id?: unknown })?.id === callId);
+	}
+	const state = (data as { call?: { state?: unknown } } | null | undefined)?.call?.state;
+	return state === "needs_you";
+}
 
 // JSON keeps host and call ids apart whatever characters they contain.
 const key = (hostId: string, callId: string) => JSON.stringify([hostId, callId]);
