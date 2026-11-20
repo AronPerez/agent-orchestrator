@@ -967,8 +967,11 @@ function SharePanel({
 			const result = await pending.result;
 			// Sent here, not in settle: this runs once per publish even if the panel closed meanwhile.
 			void captureRendererEvent(...publishResultEvent(result, Boolean(share)));
-			settle(result, links, share);
+			// Staged teams and workspace are queued before settle reads the list,
+			// so that read waits for them: read first, it could show Only you
+			// (and offer it as a choice) while the workspace grant is on its way.
 			if (result.status === "published" && subjects) void addSubjects(result.share.id, subjects, "artifacts.share.people.teamsFailed");
+			settle(result, links, share);
 		} catch (error) {
 			void captureRendererEvent("ao.artifacts.publish_failed", { is_republish: Boolean(share), reason: "other" });
 			setPhase({ kind: "error", message: errorMessage(error) });

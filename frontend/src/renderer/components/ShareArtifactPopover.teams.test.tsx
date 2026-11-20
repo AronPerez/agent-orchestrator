@@ -234,9 +234,14 @@ describe("ShareArtifactButton on a team workspace", () => {
 	it("shares a new link with the teams and workspace set up before Publish, once it is live", async () => {
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue(inspection);
 		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue(links);
-		vi.spyOn(aoBridge.cloudShare, "grants").mockResolvedValue(none);
+		// What the server holds: the list read after the invite includes it.
+		let server: CloudShareGrants = none;
+		vi.spyOn(aoBridge.cloudShare, "grants").mockImplementation(async () => server);
 		const publish = vi.spyOn(aoBridge.cloudShare, "publish").mockResolvedValue({ status: "published", replaced: false, share });
-		const invite = vi.spyOn(aoBridge.cloudShare, "invite").mockResolvedValue({ ...none, teams: [design], workspaces: [everyone] });
+		const invite = vi.spyOn(aoBridge.cloudShare, "invite").mockImplementation(async () => {
+			server = { ...none, teams: [design], workspaces: [everyone] };
+			return server;
+		});
 		renderButton(localFile);
 		await userEvent.click(await screen.findByRole("button", { name: "Publish: report.html" }));
 		await screen.findByRole("combobox", { name: "Add people by email or team" });
@@ -250,6 +255,35 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(publish.mock.calls[0]![0]).not.toHaveProperty("teamIds");
 		await waitFor(() => expect(invite).toHaveBeenCalledExactlyOnceWith("https://cp.test", SHARE_ID, { orgId: ORG_ID, teamIds: [TEAM_ID], workspace: true }));
 		expect(await screen.findByText("3 members")).toBeTruthy();
+	});
+
+	it("keeps access unknown until a workspace staged before Publish has been shared", async () => {
+		mocks.candidates = [];
+		// What the server holds; reads answer from it.
+		let server: CloudShareGrants = none;
+		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue(inspection);
+		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue(links);
+		const grants = vi.spyOn(aoBridge.cloudShare, "grants").mockImplementation(async () => server);
+		vi.spyOn(aoBridge.cloudShare, "publish").mockResolvedValue({ status: "published", replaced: false, share });
+		let release!: () => void;
+		vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => {
+			release = () => {
+				server = { ...server, workspaces: [everyone] };
+				resolve(server);
+			};
+		}));
+		renderButton(localFile);
+		await userEvent.click(await screen.findByRole("button", { name: "Publish: report.html" }));
+		await userEvent.click(await screen.findByRole("button", { name: /Only you/ }));
+		await userEvent.click(screen.getByRole("menuitemradio", { name: /Everyone at Acme/ }));
+		await userEvent.click(screen.getByRole("button", { name: "Publish" }));
+		// Live, the workspace grant still on its way: no read yet, and no choice offered.
+		const checking = await screen.findByRole("button", { name: "Checking who has access…" });
+		expect(checking).toHaveProperty("disabled", true);
+		expect(grants).not.toHaveBeenCalled();
+		expect(screen.queryByText("Only you")).toBeNull();
+		release();
+		expect(await screen.findByText("Everyone at Acme can open it after signing in, and finds it under Shared with you.")).toBeTruthy();
 	});
 
 	it("shares with a typed email on Enter", async () => {
