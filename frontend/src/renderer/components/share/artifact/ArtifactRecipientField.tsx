@@ -81,10 +81,16 @@ export function ArtifactRecipientField({ orgId, teams: teamsOffered, unavailable
 		}
 		return next;
 	});
-	const send = (picked: readonly Recipient[]) => {
+	// Picks with a request outstanding (queued or on its way). A retry skips
+	// them, so one pick never has two requests at once: each lock then has a
+	// single request that owns it, and nobody is invited twice.
+	const outstanding = useRef(new Set<string>());
+	const send = (all: readonly Recipient[]) => {
+		const picked = all.filter((recipient) => !outstanding.current.has(recipientKey(recipient)));
 		const recipients = splitRecipients(picked);
 		if (recipients.emails.length === 0 && recipients.teams.length === 0) return;
 		const sent = new Set(picked.map(recipientKey));
+		for (const key of sent) outstanding.current.add(key);
 		let sending: string[] = [];
 		const stillPicked = () => {
 			const kept = new Set(heldNow.current.map(recipientKey));
@@ -97,6 +103,7 @@ export function ArtifactRecipientField({ orgId, teams: teamsOffered, unavailable
 			.then(() => onSubmit(recipients, stillPicked))
 			.catch(() => false)
 			.then((taken) => {
+				for (const key of sent) outstanding.current.delete(key);
 				lock(sending, false);
 				if (taken) updateHeld((current) => current.filter((recipient) => !sent.has(recipientKey(recipient))));
 			});

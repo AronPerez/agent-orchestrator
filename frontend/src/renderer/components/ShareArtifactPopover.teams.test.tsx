@@ -333,6 +333,33 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(within(people).getByRole("button", { name: "Remove access for maya@acme.co" })).toBeTruthy();
 	});
 
+	it("sends no retry for a pick whose invitation is still outstanding, so its lock holds", async () => {
+		mocks.candidates = [];
+		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
+		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [share] });
+		vi.spyOn(aoBridge.cloudShare, "grants").mockResolvedValue(none);
+		let fail!: () => void;
+		const invite = vi.spyOn(aoBridge.cloudShare, "invite")
+			.mockImplementationOnce(() => new Promise<CloudShareGrants>((_resolve, reject) => { fail = () => reject(new Error("offline")); }))
+			.mockResolvedValueOnce({ ...none, people: [{ id: "4a0b0b4e-be7f-4a7d-be95-9b4d7a5b6c85", email: "maya@acme.co", createdAt: "" }] });
+		renderButton(cloudFile);
+		await userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
+		await waitFor(() => expect(screen.getByRole("button", { name: /Only you/ })).toHaveProperty("disabled", false));
+		const field = screen.getByRole("combobox", { name: "Add people by email or team" });
+		await userEvent.type(field, "maya@acme.co{Enter}");
+		await waitFor(() => expect(invite).toHaveBeenCalledOnce());
+		// Enter on the empty field while the first request is on its way: no second request.
+		await userEvent.type(field, "{Enter}");
+		fail();
+		// Refused: the pick is held, unlocked, for a retry, and Enter now sends it once.
+		await waitFor(() => expect(screen.getByRole("button", { name: /Remove maya@acme.co/ })).toHaveProperty("disabled", false));
+		expect(invite).toHaveBeenCalledOnce();
+		await userEvent.type(field, "{Enter}");
+		await waitFor(() => expect(invite).toHaveBeenCalledTimes(2));
+		const people = await screen.findByRole("region", { name: "People with access" });
+		expect(await within(people).findByText("maya@acme.co")).toBeTruthy();
+	});
+
 	it("shares with a typed email on Enter", async () => {
 		mocks.candidates = [];
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
