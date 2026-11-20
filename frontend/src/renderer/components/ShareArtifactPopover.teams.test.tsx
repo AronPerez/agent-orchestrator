@@ -307,6 +307,28 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(invite).not.toHaveBeenCalled();
 	});
 
+	it("takes back a grant whose pick was removed while its invitation was on its way, even after closing", async () => {
+		mocks.candidates = [];
+		const maya = { id: "4a0b0b4e-be7f-4a7d-be95-9b4d7a5b6c85", email: "maya@acme.co", createdAt: "" };
+		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
+		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [share] });
+		vi.spyOn(aoBridge.cloudShare, "grants").mockResolvedValue(none);
+		let answer!: () => void;
+		const invite = vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => { answer = () => resolve({ ...none, people: [maya] }); }));
+		const remove = vi.spyOn(aoBridge.cloudShare, "removeGrant").mockResolvedValue();
+		renderButton(cloudFile);
+		await userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
+		await waitFor(() => expect(screen.getByRole("button", { name: /Only you/ })).toHaveProperty("disabled", false));
+		const field = screen.getByRole("combobox", { name: "Add people by email or team" });
+		await userEvent.type(field, "maya@acme.co{Enter}");
+		// The request is on its way: remove the pick, then close the panel.
+		await waitFor(() => expect(invite).toHaveBeenCalledOnce());
+		await userEvent.type(field, "{Backspace}");
+		await userEvent.keyboard("{Escape}");
+		answer();
+		await waitFor(() => expect(remove).toHaveBeenCalledExactlyOnceWith("https://cp.test", SHARE_ID, maya.id));
+	});
+
 	it("shares with a typed email on Enter", async () => {
 		mocks.candidates = [];
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
