@@ -13,28 +13,72 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
-// newDecisionSyncServer serves linked machines' exchanges from the store.
-// Entries a peer pushes run wakes (the deliverer and the notification
-// projector) and wake waiting exchanges, so they relay on to other peers. The
-// server stops its waiting exchanges when ctx ends, so shutdown never waits on
-// a held request.
-func newDecisionSyncServer(ctx context.Context, store *sqlite.Store, decisions *decisionsvc.Service, hostID string, log *slog.Logger, wakes ...func()) *decisionsync.Server {
-	var server *decisionsync.Server
-	server = decisionsync.NewServer(decisionsync.ServerDeps{
-		Ledger: gatedSyncLedger{Store: store, decisions: decisions}, HostID: hostID, MachineLabel: decisionMachineLabel(hostID),
-		Peers: store, StatusSource: store, Log: log,
-		OnApplied: func(string, domain.DecisionApplyResult) {
-			for _, wake := range wakes {
-				wake()
-			}
-			server.Changed()
-		},
+// decisionSyncRuntime is decision ledger sync as the daemon runs it: the
+// server peers exchange with, the scheduler that initiates exchanges with
+// linked machines, and the link manager behind the person's routes.
+type decisionSyncRuntime struct {
+	server    *decisionsync.Server
+	scheduler *decisionsync.Scheduler
+	peers     *decisionsync.Peers
+	done      <-chan struct{}
+}
+
+// startDecisionSync wires sync over the store and starts the scheduler.
+// Entries received from any peer run wakes (the deliverer and the
+// notification projector), wake waiting exchanges, and poke every other link
+// so they relay on. It never blocks the daemon: a peer that is down only
+// backs off its own worker.
+func startDecisionSync(ctx context.Context, dataDir string, store *sqlite.Store, decisions *decisionsvc.Service, hostID string, issued decisionsync.IssuedCredentials, log *slog.Logger, wakes ...func()) *decisionSyncRuntime {
+	rt := &decisionSyncRuntime{}
+	// Received pages, pulled or pushed, go through the decision service so a
+	// synced answer passes the same plan-first gate as a local one.
+	ledger := gatedSyncLedger{Store: store, decisions: decisions}
+	label := decisionMachineLabel(hostID)
+	onApplied := func(peerHostID string, _ domain.DecisionApplyResult) {
+		for _, wake := range wakes {
+			wake()
+		}
+		rt.server.Changed()
+		rt.scheduler.Poke(peerHostID)
+	}
+	rt.server = decisionsync.NewServer(decisionsync.ServerDeps{
+		Ledger: ledger, HostID: hostID, MachineLabel: label,
+		Peers: store, StatusSource: store, Log: log, OnApplied: onApplied,
 	})
+	secrets, err := decisionsync.LoadPeerSecrets(decisionsync.PeerSecretsPath(dataDir))
+	if err != nil {
+		log.Warn("decision sync: links file", "err", err)
+	}
+	client := decisionsync.NewHTTPClient(nil)
+	engine := decisionsync.NewEngine(decisionsync.EngineDeps{
+		Ledger: ledger, HostID: hostID, MachineLabel: label, OnApplied: onApplied,
+	})
+	rt.peers = decisionsync.NewPeers(decisionsync.PeersDeps{
+		Secrets: secrets, Store: store, API: client, Issued: issued, HostID: hostID, MachineLabel: label, Entries: store,
+		OnChange: func() { rt.scheduler.Refresh() },
+	})
+	rt.scheduler = decisionsync.NewScheduler(decisionsync.SchedulerDeps{
+		Engine: engine, Links: rt.peers, Remote: client.Remote, Store: store, Log: log,
+	})
+	if gaps, err := store.AuditDecisionOrigins(ctx); err != nil {
+		log.Warn("decision sync: audit origins", "err", err)
+	} else {
+		for _, gap := range gaps {
+			log.Warn("decision sync: origin has holes", "origin", gap.Origin, "held", gap.Have, "highest", gap.Got)
+		}
+	}
 	go func() {
 		<-ctx.Done()
-		server.Stop()
+		rt.server.Stop()
 	}()
-	return server
+	rt.done = rt.scheduler.Start(ctx)
+	return rt
+}
+
+// changed wakes waiting exchanges and pokes every link after a local write.
+func (rt *decisionSyncRuntime) changed() {
+	rt.server.Changed()
+	rt.scheduler.Poke("")
 }
 
 // gatedSyncLedger is the store as sync sees it, except that received pages
@@ -43,6 +87,10 @@ type gatedSyncLedger struct {
 	*sqlite.Store
 	decisions *decisionsvc.Service
 }
+
+// GuardsApply marks the ledger as running only its store write inside the
+// sync request's guard, after the plan gates (decisionsync.SelfGuardedLedger).
+func (gatedSyncLedger) GuardsApply() {}
 
 func (l gatedSyncLedger) ApplyDecisionEntries(ctx context.Context, peerHostID string, entries []domain.DecisionEntry, now time.Time) (domain.DecisionApplyResult, error) {
 	return l.decisions.ApplySyncedEntries(ctx, peerHostID, entries, now)

@@ -14,7 +14,7 @@ func TestDecisionSyncPeerRows(t *testing.T) {
 	at := syncBase
 
 	if err := s.UpsertDecisionSyncPeer(ctx, domain.DecisionSyncPeer{
-		HostID: "h_mini", Label: "mac-mini", URL: "http://10.0.0.2:3011", Direction: domain.DecisionSyncOutbound,
+		HostID: "h_mini", Label: "mini (desk)", URL: "http://10.0.0.2:3011", Direction: domain.DecisionSyncOutbound,
 		DeviceID: "dev_1", CreatedAt: at,
 	}); err != nil {
 		t.Fatal(err)
@@ -41,12 +41,22 @@ func TestDecisionSyncPeerRows(t *testing.T) {
 	if laptop.HostID != "h_laptop" || laptop.Direction != domain.DecisionSyncInbound || laptop.Label != "laptop" || !laptop.LastSuccessAt.Equal(at.Add(time.Minute)) {
 		t.Fatalf("inbound peer = %+v", laptop)
 	}
-	if mini.Direction != domain.DecisionSyncOutbound || mini.Label != "mac-mini" || mini.URL != "http://10.0.0.2:3011" ||
+	// The person's label stays; the peer's own name only fills an empty one.
+	if mini.Direction != domain.DecisionSyncOutbound || mini.Label != "mini (desk)" || mini.URL != "http://10.0.0.2:3011" ||
 		!mini.InSync || mini.PeerVector["h_mini"] != 4 || mini.ClockAheadMS != 420000 || mini.PeerProtocol != 1 ||
 		!mini.LastSuccessAt.Equal(at.Add(2*time.Minute)) || mini.LastErrorCode != "" {
 		t.Fatalf("outbound peer = %+v", mini)
 	}
 
+	if err := s.UpsertDecisionSyncPeer(ctx, domain.DecisionSyncPeer{HostID: "h_vm", Direction: domain.DecisionSyncOutbound, CreatedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordDecisionSyncAttempt(ctx, "h_vm", domain.DecisionSyncAttempt{At: at, PeerLabel: "vm-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if vm, _, _ := s.GetDecisionSyncPeer(ctx, "h_vm"); vm.Label != "vm-2" {
+		t.Fatalf("unlabelled peer after its first sync = %q, want its own name", vm.Label)
+	}
 	if ok, err := s.RecordDecisionSyncAttempt(ctx, "h_mini", domain.DecisionSyncAttempt{At: at.Add(3 * time.Minute), ErrorCode: "unreachable"}); err != nil || !ok {
 		t.Fatalf("record failure = %v, %v", ok, err)
 	}

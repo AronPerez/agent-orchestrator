@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync"
 )
 
 var syncedSeq int64
@@ -138,5 +139,54 @@ func TestSyncedAnswerToAnotherMachinesPlanCallLeavesLocalSessionAlone(t *testing
 	}
 	if got := planState(t, fixture, fixture.loose); got != domain.PlanFirstApproved {
 		t.Fatalf("another machine's plan answer moved this machine's session to %q", got)
+	}
+}
+
+// The plan gate is waited for outside the sync request's guard: a revocation
+// waiting on that guard never waits behind an approval delivery.
+func TestSyncedApplyEntersTheGuardOnlyAfterThePlanGate(t *testing.T) {
+	syncedSeq = 0
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: %v %v", updated, err)
+	}
+	approval := answeredPlanFirstCall(t, fixture, fixture.loose, 1, "")
+	messenger := &blockingDecisionMessenger{
+		fakeDecisionMessenger: newFakeDecisionMessenger(), block: fixture.loose,
+		started: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	deliverer := newTestDeliverer(fixture.store, messenger, "h_a")
+	deliverer.mutationGate = fixture.service.mutationGate
+	delivered := make(chan error, 1)
+	go func() {
+		_, err := deliverer.RunDue(context.Background())
+		delivered <- err
+	}()
+	<-messenger.started
+
+	guarded := make(chan struct{}, 1)
+	ctx := decisionsync.WithApplyGuard(context.Background(), func(fn func() error) error {
+		guarded <- struct{}{}
+		return fn()
+	})
+	applied := make(chan error, 1)
+	go func() {
+		_, err := fixture.service.ApplySyncedEntries(ctx, "h_b", []domain.DecisionEntry{syncedAnswer(approval.ID, 3)}, time.UnixMilli(9_000_000))
+		applied <- err
+	}()
+	select {
+	case <-guarded:
+		t.Fatal("the guard was entered while the approval delivery held the plan gate")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(messenger.release)
+	if err := <-delivered; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-applied; err != nil {
+		t.Fatal(err)
+	}
+	if len(guarded) != 1 {
+		t.Fatalf("the store write ran inside the guard %d times, want once", len(guarded))
 	}
 }

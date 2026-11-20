@@ -304,3 +304,47 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met before deadline")
 }
+
+func catchUpProjector(ledger *fakeNotificationLedger, writer *fakeNotificationWriter, now time.Time) *NotificationProjector {
+	return NewNotificationProjector(NotificationProjectorDeps{
+		Store: ledger, Writer: writer, RetryDelay: 10 * time.Millisecond, HostID: "h_local",
+		Now: func() time.Time { return now }, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+}
+
+func TestProjectorMarksCatchUpCallsRead(t *testing.T) {
+	ledger := &fakeNotificationLedger{}
+	old, recent := needsYouCall("dec_old"), needsYouCall("dec_recent")
+	now := time.Unix(100_000, 0)
+	old.RaisedAt = now.Add(-10*time.Minute - time.Second)
+	recent.RaisedAt = now.Add(-10*time.Minute + time.Second)
+	ledger.set(old)
+	ledger.set(recent)
+	writer := &fakeNotificationWriter{ledger: ledger}
+	if err := catchUpProjector(ledger, writer, now).Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, _, intents := writer.snapshot()
+	read := map[string]bool{}
+	for _, intent := range intents {
+		read[intent.DecisionCallID] = intent.InitiallyRead
+	}
+	if !read["dec_old"] || read["dec_recent"] || len(read) != 2 {
+		t.Fatalf("initially read = %v, want only the call raised over 10 minutes ago", read)
+	}
+}
+
+func TestProjectorNeverMarksLocalCallsRead(t *testing.T) {
+	ledger := &fakeNotificationLedger{}
+	local := needsYouCall("dec_local")
+	local.Origin = "h_local"
+	local.RaisedAt = time.Unix(1, 0)
+	ledger.set(local)
+	writer := &fakeNotificationWriter{ledger: ledger}
+	if err := catchUpProjector(ledger, writer, time.Unix(100_000, 0)).Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, intents := writer.snapshot(); len(intents) != 1 || intents[0].InitiallyRead {
+		t.Fatalf("intents = %+v, want this machine's own call unread", intents)
+	}
+}

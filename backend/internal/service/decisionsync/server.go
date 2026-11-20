@@ -2,6 +2,7 @@ package decisionsync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -176,7 +177,15 @@ func (s *Server) page(ctx context.Context, peerHostID string, req ExchangeReques
 	if err != nil {
 		return ExchangeResponse{}, fmt.Errorf("read sync page: %w", err)
 	}
-	if _, err := s.deps.Ledger.CheckDecisionHeads(ctx, peerHostID, req.Heads, s.deps.Now()); err != nil {
+	// Recording a conflict is a write: it runs inside the request's guard on
+	// each wake, never across the wait.
+	if err := RunGuarded(ctx, func() error {
+		_, err := s.deps.Ledger.CheckDecisionHeads(ctx, peerHostID, req.Heads, s.deps.Now())
+		return err
+	}); err != nil {
+		if errors.Is(err, ErrCredentialRevoked) {
+			return ExchangeResponse{}, err
+		}
 		return ExchangeResponse{}, fmt.Errorf("check peer heads: %w", err)
 	}
 	heads, err := s.deps.Ledger.DecisionHeads(ctx)
@@ -211,13 +220,29 @@ func (s *Server) Push(ctx context.Context, peerHostID string, req PushRequest) (
 		return PushResponse{}, err
 	}
 	now := s.deps.Now()
-	if _, err := s.deps.Ledger.CheckDecisionHeads(ctx, peerHostID, req.Heads, now); err != nil {
+	// Both writes run inside the request's guard (see WithApplyGuard).
+	if err := RunGuarded(ctx, func() error {
+		_, err := s.deps.Ledger.CheckDecisionHeads(ctx, peerHostID, req.Heads, now)
+		return err
+	}); err != nil {
+		if errors.Is(err, ErrCredentialRevoked) {
+			return PushResponse{}, err
+		}
 		return PushResponse{}, fmt.Errorf("check peer heads: %w", err)
 	}
 	var result domain.DecisionApplyResult
 	if len(req.Entries) > 0 {
+		apply := func() error {
+			var err error
+			result, err = s.deps.Ledger.ApplyDecisionEntries(ctx, peerHostID, req.Entries, now)
+			return err
+		}
 		var err error
-		result, err = s.deps.Ledger.ApplyDecisionEntries(ctx, peerHostID, req.Entries, now)
+		if _, self := s.deps.Ledger.(SelfGuardedLedger); self {
+			err = apply()
+		} else {
+			err = RunGuarded(ctx, apply)
+		}
 		if err != nil {
 			return PushResponse{}, err
 		}

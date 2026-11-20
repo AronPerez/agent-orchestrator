@@ -208,15 +208,49 @@ func (c *MobileController) RevokeCoordinationToken(w http.ResponseWriter, r *htt
 	})
 }
 
-// RevokeDecisionSyncToken retires one decision sync token. A peer's own sync
-// token cannot reach this route; the person revokes it with a full credential.
+// RevokeDecisionSyncToken retires one decision sync token. A full credential
+// may revoke any sync token; a sync token may revoke only itself, which is how
+// a machine that unlinks gives its access back without a full credential.
 func (c *MobileController) RevokeDecisionSyncToken(w http.ResponseWriter, r *http.Request) {
+	if credential := requestscope.CredentialFrom(r.Context()); credential.HasScope(mobilebridge.DeviceScopeDecisionSync) {
+		c.revokeOwnDecisionSyncToken(w, r, credential)
+		return
+	}
 	revoker, ok := c.Bridge.(interface {
 		RevokeDecisionSyncToken(context.Context, string, requestscope.Credential, string) (bool, error)
 	})
 	c.revokeScopedToken(w, r, decisionSyncTokenRoute, ok, func(id string, credential requestscope.Credential, presented string) (bool, error) {
 		return revoker.RevokeDecisionSyncToken(r.Context(), id, credential, presented)
 	})
+}
+
+func (c *MobileController) revokeOwnDecisionSyncToken(w http.ResponseWriter, r *http.Request, credential requestscope.Credential) {
+	id := chi.URLParam(r, "deviceId")
+	if credential.Kind != requestscope.CredentialDevice || id != credential.DeviceID {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", decisionSyncTokenRoute.issuerCode,
+			"A decision sync credential can revoke only itself.", nil)
+		return
+	}
+	revoker, ok := c.Bridge.(interface {
+		RevokeOwnDecisionSyncToken(context.Context, string) (bool, error)
+	})
+	if !ok {
+		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", decisionSyncTokenRoute.tokenCode, decisionSyncTokenRoute.unavailable, nil)
+		return
+	}
+	found, err := revoker.RevokeOwnDecisionSyncToken(r.Context(), id)
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeCoordinationInterrupted(w, r)
+		return
+	case err != nil:
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", decisionSyncTokenRoute.tokenCode, decisionSyncTokenRoute.revokeFailed, nil)
+		return
+	case !found:
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", decisionSyncTokenRoute.notFoundCode, decisionSyncTokenRoute.notFoundMessage, nil)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (c *MobileController) revokeScopedToken(w http.ResponseWriter, r *http.Request, route scopedTokenRoute, available bool,
@@ -1585,6 +1619,58 @@ func (b *BridgeService) RevokeCoordinationToken(ctx context.Context, id string, 
 // rules as RevokeCoordinationToken.
 func (b *BridgeService) RevokeDecisionSyncToken(ctx context.Context, id string, credential requestscope.Credential, presentedToken string) (bool, error) {
 	return b.revokeScopedToken(ctx, mobilebridge.DeviceScopeDecisionSync, id, credential, presentedToken)
+}
+
+// RevokeOwnDecisionSyncToken removes the decision sync device that presented
+// the request. The response still travels on its connection; the token is
+// refused from its next request on.
+func (b *BridgeService) RevokeOwnDecisionSyncToken(ctx context.Context, id string) (bool, error) {
+	if err := b.lockTransition(ctx); err != nil {
+		return false, err
+	}
+	defer b.transitionMu.Unlock()
+	if b.Devices == nil {
+		return false, nil
+	}
+	for _, device := range b.Devices.List() {
+		if device.ID == id && len(device.Scopes) == 1 && device.Scopes[0] == mobilebridge.DeviceScopeDecisionSync {
+			_, found, err := b.Devices.Revoke(id)
+			return found, err
+		}
+	}
+	return false, nil
+}
+
+// RevokeDecisionSyncDevicesFor removes every decision sync device this
+// machine issued to the machine with clientID, and drops their open
+// connections. Unlinking that machine uses it, so a link the other machine
+// made to this one stops too. It returns how many it removed.
+func (b *BridgeService) RevokeDecisionSyncDevicesFor(ctx context.Context, clientID string) (int, error) {
+	if err := b.lockTransition(ctx); err != nil {
+		return 0, err
+	}
+	defer b.transitionMu.Unlock()
+	if b.Devices == nil || clientID == "" {
+		return 0, nil
+	}
+	removed := 0
+	for _, device := range b.Devices.List() {
+		if device.ClientID != clientID || len(device.Scopes) != 1 || device.Scopes[0] != mobilebridge.DeviceScopeDecisionSync {
+			continue
+		}
+		revoked, found, err := b.Devices.Revoke(device.ID)
+		if err != nil {
+			return removed, err
+		}
+		if !found {
+			continue
+		}
+		removed++
+		if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
+			lan.DisconnectCredential(revoked.TokenHash)
+		}
+	}
+	return removed, nil
 }
 
 func (b *BridgeService) revokeScopedToken(ctx context.Context, scope, id string, credential requestscope.Credential, presentedToken string) (bool, error) {

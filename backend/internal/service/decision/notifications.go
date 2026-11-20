@@ -30,13 +30,24 @@ type NotificationProjectorDeps struct {
 	Writer     NotificationWriter
 	RetryDelay time.Duration
 	Log        *slog.Logger
+	// HostID is this machine. A call from another machine that was raised
+	// more than CatchUpAge before its row is first created gets a row that is
+	// already read (quiet catch-up after a first link or a long absence).
+	HostID string
+	Now    func() time.Time
 }
+
+// CatchUpAge is how old another machine's call must be, when this machine
+// first creates its bell row, for the row to start out read.
+const CatchUpAge = 10 * time.Minute
 
 // NotificationProjector derives decision_needed notifications from the ledger.
 // It never runs inside a ledger write: an append only wakes it, and each pass
 // rescans the whole Needs you set, so a crash or a failed publication between
 // the ledger commit and the notification is repaired by the next pass.
 type NotificationProjector struct {
+	hostID     string
+	now        func() time.Time
 	store      NotificationLedger
 	writer     NotificationWriter
 	retryDelay time.Duration
@@ -52,7 +63,11 @@ func NewNotificationProjector(d NotificationProjectorDeps) *NotificationProjecto
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
+	if d.Now == nil {
+		d.Now = time.Now
+	}
 	return &NotificationProjector{
+		hostID: d.HostID, now: d.Now,
 		store: d.Store, writer: d.Writer, retryDelay: d.RetryDelay, log: d.Log,
 		wake: make(chan struct{}, 1),
 	}
@@ -112,8 +127,12 @@ func (p *NotificationProjector) Reconcile(ctx context.Context) error {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	now := p.now()
 	for _, call := range calls {
-		err := p.writer.Notify(ctx, decisionNotificationIntent(call))
+		intent := decisionNotificationIntent(call)
+		// The writer creates a call's row once; this only matters that time.
+		intent.InitiallyRead = p.hostID != "" && call.Origin != p.hostID && now.Sub(call.RaisedAt) > CatchUpAge
+		err := p.writer.Notify(ctx, intent)
 		if errors.Is(err, domain.ErrInvalidNotificationRecord) {
 			// A record that cannot be announced (no title, no origin) will not
 			// become valid on retry; the call still shows on the Decisions page.

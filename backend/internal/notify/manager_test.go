@@ -318,3 +318,33 @@ func TestManagerResolveRejectsDecisionCombinedWithOtherTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestCatchUpRowStillResolvesWhenAnswered(t *testing.T) {
+	st := &fakeStore{}
+	hub := NewHub()
+	ch, unsub := hub.Subscribe("")
+	defer unsub()
+	now := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	mgr := New(Deps{Store: st, Publisher: hub, Clock: func() time.Time { return now }, NewID: func() string { return "ntf_1" }})
+	intent := Intent{
+		Type: domain.NotificationDecisionNeeded, SourceKey: DecisionSourceKey("dec_1"),
+		DecisionCallID: "dec_1", DecisionOriginHostID: "h_mini", DecisionTitle: "Which cache?", InitiallyRead: true,
+	}
+	if err := mgr.Notify(context.Background(), intent); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if len(st.rows) != 1 || st.rows[0].Status != domain.NotificationRead {
+		t.Fatalf("stored = %+v, want one read row", st.rows)
+	}
+	select {
+	case got := <-ch:
+		t.Fatalf("a catch-up row was announced: %+v", got)
+	default:
+	}
+	if err := mgr.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !st.rows[0].Resolved() {
+		t.Fatal("catch-up row was not resolved once its call left Needs you")
+	}
+}

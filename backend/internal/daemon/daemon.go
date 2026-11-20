@@ -1217,7 +1217,7 @@ func Run(buildVersion string) (retErr error) {
 	// Reconcile above; the projector's first pass creates any that a crash
 	// left missing. Appends only wake it, so a ledger write never waits on
 	// notification I/O.
-	decisionNotifications, decisionNotificationsDone := startDecisionNotifications(ctx, store, notificationWriter, log)
+	decisionNotifications, decisionNotificationsDone := startDecisionNotifications(ctx, store, notificationWriter, hostIdentity.HostID, log)
 	decisionMutationGate := &decisionsvc.MutationGate{}
 	wakeDecisionDeliverer := func() {
 		if decisionDeliverer != nil {
@@ -1225,20 +1225,20 @@ func Run(buildVersion string) (retErr error) {
 		}
 	}
 	// Linked machines exchange ledger entries through this server on the
-	// remote listener. Received pages go through the decision service, so a
-	// synced answer passes the same plan-first gate as a local one and wakes
-	// the deliverer exactly as a local answer does.
-	var decisionSync atomic.Pointer[decisionsync.Server]
+	// remote listener. A pushed answer for a call this machine owns wakes the
+	// deliverer exactly as a local answer does.
+	var syncRuntime atomic.Pointer[decisionSyncRuntime]
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
 		MutationGate: decisionMutationGate,
 		OnAppended: decisionAppendHook(wakeDecisionDeliverer, decisionNotifications.Wake, func() {
-			if server := decisionSync.Load(); server != nil {
-				server.Changed()
+			if rt := syncRuntime.Load(); rt != nil {
+				rt.changed()
 			}
 		}),
 	})
-	decisionSync.Store(newDecisionSyncServer(ctx, store, decisionSvc, hostIdentity.HostID, log, wakeDecisionDeliverer, decisionNotifications.Wake))
+	decisionSync := startDecisionSync(ctx, cfg.DataDir, store, decisionSvc, hostIdentity.HostID, bs, log, wakeDecisionDeliverer, decisionNotifications.Wake)
+	syncRuntime.Store(decisionSync)
 	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
 		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
 		MutationGate:       decisionMutationGate,
@@ -1249,6 +1249,7 @@ func Run(buildVersion string) (retErr error) {
 		stop()
 		<-decisionDeliveryDone
 		<-decisionNotificationsDone
+		<-decisionSync.done
 	}()
 
 	// Managed remote-access connector. Reap first: a daemon that died without
@@ -1358,7 +1359,8 @@ func Run(buildVersion string) (retErr error) {
 		Notifications:               notifier,
 		Reports:                     reportSvc,
 		Decisions:                   decisionSvc,
-		DecisionSync:                decisionSync.Load(),
+		DecisionSync:                decisionSync.server,
+		DecisionPeers:               decisionsync.PeerService{Peers: decisionSync.peers, Scheduler: decisionSync.scheduler},
 		NotificationStream:          notificationHub,
 		Push:                        pushRegistry,
 		Presence:                    presenceTracker,

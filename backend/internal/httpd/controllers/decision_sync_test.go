@@ -216,3 +216,46 @@ func TestDecisionSyncRejectsOversizedBody(t *testing.T) {
 		t.Fatalf("invalid entry: status=%d body=%s", rec.Code, rec.Body)
 	}
 }
+
+// revocableDevices says the sync device is registered for its first n checks.
+type revocableDevices struct{ validChecks int }
+
+func (d *revocableDevices) Has(string) bool {
+	d.validChecks--
+	return d.validChecks >= 0
+}
+
+func TestRevokedSyncTokenStopsInFlightRequests(t *testing.T) {
+	ledger := ledgertest.NewMemLedger("h_server")
+	server := decisionsync.NewServer(decisionsync.ServerDeps{Ledger: ledger, HostID: "h_server", Now: func() time.Time { return syncAt }})
+	devices := &revocableDevices{}
+	r := chi.NewRouter()
+	r.Route("/api/v1", (&controllers.DecisionSyncController{Svc: server, Devices: devices}).Register)
+	f := &syncFixture{router: r, ledger: ledger}
+	credential := syncCredential("h_peer")
+
+	// Revoked while the push body was still being read: nothing is applied.
+	entry := domain.DecisionEntry{
+		ID: "dent_1", Origin: "h_peer", OriginSeq: 1, Stamp: domain.DecisionStamp{WallMS: syncAt.UnixMilli()},
+		CallID: "dec_1", Kind: "future_kind", Payload: json.RawMessage(`{}`), WrittenAt: syncAt, AuthorKind: domain.DecisionAuthorPerson,
+	}
+	push := mustJSONBody(t, controllers.DecisionSyncPushRequest{Protocol: 1, HostID: "h_peer", Entries: []controllers.DecisionSyncEntry{controllers.DecisionSyncEntry(decisionsync.ToWire(entry))}})
+	devices.validChecks = 0
+	rec, decoded := f.do(t, http.MethodPost, "/api/v1/decision-sync/entries", &credential, push)
+	if rec.Code != http.StatusUnauthorized || decoded["code"] != "DEVICE_REVOKED" || len(ledger.Entries()) != 0 {
+		t.Fatalf("push after revoke: %d %s, entries %d", rec.Code, rec.Body, len(ledger.Entries()))
+	}
+
+	// Revoked while an exchange was answering: no ledger data goes out.
+	ledger.Append(ledgertest.Future("dec_2"), syncAt)
+	devices.validChecks = 1
+	rec, decoded = f.do(t, http.MethodPost, "/api/v1/decision-sync/exchange", &credential, mustJSONBody(t, controllers.DecisionSyncExchangeRequest{Protocol: 1, HostID: "h_peer"}))
+	if rec.Code != http.StatusUnauthorized || decoded["code"] != "DEVICE_REVOKED" || strings.Contains(rec.Body.String(), "dec_2") {
+		t.Fatalf("exchange revoked mid-flight: %d %s", rec.Code, rec.Body)
+	}
+
+	devices.validChecks = 2
+	if rec, _ = f.do(t, http.MethodPost, "/api/v1/decision-sync/exchange", &credential, mustJSONBody(t, controllers.DecisionSyncExchangeRequest{Protocol: 1, HostID: "h_peer"})); rec.Code != http.StatusOK {
+		t.Fatalf("valid exchange: %d %s", rec.Code, rec.Body)
+	}
+}

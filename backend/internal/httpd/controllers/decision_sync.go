@@ -33,6 +33,45 @@ type DecisionSyncService interface {
 // freshness to this machine's own clients.
 type DecisionSyncController struct {
 	Svc DecisionSyncService
+	// Devices, when set, is checked again after a request's body is read and
+	// before a response with ledger data is written, so a token revoked while
+	// a request was in flight (by unlinking, or by the person) neither writes
+	// entries nor receives them.
+	Devices interface{ Has(deviceID string) bool }
+}
+
+// guarded returns the request context carrying the sending device's guard:
+// each ledger write the request makes runs while the device is held live, so
+// revoking it returns only after that write, and a write after that is
+// refused. Waits (the plan gate, the long poll) happen outside the guard, so
+// revoking never stalls. Without a registry that holds devices live, it
+// falls back to one recheck.
+func (c *DecisionSyncController) guarded(w http.ResponseWriter, r *http.Request) (context.Context, bool) {
+	live, ok := c.Devices.(interface {
+		WhileLive(string, func() error) (bool, error)
+	})
+	if !ok {
+		return r.Context(), c.stillValid(w, r)
+	}
+	deviceID := requestscope.CredentialFrom(r.Context()).DeviceID
+	return decisionsync.WithApplyGuard(r.Context(), func(fn func() error) error {
+		found, err := live.WhileLive(deviceID, fn)
+		if !found {
+			return decisionsync.ErrCredentialRevoked
+		}
+		return err
+	}), true
+}
+
+// stillValid writes 401 and reports false when the request's sync device was
+// revoked after the listener accepted it.
+func (c *DecisionSyncController) stillValid(w http.ResponseWriter, r *http.Request) bool {
+	if c.Devices == nil || c.Devices.Has(requestscope.CredentialFrom(r.Context()).DeviceID) {
+		return true
+	}
+	envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "DEVICE_REVOKED",
+		"This decision sync credential was revoked.", nil)
+	return false
 }
 
 // Register mounts the sync routes under /api/v1.
@@ -87,12 +126,20 @@ func (c *DecisionSyncController) exchange(w http.ResponseWriter, r *http.Request
 	if !decodeSyncBody(w, r, &req) {
 		return
 	}
-	resp, err := c.Svc.Exchange(r.Context(), peer, decisionsync.ExchangeRequest{
+	ctx, ok := c.guarded(w, r)
+	if !ok {
+		return
+	}
+	resp, err := c.Svc.Exchange(ctx, peer, decisionsync.ExchangeRequest{
 		Protocol: req.Protocol, HostID: req.HostID, MachineLabel: req.MachineLabel,
 		Have: req.Have, Heads: headsFromDTO(req.Heads), WaitSeconds: req.WaitSeconds,
 	})
 	if err != nil {
 		writeDecisionSyncError(w, r, err)
+		return
+	}
+	// A waiting exchange may have been revoked while it waited.
+	if !c.stillValid(w, r) {
 		return
 	}
 	writeSyncJSON(w, DecisionSyncExchangeResponse{
@@ -115,9 +162,14 @@ func (c *DecisionSyncController) entries(w http.ResponseWriter, r *http.Request)
 	if !decodeSyncBody(w, r, &req) {
 		return
 	}
-	resp, err := c.Svc.Push(r.Context(), peer, decisionsync.PushRequest{
+	push := decisionsync.PushRequest{
 		Protocol: req.Protocol, HostID: req.HostID, Entries: EntriesFromDTO(req.Entries), Heads: headsFromDTO(req.Heads),
-	})
+	}
+	ctx, ok := c.guarded(w, r)
+	if !ok {
+		return
+	}
+	resp, err := c.Svc.Push(ctx, peer, push)
 	if err != nil {
 		writeDecisionSyncError(w, r, err)
 		return
@@ -166,6 +218,9 @@ func writeDecisionSyncError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		envelope.WriteAPIError(w, r, http.StatusServiceUnavailable, "unavailable", "DECISION_SYNC_INTERRUPTED",
 			"The sync request ended before it finished.", nil)
+	case errors.Is(err, decisionsync.ErrCredentialRevoked):
+		envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "DEVICE_REVOKED",
+			"This decision sync credential was revoked.", nil)
 	case errors.Is(err, decisionsync.ErrSameIdentity):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "DECISION_SYNC_SAME_IDENTITY",
 			"The linked machine has this machine's own identity. One of them is a copy of the other's data directory.", nil)

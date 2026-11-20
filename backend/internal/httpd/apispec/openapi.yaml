@@ -3775,6 +3775,188 @@ paths:
         shell terminal
       tags:
       - cues
+  /api/v1/decision-peers:
+    get:
+      operationId: listDecisionPeers
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListDecisionPeersResponse'
+          description: OK
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: List machines linked for decision sync (loopback only, person only)
+      tags:
+      - decisions
+    post:
+      operationId: linkDecisionPeer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LinkDecisionPeerRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkDecisionPeerResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+        "502":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Gateway
+      summary: Link a machine for decision sync with a one-time full credential (loopback
+        only, person only)
+      tags:
+      - decisions
+  /api/v1/decision-peers/{hostId}:
+    delete:
+      operationId: unlinkDecisionPeer
+      parameters:
+      - description: The linked machine's host id.
+        in: path
+        name: hostId
+        required: true
+        schema:
+          description: The linked machine's host id.
+          type: string
+      responses:
+        "204":
+          description: No Content
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Unlink a machine; entries stay on both machines (loopback only, person
+        only)
+      tags:
+      - decisions
+  /api/v1/decision-peers/sync:
+    post:
+      operationId: syncDecisionPeers
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncDecisionPeersRequest'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncDecisionPeersResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Sync one linked machine, or all, now (loopback only, person only)
+      tags:
+      - decisions
   /api/v1/decision-sync/entries:
     post:
       operationId: pushDecisionSyncEntries
@@ -3797,6 +3979,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
         "403":
           content:
             application/json:
@@ -3858,6 +4046,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
         "403":
           content:
             application/json:
@@ -3953,6 +4147,14 @@ paths:
             100 are capped. Ignored when q is absent.
           minimum: 1
           type: integer
+      - description: Comma-separated call ids to look up, at most 100; unknown ids
+          are left out. Takes precedence over q and scope.
+        in: query
+        name: ids
+        schema:
+          description: Comma-separated call ids to look up, at most 100; unknown ids
+            are left out. Takes precedence over q and scope.
+          type: string
       responses:
         "200":
           content:
@@ -22550,6 +22752,75 @@ components:
       required:
       - text
       type: object
+    DecisionPeer:
+      properties:
+        clockAheadMs:
+          format: int64
+          type: integer
+        direction:
+          enum:
+          - outbound
+          - inbound
+          type: string
+        hostId:
+          type: string
+        inSync:
+          type: boolean
+        label:
+          type: string
+        lastAttemptAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        lastErrorCode:
+          type: string
+        lastSuccessAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        state:
+          enum:
+          - linked_in_sync
+          - linked_behind
+          - unreachable
+          - revoked
+          - incompatible
+          - identity_conflict
+          - inbound
+          type: string
+        url:
+          type: string
+      required:
+      - hostId
+      - label
+      - direction
+      - state
+      - inSync
+      - clockAheadMs
+      type: object
+    DecisionPeerSyncResult:
+      properties:
+        errorCode:
+          type: string
+        hostId:
+          type: string
+        inSync:
+          type: boolean
+        label:
+          type: string
+        pulled:
+          type: integer
+        pushed:
+          type: integer
+      required:
+      - hostId
+      - label
+      - pulled
+      - pushed
+      - inSync
+      type: object
     DecisionPredictionPayload:
       properties:
         label:
@@ -22568,6 +22839,16 @@ components:
       - option
       - why
       - undo
+      type: object
+    DecisionSecretWarning:
+      properties:
+        callId:
+          type: string
+        field:
+          type: string
+      required:
+      - callId
+      - field
       type: object
     DecisionSyncConflict:
       properties:
@@ -23912,6 +24193,36 @@ components:
       - ok
       - sessionId
       type: object
+    LinkDecisionPeerRequest:
+      properties:
+        credential:
+          description: The machine's password, account token or device token. Used
+            once; not stored.
+          type: string
+        expectedHostId:
+          description: Refuse the link if the address answers with another host id.
+          type: string
+        label:
+          type: string
+        url:
+          description: The machine's remote-access address, for example http://mac-mini.local:3011.
+          type: string
+      required:
+      - url
+      - credential
+      type: object
+    LinkDecisionPeerResponse:
+      properties:
+        peer:
+          $ref: '#/components/schemas/DecisionPeer'
+        warnings:
+          items:
+            $ref: '#/components/schemas/DecisionSecretWarning'
+          type: array
+      required:
+      - peer
+      - warnings
+      type: object
     LinkPreviewResponse:
       properties:
         description:
@@ -24047,6 +24358,15 @@ components:
           type: array
       required:
       - cues
+      type: object
+    ListDecisionPeersResponse:
+      properties:
+        peers:
+          items:
+            $ref: '#/components/schemas/DecisionPeer'
+          type: array
+      required:
+      - peers
       type: object
     ListDecisionsResponse:
       properties:
@@ -28780,6 +29100,20 @@ components:
           type: string
       required:
       - path
+      type: object
+    SyncDecisionPeersRequest:
+      properties:
+        hostId:
+          type: string
+      type: object
+    SyncDecisionPeersResponse:
+      properties:
+        results:
+          items:
+            $ref: '#/components/schemas/DecisionPeerSyncResult'
+          type: array
+      required:
+      - results
       type: object
     SystemMemoryResponse:
       properties:

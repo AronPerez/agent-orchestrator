@@ -237,6 +237,7 @@ type ListDecisionsQuery struct {
 	Scope string `query:"scope,omitempty" enum:"mine,needs_you,decided" description:"Which calls to list. Defaults to needs_you. Ignored when q is given."`
 	Q     string `query:"q,omitempty" description:"Search words. When given, the response is the search result."`
 	Limit int    `query:"limit,omitempty" minimum:"1" description:"Most search results to return. Defaults to 20; values above 100 are capped. Ignored when q is absent."`
+	IDs   string `query:"ids,omitempty" description:"Comma-separated call ids to look up, at most 100; unknown ids are left out. Takes precedence over q and scope."`
 }
 
 // DecisionBoardResponse is the Decisions page snapshot: every active call plus
@@ -3798,6 +3799,73 @@ type DecisionSyncStatusResponse struct {
 	Peers        []DecisionSyncPeerStatus   `json:"peers"`
 	Origins      []DecisionSyncOriginStatus `json:"origins"`
 	Conflicts    []DecisionSyncConflict     `json:"conflicts"`
+}
+
+// LinkDecisionPeerRequest links a machine for decision sync. Credential is a
+// full credential for that machine, presented once to mint a scoped token and
+// never stored.
+type LinkDecisionPeerRequest struct {
+	URL            string `json:"url" description:"The machine's remote-access address, for example http://mac-mini.local:3011."`
+	ExpectedHostID string `json:"expectedHostId,omitempty" description:"Refuse the link if the address answers with another host id."`
+	Label          string `json:"label,omitempty"`
+	Credential     string `json:"credential" description:"The machine's password, account token or device token. Used once; not stored."`
+}
+
+// DecisionPeer is one machine this machine syncs decisions with. It never
+// carries a token.
+type DecisionPeer struct {
+	HostID        string     `json:"hostId"`
+	Label         string     `json:"label"`
+	URL           string     `json:"url,omitempty"`
+	Direction     string     `json:"direction" enum:"outbound,inbound"`
+	State         string     `json:"state" enum:"linked_in_sync,linked_behind,unreachable,revoked,incompatible,identity_conflict,inbound"`
+	LastSuccessAt *time.Time `json:"lastSuccessAt,omitempty"`
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
+	LastErrorCode string     `json:"lastErrorCode,omitempty"`
+	InSync        bool       `json:"inSync"`
+	ClockAheadMs  int64      `json:"clockAheadMs"`
+}
+
+// DecisionSecretWarning names an existing entry that looks like it holds a credential.
+type DecisionSecretWarning struct {
+	CallID string `json:"callId"`
+	Field  string `json:"field"`
+}
+
+// LinkDecisionPeerResponse is the linked machine and any warnings.
+type LinkDecisionPeerResponse struct {
+	Peer     DecisionPeer            `json:"peer"`
+	Warnings []DecisionSecretWarning `json:"warnings"`
+}
+
+// ListDecisionPeersResponse lists linked and linking machines.
+type ListDecisionPeersResponse struct {
+	Peers []DecisionPeer `json:"peers"`
+}
+
+// DecisionPeerHostIDParam identifies a linked machine.
+type DecisionPeerHostIDParam struct {
+	HostID string `path:"hostId" description:"The linked machine's host id."`
+}
+
+// SyncDecisionPeersRequest syncs one linked machine, or all when hostId is empty.
+type SyncDecisionPeersRequest struct {
+	HostID string `json:"hostId,omitempty"`
+}
+
+// DecisionPeerSyncResult is one machine's sync result.
+type DecisionPeerSyncResult struct {
+	HostID    string `json:"hostId"`
+	Label     string `json:"label"`
+	Pulled    int    `json:"pulled"`
+	Pushed    int    `json:"pushed"`
+	InSync    bool   `json:"inSync"`
+	ErrorCode string `json:"errorCode,omitempty"`
+}
+
+// SyncDecisionPeersResponse lists each synced machine's result.
+type SyncDecisionPeersResponse struct {
+	Results []DecisionPeerSyncResult `json:"results"`
 }
 
 // SetRequireDeviceCredentialsRequest turns the pairing password off or on.

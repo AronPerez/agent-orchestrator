@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync"
 )
 
 // SyncStore is the store method that stores entries received from a linked
@@ -67,7 +68,14 @@ func (s *Service) ApplySyncedEntries(ctx context.Context, peerHostID string, ent
 			return domain.DecisionApplyResult{}, err
 		}
 	}
-	result, err := store.ApplyDecisionEntries(ctx, peerHostID, entries, now)
+	// Only the store write runs inside the sync request's guard: the plan
+	// gates above may wait, and revoking the sending device must not.
+	var result domain.DecisionApplyResult
+	err = decisionsync.RunGuarded(ctx, func() error {
+		var applyErr error
+		result, applyErr = store.ApplyDecisionEntries(ctx, peerHostID, entries, now)
+		return applyErr
+	})
 	if err != nil {
 		s.restorePlanGates(ctx, holds)
 		return domain.DecisionApplyResult{}, err
