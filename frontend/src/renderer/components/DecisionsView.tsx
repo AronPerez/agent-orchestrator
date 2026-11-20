@@ -136,7 +136,7 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 						{t("decisions.nothingNeedsYou")}
 					</p>
 				) : null}
-				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
+				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} onEscape={callId ? closeCall : undefined} />
 			</>
 		);
 	} else if (board.data && !board.isError) {

@@ -22,6 +22,7 @@ import { cn } from "../lib/utils";
 import { DecisionStateDot, decisionStateLabel } from "./DecisionStateLabel";
 import { Button } from "./ui/button";
 import { Pressable } from "./ui/pressable";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 
 /** Sync freshness for the cards of calls another machine must still deliver. */
@@ -38,6 +39,12 @@ export type DecisionsBoardProps = {
 	sync?: DecisionSyncStatus;
 	/** Which projects and streams are folded; the page owns it so its toolbar can fold everything. */
 	folds: DecisionFolds;
+	/**
+	 * Escape on a card whose details are showing. The tooltip takes that key
+	 * first and marks it handled, so the page's own Escape handler never sees
+	 * it; this keeps one press closing the details and the open call together.
+	 */
+	onEscape?: () => void;
 };
 
 // Narrow pane: the state columns alone, each project's and stream's name as a
@@ -66,7 +73,7 @@ function countsText(counts: Record<DecisionLane, number>, t: TFunction): string 
  * streams both fold to their counts. Cards are the only individually bordered
  * objects; everything else shares hairlines.
  */
-export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds }: DecisionsBoardProps) {
+export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds, onEscape }: DecisionsBoardProps) {
 	const { t } = useTranslation();
 	const hintId = useId();
 
@@ -84,10 +91,13 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds }
 		const row = model.topology.find((item) => item.bandKey === at.bandKey && item.rowKey === at.rowKey);
 		return row && row.lanes.done.indexOf(at.card.id) >= DECISION_DONE_SHOWN ? decisionRowFoldKey(at.bandKey, at.rowKey) : undefined;
 	}, [model, selectedId]);
+	// Follows the selection as well as its row: moving between two cards past
+	// the cap in one row keeps the same row key, and must still reopen a cell
+	// the person cut back with Show fewer.
 	useEffect(() => {
 		if (!selectedPastCap) return;
 		setExpandedDone((current) => (current.has(selectedPastCap) ? current : new Set(current).add(selectedPastCap)));
-	}, [selectedPastCap]);
+	}, [selectedPastCap, selectedId]);
 
 	// Roving focus: one card is the board's tab stop; arrows move it.
 	const gridRef = useRef<HTMLDivElement>(null);
@@ -181,6 +191,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds }
 						selectedId={selectedId}
 						tabStop={tabStop}
 						onSelect={onSelect}
+						onEscape={onEscape}
 						now={now}
 					/>
 				))}
@@ -198,6 +209,7 @@ type RowShared = {
 	selectedId?: string;
 	tabStop?: string;
 	onSelect: (callId: string) => void;
+	onEscape?: () => void;
 	now: number;
 };
 
@@ -256,7 +268,7 @@ function DecisionBand({ band, ...shared }: { band: DecisionProjectBand } & RowSh
 	);
 }
 
-function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, selectedId, tabStop, onSelect, now }: { bandKey: string; row: DecisionStreamRow } & RowShared) {
+function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, selectedId, tabStop, onSelect, onEscape, now }: { bandKey: string; row: DecisionStreamRow } & RowShared) {
 	const { t } = useTranslation();
 	const name = row.projectWide
 		? t("decisions.projectWide")
@@ -289,7 +301,7 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
 					>
 						{shown.map((card) => (
 							<li key={card.id} className="min-w-0">
-								<DecisionCard card={card} selected={card.id === selectedId} tabStop={card.id === tabStop} onSelect={onSelect} now={now} />
+								<DecisionCard card={card} selected={card.id === selectedId} tabStop={card.id === tabStop} onSelect={onSelect} onEscape={onEscape} now={now} />
 							</li>
 						))}
 						{capped ? (
@@ -308,11 +320,13 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
 
 /**
  * A card draws the call's title alone. Who raised it and how it stands are in
- * its tooltip and its accessible name; the column already gives the state.
- * What a person must not miss stays on the card: the two flags keep their
- * glyph, and an answer that has not reached a session says so under the title.
+ * its accessible name and in a tooltip that opens on keyboard focus as well as
+ * hover, so arrowing through the board shows them; the column already gives
+ * the state. What a person must not miss stays on the card: the two flags keep
+ * their glyph, and an answer that has not reached a session says so under the
+ * title.
  */
-function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: DecisionCardModel; selected: boolean; tabStop: boolean; onSelect: (callId: string) => void; now: number }) {
+function DecisionCard({ card, selected, tabStop, onSelect, onEscape, now }: { card: DecisionCardModel; selected: boolean; tabStop: boolean; onSelect: (callId: string) => void; onEscape?: () => void; now: number }) {
 	const { t, i18n } = useTranslation();
 	const sync = useContext(DecisionSyncContext);
 	const status = decisionStatusText(card.status, now, t, { sync, locale: i18n.language });
@@ -323,11 +337,12 @@ function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: Decisi
 		...(card.changedAfterClose ? [{ Icon: TriangleAlert, label: t("decisions.changedAfterClose") }] : []),
 	];
 	return (
+		<Tooltip>
+		<TooltipTrigger asChild>
 		<Pressable
 			aria-current={selected ? "true" : undefined}
 			data-decision-card={card.id}
 			tabIndex={tabStop ? 0 : -1}
-			title={[card.title, secondary, status, ...flags.map((flag) => flag.label)].filter(Boolean).join("\n")}
 			onClick={() => onSelect(card.id)}
 			className={cn(
 				"flex w-full min-w-0 flex-wrap items-start gap-x-1 rounded-md border border-border bg-card px-2 py-1 transition-colors duration-(--duration-fast) hover:bg-interactive-hover focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
@@ -345,5 +360,13 @@ function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: Decisi
 			))}
 			{status && undelivered ? <>{" "}<span className="line-clamp-2 w-full text-caption leading-4 text-muted-foreground">{status}</span></> : null}
 		</Pressable>
+		</TooltipTrigger>
+		<TooltipContent side="bottom" align="start" hideArrow className="flex max-w-xs flex-col gap-0.5" onEscapeKeyDown={onEscape}>
+			<span className="font-medium">{card.title}</span>
+			{secondary ? <span className="text-muted-foreground">{secondary}</span> : null}
+			{status ? <span className={card.lane === "needs_you" ? "text-status-needs-you" : "text-muted-foreground"}>{status}</span> : null}
+			{flags.map((flag) => <span key={flag.label} className="text-status-in-review">{flag.label}</span>)}
+		</TooltipContent>
+		</Tooltip>
 	);
 }

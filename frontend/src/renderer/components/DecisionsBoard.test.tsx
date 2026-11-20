@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDecisionFolds } from "../hooks/useDecisionFolds";
@@ -6,11 +6,12 @@ import { buildDecisionBoard } from "../lib/decision-board";
 import { DECISION_FOLD_STORAGE_KEY, decisionBandFoldKey, decisionRowFoldKey } from "../lib/decision-folds";
 import type { DecisionCall } from "../lib/decision-inbox";
 import { DecisionsBoard as BareBoard, type DecisionsBoardProps } from "./DecisionsBoard";
+import { TooltipProvider } from "./ui/tooltip";
 
 /** The board with the page's fold state, as DecisionsView mounts it. */
 function DecisionsBoard(props: Omit<DecisionsBoardProps, "folds">) {
 	const folds = useDecisionFolds(props.model, props.selectedId);
-	return <BareBoard {...props} folds={folds} />;
+	return <TooltipProvider><BareBoard {...props} folds={folds} /></TooltipProvider>;
 }
 
 const NOW = Date.parse("2026-11-18T12:00:00Z");
@@ -86,13 +87,32 @@ describe("DecisionsBoard", () => {
 		expect(within(card("done")).getByText("Changed after it closed")).toBeInTheDocument();
 	});
 
-	it("draws only the title on a card and keeps the rest for the tooltip and assistive tech", () => {
+	it("draws only the title on a card and keeps the rest for assistive tech", () => {
 		renderBoard();
 		const card = screen.getByRole("button", { name: /^Question need/ });
-		expect(card).toHaveAttribute("title", "Question need\nmac-mini · worker 5512\nWaiting 3h");
 		expect(within(card).getByText("Question need")).not.toHaveClass("sr-only");
 		expect(within(card).getByText("mac-mini · worker 5512")).toHaveClass("sr-only");
 		expect(within(card).getByText("Waiting 3h")).toHaveClass("sr-only");
+	});
+
+	it("shows a card's details when it takes keyboard focus, not only on hover", async () => {
+		renderBoard();
+		// A native title tooltip never opens for the keyboard, so there is none.
+		expect(screen.getByRole("button", { name: /^Question need/ })).not.toHaveAttribute("title");
+		expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+		act(() => screen.getByRole("button", { name: /^Question need/ }).focus());
+		const details = await screen.findByRole("tooltip");
+		expect(details).toHaveTextContent("Question need");
+		expect(details).toHaveTextContent("mac-mini · worker 5512");
+		expect(details).toHaveTextContent("Waiting 3h");
+
+		// Arrowing on moves the details to the next card, flags included.
+		act(() => screen.getByRole("button", { name: /^Question done/ }).focus());
+		const next = await screen.findByRole("tooltip");
+		expect(next).toHaveTextContent("Question done");
+		expect(next).toHaveTextContent("Migrated in PR #412");
+		expect(next).toHaveTextContent("Changed after it closed");
+		expect(next).not.toHaveTextContent("Waiting 3h");
 	});
 
 	it("still says on the card when an answer has not reached a session", () => {
@@ -203,6 +223,17 @@ describe("DecisionsBoard", () => {
 
 		it("shows a selected Done card even when it is past the cap", () => {
 			render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} selectedId="fin1" />);
+			expect(screen.getByRole("button", { name: /^Question fin1/ })).toHaveAttribute("aria-current", "true");
+		});
+
+		it("reopens the cell when the selection moves to another card past the cap in the same row", async () => {
+			const view = render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} selectedId="fin1" />);
+			const select = (id: string) => view.rerender(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} selectedId={id} />);
+			select("fin2");
+			expect(screen.getByRole("button", { name: /^Question fin2/ })).toHaveAttribute("aria-current", "true");
+			await userEvent.click(screen.getByRole("button", { name: "Show fewer" }));
+			expect(screen.queryByRole("button", { name: /^Question fin2/ })).not.toBeInTheDocument();
+			select("fin1");
 			expect(screen.getByRole("button", { name: /^Question fin1/ })).toHaveAttribute("aria-current", "true");
 		});
 
