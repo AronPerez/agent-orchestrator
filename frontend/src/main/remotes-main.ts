@@ -456,6 +456,7 @@ export function registerRemotesIpc(
 		const entry = entries.find((candidate) => !candidate.cleanupOnly)
 			?? entries.find((candidate) => candidate.cleanupOnly);
 		if (!entry) throw new Error("Host does not belong to this account.");
+		await stopDecisionSync(entry.hostId);
 		await disconnect(url);
 		const key = coordinationKey(entry);
 		const unsavedCandidate = unsavedCoordination.get(key);
@@ -617,6 +618,18 @@ export function registerRemotesIpc(
 		await accountHosts("PUT", `/${encodeURIComponent(issued.hostId)}`, { body: issued.registration });
 	});
 	ipcMain.handle("remotes:disconnect", async (_event, url: string) => ordered(() => disconnect(url)));
+	// Forgetting a host also stops decision sync with it: otherwise this
+	// computer's daemon keeps copying decisions to it with no switch left to
+	// turn that off. When that cannot be done the host stays, switch and all.
+	async function stopDecisionSync(hostId: string | undefined) {
+		if (!localDaemonRequest || !hostId) return;
+		const status = await localDaemonRequest("DELETE", `/api/v1/decision-peers/${encodeURIComponent(hostId)}`)
+			.then((response) => response.status, () => 0);
+		// 404: never linked, or a daemon without decision sync; 409: only the
+		// other machine links to this one, so there is nothing here to stop.
+		if (status === 204 || status === 404 || status === 409) return;
+		throw new ExpectedIpcError("Could not stop decision sync with this host, so it was not removed. Try again.");
+	}
 	// Linking a saved host for decision sync hands its saved (possibly
 	// keychain-sealed) credential to this computer's daemon over loopback, once.
 	// The daemon mints a sync-only token on that host and keeps only that; the

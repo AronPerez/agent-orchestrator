@@ -1314,6 +1314,41 @@ describe("remotes:setDecisionSync", () => {
 		expect(off).toEqual({ ok: true, warnings: [] });
 	});
 
+	it("remove stops decision sync with the host before forgetting it", async () => {
+		const { ipc, calls } = await setup(
+			`{"remotes":[{"hostId":"h_mini","label":"mac-mini","url":"http://192.0.2.7:3011","password":"saved-secret-3"}]}`,
+			() => ({ status: 204, body: "" }),
+		);
+		await ipc.invoke("remotes:remove", "http://192.0.2.7:3011");
+		expect(calls).toEqual([{ method: "DELETE", path: "/api/v1/decision-peers/h_mini", body: undefined }]);
+		expect(await ipc.invoke("remotes:list")).toEqual([]);
+	});
+
+	it("remove goes ahead when there is no outbound link to stop", async () => {
+		for (const status of [404, 409]) {
+			const { ipc } = await setup(
+				`{"remotes":[{"hostId":"h_mini","label":"mac-mini","url":"http://192.0.2.7:3011","password":"saved-secret-4"}]}`,
+				() => ({ status, body: "{}" }),
+			);
+			await ipc.invoke("remotes:remove", "http://192.0.2.7:3011");
+			expect(await ipc.invoke("remotes:list")).toEqual([]);
+		}
+	});
+
+	it("remove keeps the host when decision sync cannot be stopped", async () => {
+		for (const daemon of [
+			() => ({ status: 500, body: JSON.stringify({ code: "DECISION_PEERS" }) }),
+			() => { throw new Error("connect ECONNREFUSED"); },
+		]) {
+			const { ipc } = await setup(
+				`{"remotes":[{"hostId":"h_mini","label":"mac-mini","url":"http://192.0.2.7:3011","password":"saved-secret-5"}]}`,
+				daemon,
+			);
+			await expect(ipc.invoke("remotes:remove", "http://192.0.2.7:3011")).rejects.toThrow(/decision sync/);
+			expect((await ipc.invoke("remotes:list") as { hostId: string }[]).map((host) => host.hostId)).toEqual(["h_mini"]);
+		}
+	});
+
 	it("setDecisionSync uses the sealed password path", async () => {
 		const cipher = { encrypt: (plain: string) => `sealed:${plain}`, decrypt: (sealed: string) => sealed.replace(/^sealed:/, "") };
 		setPasswordCipher(() => cipher);
