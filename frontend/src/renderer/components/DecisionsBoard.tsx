@@ -40,9 +40,11 @@ export type DecisionsBoardProps = {
 	/** Which projects and streams are folded; the page owns it so its toolbar can fold everything. */
 	folds: DecisionFolds;
 	/**
-	 * Escape on a card whose details are showing. The tooltip takes that key
-	 * first and marks it handled, so the page's own Escape handler never sees
-	 * it; this keeps one press closing the details and the open call together.
+	 * Escape pressed on a card whose details are showing. The tooltip takes
+	 * that key first and marks it handled, so the page's own Escape handler
+	 * never sees it; this keeps one press closing the details and the open call
+	 * together. Not called for Escape pressed elsewhere while a card is only
+	 * hovered: that key belongs to whatever has focus, such as the search field.
 	 */
 	onEscape?: () => void;
 };
@@ -332,6 +334,7 @@ function DecisionCard({ card, selected, tabStop, onSelect, onEscape, now }: { ca
 	const status = decisionStatusText(card.status, now, t, { sync, locale: i18n.language });
 	const secondary = decisionSecondaryText(card.secondary, t);
 	const undelivered = card.status.kind === "pending" || card.status.kind === "no_session";
+	const cardRef = useRef<HTMLButtonElement>(null);
 	const flags = [
 		...(card.outsidePolicy ? [{ Icon: ShieldAlert, label: t("decisions.outsidePolicyShort") }] : []),
 		...(card.changedAfterClose ? [{ Icon: TriangleAlert, label: t("decisions.changedAfterClose") }] : []),
@@ -340,6 +343,7 @@ function DecisionCard({ card, selected, tabStop, onSelect, onEscape, now }: { ca
 		<Tooltip>
 		<TooltipTrigger asChild>
 		<Pressable
+			ref={cardRef}
 			aria-current={selected ? "true" : undefined}
 			data-decision-card={card.id}
 			tabIndex={tabStop ? 0 : -1}
@@ -361,7 +365,12 @@ function DecisionCard({ card, selected, tabStop, onSelect, onEscape, now }: { ca
 			{status && undelivered ? <>{" "}<span className="line-clamp-2 w-full text-caption leading-4 text-muted-foreground">{status}</span></> : null}
 		</Pressable>
 		</TooltipTrigger>
-		<TooltipContent side="bottom" align="start" hideArrow className="flex max-w-xs flex-col gap-0.5" onEscapeKeyDown={onEscape}>
+		<TooltipContent side="bottom" align="start" hideArrow className="flex max-w-xs flex-col gap-0.5"
+			// Radix hears Escape for the whole document while the details show, hover included.
+			onEscapeKeyDown={(event) => {
+				if (event.target instanceof Node && cardRef.current?.contains(event.target)) onEscape?.();
+			}}
+		>
 			<span className="font-medium">{card.title}</span>
 			{secondary ? <span className="text-muted-foreground">{secondary}</span> : null}
 			{status ? <span className={card.lane === "needs_you" ? "text-status-needs-you" : "text-muted-foreground"}>{status}</span> : null}

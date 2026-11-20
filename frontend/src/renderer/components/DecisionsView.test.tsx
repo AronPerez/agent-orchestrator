@@ -309,6 +309,24 @@ describe("DecisionsView", () => {
 			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: {} });
 		});
 
+		it("leaves Escape to the search field while a hovered card's details are showing", async () => {
+			const selected = call({ id: "dec_1" });
+			answer(board([selected]), { dec_1: selected });
+			renderView(<DecisionsView callId="dec_1" />);
+			const card = await screen.findByRole("button", { name: /^Question dec_1/ });
+			await userEvent.click(screen.getByRole("button", { name: "Search all decisions" }));
+			expect(screen.getByRole("searchbox", { name: "Search all decisions" })).toHaveFocus();
+			await userEvent.hover(card);
+			expect(await screen.findByRole("tooltip")).toHaveTextContent("Question dec_1");
+			navigateMock.mockClear();
+
+			await userEvent.keyboard("{Escape}");
+			// The search field takes its first Escape; the open call stays open.
+			expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+			expect(navigateMock).not.toHaveBeenCalled();
+			expect(screen.getByRole("complementary", { name: "Decision" })).toBeInTheDocument();
+		});
+
 		it("announces the Needs-you count in one polite live region", async () => {
 			answer(board([call({ id: "dec_1" }), call({ id: "dec_2" })]));
 			const { container } = renderView(<DecisionsView />);
