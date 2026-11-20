@@ -172,6 +172,37 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(grants).toHaveBeenCalledTimes(2);
 	});
 
+	it("reads the list again only after an invitation sent beside the retry has answered", async () => {
+		mocks.candidates = [];
+		const maya = { id: "4a0b0b4e-be7f-4a7d-be95-9b4d7a5b6c85", email: "maya@acme.co", createdAt: "" };
+		// What the server holds; reads answer from it.
+		let server: CloudShareGrants = none;
+		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
+		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [share] });
+		const grants = vi.spyOn(aoBridge.cloudShare, "grants")
+			.mockRejectedValueOnce(new Error("offline"))
+			.mockImplementation(async () => server);
+		let release!: () => void;
+		vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => {
+			release = () => {
+				server = { ...server, people: [maya] };
+				resolve(server);
+			};
+		}));
+		renderButton(cloudFile);
+		await userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
+		const retry = await screen.findByRole("button", { name: "Try again" });
+		await userEvent.type(screen.getByRole("combobox", { name: "Add people by email or team" }), "maya@acme.co{Enter}");
+		// Try again while the invitation is still open: the read waits for it.
+		await userEvent.click(retry);
+		expect(grants).toHaveBeenCalledOnce();
+		release();
+		await waitFor(() => expect(grants).toHaveBeenCalledTimes(2));
+		const people = await screen.findByRole("region", { name: "People with access" });
+		expect(await within(people).findByText("maya@acme.co")).toBeTruthy();
+		expect(screen.queryByText("Only you")).toBeNull();
+	});
+
 	it("shares a new link with the teams and workspace set up before Publish, once it is live", async () => {
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue(inspection);
 		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue(links);

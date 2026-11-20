@@ -733,9 +733,10 @@ function SharePanel({
 	// number. A full list (a read, or an invite's answer) is shown only if
 	// nothing started after it, so an older answer never replaces a newer one.
 	const grantsSeq = useRef(0);
-	// The grant change last queued (an invite or a removal); it never rejects
-	// (sendSubjects and sendRemoval answer false). Each change runs after the
-	// one before it settled, so its answer is read against the list it changed.
+	// The grant change or read last queued (an invite, a removal, or a read of
+	// the list); it never rejects (each answers false or catches). Each runs
+	// after the one before it settled, so a read sees every change before it
+	// and a change's answer is read against the list it changed.
 	const grantChangesInFlight = useRef<Promise<unknown>>(Promise.resolve());
 	const queueGrantChange = (run: () => Promise<boolean>): Promise<boolean> => {
 		const sent = grantChangesInFlight.current.then(run);
@@ -751,21 +752,24 @@ function SharePanel({
 		actions.current += 1;
 	};
 	const loadGrants = (share: CloudShareLink) => {
-		const seq = ++grantsSeq.current;
 		setPhase((current) => current.kind === "published" && current.share.id === share.id ? { ...current, grantsError: undefined } : current);
-		// Whether the answer is still the newest is decided when it lands: a
-		// state updater runs later, after a change queued behind it took a number.
-		void aoBridge.cloudShare.grants(baseUrl, share.id)
-			.then((grants) => {
-				const newest = seq === grantsSeq.current;
-				setPhase((current) => current.kind === "published" && current.share.id === share.id && newest
-					? { ...current, grants, grantsError: undefined } : current);
-			})
-			.catch(() => {
-				const newest = seq === grantsSeq.current;
-				setPhase((current) => current.kind === "published" && current.share.id === share.id && newest
-					? { ...current, grantsError: true } : current);
-			});
+		// Queued behind pending invites and removals: a read sent beside one
+		// (Try again after a failed read) could answer with the list from before
+		// it, and its newer number would discard the change's answer.
+		void queueGrantChange(async () => {
+			const seq = ++grantsSeq.current;
+			let read: { grants?: CloudShareGrants; grantsError?: true };
+			try {
+				read = { grants: await aoBridge.cloudShare.grants(baseUrl, share.id), grantsError: undefined };
+			} catch {
+				read = { grantsError: true };
+			}
+			// Whether the answer is still the newest is decided when it lands: a
+			// state updater runs later, after a change queued behind it took a number.
+			const newest = seq === grantsSeq.current;
+			setPhase((current) => current.kind === "published" && current.share.id === share.id && newest ? { ...current, ...read } : current);
+			return true;
+		});
 	};
 	const showPublished = (share: CloudShareLink, extra: Partial<Extract<Phase, { kind: "published" }>> = {}) => {
 		setPhase({ kind: "published", share, ...extra });
