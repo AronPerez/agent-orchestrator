@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DecisionBoardModel } from "../lib/decision-board";
 import {
 	foldAllDecisions,
@@ -32,12 +32,14 @@ export function useDecisionFolds(model: DecisionBoardModel, selectedId?: string)
 		if (preferences !== loaded.current) writeDecisionFolds(preferences);
 	}, [preferences]);
 
-	// Opening a call always shows it. This follows the selection (and the call's
-	// place on the board), not the fold state, so folding its group afterwards
-	// stays the person's choice.
+	// The selected call is always shown. This follows the selection, the call's
+	// place on the board and its state, not the fold state: a call that finishes
+	// can leave its stream with nothing open, which folds by default, so the
+	// state change reveals it again; folding the group afterwards stays the
+	// person's choice. Before paint, so the group never flashes folded.
 	const at = selectedId ? model.cardById.get(selectedId) : undefined;
-	const place = at ? `${at.bandKey}\n${at.rowKey}` : undefined;
-	useEffect(() => {
+	const place = at ? `${at.bandKey}\n${at.rowKey}\n${at.card.lane}` : undefined;
+	useLayoutEffect(() => {
 		if (!selectedId || place === undefined) return;
 		setPreferences((current) => revealDecisionCard(latestModel.current, current, selectedId));
 	}, [selectedId, place]);

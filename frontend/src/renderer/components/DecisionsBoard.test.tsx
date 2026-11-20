@@ -160,6 +160,24 @@ describe("DecisionsBoard", () => {
 		expect(screen.getByRole("button", { name: /^Question need/ })).toHaveAttribute("aria-current", "true");
 	});
 
+	it("keeps the selected call on screen when it finishes and was the last open call in its stream", async () => {
+		const { rerender, onSelect } = renderBoard({ selectedId: "need" });
+		const finished = calls.map((item) => item.id === "need"
+			? { ...item, state: "done" as const, stateLabel: "Done", chosenLabel: "Ship", outcome: "Shipped", answeredAt: "2026-11-18T11:30:00Z", outcomeAt: "2026-11-18T11:45:00Z" }
+			: item);
+		rerender(<DecisionsBoard model={buildDecisionBoard(finished)} now={NOW} onSelect={onSelect} selectedId="need" />);
+		const row = screen.getByRole("group", { name: "Power BI and Nango" });
+		const toggle = within(row).getByRole("button", { name: /Power BI and Nango/ });
+		expect(toggle).toHaveAttribute("aria-expanded", "true");
+		expect(screen.getByRole("button", { name: /^Question need/ })).toHaveAttribute("aria-current", "true");
+
+		// Folding it afterwards is still the person's choice, and a later refresh leaves it folded.
+		await userEvent.click(toggle);
+		expect(toggle).toHaveAttribute("aria-expanded", "false");
+		rerender(<DecisionsBoard model={buildDecisionBoard(finished)} now={NOW + 60_000} onSelect={onSelect} selectedId="need" />);
+		expect(within(screen.getByRole("group", { name: "Power BI and Nango" })).getByRole("button", { name: /Power BI and Nango/ })).toHaveAttribute("aria-expanded", "false");
+	});
+
 	describe("done cap", () => {
 		const finished = [1, 2, 3, 4, 5].map((minute) => call({
 			id: `fin${minute}`, projectId: "cloud", projectName: "skyvern-cloud", state: "done", outcome: "Shipped", outcomeAt: `2026-11-18T11:0${minute}:00Z`,
