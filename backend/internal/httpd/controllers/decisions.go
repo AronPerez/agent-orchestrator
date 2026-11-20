@@ -307,6 +307,9 @@ func (c *DecisionsController) answer(w http.ResponseWriter, r *http.Request) {
 	}
 	call, err := c.Svc.Answer(r.Context(), decisionActor(r), chi.URLParam(r, "id"), decisionsvc.AnswerInput{
 		Choice: req.Choice, Option: req.Option, Note: req.Note,
+		// A header, not a body field: daemons that predate it ignore an unknown
+		// header but would reject an unknown body field.
+		IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")),
 	})
 	if err != nil {
 		envelope.WriteErrorWithCode(w, r, err, "DECISION_ANSWER_FAILED", "Unable to answer decision")

@@ -181,6 +181,9 @@ type AnswerInput struct {
 	Choice string
 	Option int
 	Note   string
+	// IdempotencyKey, when set, makes a repeat of the same attempt return the
+	// answer already recorded instead of appending another.
+	IdempotencyKey string
 }
 
 // OutcomeInput records the result of carrying out a decision.
@@ -479,6 +482,14 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	if actor.Session != "" {
 		return domain.DecisionCall{}, personOnly()
 	}
+	// Holding the call's lock, a retry of an attempt the daemon already recorded
+	// (its response was lost) sees that entry and returns the call as it is.
+	if recorded, err := s.answeredWithKey(ctx, call.ID, input.IdempotencyKey); err != nil || recorded {
+		if err != nil {
+			return domain.DecisionCall{}, err
+		}
+		return call, nil
+	}
 	if call.Decided != nil {
 		return domain.DecisionCall{}, apierr.Conflict("DECISION_NOT_A_QUESTION", "This is a decision made for you, not a question. Overrule it instead.", nil)
 	}
@@ -488,7 +499,9 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	if call.State != domain.DecisionStateNeedsYou && call.State != domain.DecisionStateInProgress && call.State != domain.DecisionStateDismissed {
 		return domain.DecisionCall{}, wrongState(call, `This call is closed. Its state is "%s".`)
 	}
-	payload := domain.DecisionAnsweredPayload{Choice: input.Choice, Option: input.Option, Note: strings.TrimSpace(input.Note)}
+	payload := domain.DecisionAnsweredPayload{
+		Choice: input.Choice, Option: input.Option, Note: strings.TrimSpace(input.Note), IdempotencyKey: input.IdempotencyKey,
+	}
 	if err := domain.ValidateDecisionAnswer(len(call.Raised.Options), payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
@@ -496,6 +509,28 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 		return domain.DecisionCall{}, err
 	}
 	return s.append(ctx, actor, call.ID, domain.DecisionKindAnswered, payload)
+}
+
+// answeredWithKey reports whether the call already has an answer recorded
+// under this idempotency key. An empty key never matches.
+func (s *Service) answeredWithKey(ctx context.Context, callID, key string) (bool, error) {
+	if key == "" {
+		return false, nil
+	}
+	entries, err := s.store.ListDecisionEntries(ctx, callID)
+	if err != nil {
+		return false, fmt.Errorf("read decision entries: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.Kind != domain.DecisionKindAnswered {
+			continue
+		}
+		var payload domain.DecisionAnsweredPayload
+		if json.Unmarshal(entry.Payload, &payload) == nil && payload.IdempotencyKey == key {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Dismiss records that the person declined to choose from a pending call.

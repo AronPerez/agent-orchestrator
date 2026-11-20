@@ -3938,6 +3938,18 @@ paths:
         schema:
           description: Call identifier.
           type: string
+      - description: Client-chosen key for one answer attempt, reused when retrying
+          a send whose result was not seen. A repeat with the same key on the same
+          call returns the answer already recorded instead of adding another. At most
+          128 characters.
+        in: header
+        name: Idempotency-Key
+        schema:
+          description: Client-chosen key for one answer attempt, reused when retrying
+            a send whose result was not seen. A repeat with the same key on the same
+            call returns the answer already recorded instead of adding another. At
+            most 128 characters.
+          type: string
       requestBody:
         content:
           application/json:

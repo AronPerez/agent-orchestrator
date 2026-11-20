@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -29,6 +30,9 @@ const (
 	MaxDecisionOutcome     = 300
 	MaxDecisionWhy         = 300
 	MaxDecisionUndo        = 300
+	// MaxDecisionIdempotencyKey bounds the client-chosen key that makes a
+	// retried answer safe to send again.
+	MaxDecisionIdempotencyKey = 128
 	// PlanFirstDecisionReference identifies the one ledger call that can release
 	// a session's plan-first implementation gate.
 	PlanFirstDecisionReference = "plan-first"
@@ -209,6 +213,10 @@ type DecisionAnsweredPayload struct {
 	Choice string `json:"choice"`
 	Option int    `json:"option,omitempty"`
 	Note   string `json:"note,omitempty"`
+	// IdempotencyKey is chosen by the person's client for one answer attempt
+	// and reused when it retries a send whose result it could not see. A
+	// second answer with the same key on the same call is not appended.
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
 
 // DecisionDismissedPayload records why a person dismissed a call.
@@ -377,6 +385,9 @@ func ValidateDecisionAnswer(optionCount int, p DecisionAnsweredPayload) error {
 	}
 	if p.Choice == DecisionChoiceOther && strings.TrimSpace(p.Note) == "" {
 		return decisionRule("note_required", "\"Something else\" needs a note that says what to do.")
+	}
+	if len(p.IdempotencyKey) > MaxDecisionIdempotencyKey || strings.IndexFunc(p.IdempotencyKey, unicode.IsControl) >= 0 {
+		return decisionRule("idempotency_key_invalid", fmt.Sprintf("The answer's idempotency key must be at most %d characters on one line.", MaxDecisionIdempotencyKey))
 	}
 	return ValidateDecisionNote(p.Note)
 }

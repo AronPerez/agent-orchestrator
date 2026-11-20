@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -418,5 +420,147 @@ func assertDecisionAPIError(t *testing.T, err error, kind apierr.Kind, code, rul
 	}
 	if message != "" && apiError.Message != message {
 		t.Fatalf("api error message = %q, want %q", apiError.Message, message)
+	}
+}
+
+func answeredEntries(entries []domain.DecisionEntry, callID string) int {
+	n := 0
+	for _, entry := range entries {
+		if entry.CallID == callID && entry.Kind == domain.DecisionKindAnswered {
+			n++
+		}
+	}
+	return n
+}
+
+func TestAnswerWithTheSameIdempotencyKeyIsRecordedOnce(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	call := raiseDecision(t, fixture, fixture.w1)
+	person := Actor{Surface: domain.RequestSurfaceDesktop}
+
+	first, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 2, IdempotencyKey: "ans_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The retry of an uncertain send carries the same key; even with a different
+	// pick it returns what was recorded instead of appending a second answer.
+	again, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 1, IdempotencyKey: "ans_1"})
+	if err != nil {
+		t.Fatalf("repeat with the same key: %v", err)
+	}
+	if again.Option != 2 || again.StandingEntryID != first.StandingEntryID {
+		t.Fatalf("repeat returned %+v, want the first answer %+v", again, first)
+	}
+	if n := answeredEntries(*fixture.appended, call.ID); n != 1 {
+		t.Fatalf("answered entries = %d, want 1", n)
+	}
+
+	// A new key (a new deliberate answer) and a keyless answer still append.
+	if _, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 1, IdempotencyKey: "ans_2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if n := answeredEntries(*fixture.appended, call.ID); n != 3 {
+		t.Fatalf("answered entries = %d, want 3", n)
+	}
+}
+
+func TestAnswerIdempotencyKeyIsScopedToItsCall(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	person := Actor{Surface: domain.RequestSurfaceDesktop}
+	first := raiseDecision(t, fixture, fixture.w1)
+	second := raiseDecision(t, fixture, fixture.w2)
+	for _, call := range []domain.DecisionCall{first, second} {
+		if _, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 1, IdempotencyKey: "same"}); err != nil {
+			t.Fatal(err)
+		}
+		if n := answeredEntries(*fixture.appended, call.ID); n != 1 {
+			t.Fatalf("call %s answered entries = %d, want 1", call.ID, n)
+		}
+	}
+}
+
+func TestAnswerRejectsAnUnusableIdempotencyKey(t *testing.T) {
+	fixture := newDecisionService(t)
+	call := raiseDecision(t, fixture, fixture.w1)
+	for _, key := range []string{strings.Repeat("k", domain.MaxDecisionIdempotencyKey+1), "two\nlines"} {
+		_, err := fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceDesktop}, call.ID,
+			AnswerInput{Choice: domain.DecisionChoiceOption, Option: 1, IdempotencyKey: key})
+		if apiCode(err) != "DECISION_INVALID" {
+			t.Fatalf("key %q: error = %v", key, err)
+		}
+	}
+}
+
+// stallingAnswerStore holds the first answered append until released, like a
+// daemon still recording an answer after the client's request timed out.
+type stallingAnswerStore struct {
+	Store
+	appending chan struct{}
+	release   chan struct{}
+	once      sync.Once
+}
+
+func (s *stallingAnswerStore) AppendDecisionEntry(ctx context.Context, entry domain.DecisionEntry, at time.Time) (domain.DecisionEntry, domain.DecisionCall, error) {
+	if entry.Kind == domain.DecisionKindAnswered {
+		s.once.Do(func() {
+			close(s.appending)
+			<-s.release
+		})
+	}
+	return s.Store.AppendDecisionEntry(ctx, entry, at)
+}
+
+// A proxy can time out while the daemon is still recording the answer. A read
+// does not take the call's lock, so it can still show Needs you; the person's
+// retry with the same key must then wait for the original and return it.
+func TestAnswerRetryAfterADelayedCommitReturnsTheOriginal(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	call := raiseDecision(t, fixture, fixture.w1)
+	stalled := &stallingAnswerStore{Store: fixture.store, appending: make(chan struct{}), release: make(chan struct{})}
+	service := New(Deps{Store: stalled, HostID: "h_a", MachineLabel: func() string { return "mac-mini" }})
+	person := Actor{Surface: domain.RequestSurfaceDesktop}
+	answer := AnswerInput{Choice: domain.DecisionChoiceOption, Option: 2, IdempotencyKey: "ans_delayed"}
+
+	original := make(chan error, 1)
+	go func() {
+		_, err := service.Answer(ctx, person, call.ID, answer)
+		original <- err
+	}()
+	<-stalled.appending
+
+	// The client's request timed out; its re-read still sees the call waiting.
+	seen, ok, err := fixture.store.GetDecisionCall(ctx, call.ID)
+	if err != nil || !ok || seen.State != domain.DecisionStateNeedsYou {
+		t.Fatalf("read during the stalled commit = %+v ok=%v err=%v", seen, ok, err)
+	}
+	retried := make(chan domain.DecisionCall, 1)
+	retryErr := make(chan error, 1)
+	go func() {
+		got, err := service.Answer(ctx, person, call.ID, answer)
+		retried <- got
+		retryErr <- err
+	}()
+	close(stalled.release)
+	if err := <-original; err != nil {
+		t.Fatalf("original answer: %v", err)
+	}
+	if err := <-retryErr; err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if got := <-retried; got.State != domain.DecisionStateInProgress || got.Option != 2 {
+		t.Fatalf("retry returned %+v", got)
+	}
+	entries, err := fixture.store.ListDecisionEntries(ctx, call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := answeredEntries(entries, call.ID); n != 1 {
+		t.Fatalf("answered entries = %d, want 1 (the retry must not append)", n)
 	}
 }
