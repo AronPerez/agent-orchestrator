@@ -171,7 +171,7 @@ export function attachAppShortcuts(
 		const { id, channel, payload } = match;
 		// Contextual actions are owned by the focused surface. Let the renderer
 		// inspect dialogs, editors, focus and the live selection before claiming them.
-		if (id === "find" || id === "find-in-chat" || id === "add-selection-to-chat") return;
+		if (id === "find-in-chat" || id === "add-selection-to-chat") return;
 		if (!isMac && shortcutYieldsToTerminal(id, chord) && isTerminalFocused()) return;
 		if (!shouldHandle(id, chord)) {
 			// Browser context owns these chords. Consume them so a racing shell

@@ -151,9 +151,17 @@ Status is derived from durable runtime, PR, CI, and review facts. The renderer c
 
 Use one fixed status slot where status belongs. Prefer an icon/glyph over a prose badge.
 
-1. If the session is actively working, show the working spinner.
+1. If the session is actively working, show the working spinner in `--color-status-working`.
 2. Otherwise, if a PR is relevant, show the PR glyph tinted by its actionable state.
 3. Otherwise, show a dot: amber/red for attention, muted for idle/complete.
+
+Sidebar session rows apply these rules with distinct shapes, so colour is never the only signal:
+
+- Working: blue spinner (`--color-status-working`). The title sweep is tinted toward the same blue at low strength (40% mixed into the foreground). The open row keeps the spinner without the sweep, and reduced motion stops both.
+- Waiting on the user, CI failing, merge conflicts, changes requested: red alert icon. A person's review next: orange alert icon.
+- Ready to merge: green pull-request icon. Merged: dimmed purple merge icon.
+- A session that changed since the user last opened it: filled muted dot. Once opened: hollow muted ring. The dots stay grey so the sidebar's colour goes to working and to what needs the user.
+- A collapsed project shows its strongest state, in this order: a red alert in place of its icon when any session waits on the user; otherwise its icon keeps the orchestrator button's corner dot, breathing muted while any agent works and solid accent for an unopened finished turn.
 
 Do not show multiple competing status chips on a session card or sidebar row. Text labels are allowed when needed for accessibility, an empty state, an inspector summary, or a decision the user must make.
 
@@ -331,6 +339,9 @@ Motion is functional and modest.
 - Sidebar and route shell may use the established ~280ms settle transition where layout must remain spatially legible.
 - Use ease-out for entry, ease-in for exit, and ease-in-out for positional movement.
 - The working spinner/pulse may animate to show liveness. Do not animate text, metrics, or layout merely to make the interface feel busy.
+- Animations that loop or run while the user types animate only `transform` or `opacity`. Chromium runs those on the compositor; any other property (`background-position`, `mask-position`, `width`, `top`, `box-shadow`, color) restyles and repaints the element on the main thread every frame and delays input. `will-change` does not change that.
+- For a light sweep across text, copy `.sidebar-working-shimmer` in `styles.css`: a masked copy of the text moved with `transform`. Do not add new uses of `.chat-working-shimmer`, which animates `background-position`.
+- Check a new looping animation in a DevTools performance trace: while the page is otherwise idle it should show no Recalculate Style or Paint on every frame.
 - Respect reduced-motion preferences: remove nonessential transforms and reduce transitions to immediate state changes.
 
 ## 11. Platform and responsive behavior
@@ -449,3 +460,5 @@ Approve only when the answer to every applicable check is yes. Otherwise classif
 | 2026-11-17 | The fleet overview is a quiet expandable project → machine → session tree, rendered as compact shared-list rows with indentation, status text, and rollups on ancestors; it is not a node-card canvas. Cross-machine relationship lines remain a later enhancement over stable tree identities. | A dense list fits the existing shell, keeps unreachable machines and human-attention branches scannable, and supports keyboard navigation and narrow windows without inventing a second dashboard. Stable identities let feature 10 add trusted cross-machine edges without this view guessing that same-named projects are related. |
 | 2026-11-18 | A cross-machine spawn edge draws the child nested under its parent's row, in the parent's machine branch, with muted "On <machine>" status text; a child whose parent's machine is unknown or not connected stays a root in its own branch with muted "Parent on an unknown machine" or "Parent's machine not connected" text. Edges resolve only by exact (machine, session) address. No connector graphics or extra chips. | Nesting is the tree's existing relationship line, so the edge needs no second visual language; the status-text slot already carries lineage state. Cached rows from a disconnected machine may be stale, so edges are not drawn into them, and a bare session ID can collide across machines. |
 | 2026-11-19 | Decision sync freshness lives in the Decisions page footer as one muted line: "Decisions on this computer only · Link machines in Settings › Remote hosts" with no links, otherwise "In sync with <machines>" and "<machine> last synced <time>" joined by " · ". Problems (revoked, needs a newer Orchestrator, not answering, shared identity, clock ahead) come first in review/caution text. A call owned by another machine says "Not delivered yet · waiting for <machine>" (or "… <machine> last heard <time>" when stale) on its card, and "On <machine>. Answers reach it when it syncs." under the panel heading. Each saved host in Settings › Remote hosts gets one "Sync decisions" switch row with the peer's state as muted text beneath; a host never connected shows the switch disabled with why. | Freshness is a property of the whole ledger, so it belongs to the page, not to each card; color is kept for states the person must act on. The switch sits with the saved host it uses, so linking never asks for a credential twice. |
+| 2026-11-18 | Looping animations animate only `transform` or `opacity`; working sidebar titles sweep a masked copy of the title with `transform` | The old `background-position` sweep repainted every working row each frame and delayed typing while replies streamed (ADEMark A8 median 50.1 to 35.4 ms). |
+| 2026-11-19 | Sidebar activity carries colour: the working spinner is blue, the working title sweep is tinted blue at low strength, the unread dot stays filled grey, and a collapsed project keeps its icon with the orchestrator button's corner dot for working and unopened finished turns (the red attention alert still replaces it) | Working and finished turns were both grey, so a long list had to be read row by row; the board already used the working blue. A green unread dot was tried and dropped: it competed with ready-to-merge green and made every changed row loud. Swapping a project's avatar for a spinner or dot hid which project it was; the corner dot already means "new reply" on the orchestrator button. |

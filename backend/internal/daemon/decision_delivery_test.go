@@ -57,7 +57,7 @@ func TestDecisionMessengerSendsAsThePersonAndNamesEndedSessions(t *testing.T) {
 	}
 
 	sender.err = fmt.Errorf("send failed: %w", sessionmanager.ErrDeliveryUnconfirmed)
-	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", "dent-1", at); !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) || errors.Is(err, decisionsvc.ErrSessionEnded) {
-		t.Fatalf("DeliverAsPerson(unconfirmed) = %v, want ambiguous ErrAgentDeliveryUnconfirmed", err)
+	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", "dent-1", at); !errors.Is(err, ports.ErrDeliveryUnconfirmed) || errors.Is(err, decisionsvc.ErrSessionEnded) {
+		t.Fatalf("DeliverAsPerson(unconfirmed) = %v, want ambiguous ErrDeliveryUnconfirmed", err)
 	}
 }

@@ -121,7 +121,9 @@ func TestTimestampRepairTriggerInventory(t *testing.T) {
 	// which PreserveRepresentation removes; see TestRepairDoesNotPublishDecisionEvents.
 	// 2026-11-19: decision_sync_{peers,conflicts}_cdc_* write change_log the same
 	// way; see TestRepairDoesNotPublishDecisionSyncEvents.
-	const reviewed = "5716500910a8198bdeb5d7e97fec87175e45b72d1ff2e54a708e8254e1b5a27c"
+	// review_run_worker_notice_pending only fires on status updates. Timestamp
+	// repair preserves notice state (TestTimestampRepairPreservesReviewDoneNotices).
+	const reviewed = "4e0fdfc14b058cba7052468cc2b365ef55e13dea3869ed894608e6cb3706d393"
 	if got := fmt.Sprintf("%x", hash.Sum(nil)); got != reviewed {
 		t.Fatalf("timestamp trigger inventory changed; review preservation logic before updating fingerprint: %s", got)
 	}

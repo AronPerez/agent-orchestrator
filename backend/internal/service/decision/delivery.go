@@ -373,7 +373,7 @@ func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCal
 			revoke()
 		}
 		return !recorded, true
-	case errors.Is(err, ports.ErrAgentDeliveryUnconfirmed):
+	case errors.Is(err, ports.ErrDeliveryUnconfirmed):
 		// The message reached the agent surface, so the fallback may already be
 		// acting on it even though AO missed the acceptance signal. Retain its
 		// answer-scoped authority while the delivery remains pending for retry.

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { aoBridge } from "../lib/bridge";
 import { connectHost, connectedHosts, disconnectHost } from "../lib/host-clients";
 import { useCloudSession } from "../lib/cloud-session";
+import { publishSavedRemoteHosts } from "../lib/saved-remote-hosts";
 import { useSettings } from "./useSettings";
 import { useUiStore } from "../stores/ui-store";
 
@@ -55,6 +56,15 @@ export type RemoteHost = {
 
 type SavedHost = Pick<RemoteHost, "hostId" | "url">;
 
+type RefreshOptions = {
+	/**
+	 * A background re-sync: a machine already known to be offline stays shown as
+	 * offline, with its reason, while it is checked again, instead of flickering
+	 * to "connecting" every sync. A refresh someone asked for shows "connecting".
+	 */
+	quiet?: boolean;
+};
+
 /**
  * listed: hosts holds the saved list, not the empty one before the first read.
  * settled: the saved host list has loaded, or remote hosts are disabled.
@@ -63,7 +73,7 @@ type SavedHost = Pick<RemoteHost, "hostId" | "url">;
  * instead of restating the enable rule, so the
  * two can never drift apart.
  */
-export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; settled: boolean; refresh: () => Promise<void>; retryNow: () => Promise<void> } {
+export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; settled: boolean; refresh: (options?: RefreshOptions) => Promise<void>; retryNow: () => Promise<void> } {
 	const remoteHostsEnabled = useUiStore((state) => state.remoteHosts);
 	const { status, session } = useCloudSession();
 	const accountId = status === "authenticated" ? session?.user.id ?? "" : "";
@@ -119,7 +129,7 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; settle
 		return attempt(host, refreshGeneration.current, accountRef.current).finally(() => inFlight.current.delete(host.hostId));
 	}, [attempt]);
 
-	const refresh = useCallback(async () => {
+	const refresh = useCallback(async ({ quiet = false }: RefreshOptions = {}) => {
 		if (!enabledRef.current) return;
 		const generation = ++refreshGeneration.current;
 		const current = () => enabledRef.current && accountRef.current === accountId && refreshGeneration.current === generation;
@@ -136,10 +146,14 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; settle
 		if (!current()) return;
 		savedHostUrls.current = new Map(saved.map((host) => [host.hostId, host.url]));
 		setListed(true);
-		setHosts((previous) => saved.map((host) => ({
-			...host,
-			status: previous.some((entry) => entry.hostId === host.hostId && entry.url === host.url && entry.status === "connected") ? "connected" : "connecting",
-		})));
+		setHosts((previous) => saved.map((host): RemoteHost => {
+			const before = previous.find((entry) => entry.hostId === host.hostId && entry.url === host.url);
+			if (before?.status === "connected") return { ...host, status: "connected" };
+			if (quiet && before?.status === "offline") {
+				return { ...host, status: "offline", ...(before.failureReason ? { failureReason: before.failureReason } : {}) };
+			}
+			return { ...host, status: "connecting" };
+		}));
 		await Promise.all(saved.map((host) => attempt(host, generation, accountId)));
 	}, [attempt, cloudBaseUrl, accountId]);
 
@@ -209,12 +223,17 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; settle
 	}, [enabled, refresh]);
 	useEffect(() => {
 		if (!enabled || !accountId || !cloudBaseUrl) return;
-		const timer = setInterval(() => { if (!document.hidden) void refresh(); }, ACCOUNT_SYNC_MS);
+		const timer = setInterval(() => { if (!document.hidden) void refresh({ quiet: true }); }, ACCOUNT_SYNC_MS);
 		return () => clearInterval(timer);
 	}, [enabled, accountId, cloudBaseUrl, refresh]);
 
+	const visible = enabled ? hosts : NO_HOSTS;
+	// Searching across machines reads which saved machines exist and which are
+	// down from this snapshot, without starting connections of its own.
+	useEffect(() => publishSavedRemoteHosts(visible), [visible]);
+
 	return {
-		hosts: enabled ? hosts : NO_HOSTS,
+		hosts: visible,
 		listed: enabled && listed,
 		settled: !enabled || listed,
 		refresh,

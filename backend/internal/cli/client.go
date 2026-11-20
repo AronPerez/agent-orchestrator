@@ -162,18 +162,18 @@ func (c *commandContext) postLoopbackJSON(ctx context.Context, path string, body
 
 // daemonBase returns the base URL every daemon call targets. With a remote
 // target it is the given URL; otherwise it is the loopback daemon discovered
-// through the run-file, gated on a live local PID as before.
-func (c *commandContext) daemonBase() (string, error) {
+// through the run-file, gated on a live local daemon (daemonAlive).
+func (c *commandContext) daemonBase(ctx context.Context) (string, error) {
 	if c.remote != nil {
 		return c.remote.baseURL, nil
 	}
 	if c.pinnedBase != "" {
 		return c.pinnedBase, nil
 	}
-	return c.localDaemonBase()
+	return c.localDaemonBase(ctx)
 }
 
-func (c *commandContext) localDaemonBase() (string, error) {
+func (c *commandContext) localDaemonBase(ctx context.Context) (string, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return "", err
@@ -185,7 +185,7 @@ func (c *commandContext) localDaemonBase() (string, error) {
 	if info == nil {
 		return "", daemonUnavailableError{message: "AO daemon is not running — start it with `ao start`", cause: errDaemonNotRunning}
 	}
-	if !c.deps.ProcessAlive(info.PID) {
+	if !c.daemonAlive(ctx, info) {
 		return "", daemonUnavailableError{message: fmt.Sprintf("AO daemon is not running (stale run-file at %s) — start it with `ao start`", cfg.RunFilePath), cause: errDaemonNotRunning}
 	}
 	return fmt.Sprintf("http://%s:%d", config.LoopbackHost, info.Port), nil
@@ -211,7 +211,7 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	headers map[string]string,
 	timeout time.Duration,
 ) error {
-	base, err := c.daemonBase()
+	base, err := c.daemonBase(ctx)
 	if err != nil {
 		return err
 	}
