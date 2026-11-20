@@ -114,6 +114,10 @@ func (r *countingRemote) Push(context.Context, decisionsync.PushRequest) (decisi
 	return decisionsync.PushResponse{}, nil
 }
 
+func (r *countingRemote) OriginIDs(context.Context, decisionsync.OriginIDsRequest) (decisionsync.OriginIDsResponse, error) {
+	return decisionsync.OriginIDsResponse{}, nil
+}
+
 type staticLinks []decisionsync.StoredPeer
 
 func (l staticLinks) Linked() []decisionsync.StoredPeer { return l }
@@ -400,6 +404,10 @@ func (w *waitTracker) Exchange(ctx context.Context, req decisionsync.ExchangeReq
 
 func (w *waitTracker) Push(ctx context.Context, req decisionsync.PushRequest) (decisionsync.PushResponse, error) {
 	return w.inner.Push(ctx, req)
+}
+
+func (w *waitTracker) OriginIDs(ctx context.Context, req decisionsync.OriginIDsRequest) (decisionsync.OriginIDsResponse, error) {
+	return w.inner.OriginIDs(ctx, req)
 }
 
 // initiatorPair is A, which links to B, and B, which serves with waits that

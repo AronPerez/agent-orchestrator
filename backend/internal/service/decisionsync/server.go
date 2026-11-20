@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -56,6 +57,7 @@ type Server struct {
 
 	stopOnce sync.Once
 	stop     chan struct{}
+	paused   atomic.Bool
 }
 
 type inboundMark struct {
@@ -124,7 +126,15 @@ func (s *Server) recordInbound(ctx context.Context, peerHostID, label string, pr
 	}
 }
 
+// Pause refuses every exchange, push and id list from now on. An identity
+// repair stages itself this way: until the restart that finishes it, no peer
+// may receive this machine's old identity again.
+func (s *Server) Pause() { s.paused.Store(true) }
+
 func (s *Server) checkPeer(peerHostID, bodyHostID string) error {
+	if s.paused.Load() {
+		return ErrSyncPaused
+	}
 	if peerHostID == s.deps.HostID {
 		return ErrSameIdentity
 	}
@@ -132,6 +142,28 @@ func (s *Server) checkPeer(peerHostID, bodyHostID string) error {
 		return ErrPeerIdentityMismatch
 	}
 	return nil
+}
+
+// OriginIDs returns which entry this ledger holds at each sequence of an
+// origin, a page at a time. It serves a quarantined origin too: ids carry no
+// payload, and they are how a repairing machine finds where it forked.
+func (s *Server) OriginIDs(ctx context.Context, peerHostID string, req OriginIDsRequest) (OriginIDsResponse, error) {
+	if err := s.checkPeer(peerHostID, req.HostID); err != nil {
+		return OriginIDsResponse{}, err
+	}
+	if req.Origin == "" || req.From < 1 {
+		return OriginIDsResponse{}, ErrOriginIDsInvalid
+	}
+	limit := min(max(req.Limit, 1), MaxOriginIDsPage)
+	ids, err := s.deps.Ledger.DecisionOriginIDs(ctx, req.Origin, req.From, limit+1)
+	if err != nil {
+		return OriginIDsResponse{}, err
+	}
+	more := len(ids) > limit
+	if more {
+		ids = ids[:limit]
+	}
+	return OriginIDsResponse{HostID: s.deps.HostID, IDs: ids, More: more}, nil
 }
 
 // Exchange returns one page of the entries the peer lacks and this ledger's

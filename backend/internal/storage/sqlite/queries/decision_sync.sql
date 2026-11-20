@@ -113,3 +113,43 @@ JOIN (
     GROUP BY origin
 ) AS latest ON latest.origin = calls.origin AND latest.newest = calls.raised_at
 ORDER BY calls.origin;
+
+-- name: ListDecisionOriginIDs :many
+SELECT origin_seq, id FROM decision_entries
+WHERE origin = sqlc.arg(origin) AND origin_seq >= sqlc.arg(from_seq)
+ORDER BY origin_seq
+LIMIT sqlc.arg(result_limit);
+
+-- name: ListDecisionRepairEntries :many
+SELECT * FROM decision_entries
+WHERE kind = 'identity_repaired'
+ORDER BY origin, origin_seq;
+
+-- name: ArchiveDecisionEntry :execrows
+-- Copies the row byte for byte; a row archived before stays as it was.
+INSERT OR IGNORE INTO decision_entries_forked (
+    id, origin, origin_seq, stamp_wall, stamp_counter, call_id, kind, payload,
+    written_at, author_kind, author_surface, author_session, archived_at, repair_id
+)
+SELECT id, origin, origin_seq, stamp_wall, stamp_counter, call_id, kind, payload,
+       written_at, author_kind, author_surface, author_session,
+       sqlc.arg(archived_at), sqlc.arg(repair_id)
+FROM decision_entries
+WHERE decision_entries.id = sqlc.arg(id);
+
+-- name: RemoveArchivedDecisionEntry :execrows
+-- Only a row the archive already holds leaves the log.
+DELETE FROM decision_entries
+WHERE decision_entries.id = sqlc.arg(id)
+  AND EXISTS (SELECT 1 FROM decision_entries_forked AS f WHERE f.id = decision_entries.id);
+
+-- name: ListArchivedDecisionEntries :many
+SELECT * FROM decision_entries_forked
+WHERE repair_id = ?
+ORDER BY origin, origin_seq;
+
+-- name: DeleteDecisionSyncConflictsForOrigin :execrows
+DELETE FROM decision_sync_conflicts WHERE origin = ?;
+
+-- name: DeleteDecisionCall :execrows
+DELETE FROM decision_calls WHERE call_id = ?;

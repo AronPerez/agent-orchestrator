@@ -3737,6 +3737,30 @@ type DecisionSyncExchangeResponse struct {
 	ServerTime   time.Time                   `json:"serverTime"`
 }
 
+// DecisionSyncOriginIDsRequest asks which entry the peer holds at each
+// sequence of one origin. Identity repair uses it to find where a copied
+// identity forked; it carries no payloads.
+type DecisionSyncOriginIDsRequest struct {
+	Protocol int    `json:"protocol"`
+	HostID   string `json:"hostId" description:"The sender's host id; must match the credential's peer."`
+	Origin   string `json:"origin"`
+	From     int64  `json:"from" description:"First sequence to list; at least 1."`
+	Limit    int    `json:"limit,omitempty" description:"At most this many pairs (1 to 1000)."`
+}
+
+// DecisionSyncOriginID is the entry id a ledger holds at one sequence.
+type DecisionSyncOriginID struct {
+	Seq int64  `json:"seq"`
+	ID  string `json:"id"`
+}
+
+// DecisionSyncOriginIDsResponse is one page of (sequence, id) pairs.
+type DecisionSyncOriginIDsResponse struct {
+	HostID string                 `json:"hostId"`
+	IDs    []DecisionSyncOriginID `json:"ids"`
+	More   bool                   `json:"more"`
+}
+
 // DecisionSyncPushRequest sends the peer one page of entries it lacks.
 type DecisionSyncPushRequest struct {
 	Protocol int                         `json:"protocol"`

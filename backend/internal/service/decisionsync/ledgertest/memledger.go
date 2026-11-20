@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -19,11 +20,24 @@ import (
 // speak for the real store as long as the conformance suite passes on both.
 type MemLedger struct {
 	HostID string
+	// NoRepairs makes this ledger behave like a build without identity
+	// repair: repair entries are stored like any unknown kind, and nothing
+	// is skipped or moved out because of them.
+	NoRepairs bool
 
 	mu        sync.Mutex
 	byID      map[string]domain.DecisionEntry
 	byOrigin  map[string]map[int64]domain.DecisionEntry
 	conflicts []domain.DecisionSyncConflict
+	// archived holds entries an identity repair moved out of the log, by id.
+	archived map[string]ArchivedEntry
+}
+
+// ArchivedEntry is an entry an identity repair moved out of the log.
+type ArchivedEntry struct {
+	Entry    domain.DecisionEntry
+	RepairID string
+	At       time.Time
 }
 
 // NewMemLedger returns an empty ledger for hostID.
@@ -32,7 +46,36 @@ func NewMemLedger(hostID string) *MemLedger {
 		HostID:   hostID,
 		byID:     map[string]domain.DecisionEntry{},
 		byOrigin: map[string]map[int64]domain.DecisionEntry{},
+		archived: map[string]ArchivedEntry{},
 	}
+}
+
+// Clone returns an independent copy of the ledger, as a copied data
+// directory would be.
+func (l *MemLedger) Clone() *MemLedger {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := NewMemLedger(l.HostID)
+	out.NoRepairs = l.NoRepairs
+	for _, e := range l.byID {
+		out.insertLocked(e)
+	}
+	out.conflicts = slices.Clone(l.conflicts)
+	for id, a := range l.archived {
+		out.archived[id] = a
+	}
+	return out
+}
+
+// Archived returns the entries identity repairs moved out of the log.
+func (l *MemLedger) Archived() map[string]ArchivedEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make(map[string]ArchivedEntry, len(l.archived))
+	for id, a := range l.archived {
+		out[id] = a
+	}
+	return out
 }
 
 // Append writes a local entry as this machine: origin, sequence and stamp are
@@ -169,6 +212,94 @@ func (l *MemLedger) ApplyDecisionEntries(_ context.Context, peerHostID string, e
 	return result, nil
 }
 
+// DecisionOriginIDs implements decisionsync.Ledger.
+func (l *MemLedger) DecisionOriginIDs(_ context.Context, origin string, from int64, limit int) ([]domain.DecisionOriginID, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []domain.DecisionOriginID
+	for seq, e := range l.byOrigin[origin] {
+		if seq >= from {
+			out = append(out, domain.DecisionOriginID{Seq: seq, ID: e.ID})
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.DecisionOriginID) int { return cmp.Compare(a.Seq, b.Seq) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// ListDecisionSyncConflicts implements decisionsync.RepairStore.
+func (l *MemLedger) ListDecisionSyncConflicts(context.Context) ([]domain.DecisionSyncConflict, error) {
+	return l.Conflicts(), nil
+}
+
+// DecisionEntriesFrom implements decisionsync.RepairStore.
+func (l *MemLedger) DecisionEntriesFrom(_ context.Context, origin string, from int64) ([]domain.DecisionEntry, error) {
+	var out []domain.DecisionEntry
+	for _, e := range l.Entries() {
+		if e.Origin == origin && e.OriginSeq >= from {
+			out = append(out, e)
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.DecisionEntry) int { return cmp.Compare(a.OriginSeq, b.OriginSeq) })
+	return out, nil
+}
+
+// ReissueDecisionFork implements decisionsync.RepairStore as the store does.
+func (l *MemLedger) ReissueDecisionFork(_ context.Context, plan domain.DecisionRepairPlan, newID func() string, now time.Time) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.byID {
+		if e.CallID == domain.DecisionRepairCallID(plan.RepairID) {
+			return false, nil
+		}
+	}
+	fork := make([]domain.DecisionEntry, 0, len(plan.ForkIDs))
+	for _, id := range plan.ForkIDs {
+		e, ok := l.byID[id]
+		if !ok {
+			return false, fmt.Errorf("fork entry %s is not held", id)
+		}
+		fork = append(fork, e)
+	}
+	through := plan.ForkThrough(fork)
+	for seq, e := range l.byOrigin[plan.Origin] {
+		if seq > through {
+			fork = append(fork, e)
+		}
+	}
+	slices.SortFunc(fork, func(a, b domain.DecisionEntry) int { return cmp.Compare(a.OriginSeq, b.OriginSeq) })
+	newest := domain.DecisionStamp{}
+	if all := l.sortedLocked(); len(all) > 0 {
+		newest = all[len(all)-1].Stamp
+	}
+	entries, err := domain.BuildDecisionRepairEntries(domain.DecisionRepairInput{
+		RepairID: plan.RepairID, Origin: plan.Origin, FromSeq: plan.FromSeq, NewOrigin: plan.NewOrigin,
+		StartSeq: l.highestLocked(plan.NewOrigin) + 1, Fork: fork, Stamp: newest.Next(now.UnixMilli()), Now: now, NewID: newID,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		l.insertLocked(e)
+	}
+	return true, nil
+}
+
+// ArchiveDecisionFork implements decisionsync.RepairStore as the store does.
+func (l *MemLedger) ArchiveDecisionFork(_ context.Context, repairID string, now time.Time) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	view := &memView{l: l}
+	_, complete, err := domain.FinishDecisionRepair(view, repairID, now)
+	if err != nil {
+		return false, err
+	}
+	view.commit()
+	return complete, nil
+}
+
 // CheckDecisionHeads implements decisionsync.Ledger.
 func (l *MemLedger) CheckDecisionHeads(_ context.Context, peerHostID string, heads domain.DecisionHeads, now time.Time) ([]domain.DecisionSyncConflict, error) {
 	l.mu.Lock()
@@ -217,11 +348,79 @@ func (l *MemLedger) sortedLocked() []domain.DecisionEntry {
 }
 
 // memView stages a batch's writes so a failing batch stores nothing, like the
-// store's transaction.
+// store's transaction. Inserts land before archive moves and conflict clears,
+// the order the apply rules make them in.
 type memView struct {
 	l         *MemLedger
 	inserted  []domain.DecisionEntry
 	conflicts []domain.DecisionSyncConflict
+	archive   []ArchivedEntry
+	cleared   []string
+}
+
+func (v *memView) gone(id string) bool {
+	return slices.ContainsFunc(v.archive, func(a ArchivedEntry) bool { return a.Entry.ID == id })
+}
+
+// all is every entry the batch would leave in the log.
+func (v *memView) all() []domain.DecisionEntry {
+	var out []domain.DecisionEntry
+	for _, e := range v.l.byID {
+		if !v.gone(e.ID) {
+			out = append(out, e)
+		}
+	}
+	for _, e := range v.inserted {
+		if !v.gone(e.ID) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (v *memView) RepairEntries() ([]domain.DecisionEntry, error) {
+	if v.l.NoRepairs {
+		return nil, nil
+	}
+	var out []domain.DecisionEntry
+	for _, e := range v.all() {
+		if e.Kind == domain.DecisionKindIdentityRepaired {
+			out = append(out, e)
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.DecisionEntry) int {
+		return cmp.Or(cmp.Compare(a.Origin, b.Origin), cmp.Compare(a.OriginSeq, b.OriginSeq))
+	})
+	return out, nil
+}
+
+func (v *memView) ArchiveForked(repairID string, ids []string, now time.Time) ([]domain.DecisionEntry, error) {
+	var moved []domain.DecisionEntry
+	for _, id := range ids {
+		e, ok, _ := v.EntryByID(id)
+		if !ok || v.gone(id) {
+			continue
+		}
+		v.archive = append(v.archive, ArchivedEntry{Entry: e, RepairID: repairID, At: now})
+		moved = append(moved, e)
+	}
+	return moved, nil
+}
+
+func (v *memView) OriginIDsFrom(origin string, from int64) ([]domain.DecisionOriginID, error) {
+	var out []domain.DecisionOriginID
+	for _, e := range v.all() {
+		if e.Origin == origin && e.OriginSeq >= from {
+			out = append(out, domain.DecisionOriginID{Seq: e.OriginSeq, ID: e.ID})
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.DecisionOriginID) int { return cmp.Compare(a.Seq, b.Seq) })
+	return out, nil
+}
+
+func (v *memView) ClearConflicts(origin string) error {
+	v.cleared = append(v.cleared, origin)
+	return nil
 }
 
 func (v *memView) EntryByID(id string) (domain.DecisionEntry, bool, error) {
@@ -264,4 +463,22 @@ func (v *memView) commit() {
 		v.l.insertLocked(e)
 	}
 	v.l.conflicts = append(v.l.conflicts, v.conflicts...)
+	for _, a := range v.archive {
+		v.l.archiveLocked(a)
+	}
+	for _, origin := range v.cleared {
+		v.l.conflicts = slices.DeleteFunc(v.l.conflicts, func(c domain.DecisionSyncConflict) bool { return c.Origin == origin })
+	}
+}
+
+func (l *MemLedger) archiveLocked(a ArchivedEntry) {
+	if _, ok := l.byID[a.Entry.ID]; !ok {
+		return
+	}
+	delete(l.byID, a.Entry.ID)
+	delete(l.byOrigin[a.Entry.Origin], a.Entry.OriginSeq)
+	if len(l.byOrigin[a.Entry.Origin]) == 0 {
+		delete(l.byOrigin, a.Entry.Origin)
+	}
+	l.archived[a.Entry.ID] = a
 }

@@ -478,6 +478,23 @@ type DecisionCallsFt struct {
 	SearchText string
 }
 
+type DecisionEntriesForked struct {
+	ID            string
+	Origin        string
+	OriginSeq     int64
+	StampWall     int64
+	StampCounter  int64
+	CallID        string
+	Kind          string
+	Payload       string
+	WrittenAt     time.Time
+	AuthorKind    string
+	AuthorSurface string
+	AuthorSession string
+	ArchivedAt    time.Time
+	RepairID      string
+}
+
 type DecisionEntry struct {
 	ID            string
 	Origin        string

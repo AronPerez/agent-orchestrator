@@ -119,16 +119,8 @@ func (s *PeerSecrets) Delete(hostID string) (StoredPeer, bool, error) {
 	return peer, true, nil
 }
 
-// persistLocked writes the file atomically: a 0600 temporary file in the same
-// 0700 directory, synced, then renamed over the old one.
+// persistLocked writes the file atomically (see writeOwnerOnlyFile).
 func (s *PeerSecrets) persistLocked() error {
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create decision sync directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory needs its execute bit; 0700 is owner-only.
-		return fmt.Errorf("protect decision sync directory: %w", err)
-	}
 	file := peerSecretsFile{Peers: make([]StoredPeer, 0, len(s.peers))}
 	for _, peer := range s.peers {
 		file.Peers = append(file.Peers, peer)
@@ -138,34 +130,48 @@ func (s *PeerSecrets) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".peers-*.json")
+	return writeOwnerOnlyFile(s.path, raw)
+}
+
+// writeOwnerOnlyFile replaces path atomically: a 0600 temporary file in the
+// same 0700 directory, synced, then renamed over the old one.
+func writeOwnerOnlyFile(path string, raw []byte) error {
+	dir := filepath.Dir(path)
+	name := filepath.Base(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create decision sync directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory needs its execute bit; 0700 is owner-only.
+		return fmt.Errorf("protect decision sync directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, "."+name+"-*")
 	if err != nil {
-		return fmt.Errorf("write decision sync peers: %w", err)
+		return fmt.Errorf("write %s: %w", name, err)
 	}
 	tmpName := tmp.Name()
 	cleanup := func() { _ = os.Remove(tmpName) }
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		cleanup()
-		return fmt.Errorf("protect decision sync peers: %w", err)
+		return fmt.Errorf("protect %s: %w", name, err)
 	}
 	if _, err := tmp.Write(raw); err != nil {
 		_ = tmp.Close()
 		cleanup()
-		return fmt.Errorf("write decision sync peers: %w", err)
+		return fmt.Errorf("write %s: %w", name, err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		cleanup()
-		return fmt.Errorf("sync decision sync peers: %w", err)
+		return fmt.Errorf("sync %s: %w", name, err)
 	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
-		return fmt.Errorf("close decision sync peers: %w", err)
+		return fmt.Errorf("close %s: %w", name, err)
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
+	if err := os.Rename(tmpName, path); err != nil {
 		cleanup()
-		return fmt.Errorf("replace decision sync peers: %w", err)
+		return fmt.Errorf("replace %s: %w", name, err)
 	}
 	return nil
 }

@@ -8,10 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/caller"
-	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
-	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/decisionsync"
 )
 
@@ -38,23 +35,9 @@ func (c *DecisionPeersController) Register(r chi.Router) {
 	r.Delete("/decision-peers/{hostId}", c.unlink)
 }
 
-// personOnLoopback refuses remote requests (as if unmounted) and requests from
-// an agent session.
 func (c *DecisionPeersController) personOnLoopback(w http.ResponseWriter, r *http.Request, method, path string) bool {
-	if requestscope.IsLAN(r.Context()) {
-		http.NotFound(w, r)
-		return false
-	}
-	if caller.From(r.Context()) != "" {
-		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "DECISION_PERSON_ONLY",
-			"Only the person can link machines or sync decisions. A session cannot.", nil)
-		return false
-	}
-	if c.Svc == nil {
-		apispec.NotImplemented(w, r, method, path)
-		return false
-	}
-	return true
+	return decisionPersonOnLoopback(w, r, c.Svc != nil, method, path,
+		"Only the person can link machines or sync decisions. A session cannot.")
 }
 
 func (c *DecisionPeersController) list(w http.ResponseWriter, r *http.Request) {

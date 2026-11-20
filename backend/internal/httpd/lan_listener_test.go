@@ -657,12 +657,12 @@ func TestLANBlocksTheComputerUseSwitchOnly(t *testing.T) {
 }
 
 func TestDecisionPeerRoutesAreBlockedOnTheLANListener(t *testing.T) {
-	for _, path := range []string{"/api/v1/decision-peers", "/api/v1/decision-peers/sync", "/api/v1/decision-peers/h_mini"} {
+	for _, path := range []string{"/api/v1/decision-peers", "/api/v1/decision-peers/sync", "/api/v1/decision-peers/h_mini", "/api/v1/decision-identity", "/api/v1/decision-identity/repair"} {
 		if !isLANControlBlockedPath(path) {
 			t.Errorf("%s is reachable on the LAN listener", path)
 		}
 	}
-	for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries", "/api/v1/decision-peersx"} {
+	for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries", "/api/v1/decision-sync/origin-ids", "/api/v1/decision-peersx"} {
 		if isLANControlBlockedPath(path) {
 			t.Errorf("%s is blocked on the LAN listener", path)
 		}

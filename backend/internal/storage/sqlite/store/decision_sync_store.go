@@ -111,9 +111,9 @@ func (s *Store) ApplyDecisionEntries(ctx context.Context, peerHostID string, ent
 			return err
 		}
 		for _, callID := range callIDs {
-			call, ok, err := reprojectDecisionCall(ctx, q, callID)
+			call, ok, err := reprojectOrDropDecisionCall(ctx, q, callID)
 			if err != nil {
-				return fmt.Errorf("reproject decision call %s: %w", callID, err)
+				return err
 			}
 			if ok {
 				res.Calls = append(res.Calls, call)

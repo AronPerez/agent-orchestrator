@@ -233,6 +233,18 @@ func (r *httpRemote) Exchange(ctx context.Context, req ExchangeRequest) (Exchang
 	}, nil
 }
 
+// OriginIDs implements Remote.
+func (r *httpRemote) OriginIDs(ctx context.Context, req OriginIDsRequest) (OriginIDsResponse, error) {
+	if err := r.probe(ctx); err != nil {
+		return OriginIDsResponse{}, err
+	}
+	var out WireOriginIDsResponse
+	if err := r.client.post(ctx, requestTimeout, r.peer.URL+"/api/v1/decision-sync/origin-ids", r.peer.HostID, r.peer.Token, WireOriginIDsRequest(req), &out); err != nil {
+		return OriginIDsResponse{}, err
+	}
+	return OriginIDsResponse(out), nil
+}
+
 // Push implements Remote.
 func (r *httpRemote) Push(ctx context.Context, req PushRequest) (PushResponse, error) {
 	if err := r.probe(ctx); err != nil {

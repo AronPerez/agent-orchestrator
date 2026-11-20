@@ -313,7 +313,12 @@ WHERE calls.origin = ?
         AND delivered.kind = 'delivered'
         AND CASE
             WHEN json_valid(delivered.payload)
-            THEN json_extract(delivered.payload, '$.forEntry') = pending.id
+            -- A delivery of the original also delivered its re-issued copy
+            -- (decision identity repair).
+            THEN json_extract(delivered.payload, '$.forEntry') IN (
+                pending.id,
+                CASE WHEN json_valid(pending.payload) THEN json_extract(pending.payload, '$.reissuedFrom') END
+            )
             ELSE 0
         END
   )

@@ -19,6 +19,7 @@ func newDecisionSyncHost(t *testing.T) *pairingHost {
 	ok := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
 	h.router.Post("/api/v1/decision-sync/exchange", ok)
 	h.router.Post("/api/v1/decision-sync/entries", ok)
+	h.router.Post("/api/v1/decision-sync/origin-ids", ok)
 	h.router.Get("/api/v1/decision-sync/status", ok)
 	return h
 }
@@ -46,7 +47,7 @@ func TestDecisionSyncScopeAllowsOnlySyncRoutes(t *testing.T) {
 	h := newDecisionSyncHost(t)
 	_, token := h.mustIssueDecisionSync("secret12", "h_laptop")
 
-	for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries"} {
+	for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries", "/api/v1/decision-sync/origin-ids"} {
 		if status, body := h.remote(http.MethodPost, path, token, map[string]string{}); status != http.StatusOK {
 			t.Errorf("POST %s: status=%d body=%v", path, status, body)
 		}
@@ -54,6 +55,7 @@ func TestDecisionSyncScopeAllowsOnlySyncRoutes(t *testing.T) {
 	denied := []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/decision-sync/exchange"},
 		{http.MethodPost, "/api/v1/decision-sync/exchange/"},
+		{http.MethodGet, "/api/v1/decision-sync/origin-ids"},
 		{http.MethodGet, "/api/v1/decision-sync/status"},
 		{http.MethodGet, "/api/v1/coordination/capabilities"},
 		{http.MethodGet, "/api/v1/projects"},
@@ -82,7 +84,7 @@ func TestCoordinationScopeCannotReachSyncRoutes(t *testing.T) {
 	h := newDecisionSyncHost(t)
 	_, issued := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", "secret12", map[string]string{"clientId": "h_desk"})
 	coordination, _ := issued["token"].(string)
-	for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries"} {
+	for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries", "/api/v1/decision-sync/origin-ids"} {
 		if status, body := h.remote(http.MethodPost, path, coordination, map[string]string{}); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
 			t.Errorf("coordination token reached %s: status=%d body=%v", path, status, body)
 		}

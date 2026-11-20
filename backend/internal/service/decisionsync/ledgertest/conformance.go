@@ -44,6 +44,38 @@ func receivedRaised(origin string, seq int64, callID string) domain.DecisionEntr
 	return out
 }
 
+// RepairFork is a copy's own entries from..to under origin: a raised entry
+// for callID first, then answers.
+func RepairFork(origin string, from, to int64, callID string) []domain.DecisionEntry {
+	var out []domain.DecisionEntry
+	for seq := from; seq <= to; seq++ {
+		e := Received(origin, seq, callID, domain.DecisionKindAnswered, fmt.Sprintf(`{"choice":"A","option":1,"note":"%d"}`, seq))
+		if seq == from {
+			e = receivedRaised(origin, seq, callID)
+		}
+		e.ID = fmt.Sprintf("dent_fork_%d", seq)
+		out = append(out, e)
+	}
+	return out
+}
+
+// RepairEntries is what repairing fork writes under newOrigin, starting at
+// sequence 1. pairsPerEntry 0 puts every pair in one part.
+func RepairEntries(t *testing.T, repairID string, fork []domain.DecisionEntry, newOrigin string, pairsPerEntry int) []domain.DecisionEntry {
+	t.Helper()
+	n := 0
+	out, err := domain.BuildDecisionRepairEntries(domain.DecisionRepairInput{
+		RepairID: repairID, Origin: fork[0].Origin, FromSeq: fork[0].OriginSeq, NewOrigin: newOrigin,
+		StartSeq: 1, Fork: fork, Stamp: domain.DecisionStamp{WallMS: conformanceAt.UnixMilli() + 1e6},
+		Now: conformanceAt.Add(time.Hour), PairsPerEntry: pairsPerEntry,
+		NewID: func() string { n++; return fmt.Sprintf("dent_%s_%s_%d", newOrigin, repairID, n) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 // RunApplyConformance holds a Ledger implementation to the sync rules:
 // verbatim storage, idempotence, gaps, forks, own-origin restore, invalid
 // batches, reprojection, paging and held-back origins. newLedger returns an
@@ -83,6 +115,15 @@ func RunApplyConformance(t *testing.T, newLedger func(t *testing.T, hostID strin
 				return out
 			}
 		}
+	}
+
+	stopped := func(t *testing.T, l decisionsync.Ledger, origin string) bool {
+		t.Helper()
+		heads, err := l.DecisionHeads(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return heads[origin].Stopped
 	}
 
 	t.Run("StoresVerbatim", func(t *testing.T) {
@@ -263,6 +304,77 @@ func RunApplyConformance(t *testing.T, newLedger func(t *testing.T, hostID strin
 		}
 		if strings.Join(got, ",") != "h_b:1,h_b:2" {
 			t.Fatalf("page = %v", got)
+		}
+	})
+
+	t.Run("RepairMovesForkOutAndResumes", func(t *testing.T) {
+		l := newLedger(t, "h_b")
+		apply(t, l, "h_c", ReceivedRun("h_x", 1, 2, "dec_s"))
+		fork := RepairFork("h_x", 3, 4, "dec_f")
+		apply(t, l, "h_c", fork)
+		if c, _ := l.CheckDecisionHeads(ctx, "h_o", domain.DecisionHeads{"h_x": {Seq: 3, ID: "dent_o_3"}}, conformanceAt); len(c) != 1 {
+			t.Fatalf("fork not noticed: %+v", c)
+		}
+		repair := RepairEntries(t, "rep_1", fork, "h_y", 1)
+		if res := apply(t, l, "h_c", repair[:1]); res.Applied != 1 {
+			t.Fatalf("first part applied = %d", res.Applied)
+		}
+		if v := vector(t, l); v["h_x"] != 4 || !stopped(t, l, "h_x") {
+			t.Fatalf("one of two parts moved the fork: vector %v", v)
+		}
+		res := apply(t, l, "h_c", repair[1:])
+		if v := vector(t, l); v["h_x"] != 2 || v["h_y"] != 4 || stopped(t, l, "h_x") {
+			t.Fatalf("after repair vector %v stopped %v", v, stopped(t, l, "h_x"))
+		}
+		var moved *domain.DecisionCall
+		for i := range res.Calls {
+			if res.Calls[i].ID == "dec_f" {
+				moved = &res.Calls[i]
+			}
+		}
+		if moved == nil || moved.Origin != "h_y" {
+			t.Fatalf("repaired call = %+v", moved)
+		}
+		original := ReceivedRun("h_x", 3, 4, "dec_o")
+		for i := range original {
+			original[i].ID = fmt.Sprintf("dent_o_%d", 3+i)
+		}
+		if res := apply(t, l, "h_o", original); res.Applied != 2 || len(res.Conflicts) != 0 {
+			t.Fatalf("original history after repair = %+v", res)
+		}
+	})
+
+	t.Run("RepairLeavingAHoleKeepsQuarantine", func(t *testing.T) {
+		l := newLedger(t, "h_b")
+		apply(t, l, "h_c", ReceivedRun("h_x", 1, 1, "dec_s"))
+		fork := RepairFork("h_x", 2, 4, "dec_f")
+		apply(t, l, "h_c", fork)
+		if c, _ := l.CheckDecisionHeads(ctx, "h_o", domain.DecisionHeads{"h_x": {Seq: 2, ID: "dent_o_2"}}, conformanceAt); len(c) != 1 {
+			t.Fatalf("fork not noticed: %+v", c)
+		}
+		// The repair lists 2 and 3 only; 4 stays and leaves a hole at 2.
+		apply(t, l, "h_c", RepairEntries(t, "rep_1", fork[:2], "h_y", 0))
+		if !stopped(t, l, "h_x") {
+			t.Fatal("an origin with a hole in its history resumed")
+		}
+	})
+
+	t.Run("RepairedOriginalsNeverReturn", func(t *testing.T) {
+		l := newLedger(t, "h_b")
+		apply(t, l, "h_c", ReceivedRun("h_x", 1, 2, "dec_s"))
+		fork := RepairFork("h_x", 3, 4, "dec_f")
+		// The repair arrives before the fork itself, then an older machine
+		// sends the fork: it is never stored, and its head is no conflict.
+		apply(t, l, "h_c", RepairEntries(t, "rep_1", fork, "h_y", 0))
+		res := apply(t, l, "h_old", fork)
+		if res.Applied != 0 || len(res.Conflicts) != 0 {
+			t.Fatalf("repaired fork applied: %+v", res)
+		}
+		if v := vector(t, l); v["h_x"] != 2 {
+			t.Fatalf("vector %v", v)
+		}
+		if c, err := l.CheckDecisionHeads(ctx, "h_old", domain.DecisionHeads{"h_x": {Seq: 2, ID: fork[1].ID}}, conformanceAt); err != nil || len(c) != 0 {
+			t.Fatalf("a repaired head is a conflict: %+v, %v", c, err)
 		}
 	})
 

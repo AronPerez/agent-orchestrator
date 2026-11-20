@@ -1208,6 +1208,9 @@ func Run(buildVersion string) (retErr error) {
 	// GET /api/v1/identity probe. A failure here is not fatal: the probe then
 	// answers 501 and the phone falls back to pairing without identity
 	// verification, which is how it behaved before the probe existed.
+	// A staged decision identity repair changes the host identity, so it
+	// finishes before the identity is read.
+	resumeDecisionRepair(ctx, cfg.DataDir, store, log)
 	hostIdentity, identityErr := mobilebridge.EnsureLocalIdentity(cfg.DataDir)
 	if identityErr != nil {
 		log.Warn("could not establish host identity; /api/v1/identity will report unimplemented", "error", identityErr)
@@ -1361,6 +1364,7 @@ func Run(buildVersion string) (retErr error) {
 		Decisions:                   decisionSvc,
 		DecisionSync:                decisionSync.server,
 		DecisionPeers:               decisionsync.PeerService{Peers: decisionSync.peers, Scheduler: decisionSync.scheduler},
+		DecisionIdentity:            decisionSync.repairer,
 		NotificationStream:          notificationHub,
 		Push:                        pushRegistry,
 		Presence:                    presenceTracker,

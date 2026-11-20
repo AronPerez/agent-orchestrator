@@ -150,3 +150,59 @@ func EnsureLocalIdentity(dataDir string) (Identity, error) {
 	}
 	return EnsureIdentityFor(IdentityPath(dataDir), ifaces)
 }
+
+// ReadHostID returns the host id recorded in the identity file at path.
+func ReadHostID(path string) (string, error) {
+	b, err := os.ReadFile(path) // #nosec G304 -- path is the daemon's own identity file.
+	if err != nil {
+		return "", fmt.Errorf("read mobile identity: %w", err)
+	}
+	var id Identity
+	if err := json.Unmarshal(b, &id); err != nil || id.HostID == "" {
+		return "", fmt.Errorf("mobile identity has no host id")
+	}
+	return id.HostID, nil
+}
+
+// ReplaceHostID gives this installation a new host id, keeping the rest of
+// the identity file, and replaces the file atomically so a crash leaves
+// either the old id or the new one. Only decision identity repair calls it:
+// a copied data directory shares its host id with the original.
+func ReplaceHostID(path, hostID string) error {
+	b, err := os.ReadFile(path) // #nosec G304 -- path is the daemon's own identity file.
+	if err != nil {
+		return fmt.Errorf("read mobile identity: %w", err)
+	}
+	var id Identity
+	if err := json.Unmarshal(b, &id); err != nil {
+		return fmt.Errorf("decode mobile identity: %w", err)
+	}
+	id.HostID = hostID
+	raw, err := json.MarshalIndent(id, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".identity-*.json")
+	if err != nil {
+		return fmt.Errorf("write mobile identity: %w", err)
+	}
+	tmpName := tmp.Name()
+	_, werr := tmp.Write(append(raw, '\n'))
+	if werr == nil {
+		werr = tmp.Chmod(0o600)
+	}
+	if werr == nil {
+		werr = tmp.Sync()
+	}
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmpName, path)
+	}
+	if werr != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("replace mobile identity: %w", werr)
+	}
+	return nil
+}
