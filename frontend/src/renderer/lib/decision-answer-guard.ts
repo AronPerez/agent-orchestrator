@@ -8,114 +8,111 @@ import { LOCAL_HOST } from "./hosts";
  */
 export type DecisionAnswerHold = "sending" | "unconfirmed";
 
-/**
- * `key` names the person's current answer attempt for the daemon's idempotency
- * check. `keyRetired` is set once a fresh read shows the call left Needs you:
- * the lost attempt was recorded (or the call closed), so the next send is a
- * deliberate change and must not reuse the key.
- */
-type Entry = { sending: number; failedAt?: number; key: string; keyRetired?: boolean };
+type Entry = {
+	/**
+	 * Names the person's current answer attempt for the daemon's idempotency
+	 * check. Kept across sends whose result was not seen, so a retry is
+	 * recognised; replaced once the source shows the lost answer was recorded,
+	 * so a deliberate change is not mistaken for that retry.
+	 */
+	key: string;
+	/** The machine the latest attempt was sent to: its reads settle what happened. */
+	source: string;
+	sending: number;
+	failedAt?: number;
+	/** What the source's own fresh read showed: whether the call still waits. */
+	sourceWaiting?: boolean;
+	/** Per view, whether its own fresh read still showed the call waiting. */
+	observed: Map<string, boolean>;
+};
 
 /**
- * One record per host and call of answers whose result is unknown, shared by
+ * One record per decision call of answers whose result is unknown, shared by
  * every decision surface on a query client (the bell and the Decisions page),
- * so closing a panel or switching surfaces never forgets it.
+ * so closing a panel or switching surfaces never forgets it. Calls are keyed
+ * by their stable id, which decision sync keeps across machines: a copy of
+ * the call on another machine is held too.
  *
- * Each surface acts on its own cached copy of a call, so a failed answer is
- * released per *view*: only once that view has applied a read that *started*
- * after the failure. Another view's fresh read does not refresh this one's
- * cache, and a read already under way may have looked before the answer was
- * committed.
+ * Only reads that React Query applied, and that started after the failure,
+ * count. If the machine the answer went to shows the call still waiting, the
+ * answer was not recorded anywhere and every view is released. If it shows
+ * the call has moved on, the answer was recorded: each view stays held until
+ * its own fresh data shows that too (a synced copy can lag behind).
  */
 export class DecisionAnswerGuard {
 	private sequence = 0;
 	private readonly entries = new Map<string, Entry>();
-	/** Per view: when its latest successful read started. */
-	private readonly viewReads = new Map<string, number>();
 	/** Per view: when its most recent fetch started (the one React Query would apply). */
 	private readonly fetchStarts = new Map<string, number>();
 	private readonly listeners = new Set<() => void>();
 	private version = 0;
 
 	/** Why `view` must not send an answer to this call right now, if anything. */
-	state(hostId: string, callId: string, view: string): DecisionAnswerHold | undefined {
-		const entry = this.entries.get(key(hostId, callId));
+	state(callId: string, view: string): DecisionAnswerHold | undefined {
+		const entry = this.entries.get(callId);
 		if (!entry) return undefined;
 		if (entry.sending > 0) return "sending";
-		if (entry.failedAt !== undefined && (this.viewReads.get(view) ?? 0) <= entry.failedAt) return "unconfirmed";
-		return undefined;
+		if (entry.failedAt === undefined || entry.sourceWaiting === true) return undefined;
+		if (entry.sourceWaiting === false && entry.observed.get(view) === false) return undefined;
+		return "unconfirmed";
 	}
 
 	/**
-	 * An answer for the call is about to be sent. Returns the idempotency key to
-	 * send with it: the same key as an earlier send whose result was not seen,
-	 * so the daemon returns that answer instead of recording a second one.
+	 * An answer to the call is about to be sent to `source`. Returns the
+	 * idempotency key to send with it: the earlier attempt's key while its fate
+	 * is unknown or it was shown unrecorded, a new one once it was shown recorded.
 	 */
-	begin(hostId: string, callId: string): string {
-		const id = key(hostId, callId);
-		const existing = this.entries.get(id);
-		const entry = existing && !existing.keyRetired ? existing : { ...existing, sending: existing?.sending ?? 0, key: newAttemptKey() };
-		this.entries.set(id, { ...entry, keyRetired: false, sending: entry.sending + 1 });
+	begin(source: string, callId: string): string {
+		const entry = this.entries.get(callId);
+		const key = entry && entry.sourceWaiting !== false ? entry.key : newAttemptKey();
+		this.entries.set(callId, {
+			...entry,
+			key,
+			source,
+			sending: (entry?.sending ?? 0) + 1,
+			// A new attempt starts a new account of what happened to it.
+			sourceWaiting: undefined,
+			observed: new Map(),
+		});
 		this.changed();
-		return entry.key;
+		return key;
 	}
 
 	/** The answer settled: confirmed by the daemon, or failed with its fate unknown. */
-	settle(hostId: string, callId: string, confirmed: boolean): void {
-		const id = key(hostId, callId);
-		const entry = this.entries.get(id);
+	settle(callId: string, confirmed: boolean): void {
+		const entry = this.entries.get(callId);
 		if (!entry) return;
 		const sending = Math.max(0, entry.sending - 1);
 		// A confirmed answer says what the daemon recorded, even after an earlier failure.
-		if (confirmed && sending === 0) this.entries.delete(id);
-		else this.entries.set(id, { ...entry, sending, failedAt: confirmed ? entry.failedAt : ++this.sequence });
+		if (confirmed && sending === 0) this.entries.delete(callId);
+		else this.entries.set(callId, { ...entry, sending, failedAt: confirmed ? entry.failedAt : ++this.sequence });
 		this.changed();
-	}
-
-	/** Call when a decision read is sent; pass the result to viewRead. */
-	readStarted(): number {
-		return ++this.sequence;
 	}
 
 	/** A fetch for `view` is being sent. */
 	fetchStarted(view: string): void {
-		this.fetchStarts.set(view, this.readStarted());
+		this.fetchStarts.set(view, ++this.sequence);
 	}
 
 	/**
-	 * React Query installed a fetched result for `view`. It applies only the
+	 * React Query installed `data` as `view`'s result. It applies only the
 	 * result of the latest fetch it started (a cancelled one is discarded), so
-	 * that fetch's start is what the view now reflects.
+	 * that fetch's start says whether the read can know about a failure.
 	 */
-	fetchApplied(view: string, data?: unknown): void {
+	fetchApplied(view: string, data: unknown): void {
 		const startedAt = this.fetchStarts.get(view);
-		if (startedAt === undefined) return;
-		this.viewRead(view, startedAt);
-		this.retireObservedKeys(view, startedAt, data);
-	}
-
-	/**
-	 * A read that started after an answer failed shows whether that answer
-	 * landed: a call no longer waiting means it did (or the call closed), so
-	 * its key is retired. A call still waiting keeps its key for a retry.
-	 */
-	private retireObservedKeys(view: string, startedAt: number, data: unknown): void {
 		const scope = viewScope(view);
-		if (!scope) return;
-		for (const [id, entry] of this.entries) {
-			const [hostId, callId] = JSON.parse(id) as [string, string];
-			if (hostId !== scope.hostId || (scope.callId !== undefined && callId !== scope.callId)) continue;
-			if (entry.sending > 0 || entry.failedAt === undefined || startedAt <= entry.failedAt || entry.keyRetired) continue;
-			if (stillWaiting(scope, callId, data)) continue;
-			this.entries.set(id, { ...entry, keyRetired: true });
+		if (startedAt === undefined || !scope) return;
+		let changed = false;
+		for (const [callId, entry] of this.entries) {
+			if (entry.sending > 0 || entry.failedAt === undefined || startedAt <= entry.failedAt) continue;
+			if (scope.callId !== undefined && scope.callId !== callId) continue;
+			const stillWaiting = waitingIn(scope, callId, data);
+			entry.observed.set(view, stillWaiting);
+			if (scope.hostId === entry.source) entry.sourceWaiting = stillWaiting;
+			changed = true;
 		}
-	}
-
-	/** `view` successfully applied a read that started at `startedAt`. */
-	viewRead(view: string, startedAt: number): void {
-		if (startedAt <= (this.viewReads.get(view) ?? 0)) return;
-		this.viewReads.set(view, startedAt);
-		this.changed();
+		if (changed) this.changed();
 	}
 
 	subscribe = (listener: () => void): (() => void) => {
@@ -135,10 +132,31 @@ export class DecisionAnswerGuard {
 /** Query `meta` naming the answer-bearing view a decision query feeds. */
 export const decisionViewMeta = (view: string) => ({ decisionAnswerView: view });
 
+const newAttemptKey = () => `ans_${crypto.randomUUID()}`;
+
+const NEEDS_YOU = "needs-you:";
+const DETAIL = "detail:";
+
 /** The bell's needs-you list for one machine. */
 export const needsYouView = (hostId: string) => `${NEEDS_YOU}${hostId}`;
 /** This computer's detail for one call (the Decisions panel). */
 export const detailView = (callId: string) => `${DETAIL}${callId}`;
+
+/** The machine, and for a detail the one call, a view's data describes. */
+function viewScope(view: string): { hostId: string; callId?: string } | undefined {
+	if (view.startsWith(NEEDS_YOU)) return { hostId: view.slice(NEEDS_YOU.length) };
+	if (view.startsWith(DETAIL)) return { hostId: LOCAL_HOST, callId: view.slice(DETAIL.length) };
+	return undefined;
+}
+
+/** Whether a view's freshly applied data still shows the call in Needs you. */
+function waitingIn(scope: { callId?: string }, callId: string, data: unknown): boolean {
+	if (scope.callId === undefined) {
+		// A needs-you list: the call is waiting exactly when it is listed.
+		return Array.isArray(data) && data.some((call) => (call as { id?: unknown } | null)?.id === callId);
+	}
+	return (data as { call?: { state?: unknown } } | null | undefined)?.call?.state === "needs_you";
+}
 
 /**
  * The query function wrapper for an answer-bearing view: records when the
@@ -179,27 +197,3 @@ export function decisionAnswerGuard(queryClient: QueryClient): DecisionAnswerGua
 	return guard;
 }
 
-const newAttemptKey = () => `ans_${crypto.randomUUID()}`;
-
-const NEEDS_YOU = "needs-you:";
-const DETAIL = "detail:";
-
-/** The host and call(s) a view's data describes. Detail views are this computer's. */
-function viewScope(view: string): { hostId: string; callId?: string } | undefined {
-	if (view.startsWith(NEEDS_YOU)) return { hostId: view.slice(NEEDS_YOU.length) };
-	if (view.startsWith(DETAIL)) return { hostId: LOCAL_HOST, callId: view.slice(DETAIL.length) };
-	return undefined;
-}
-
-/** Whether the view's freshly applied data still shows the call in Needs you. */
-function stillWaiting(scope: { callId?: string }, callId: string, data: unknown): boolean {
-	if (scope.callId === undefined) {
-		// A needs-you list: the call is waiting exactly when it is listed.
-		return Array.isArray(data) && data.some((call) => (call as { id?: unknown })?.id === callId);
-	}
-	const state = (data as { call?: { state?: unknown } } | null | undefined)?.call?.state;
-	return state === "needs_you";
-}
-
-// JSON keeps host and call ids apart whatever characters they contain.
-const key = (hostId: string, callId: string) => JSON.stringify([hostId, callId]);
