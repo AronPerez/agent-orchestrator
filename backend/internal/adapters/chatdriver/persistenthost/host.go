@@ -726,15 +726,6 @@ func Run(ctx context.Context, cfg Config) error {
 	child := aoprocess.Command(cfg.Argv[0], cfg.Argv[1:]...) //nolint:gosec // provider argv is constructed by AO's driver.
 	child.Dir = cfg.Workdir
 	child.Env = cfg.Env
-	// Mark the provider tree so recovery can find any of its processes after
-	// an abrupt host exit. Without a marker, that recovery stays fenced.
-	treeMarker := ""
-	if cfg.launchToken != "" && !providerTreeDiesWithHost() {
-		if marker, markerErr := randomToken(); markerErr == nil {
-			treeMarker = marker
-			child.Env = envWithProviderTreeMarker(cfg.Env, treeMarker)
-		}
-	}
 	configureProviderProcess(child)
 	stdin, err := child.StdinPipe()
 	if err != nil {
@@ -759,14 +750,6 @@ func Run(ctx context.Context, cfg Config) error {
 	// it before waiting for inherited pipes and before releasing the host lock.
 	closeProviderTree = sync.OnceFunc(closeProviderTree)
 	defer closeProviderTree()
-	if treeMarker != "" {
-		// Record the provider tree so recovery can prove it is gone if this
-		// host later dies without orderly teardown. A failed write only leaves
-		// that recovery fenced, as it was before.
-		if pgid := providerProcessGroup(child); pgid > 1 {
-			_ = publishLaunchProvider(cfg.DataDir, cfg.SessionID, cfg.launchToken, pgid, treeMarker, cfg.Workdir)
-		}
-	}
 
 	d := Descriptor{
 		Version: ProtocolVersion, SessionID: cfg.SessionID, Protocol: cfg.Protocol,

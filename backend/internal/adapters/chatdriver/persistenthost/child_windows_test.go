@@ -299,6 +299,3 @@ func TestExtendedLengthPathMatchesOS(t *testing.T) {
 		}
 	}
 }
-
-// startProviderTestTool is Unix-only: Windows tests never request a tool.
-func startProviderTestTool(string, string) {}
