@@ -20,26 +20,12 @@ import (
 
 func TestMain(m *testing.M) {
 	if len(os.Args) >= 6 && os.Args[1] == "chat-host" {
-		protocol := ProtocolRaw
-		fingerprint := ""
-		separator := 5
-		if len(os.Args) > 5 && os.Args[5] == string(ProtocolACP) {
-			protocol = ProtocolACP
-			if len(os.Args) > 6 {
-				fingerprint = os.Args[6]
-			}
-			separator = 7
-		}
-		if len(os.Args) <= separator || os.Args[separator] != "--" {
-			os.Exit(2)
-		}
-		err := Run(context.Background(), Config{
-			SessionID: os.Args[2], DataDir: os.Args[3], Workdir: os.Args[4],
-			Env: os.Environ(), Argv: os.Args[separator+1:], Protocol: protocol,
-			OwnershipFingerprint: fingerprint,
-		})
-		if err != nil {
+		// Host through the real entrypoint so tests cover its signal handling.
+		if err := RunCommand(context.Background(), os.Args[2:]); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
+			if errors.Is(err, ErrCommandUsage) {
+				os.Exit(2)
+			}
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -1271,6 +1257,7 @@ func TestLaunchProbeClearsReadinessFromPriorBoot(t *testing.T) {
 		func(int) bool { return true },
 		func() (string, error) { return ready.BootID + "-next", nil },
 		false,
+		processGroupExited,
 	)
 	if err != nil {
 		t.Fatalf("probe prior-boot readiness: %v", err)
@@ -1603,5 +1590,214 @@ func TestShutdownStaleDescriptorPreservesUnpublishedReplacement(t *testing.T) {
 	}
 	if _, err := readLaunchReady(dataDir, sessionID, token); err != nil {
 		t.Fatalf("stale descriptor cleanup removed replacement readiness: %v", err)
+	}
+}
+
+func TestAdmittedHostProviderRecordDecidesSameBootFence(t *testing.T) {
+	const providerPGID = 424242
+	tests := []struct {
+		name           string
+		record         func(t *testing.T, dataDir, sessionID, token string)
+		leaderExited   bool
+		groupExited    bool
+		wantCleared    bool
+		wantErrContain string
+	}{
+		{
+			name:         "recorded group is empty",
+			record:       publishTestProvider(providerPGID),
+			leaderExited: true, groupExited: true, wantCleared: true,
+		},
+		{
+			name:         "recorded group still has members",
+			record:       publishTestProvider(providerPGID),
+			leaderExited: true, groupExited: false,
+			wantErrContain: "provider process group 424242 is not proven absent",
+		},
+		{
+			name:         "provider leader still alive",
+			record:       publishTestProvider(providerPGID),
+			leaderExited: false, groupExited: true,
+			wantErrContain: "provider process group 424242 is not proven absent",
+		},
+		{
+			name:         "no provider record",
+			record:       func(*testing.T, string, string, string) {},
+			leaderExited: true, groupExited: true,
+			wantErrContain: "no provider process group was recorded",
+		},
+		{
+			name: "record from another host launch",
+			record: func(t *testing.T, dataDir, sessionID, token string) {
+				writeTestProviderRecord(t, dataDir, sessionID, launchProvider{
+					Token: token, HostPID: os.Getpid() + 1, ProviderPGID: providerPGID,
+				})
+			},
+			leaderExited: true, groupExited: true,
+			wantErrContain: "belongs to another host launch",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			sessionID := "same-boot-provider"
+			token, err := reserveLaunchIntent(dataDir, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+			if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()); err != nil {
+				t.Fatal(err)
+			}
+			ready, err := readLaunchReady(dataDir, sessionID, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.record(t, dataDir, sessionID, token)
+
+			err = probeLaunchTokenWithProbes(
+				dataDir, sessionID, token,
+				func(pid int) bool { return pid != providerPGID || tt.leaderExited },
+				func() (string, error) { return ready.BootID, nil },
+				false,
+				func(pgid int) bool { return pgid == providerPGID && tt.groupExited },
+			)
+			_, readyErr := readLaunchReady(dataDir, sessionID, token)
+			if tt.wantCleared {
+				if err != nil {
+					t.Fatalf("probe error = %v, want the empty provider group to settle ownership", err)
+				}
+				if !errors.Is(readyErr, os.ErrNotExist) {
+					t.Fatalf("readiness remains after proven cleanup: %v", readyErr)
+				}
+				if _, err := readLaunchProvider(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("provider record remains after proven cleanup: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrOwnershipInconclusive) || !strings.Contains(err.Error(), tt.wantErrContain) {
+				t.Fatalf("probe error = %v, want ErrOwnershipInconclusive containing %q", err, tt.wantErrContain)
+			}
+			if readyErr != nil {
+				t.Fatalf("fenced probe removed readiness: %v", readyErr)
+			}
+		})
+	}
+}
+
+func publishTestProvider(pgid int) func(*testing.T, string, string, string) {
+	return func(t *testing.T, dataDir, sessionID, token string) {
+		t.Helper()
+		if err := publishLaunchProvider(dataDir, sessionID, token, pgid); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func writeTestProviderRecord(t *testing.T, dataDir, sessionID string, record launchProvider) {
+	t.Helper()
+	path, err := launchProviderPath(dataDir, sessionID, record.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomicLaunchFile(path, b); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishLaunchProviderRequiresOwnReadiness(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "provider-needs-readiness"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	if err := publishLaunchProvider(dataDir, sessionID, token, 4242); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("publish without readiness error = %v, want missing readiness", err)
+	}
+	if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishLaunchProvider(dataDir, sessionID, token, 4242); err == nil {
+		t.Fatal("published a provider record for another host's readiness")
+	}
+	if err := publishLaunchProvider(dataDir, sessionID, token, 1); err == nil {
+		t.Fatal("published an invalid provider process group")
+	}
+}
+
+func TestLaunchProbeSweepsStrayProviderRecord(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "stray-provider-record"
+	token, err := randomToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestProviderRecord(t, dataDir, sessionID, launchProvider{Token: token, HostPID: 4242, ProviderPGID: 4243})
+
+	if err := probeUnpublishedHost(dataDir, sessionID); err != nil {
+		t.Fatalf("probe with only a stray provider record: %v", err)
+	}
+	if _, err := readLaunchProvider(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stray provider record remains: %v", err)
+	}
+}
+
+func TestClearLaunchIntentRetriesOwnershipLock(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		failures    int
+		wantCleared bool
+	}{
+		{name: "transient lock failure", failures: 2, wantCleared: true},
+		{name: "persistent lock failure", failures: 100, wantCleared: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			sessionID := "clear-retry"
+			token, err := reserveLaunchIntent(dataDir, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+			if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()); err != nil {
+				t.Fatal(err)
+			}
+			attempts := 0
+			lockErr := errors.New("too many open files")
+			acquire := func(dataDir, sessionID string) (hostOwnershipMutationLock, error) {
+				attempts++
+				if attempts <= tt.failures {
+					return nil, lockErr
+				}
+				return acquireHostOwnershipMutationLock(dataDir, sessionID)
+			}
+
+			err = clearLaunchIntentWith(dataDir, sessionID, token, acquire, []time.Duration{0, 0, 0})
+			_, readyErr := readLaunchReady(dataDir, sessionID, token)
+			if tt.wantCleared {
+				if err != nil || attempts != 3 {
+					t.Fatalf("clear error = %v after %d attempts, want success on attempt 3", err, attempts)
+				}
+				if !errors.Is(readyErr, os.ErrNotExist) {
+					t.Fatalf("readiness remains after retried clear: %v", readyErr)
+				}
+				return
+			}
+			if !errors.Is(err, lockErr) || attempts != 4 {
+				t.Fatalf("clear error = %v after %d attempts, want the lock error after 4", err, attempts)
+			}
+			if readyErr != nil {
+				t.Fatalf("clear without the ownership lock removed readiness: %v", readyErr)
+			}
+		})
 	}
 }

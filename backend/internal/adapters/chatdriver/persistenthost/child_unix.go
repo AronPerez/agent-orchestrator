@@ -33,6 +33,24 @@ func killProviderProcess(_ context.Context, cmd *exec.Cmd) error {
 	return aoprocess.TerminateGroup(cmd.Process.Pid, 2*time.Second)
 }
 
+// processGroupExited reports whether no process is left in group pgid. Only
+// ESRCH proves that; any other answer, including EPERM, keeps the group alive.
+func processGroupExited(pgid int) bool {
+	if pgid <= 1 {
+		return false
+	}
+	return errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH)
+}
+
+// providerProcessGroup is the process group configureProviderProcess gave the
+// provider: Setpgid with a zero Pgid makes the provider lead its own group.
+func providerProcessGroup(cmd *exec.Cmd) int {
+	if cmd.Process == nil {
+		return 0
+	}
+	return cmd.Process.Pid
+}
+
 // terminateProviderProcess asks the hosted process group to exit.
 func terminateProviderProcess(cmd *exec.Cmd) error {
 	if cmd.Process == nil {

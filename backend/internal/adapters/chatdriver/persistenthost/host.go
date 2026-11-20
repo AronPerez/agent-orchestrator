@@ -750,6 +750,14 @@ func Run(ctx context.Context, cfg Config) error {
 	// it before waiting for inherited pipes and before releasing the host lock.
 	closeProviderTree = sync.OnceFunc(closeProviderTree)
 	defer closeProviderTree()
+	if cfg.launchToken != "" && !providerTreeDiesWithHost() {
+		// Record the provider's process group so recovery can prove the tree is
+		// gone if this host later dies without orderly teardown. A failed write
+		// only leaves that recovery fenced, as it was before.
+		if pgid := providerProcessGroup(child); pgid > 1 {
+			_ = publishLaunchProvider(cfg.DataDir, cfg.SessionID, cfg.launchToken, pgid)
+		}
+	}
 
 	d := Descriptor{
 		Version: ProtocolVersion, SessionID: cfg.SessionID, Protocol: cfg.Protocol,

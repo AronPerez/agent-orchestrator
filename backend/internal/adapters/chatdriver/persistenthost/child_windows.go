@@ -118,6 +118,12 @@ func killProviderProcess(ctx context.Context, cmd *exec.Cmd) error {
 // deadline's kill reaps the job.
 func terminateProviderProcess(*exec.Cmd) error { return nil }
 
+// Windows has no process groups to probe: the kill-on-close Job Object already
+// proves provider-tree absence once the host has exited.
+func processGroupExited(int) bool { return false }
+
+func providerProcessGroup(*exec.Cmd) int { return 0 }
+
 // openHostFile opens a chat host file for reading without denying deletion.
 // os.Open omits FILE_SHARE_DELETE, so while Shutdown polls host.json the
 // exiting host's DeleteFile fails with a sharing violation (and host.json then
