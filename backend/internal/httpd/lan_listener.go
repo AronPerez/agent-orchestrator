@@ -87,7 +87,8 @@ func credentialAllowsRequest(credential requestscope.Credential, method, path st
 func decisionSyncRequestAllowed(method, path string) bool {
 	switch method {
 	case http.MethodPost:
-		return path == "/api/v1/decision-sync/exchange" || path == "/api/v1/decision-sync/entries"
+		return path == "/api/v1/decision-sync/exchange" || path == "/api/v1/decision-sync/entries" ||
+			path == "/api/v1/decision-sync/origin-ids"
 	case http.MethodDelete:
 		id, ok := strings.CutPrefix(path, "/api/v1/remote-host/decision-sync-token/")
 		return ok && id != "" && !strings.Contains(id, "/")

@@ -33,6 +33,30 @@ type Ledger interface {
 	// CheckDecisionHeads records a conflict for every peer head this ledger
 	// holds under another entry id.
 	CheckDecisionHeads(context.Context, string, domain.DecisionHeads, time.Time) ([]domain.DecisionSyncConflict, error)
+	// DecisionOriginIDs returns up to limit (sequence, id) pairs of an origin
+	// from a sequence on, for finding where two histories of it parted.
+	DecisionOriginIDs(ctx context.Context, origin string, from int64, limit int) ([]domain.DecisionOriginID, error)
+}
+
+// MaxOriginIDsPage is the most (sequence, id) pairs one origin-ids request
+// returns.
+const MaxOriginIDsPage = 1000
+
+// OriginIDsRequest asks a peer which entry it holds at each sequence of
+// Origin from From on. Identity repair uses it; it carries no payloads.
+type OriginIDsRequest struct {
+	Protocol int
+	HostID   string
+	Origin   string
+	From     int64
+	Limit    int
+}
+
+// OriginIDsResponse is one page of a peer's (sequence, id) pairs.
+type OriginIDsResponse struct {
+	HostID string
+	IDs    []domain.DecisionOriginID
+	More   bool
 }
 
 // ExchangeRequest asks a peer for the entries the initiator lacks.
@@ -84,6 +108,7 @@ type PushResponse struct {
 type Remote interface {
 	Exchange(context.Context, ExchangeRequest) (ExchangeResponse, error)
 	Push(context.Context, PushRequest) (PushResponse, error)
+	OriginIDs(context.Context, OriginIDsRequest) (OriginIDsResponse, error)
 }
 
 // Errors returned by the server and the engine.
@@ -97,6 +122,9 @@ var (
 	// ErrSameIdentity reports a peer claiming this machine's own host id, as a
 	// copied data directory would.
 	ErrSameIdentity = errors.New("decision sync peer shares this machine's identity")
+	// ErrOriginIDsInvalid reports an origin-ids request without an origin or
+	// with a sequence below 1.
+	ErrOriginIDsInvalid = errors.New("decision sync origin-ids request is invalid")
 	// ErrPageTooLarge reports a pushed page over the page limits.
 	ErrPageTooLarge = errors.New("decision sync page too large")
 )

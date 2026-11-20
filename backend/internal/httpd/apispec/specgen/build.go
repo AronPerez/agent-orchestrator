@@ -190,6 +190,9 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersDecisionSyncExchangeRequest":               "DecisionSyncExchangeRequest",
 	"ControllersDecisionSyncExchangeResponse":              "DecisionSyncExchangeResponse",
 	"ControllersDecisionSyncPushRequest":                   "DecisionSyncPushRequest",
+	"ControllersDecisionSyncOriginIDsRequest":              "DecisionSyncOriginIDsRequest",
+	"ControllersDecisionSyncOriginIDsResponse":             "DecisionSyncOriginIDsResponse",
+	"ControllersDecisionSyncOriginID":                      "DecisionSyncOriginID",
 	"ControllersDecisionSyncPushResponse":                  "DecisionSyncPushResponse",
 	"ControllersDecisionSyncGap":                           "DecisionSyncGap",
 	"ControllersDecisionSyncConflict":                      "DecisionSyncConflict",
@@ -1135,6 +1138,14 @@ func decisionSyncOperations() []operation {
 			method: http.MethodPost, path: "/api/v1/decision-sync/entries", id: "pushDecisionSyncEntries", tag: "decisions",
 			summary: "Apply one page of decision ledger entries from a linked machine", reqBody: controllers.DecisionSyncPushRequest{},
 			resps: append([]respUnit{{http.StatusOK, controllers.DecisionSyncPushResponse{}}}, syncErrors...),
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/decision-sync/origin-ids", id: "listDecisionSyncOriginIDs", tag: "decisions",
+			summary: "List the entry ids a linked machine holds for one origin, for identity repair", reqBody: controllers.DecisionSyncOriginIDsRequest{},
+			resps: append([]respUnit{
+				{http.StatusOK, controllers.DecisionSyncOriginIDsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+			}, syncErrors...),
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/decision-peers", id: "listDecisionPeers", tag: "decisions",

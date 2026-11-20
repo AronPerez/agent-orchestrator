@@ -190,6 +190,23 @@ func (l *MemLedger) ApplyDecisionEntries(_ context.Context, peerHostID string, e
 	return result, nil
 }
 
+// DecisionOriginIDs implements decisionsync.Ledger.
+func (l *MemLedger) DecisionOriginIDs(_ context.Context, origin string, from int64, limit int) ([]domain.DecisionOriginID, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []domain.DecisionOriginID
+	for seq, e := range l.byOrigin[origin] {
+		if seq >= from {
+			out = append(out, domain.DecisionOriginID{Seq: seq, ID: e.ID})
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.DecisionOriginID) int { return cmp.Compare(a.Seq, b.Seq) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // CheckDecisionHeads implements decisionsync.Ledger.
 func (l *MemLedger) CheckDecisionHeads(_ context.Context, peerHostID string, heads domain.DecisionHeads, now time.Time) ([]domain.DecisionSyncConflict, error) {
 	l.mu.Lock()

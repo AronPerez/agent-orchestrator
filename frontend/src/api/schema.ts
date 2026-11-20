@@ -1529,6 +1529,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decision-sync/origin-ids": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** List the entry ids a linked machine holds for one origin, for identity repair */
+        post: operations["listDecisionSyncOriginIDs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/decision-sync/status": {
         parameters: {
             query?: never;
@@ -7951,6 +7968,29 @@ export interface components {
             stopped?: boolean;
             /** Format: date-time */
             writtenAt: string;
+        };
+        DecisionSyncOriginID: {
+            id: string;
+            /** Format: int64 */
+            seq: number;
+        };
+        DecisionSyncOriginIDsRequest: {
+            /**
+             * Format: int64
+             * @description First sequence to list; at least 1.
+             */
+            from: number;
+            /** @description The sender's host id; must match the credential's peer. */
+            hostId: string;
+            /** @description At most this many pairs (1 to 1000). */
+            limit?: number;
+            origin: string;
+            protocol: number;
+        };
+        DecisionSyncOriginIDsResponse: {
+            hostId: string;
+            ids: components["schemas"]["DecisionSyncOriginID"][];
+            more: boolean;
         };
         DecisionSyncOriginStatus: {
             hostId: string;
@@ -16188,6 +16228,102 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DecisionSyncExchangeResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listDecisionSyncOriginIDs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionSyncOriginIDsRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionSyncOriginIDsResponse"];
                 };
             };
             /** @description Bad Request */

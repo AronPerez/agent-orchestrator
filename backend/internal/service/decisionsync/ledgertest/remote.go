@@ -22,6 +22,8 @@ type DirectRemote struct {
 	mu        sync.Mutex
 	Exchanges int
 	Pushes    int
+	// Lookups counts origin-ids calls; they do not advance BeforeCall's number.
+	Lookups int
 }
 
 // Exchange implements decisionsync.Remote.
@@ -47,6 +49,15 @@ func (d *DirectRemote) Push(ctx context.Context, req decisionsync.PushRequest) (
 	req = roundTrip(req)
 	req.Entries = entries
 	resp, err := d.Server.Push(ctx, d.CallerID, req)
+	return roundTrip(resp), err
+}
+
+// OriginIDs implements decisionsync.Remote.
+func (d *DirectRemote) OriginIDs(ctx context.Context, req decisionsync.OriginIDsRequest) (decisionsync.OriginIDsResponse, error) {
+	if err := d.before(&d.Lookups); err != nil {
+		return decisionsync.OriginIDsResponse{}, err
+	}
+	resp, err := d.Server.OriginIDs(ctx, d.CallerID, roundTrip(req))
 	return roundTrip(resp), err
 }
 

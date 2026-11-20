@@ -662,7 +662,7 @@ func TestDecisionPeerRoutesAreBlockedOnTheLANListener(t *testing.T) {
 			t.Errorf("%s is reachable on the LAN listener", path)
 		}
 	}
-	for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries", "/api/v1/decision-peersx"} {
+	for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries", "/api/v1/decision-sync/origin-ids", "/api/v1/decision-peersx"} {
 		if isLANControlBlockedPath(path) {
 			t.Errorf("%s is blocked on the LAN listener", path)
 		}

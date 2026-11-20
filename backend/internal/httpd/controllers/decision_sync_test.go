@@ -81,7 +81,7 @@ func TestDecisionSyncRoutesRefuseLoopbackAndFullCredentials(t *testing.T) {
 		"coordination scoped": &coordination,
 		"sync without peer":   &noClient,
 	} {
-		for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries"} {
+		for _, path := range []string{"/api/v1/decision-sync/exchange", "/api/v1/decision-sync/entries", "/api/v1/decision-sync/origin-ids"} {
 			rec, decoded := f.do(t, http.MethodPost, path, credential, body)
 			if rec.Code != http.StatusForbidden || decoded["code"] != "DECISION_SYNC_CREDENTIAL_REQUIRED" {
 				t.Errorf("%s %s: status=%d body=%s", name, path, rec.Code, rec.Body)
@@ -257,5 +257,35 @@ func TestRevokedSyncTokenStopsInFlightRequests(t *testing.T) {
 	devices.validChecks = 2
 	if rec, _ = f.do(t, http.MethodPost, "/api/v1/decision-sync/exchange", &credential, mustJSONBody(t, controllers.DecisionSyncExchangeRequest{Protocol: 1, HostID: "h_peer"})); rec.Code != http.StatusOK {
 		t.Fatalf("valid exchange: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestDecisionSyncOriginIDsPages(t *testing.T) {
+	f := newSyncFixture(t, nil)
+	if _, err := f.ledger.ApplyDecisionEntries(context.Background(), "h_x", ledgertest.ReceivedRun("h_x", 1, 5, "dec_1"), syncAt); err != nil {
+		t.Fatal(err)
+	}
+	credential := syncCredential("h_peer")
+	body := mustJSONBody(t, controllers.DecisionSyncOriginIDsRequest{Protocol: 1, HostID: "h_peer", Origin: "h_x", From: 2, Limit: 3})
+	rec, _ := f.do(t, http.MethodPost, "/api/v1/decision-sync/origin-ids", &credential, body)
+	var got controllers.DecisionSyncOriginIDsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s err=%v", rec.Code, rec.Body, err)
+	}
+	if got.HostID != "h_server" || !got.More || len(got.IDs) != 3 || got.IDs[0].Seq != 2 || got.IDs[0].ID != "dent_h_x_2" || got.IDs[2].Seq != 4 {
+		t.Fatalf("page = %+v", got)
+	}
+	for _, bad := range []controllers.DecisionSyncOriginIDsRequest{
+		{Protocol: 1, HostID: "h_peer", Origin: "", From: 1},
+		{Protocol: 1, HostID: "h_peer", Origin: "h_x", From: 0},
+	} {
+		rec, decoded := f.do(t, http.MethodPost, "/api/v1/decision-sync/origin-ids", &credential, mustJSONBody(t, bad))
+		if rec.Code != http.StatusBadRequest || decoded["code"] != "DECISION_SYNC_ORIGIN_IDS_INVALID" {
+			t.Errorf("%+v: status=%d body=%s", bad, rec.Code, rec.Body)
+		}
+	}
+	mismatch := mustJSONBody(t, controllers.DecisionSyncOriginIDsRequest{Protocol: 1, HostID: "h_other", Origin: "h_x", From: 1})
+	if rec, decoded := f.do(t, http.MethodPost, "/api/v1/decision-sync/origin-ids", &credential, mismatch); rec.Code != http.StatusForbidden || decoded["code"] != "DECISION_SYNC_HOST_MISMATCH" {
+		t.Errorf("mismatch: status=%d body=%s", rec.Code, rec.Body)
 	}
 }

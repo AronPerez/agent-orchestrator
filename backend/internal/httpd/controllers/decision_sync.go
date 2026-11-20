@@ -26,6 +26,7 @@ const MaxDecisionSyncBodyBytes = 4 << 20
 type DecisionSyncService interface {
 	Exchange(ctx context.Context, peerHostID string, req decisionsync.ExchangeRequest) (decisionsync.ExchangeResponse, error)
 	Push(ctx context.Context, peerHostID string, req decisionsync.PushRequest) (decisionsync.PushResponse, error)
+	OriginIDs(ctx context.Context, peerHostID string, req decisionsync.OriginIDsRequest) (decisionsync.OriginIDsResponse, error)
 	Status(ctx context.Context) (decisionsync.Status, error)
 }
 
@@ -55,6 +56,7 @@ func (c *DecisionSyncController) stillValid(w http.ResponseWriter, r *http.Reque
 func (c *DecisionSyncController) Register(r chi.Router) {
 	r.Post("/decision-sync/exchange", c.exchange)
 	r.Post("/decision-sync/entries", c.entries)
+	r.Post("/decision-sync/origin-ids", c.originIDs)
 	r.Get("/decision-sync/status", c.status)
 }
 
@@ -149,6 +151,33 @@ func (c *DecisionSyncController) entries(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+func (c *DecisionSyncController) originIDs(w http.ResponseWriter, r *http.Request) {
+	peer, ok := syncPeer(w, r)
+	if !ok {
+		return
+	}
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decision-sync/origin-ids")
+		return
+	}
+	var req DecisionSyncOriginIDsRequest
+	if !decodeSyncBody(w, r, &req) || !c.stillValid(w, r) {
+		return
+	}
+	resp, err := c.Svc.OriginIDs(r.Context(), peer, decisionsync.OriginIDsRequest{
+		Protocol: req.Protocol, HostID: req.HostID, Origin: req.Origin, From: req.From, Limit: req.Limit,
+	})
+	if err != nil {
+		writeDecisionSyncError(w, r, err)
+		return
+	}
+	out := DecisionSyncOriginIDsResponse{HostID: resp.HostID, IDs: make([]DecisionSyncOriginID, len(resp.IDs)), More: resp.More}
+	for i, id := range resp.IDs {
+		out.IDs[i] = DecisionSyncOriginID{Seq: id.Seq, ID: id.ID}
+	}
+	writeSyncJSON(w, out)
+}
+
 // status serves this machine's own clients (loopback) and full remote
 // credentials. A scoped token never reaches it: the LAN scope filter admits
 // sync tokens only on the two sync routes.
@@ -192,6 +221,9 @@ func writeDecisionSyncError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, decisionsync.ErrPeerIdentityMismatch):
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "DECISION_SYNC_HOST_MISMATCH",
 			"hostId does not match the machine this credential was issued to.", nil)
+	case errors.Is(err, decisionsync.ErrOriginIDsInvalid):
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "DECISION_SYNC_ORIGIN_IDS_INVALID",
+			"origin is required and from must be at least 1.", nil)
 	case errors.Is(err, decisionsync.ErrPageTooLarge):
 		envelope.WriteAPIError(w, r, http.StatusRequestEntityTooLarge, "payload_too_large", "DECISION_SYNC_PAGE_TOO_LARGE",
 			"The page holds more entries or bytes than one sync page may.", nil)

@@ -4091,6 +4091,74 @@ paths:
       summary: Return one page of decision ledger entries a linked machine lacks
       tags:
       - decisions
+  /api/v1/decision-sync/origin-ids:
+    post:
+      operationId: listDecisionSyncOriginIDs
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionSyncOriginIDsRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionSyncOriginIDsResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Request Entity Too Large
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: List the entry ids a linked machine holds for one origin, for identity
+        repair
+      tags:
+      - decisions
   /api/v1/decision-sync/status:
     get:
       operationId: getDecisionSyncStatus
@@ -23014,6 +23082,54 @@ components:
       - seq
       - id
       - writtenAt
+      type: object
+    DecisionSyncOriginID:
+      properties:
+        id:
+          type: string
+        seq:
+          format: int64
+          type: integer
+      required:
+      - seq
+      - id
+      type: object
+    DecisionSyncOriginIDsRequest:
+      properties:
+        from:
+          description: First sequence to list; at least 1.
+          format: int64
+          type: integer
+        hostId:
+          description: The sender's host id; must match the credential's peer.
+          type: string
+        limit:
+          description: At most this many pairs (1 to 1000).
+          type: integer
+        origin:
+          type: string
+        protocol:
+          type: integer
+      required:
+      - protocol
+      - hostId
+      - origin
+      - from
+      type: object
+    DecisionSyncOriginIDsResponse:
+      properties:
+        hostId:
+          type: string
+        ids:
+          items:
+            $ref: '#/components/schemas/DecisionSyncOriginID'
+          type: array
+        more:
+          type: boolean
+      required:
+      - hostId
+      - ids
+      - more
       type: object
     DecisionSyncOriginStatus:
       properties:

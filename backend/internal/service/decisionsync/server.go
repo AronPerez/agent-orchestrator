@@ -133,6 +133,28 @@ func (s *Server) checkPeer(peerHostID, bodyHostID string) error {
 	return nil
 }
 
+// OriginIDs returns which entry this ledger holds at each sequence of an
+// origin, a page at a time. It serves a quarantined origin too: ids carry no
+// payload, and they are how a repairing machine finds where it forked.
+func (s *Server) OriginIDs(ctx context.Context, peerHostID string, req OriginIDsRequest) (OriginIDsResponse, error) {
+	if err := s.checkPeer(peerHostID, req.HostID); err != nil {
+		return OriginIDsResponse{}, err
+	}
+	if req.Origin == "" || req.From < 1 {
+		return OriginIDsResponse{}, ErrOriginIDsInvalid
+	}
+	limit := min(max(req.Limit, 1), MaxOriginIDsPage)
+	ids, err := s.deps.Ledger.DecisionOriginIDs(ctx, req.Origin, req.From, limit+1)
+	if err != nil {
+		return OriginIDsResponse{}, err
+	}
+	more := len(ids) > limit
+	if more {
+		ids = ids[:limit]
+	}
+	return OriginIDsResponse{HostID: s.deps.HostID, IDs: ids, More: more}, nil
+}
+
 // Exchange returns one page of the entries the peer lacks and this ledger's
 // position.
 func (s *Server) Exchange(ctx context.Context, peerHostID string, req ExchangeRequest) (ExchangeResponse, error) {

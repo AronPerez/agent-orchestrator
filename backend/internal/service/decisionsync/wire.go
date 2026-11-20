@@ -101,6 +101,22 @@ type WireExchangeResponse struct {
 	ServerTime   time.Time           `json:"serverTime"`
 }
 
+// WireOriginIDsRequest is DecisionSyncOriginIDsRequest on the wire.
+type WireOriginIDsRequest struct {
+	Protocol int    `json:"protocol"`
+	HostID   string `json:"hostId"`
+	Origin   string `json:"origin"`
+	From     int64  `json:"from"`
+	Limit    int    `json:"limit"`
+}
+
+// WireOriginIDsResponse is DecisionSyncOriginIDsResponse on the wire.
+type WireOriginIDsResponse struct {
+	HostID string                    `json:"hostId"`
+	IDs    []domain.DecisionOriginID `json:"ids"`
+	More   bool                      `json:"more"`
+}
+
 // WirePushRequest is DecisionSyncPushRequest on the wire.
 type WirePushRequest struct {
 	Protocol int                 `json:"protocol"`
