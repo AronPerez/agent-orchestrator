@@ -187,3 +187,54 @@ func syncEntriesDTO(entries []domain.DecisionEntry) []controllers.DecisionSyncEn
 	}
 	return out
 }
+
+func TestExchangeRecordsNothingAfterRevocationOnWake(t *testing.T) {
+	devices, err := mobilebridge.LoadAccessDevices(filepath.Join(t.TempDir(), "devices.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev, _, err := devices.IssueScoped("Decision sync from laptop", "darwin", []string{mobilebridge.DeviceScopeDecisionSync}, syncAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := ledgertest.NewMemLedger("h_server")
+	server := decisionsync.NewServer(decisionsync.ServerDeps{
+		Ledger: ledger, HostID: "h_server", MachineLabel: func() string { return "mac-mini" }, Now: func() time.Time { return syncAt },
+	})
+	r := chi.NewRouter()
+	r.Route("/api/v1", (&controllers.DecisionSyncController{Svc: server, Devices: devices}).Register)
+	f := &syncFixture{router: r}
+	credential := syncCredential("h_peer")
+	credential.DeviceID = dev.ID
+	// The peer claims an entry at h_x:1 the server does not hold yet: the
+	// first page records nothing, and the exchange waits.
+	body := mustJSONBody(t, controllers.DecisionSyncExchangeRequest{
+		Protocol: 1, HostID: "h_peer", WaitSeconds: 10,
+		Heads: map[string]controllers.DecisionSyncHead{"h_x": {Seq: 1, ID: "dent_other"}},
+	})
+	status := make(chan int, 1)
+	go func() {
+		rec, _ := f.do(t, http.MethodPost, "/api/v1/decision-sync/exchange", &credential, body)
+		status <- rec.Code
+	}()
+	time.Sleep(100 * time.Millisecond) // waiting
+	if _, _, err := devices.Revoke(dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A local write wakes the exchange; its heads now differ at h_x:1.
+	if _, err := ledger.ApplyDecisionEntries(context.Background(), "h_x", ledgertest.ReceivedRun("h_x", 1, 1, "dec_1"), syncAt); err != nil {
+		t.Fatal(err)
+	}
+	server.Changed()
+	select {
+	case code := <-status:
+		if code != http.StatusUnauthorized {
+			t.Fatalf("the woken exchange of a revoked device answered %d, want 401", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the exchange did not wake")
+	}
+	if c := ledger.Conflicts(); len(c) != 0 {
+		t.Fatalf("a revoked device's exchange recorded %+v", c)
+	}
+}
