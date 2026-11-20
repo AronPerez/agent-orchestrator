@@ -259,6 +259,12 @@ type DecisionIDParam struct {
 	ID string `path:"id" description:"Call identifier."`
 }
 
+// DecisionAnswerIdempotencyHeader makes retrying an answer safe: a repeat with
+// the same key on the same call returns the answer already recorded.
+type DecisionAnswerIdempotencyHeader struct {
+	IdempotencyKey string `header:"Idempotency-Key" description:"Client-chosen key for one answer attempt, reused when retrying a send whose result was not seen. A repeat with the same key on the same call returns the answer already recorded instead of adding another. At most 128 characters."`
+}
+
 // DecisionEntryResponse is one line of a call's history. Only the fields
 // that its kind uses are set.
 type DecisionEntryResponse struct {

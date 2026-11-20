@@ -1,9 +1,38 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
-import { decisionAnswerGuard, decisionViewMeta, guardedDecisionRead } from "./decision-answer-guard";
+import { decisionAnswerGuard, decisionViewMeta, detailView, guardedDecisionRead, needsYouView } from "./decision-answer-guard";
 
-const bell = "needs-you:local";
-const panel = "detail:dec_1";
+const localBell = needsYouView("local");
+const remoteBell = needsYouView("remote-a");
+const panel = detailView("dec_1");
+
+type Guard = ReturnType<typeof decisionAnswerGuard>;
+
+const waiting = (id = "dec_1") => [{ id, state: "needs_you" }];
+const detail = (state: string) => ({ call: { id: "dec_1", state }, history: [] });
+
+function viewQuery(guard: Guard, view: string, read: () => Promise<unknown>) {
+	return { queryKey: ["decisions", "test", view], queryFn: () => guardedDecisionRead(guard, view, read), meta: decisionViewMeta(view), retry: false as const };
+}
+
+/** Applies one read of `view` through React Query, as the app does. */
+async function read(client: QueryClient, guard: Guard, view: string, data: unknown) {
+	await client.fetchQuery(viewQuery(guard, view, async () => data));
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((res) => { resolve = res; });
+	return { promise, resolve };
+}
+
+function lostAnswer(source = "local") {
+	const client = new QueryClient();
+	const guard = decisionAnswerGuard(client);
+	guard.begin(source, "dec_1");
+	guard.settle("dec_1", false);
+	return { client, guard };
+}
 
 describe("decision answer guard", () => {
 	it("is shared by everything using one query client and separate across clients", () => {
@@ -12,133 +41,150 @@ describe("decision answer guard", () => {
 		expect(decisionAnswerGuard(new QueryClient())).not.toBe(decisionAnswerGuard(client));
 	});
 
-	it("holds a call in every view while its answer is in flight and frees it when the daemon confirms", () => {
-		const guard = decisionAnswerGuard(new QueryClient());
-		guard.begin("local", "dec_1");
-		expect(guard.state("local", "dec_1", bell)).toBe("sending");
-		expect(guard.state("local", "dec_1", panel)).toBe("sending");
-		// A read cannot settle an answer that has not settled.
-		guard.viewRead(bell, guard.readStarted());
-		expect(guard.state("local", "dec_1", bell)).toBe("sending");
-		guard.settle("local", "dec_1", true);
-		expect(guard.state("local", "dec_1", bell)).toBeUndefined();
-		expect(guard.state("local", "dec_1", panel)).toBeUndefined();
-	});
-
-	it("keeps a lost answer held through reads that started before it failed", () => {
-		const guard = decisionAnswerGuard(new QueryClient());
-		guard.begin("local", "dec_1");
-		const inFlight = guard.readStarted(); // a live refresh already under way
-		guard.settle("local", "dec_1", false);
-		expect(guard.state("local", "dec_1", panel)).toBe("unconfirmed");
-		guard.viewRead(panel, inFlight);
-		expect(guard.state("local", "dec_1", panel)).toBe("unconfirmed");
-
-		guard.viewRead(panel, guard.readStarted());
-		expect(guard.state("local", "dec_1", panel)).toBeUndefined();
-	});
-
-	// Each view acts on its own cached copy of the call. Another view's fresh
-	// read does not refresh this one, so it must not release this one's hold.
-	it("releases a view only when that view applied a read started after the failure", () => {
-		const guard = decisionAnswerGuard(new QueryClient());
-		guard.begin("local", "dec_1");
-		guard.settle("local", "dec_1", false);
-		guard.viewRead("board", guard.readStarted());
-		guard.viewRead(bell, guard.readStarted());
-		expect(guard.state("local", "dec_1", bell)).toBeUndefined();
-		expect(guard.state("local", "dec_1", panel)).toBe("unconfirmed");
-		guard.viewRead(panel, guard.readStarted());
-		expect(guard.state("local", "dec_1", panel)).toBeUndefined();
-	});
-
-	it("keeps calls and hosts apart", () => {
-		const guard = decisionAnswerGuard(new QueryClient());
-		guard.begin("remote-a", "dec_1");
-		guard.settle("remote-a", "dec_1", false);
-		expect(guard.state("local", "dec_1", bell)).toBeUndefined();
-		expect(guard.state("remote-a", "dec_1", "needs-you:remote-a")).toBe("unconfirmed");
-		expect(guard.state("remote-a", "dec_2", "needs-you:remote-a")).toBeUndefined();
-	});
-
-	it("tells subscribers when a hold starts, settles, or a view catches up", () => {
-		const guard = decisionAnswerGuard(new QueryClient());
-		let changes = 0;
-		const unsubscribe = guard.subscribe(() => { changes += 1; });
-		guard.begin("local", "dec_1");
-		guard.settle("local", "dec_1", false);
-		guard.viewRead(panel, guard.readStarted());
-		unsubscribe();
-		guard.begin("local", "dec_2");
-		expect(changes).toBe(3);
-	});
-
-	// Views advance only when React Query installs a fetched result for them.
-	function deferred<T>() {
-		let resolve!: (value: T) => void;
-		let reject!: (error: Error) => void;
-		const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
-		return { promise, resolve, reject };
-	}
-	const viewQuery = (guard: ReturnType<typeof decisionAnswerGuard>, view: string, read: () => Promise<string[]>) => ({
-		queryKey: ["decisions", "test", view],
-		queryFn: () => guardedDecisionRead(guard, view, read),
-		meta: decisionViewMeta(view),
-		retry: false,
-	});
-
-	it("releases a view once React Query applies a read that started after the failure", async () => {
+	it("holds a call in every view while its answer is in flight and frees it when the daemon confirms", async () => {
 		const client = new QueryClient();
 		const guard = decisionAnswerGuard(client);
 		guard.begin("local", "dec_1");
-		guard.settle("local", "dec_1", false);
-		await client.fetchQuery(viewQuery(guard, bell, async () => ["dec_1"]));
-		expect(guard.state("local", "dec_1", bell)).toBeUndefined();
-		expect(guard.state("local", "dec_1", panel)).toBe("unconfirmed");
+		expect(guard.state("dec_1", localBell)).toBe("sending");
+		expect(guard.state("dec_1", panel)).toBe("sending");
+		await read(client, guard, localBell, waiting());
+		expect(guard.state("dec_1", localBell)).toBe("sending");
+		guard.settle("dec_1", true);
+		expect(guard.state("dec_1", localBell)).toBeUndefined();
+		expect(guard.state("dec_1", panel)).toBeUndefined();
+	});
+
+	it("releases every view once the source shows the lost answer was not recorded", async () => {
+		const { client, guard } = lostAnswer();
+		expect(guard.state("dec_1", panel)).toBe("unconfirmed");
+		await read(client, guard, localBell, waiting());
+		expect(guard.state("dec_1", localBell)).toBeUndefined();
+		expect(guard.state("dec_1", panel)).toBeUndefined();
+	});
+
+	// The board can show the answer while the panel's own read fails: the panel
+	// still shows its cached waiting copy, so it must stay held.
+	it("keeps a view held when the source shows the answer recorded but that view has not seen it", async () => {
+		const { client, guard } = lostAnswer();
+		await read(client, guard, localBell, []);
+		expect(guard.state("dec_1", localBell)).toBeUndefined();
+		expect(guard.state("dec_1", panel)).toBe("unconfirmed");
+		await read(client, guard, panel, detail("in_progress"));
+		expect(guard.state("dec_1", panel)).toBeUndefined();
+	});
+
+	// Decision sync puts one call on several machines under the same id.
+	it("holds a synced local copy while an answer to the remote copy is unconfirmed", async () => {
+		const { client, guard } = lostAnswer("remote-a");
+		// The bell now lists this computer's copy; a fresh local read is not the source.
+		await read(client, guard, localBell, waiting());
+		expect(guard.state("dec_1", localBell)).toBe("unconfirmed");
+		expect(guard.state("dec_1", panel)).toBe("unconfirmed");
+
+		// The source shows the answer recorded; local copies wait until sync shows it too.
+		await read(client, guard, remoteBell, []);
+		expect(guard.state("dec_1", remoteBell)).toBeUndefined();
+		await read(client, guard, localBell, waiting());
+		expect(guard.state("dec_1", localBell)).toBe("unconfirmed");
+		await read(client, guard, localBell, []);
+		expect(guard.state("dec_1", localBell)).toBeUndefined();
+	});
+
+	it("releases a synced local copy once the remote source shows the answer was not recorded", async () => {
+		const { client, guard } = lostAnswer("remote-a");
+		await read(client, guard, remoteBell, waiting());
+		expect(guard.state("dec_1", localBell)).toBeUndefined();
+		expect(guard.state("dec_1", panel)).toBeUndefined();
 	});
 
 	// A live refresh can read the call while the answer is still being sent;
 	// it being applied after the answer fails proves nothing about the answer.
-	it("keeps a lost answer held when a read that was already in flight is applied after the failure", async () => {
+	it("ignores a read that was already in flight when the answer failed", async () => {
 		const client = new QueryClient();
 		const guard = decisionAnswerGuard(client);
-		const read = deferred<string[]>();
+		const late = deferred<unknown>();
 		guard.begin("local", "dec_1");
-		const fetching = client.fetchQuery(viewQuery(guard, bell, () => read.promise));
+		const fetching = client.fetchQuery(viewQuery(guard, localBell, () => late.promise));
 		await Promise.resolve();
-		guard.settle("local", "dec_1", false);
-		read.resolve(["dec_1"]);
+		guard.settle("dec_1", false);
+		late.resolve(waiting());
 		await fetching;
-		expect(guard.state("local", "dec_1", bell)).toBe("unconfirmed");
+		expect(guard.state("dec_1", localBell)).toBe("unconfirmed");
 	});
 
 	// A refresh cancelled by an unmount or another invalidation may still get
 	// its response; React Query discards it, so the view has learned nothing.
 	it("keeps a hold when a cancelled refresh completes late and the next refresh fails", async () => {
-		const client = new QueryClient();
-		const guard = decisionAnswerGuard(client);
-		guard.begin("local", "dec_1");
-		guard.settle("local", "dec_1", false);
-		const late = deferred<string[]>();
-		const cancelled = client.fetchQuery(viewQuery(guard, panel, () => late.promise)).catch(() => undefined);
+		const { client, guard } = lostAnswer();
+		const late = deferred<unknown>();
+		const cancelled = client.fetchQuery(viewQuery(guard, localBell, () => late.promise)).catch(() => undefined);
 		await Promise.resolve();
-		await client.cancelQueries({ queryKey: ["decisions", "test", panel] });
-		late.resolve(["dec_1"]);
+		await client.cancelQueries({ queryKey: ["decisions", "test", localBell] });
+		late.resolve(waiting());
 		await cancelled;
-		await client.fetchQuery(viewQuery(guard, panel, () => Promise.reject(new Error("offline")))).catch(() => undefined);
-		expect(guard.state("local", "dec_1", panel)).toBe("unconfirmed");
+		await client.fetchQuery(viewQuery(guard, localBell, () => Promise.reject(new Error("offline")))).catch(() => undefined);
+		expect(guard.state("dec_1", localBell)).toBe("unconfirmed");
 
-		await client.fetchQuery(viewQuery(guard, panel, async () => ["dec_1"]));
-		expect(guard.state("local", "dec_1", panel)).toBeUndefined();
+		await read(client, guard, localBell, waiting());
+		expect(guard.state("dec_1", localBell)).toBeUndefined();
 	});
 
 	it("does not treat a cache write as a read of the daemon", async () => {
+		const { client, guard } = lostAnswer();
+		client.setQueryData(["decisions", "test", localBell], waiting());
+		expect(guard.state("dec_1", localBell)).toBe("unconfirmed");
+	});
+
+	it("keeps calls apart", async () => {
+		const { client, guard } = lostAnswer();
+		expect(guard.state("dec_2", localBell)).toBeUndefined();
+		await read(client, guard, localBell, waiting("dec_2"));
+		// dec_1 is absent from the list: recorded (or closed) at its source.
+		expect(guard.state("dec_1", panel)).toBe("unconfirmed");
+	});
+
+	it("tells subscribers when a hold starts, settles, or a read is observed", async () => {
 		const client = new QueryClient();
 		const guard = decisionAnswerGuard(client);
-		await client.fetchQuery(viewQuery(guard, bell, async () => ["dec_1"]));
+		let changes = 0;
+		const unsubscribe = guard.subscribe(() => { changes += 1; });
 		guard.begin("local", "dec_1");
-		guard.settle("local", "dec_1", false);
-		client.setQueryData(["decisions", "test", bell], ["dec_1", "dec_2"]);
-		expect(guard.state("local", "dec_1", bell)).toBe("unconfirmed");
+		guard.settle("dec_1", false);
+		await read(client, guard, localBell, waiting());
+		unsubscribe();
+		guard.begin("local", "dec_2");
+		expect(changes).toBe(3);
+	});
+
+	// The daemon makes a repeat of the same attempt safe: one key per attempt,
+	// kept across sends whose fate is unknown, replaced once one is confirmed or
+	// shown recorded (the next send is then a deliberate change).
+	it("reuses one idempotency key across uncertain sends and starts a new one after a confirmed answer", () => {
+		const guard = decisionAnswerGuard(new QueryClient());
+		const first = guard.begin("local", "dec_1");
+		guard.settle("dec_1", false);
+		expect(guard.begin("local", "dec_1")).toBe(first);
+		guard.settle("dec_1", true);
+		const next = guard.begin("local", "dec_1");
+		expect(next).not.toBe(first);
+		expect(guard.begin("local", "dec_2")).not.toBe(next);
+	});
+
+	it("keeps the key for a retry when the source shows the call still waiting", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		const lost = guard.begin("local", "dec_1");
+		guard.settle("dec_1", false);
+		await read(client, guard, panel, detail("needs_you"));
+		expect(guard.begin("local", "dec_1")).toBe(lost);
+	});
+
+	it("starts a new key once the source shows the lost answer was recorded", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		const lost = guard.begin("local", "dec_1");
+		guard.settle("dec_1", false);
+		await read(client, guard, panel, detail("in_progress"));
+		expect(guard.begin("local", "dec_1")).not.toBe(lost);
 	});
 });

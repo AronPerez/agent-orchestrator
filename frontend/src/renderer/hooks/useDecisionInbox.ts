@@ -49,15 +49,15 @@ export function useDecisionAnswer() {
 		// `view` is the surface sending (its cached copy of the call); without
 		// one, any unconfirmed answer counts as held.
 		mutationFn: async ({ view = "", ...input }: DecisionInboxAnswer & { view?: string }) => {
-			const hold = guard.state(input.sourceHostId, input.callId, view);
+			const hold = guard.state(input.callId, view);
 			if (hold) throw new DecisionAnswerHeldError(hold);
-			guard.begin(input.sourceHostId, input.callId);
+			const idempotencyKey = guard.begin(input.sourceHostId, input.callId);
 			try {
-				const confirmed = await answerDecisionInboxCall(input);
-				guard.settle(input.sourceHostId, input.callId, true);
+				const confirmed = await answerDecisionInboxCall({ ...input, idempotencyKey });
+				guard.settle(input.callId, true);
 				return confirmed;
 			} catch (error) {
-				guard.settle(input.sourceHostId, input.callId, false);
+				guard.settle(input.callId, false);
 				throw error;
 			}
 		},
@@ -168,7 +168,7 @@ export function useDecisionInbox(enabled: boolean) {
 		void guardVersion;
 		const holds = new Map<string, DecisionAnswerHold>();
 		for (const { sourceHostId, call } of entries) {
-			const hold = guard.state(sourceHostId, call.id, needsYouView(sourceHostId));
+			const hold = guard.state(call.id, needsYouView(sourceHostId));
 			if (hold) holds.set(`${sourceHostId}:${call.id}`, hold);
 		}
 		return holds;
@@ -176,7 +176,7 @@ export function useDecisionInbox(enabled: boolean) {
 
 	const answer = useCallback((entry: DecisionInboxEntry, option: number, note?: string) => {
 		const view = needsYouView(entry.sourceHostId);
-		if (guard.state(entry.sourceHostId, entry.call.id, view)) return;
+		if (guard.state(entry.call.id, view)) return;
 		answerMutation.mutate({
 			view,
 			sourceHostId: entry.sourceHostId,
@@ -214,10 +214,10 @@ export function useDecisionInbox(enabled: boolean) {
  * branch, so it does not poll.
  */
 /** Why the call's answer cannot be sent right now, shared across every surface. */
-export function useDecisionAnswerHold(hostId: HostId, callId: string, view: string): DecisionAnswerHold | undefined {
+export function useDecisionAnswerHold(callId: string, view: string): DecisionAnswerHold | undefined {
 	const guard = decisionAnswerGuard(useQueryClient());
 	useSyncExternalStore(guard.subscribe, guard.snapshot);
-	return guard.state(hostId, callId, view);
+	return guard.state(callId, view);
 }
 
 export function useDecisionBoard() {

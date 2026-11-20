@@ -597,3 +597,22 @@ func TestDecisionsAPI_LookupByIDs(t *testing.T) {
 		t.Fatalf("101 ids: status %d, want 400", resp.StatusCode)
 	}
 }
+
+func TestDecisionsAPI_AnswerPassesTheIdempotencyKeyHeader(t *testing.T) {
+	svc := &fakeDecisionService{}
+	srv := newDecisionServer(t, svc)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/decisions/dec_1/answer", strings.NewReader(`{"choice":"option","option":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "ans_7f3c")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || svc.answer.IdempotencyKey != "ans_7f3c" {
+		t.Fatalf("status=%d input=%+v", resp.StatusCode, svc.answer)
+	}
+}

@@ -16827,7 +16827,10 @@ export interface operations {
     answerDecision: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Client-chosen key for one answer attempt, reused when retrying a send whose result was not seen. A repeat with the same key on the same call returns the answer already recorded instead of adding another. At most 128 characters. */
+                "Idempotency-Key"?: string;
+            };
             path: {
                 /** @description Call identifier. */
                 id: string;

@@ -1302,7 +1302,7 @@ func decisionOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/decisions/{id}/answer", id: "answerDecision", tag: "decisions",
-			summary: "Answer a decision call", pathParams: []any{controllers.DecisionIDParam{}},
+			summary: "Answer a decision call", pathParams: []any{controllers.DecisionIDParam{}, controllers.DecisionAnswerIdempotencyHeader{}},
 			reqBody: controllers.AnswerDecisionRequest{},
 			resps:   append([]respUnit{{http.StatusOK, controllers.DecisionCallResponse{}}}, actionErrors...),
 		},

@@ -229,7 +229,7 @@ describe("DecisionCallPanel", () => {
 			await userEvent.click(send);
 			expect(postMock).toHaveBeenCalledTimes(1);
 			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
-				params: { path: { id: "dec_1" } },
+				params: { path: { id: "dec_1" }, header: { "Idempotency-Key": expect.stringMatching(/^ans_/) } },
 				body: { choice: "option", option: 2, note: "Rotate monthly" },
 			});
 		});
@@ -246,7 +246,7 @@ describe("DecisionCallPanel", () => {
 			await userEvent.type(note, "Use the shared vault");
 			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
 			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
-				params: { path: { id: "dec_1" } },
+				params: { path: { id: "dec_1" }, header: { "Idempotency-Key": expect.stringMatching(/^ans_/) } },
 				body: { choice: "other", note: "Use the shared vault" },
 			});
 		});
@@ -268,7 +268,7 @@ describe("DecisionCallPanel", () => {
 			await userEvent.type(screen.getByLabelText("Note for the session"), "Split the migration first");
 			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
 			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
-				params: { path: { id: "dec_1" } },
+				params: { path: { id: "dec_1" }, header: { "Idempotency-Key": expect.stringMatching(/^ans_/) } },
 				body: { choice: "option", option: 2, note: "Split the migration first" },
 			});
 		});
@@ -427,6 +427,27 @@ describe("DecisionCallPanel", () => {
 			expect(screen.getByRole("button", { name: "Send decision" })).toBeDisabled();
 			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
 			expect(postMock).toHaveBeenCalledTimes(1);
+		});
+
+		// The answer was recorded but its response was lost; once a refresh shows
+		// it, picking something else is a deliberate change and must not reuse
+		// the lost attempt's key (the daemon would return the old answer).
+		it("sends a deliberate change after a lost response with a new idempotency key", async () => {
+			serve(needsYou);
+			renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			postMock.mockRejectedValueOnce(new Error("connection reset"));
+			serve({ ...inProgress, option: 2, chosenLabel: "Per-tenant API keys", standingEntryId: "dent_2" });
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(await screen.findByText("Sending a different pick delivers it to the session as an update.")).toBeInTheDocument();
+
+			postMock.mockResolvedValue({ data: { ...inProgress, option: 1, standingEntryId: "dent_3" } });
+			await userEvent.click(screen.getByRole("radio", { name: /OAuth client credentials/ }));
+			await vi.waitFor(() => expect(screen.getByRole("button", { name: "Send decision" })).toBeEnabled());
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			await vi.waitFor(() => expect(postMock).toHaveBeenCalledTimes(2));
+			const keyOf = (n: number) => (postMock.mock.calls[n][1] as { params: { header: Record<string, string> } }).params.header["Idempotency-Key"];
+			expect(keyOf(1)).not.toBe(keyOf(0));
 		});
 
 		it("shows an answer recorded despite a lost response and does not send it again", async () => {
