@@ -209,7 +209,15 @@ func (s *Server) page(ctx context.Context, peerHostID string, req ExchangeReques
 	if err != nil {
 		return ExchangeResponse{}, fmt.Errorf("read sync page: %w", err)
 	}
-	if _, err := s.deps.Ledger.CheckDecisionHeads(ctx, peerHostID, req.Heads, s.deps.Now()); err != nil {
+	// Recording a conflict is a write: it runs inside the request's guard on
+	// each wake, never across the wait.
+	if err := RunGuarded(ctx, func() error {
+		_, err := s.deps.Ledger.CheckDecisionHeads(ctx, peerHostID, req.Heads, s.deps.Now())
+		return err
+	}); err != nil {
+		if errors.Is(err, ErrCredentialRevoked) {
+			return ExchangeResponse{}, err
+		}
 		return ExchangeResponse{}, fmt.Errorf("check peer heads: %w", err)
 	}
 	heads, err := s.deps.Ledger.DecisionHeads(ctx)

@@ -94,7 +94,9 @@ type AccessDevices struct {
 	// for reading around one bounded write, and removing that device holds
 	// it for writing, so a removal returns only after every write that
 	// device had admitted. Other devices and new pairings never wait on it.
-	// Barriers are taken before mu; liveMu guards only the map.
+	// Barriers are taken before mu; liveMu guards only the map. A barrier is
+	// never deleted: a write may still hold or wait on it, and a removal
+	// must always find that same barrier.
 	liveMu sync.Mutex
 	live   map[string]*sync.RWMutex
 	mu     sync.RWMutex
@@ -324,11 +326,6 @@ func (r *AccessDevices) holdRemoval(ids []string) func() {
 		for _, b := range held {
 			b.Unlock()
 		}
-		r.liveMu.Lock()
-		for _, id := range ids {
-			delete(r.live, id)
-		}
-		r.liveMu.Unlock()
 	}
 }
 

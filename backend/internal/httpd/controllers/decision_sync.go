@@ -41,6 +41,29 @@ type DecisionSyncController struct {
 	Devices interface{ Has(deviceID string) bool }
 }
 
+// guarded returns the request context carrying the sending device's guard:
+// each ledger write the request makes runs while the device is held live, so
+// revoking it returns only after that write, and a write after that is
+// refused. Waits (the plan gate, the long poll) happen outside the guard, so
+// revoking never stalls. Without a registry that holds devices live, it
+// falls back to one recheck.
+func (c *DecisionSyncController) guarded(w http.ResponseWriter, r *http.Request) (context.Context, bool) {
+	live, ok := c.Devices.(interface {
+		WhileLive(string, func() error) (bool, error)
+	})
+	if !ok {
+		return r.Context(), c.stillValid(w, r)
+	}
+	deviceID := requestscope.CredentialFrom(r.Context()).DeviceID
+	return decisionsync.WithApplyGuard(r.Context(), func(fn func() error) error {
+		found, err := live.WhileLive(deviceID, fn)
+		if !found {
+			return decisionsync.ErrCredentialRevoked
+		}
+		return err
+	}), true
+}
+
 // stillValid writes 401 and reports false when the request's sync device was
 // revoked after the listener accepted it.
 func (c *DecisionSyncController) stillValid(w http.ResponseWriter, r *http.Request) bool {
@@ -102,10 +125,14 @@ func (c *DecisionSyncController) exchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req DecisionSyncExchangeRequest
-	if !decodeSyncBody(w, r, &req) || !c.stillValid(w, r) {
+	if !decodeSyncBody(w, r, &req) {
 		return
 	}
-	resp, err := c.Svc.Exchange(r.Context(), peer, decisionsync.ExchangeRequest{
+	ctx, ok := c.guarded(w, r)
+	if !ok {
+		return
+	}
+	resp, err := c.Svc.Exchange(ctx, peer, decisionsync.ExchangeRequest{
 		Protocol: req.Protocol, HostID: req.HostID, MachineLabel: req.MachineLabel,
 		Have: req.Have, Heads: headsFromDTO(req.Heads), WaitSeconds: req.WaitSeconds,
 	})
@@ -140,22 +167,8 @@ func (c *DecisionSyncController) entries(w http.ResponseWriter, r *http.Request)
 	push := decisionsync.PushRequest{
 		Protocol: req.Protocol, HostID: req.HostID, Entries: EntriesFromDTO(req.Entries), Heads: headsFromDTO(req.Heads),
 	}
-	ctx := r.Context()
-	// Each write of the page runs while the sending device is held live, so
-	// revoking it returns only after that write, and a write after that is
-	// refused. Waits (the plan gate) happen outside, so revoking never stalls.
-	if live, ok := c.Devices.(interface {
-		WhileLive(string, func() error) (bool, error)
-	}); ok {
-		deviceID := requestscope.CredentialFrom(ctx).DeviceID
-		ctx = decisionsync.WithApplyGuard(ctx, func(fn func() error) error {
-			found, err := live.WhileLive(deviceID, fn)
-			if !found {
-				return decisionsync.ErrCredentialRevoked
-			}
-			return err
-		})
-	} else if !c.stillValid(w, r) {
+	ctx, ok := c.guarded(w, r)
+	if !ok {
 		return
 	}
 	resp, err := c.Svc.Push(ctx, peer, push)

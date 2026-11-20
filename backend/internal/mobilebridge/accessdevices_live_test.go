@@ -83,3 +83,41 @@ func TestOnlyTheRemovedDeviceWaitsForItsWrites(t *testing.T) {
 		t.Fatal("a write ran for a revoked device")
 	}
 }
+
+// Reissuing another scope for the same client takes, then releases, the sync
+// device's barrier. A write that queued on that barrier meanwhile must still
+// hold back a later revoke.
+func TestReissueDoesNotDropABarrierAWriteHolds(t *testing.T) {
+	r, err := LoadAccessDevices(filepath.Join(t.TempDir(), "devices.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sync, _, _, err := r.IssueScopedByClient("Decision sync from c", "darwin", []string{DeviceScopeDecisionSync}, "", "h_c", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, releaseFirst := make(chan struct{}), make(chan struct{})
+	go func() { _, _ = r.WhileLive(sync.ID, func() error { close(first); <-releaseFirst; return nil }) }()
+	<-first
+	reissued := make(chan struct{})
+	go func() {
+		_, _, _, _ = r.IssueScopedByClient("Coordination from c", "darwin", []string{DeviceScopeAgentCoordination}, "", "h_c", time.Now())
+		close(reissued)
+	}()
+	time.Sleep(50 * time.Millisecond) // the reissue now waits on the barrier
+	second, releaseSecond := make(chan struct{}), make(chan struct{})
+	go func() { _, _ = r.WhileLive(sync.ID, func() error { close(second); <-releaseSecond; return nil }) }()
+	time.Sleep(50 * time.Millisecond) // the second write now waits behind the reissue
+	close(releaseFirst)
+	<-reissued
+	<-second
+	revoked := make(chan struct{})
+	go func() { _, _, _ = r.Revoke(sync.ID); close(revoked) }()
+	select {
+	case <-revoked:
+		t.Fatal("revocation returned while a write it should wait for was running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseSecond)
+	<-revoked
+}
