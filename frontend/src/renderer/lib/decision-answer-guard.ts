@@ -12,20 +12,29 @@ type Entry = { sending: number; failedAt?: number };
 /**
  * One record per host and call of answers whose result is unknown, shared by
  * every decision surface on a query client (the bell and the Decisions page),
- * so closing a panel or switching surfaces never forgets it. A failed answer
- * is released only by a read that *started* after the failure: a read already
- * under way may have looked before the answer was committed.
+ * so closing a panel or switching surfaces never forgets it.
+ *
+ * Each surface acts on its own cached copy of a call, so a failed answer is
+ * released per *view*: only once that view has applied a read that *started*
+ * after the failure. Another view's fresh read does not refresh this one's
+ * cache, and a read already under way may have looked before the answer was
+ * committed.
  */
 export class DecisionAnswerGuard {
 	private sequence = 0;
 	private readonly entries = new Map<string, Entry>();
+	/** Per view: when its latest successful read started. */
+	private readonly viewReads = new Map<string, number>();
 	private readonly listeners = new Set<() => void>();
 	private version = 0;
 
-	state(hostId: string, callId: string): DecisionAnswerHold | undefined {
+	/** Why `view` must not send an answer to this call right now, if anything. */
+	state(hostId: string, callId: string, view: string): DecisionAnswerHold | undefined {
 		const entry = this.entries.get(key(hostId, callId));
 		if (!entry) return undefined;
-		return entry.sending > 0 ? "sending" : "unconfirmed";
+		if (entry.sending > 0) return "sending";
+		if (entry.failedAt !== undefined && (this.viewReads.get(view) ?? 0) <= entry.failedAt) return "unconfirmed";
+		return undefined;
 	}
 
 	/** An answer for the call is about to be sent. */
@@ -48,26 +57,16 @@ export class DecisionAnswerGuard {
 		this.changed();
 	}
 
-	/** Call when a decision read is sent; pass the result to readSucceeded. */
+	/** Call when a decision read is sent; pass the result to viewRead. */
 	readStarted(): number {
 		return ++this.sequence;
 	}
 
-	/**
-	 * A read of the host (or of one call on it) that started at `startedAt`
-	 * succeeded, so it shows what the daemon recorded for answers that failed
-	 * before it started. Answers still in flight stay held.
-	 */
-	readSucceeded(hostId: string, startedAt: number, callId?: string): void {
-		let freed = false;
-		for (const [id, entry] of this.entries) {
-			const [entryHost, entryCall] = split(id);
-			if (entryHost !== hostId || (callId !== undefined && entryCall !== callId)) continue;
-			if (entry.sending > 0 || entry.failedAt === undefined || startedAt <= entry.failedAt) continue;
-			this.entries.delete(id);
-			freed = true;
-		}
-		if (freed) this.changed();
+	/** `view` successfully applied a read that started at `startedAt`. */
+	viewRead(view: string, startedAt: number): void {
+		if (startedAt <= (this.viewReads.get(view) ?? 0)) return;
+		this.viewReads.set(view, startedAt);
+		this.changed();
 	}
 
 	subscribe = (listener: () => void): (() => void) => {
@@ -84,19 +83,16 @@ export class DecisionAnswerGuard {
 	}
 }
 
-/**
- * Runs a decision read and, if it succeeds, releases the answers on that host
- * (or that one call) that failed before the read started.
- */
-export async function guardedDecisionRead<T>(
-	guard: DecisionAnswerGuard,
-	hostId: string,
-	callId: string | undefined,
-	read: () => Promise<T>,
-): Promise<T> {
+/** The bell's needs-you list for one machine. */
+export const needsYouView = (hostId: string) => `needs-you:${hostId}`;
+/** This computer's detail for one call (the Decisions panel). */
+export const detailView = (callId: string) => `detail:${callId}`;
+
+/** Runs a read for `view` and, if it succeeds, records when it started. */
+export async function guardedDecisionRead<T>(guard: DecisionAnswerGuard, view: string, read: () => Promise<T>): Promise<T> {
 	const startedAt = guard.readStarted();
 	const result = await read();
-	guard.readSucceeded(hostId, startedAt, callId);
+	guard.viewRead(view, startedAt);
 	return result;
 }
 
@@ -122,4 +118,3 @@ export function decisionAnswerGuard(queryClient: QueryClient): DecisionAnswerGua
 
 // JSON keeps host and call ids apart whatever characters they contain.
 const key = (hostId: string, callId: string) => JSON.stringify([hostId, callId]);
-const split = (id: string) => JSON.parse(id) as [string, string];

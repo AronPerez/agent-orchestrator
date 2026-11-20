@@ -1,6 +1,7 @@
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useDecisionAction, useDecisionAnswer, useDecisionAnswerHold } from "../hooks/useDecisionInbox";
+import { detailView } from "../lib/decision-answer-guard";
 import { apiErrorRequestId } from "../lib/api-client";
 import { decisionOptionRequiresNote, type DecisionCall } from "../lib/decision-inbox";
 import { LOCAL_HOST } from "../lib/hosts";
@@ -55,7 +56,8 @@ export function DecisionCallActions({
 	// The daemon may commit an answer whose response is lost. The hold is shared
 	// with the bell and outlives this panel: until a read started after the
 	// failure succeeds, sending again could deliver the answer twice.
-	const hold = useDecisionAnswerHold(LOCAL_HOST, call.id);
+	const view = detailView(call.id);
+	const hold = useDecisionAnswerHold(LOCAL_HOST, call.id, view);
 	const unconfirmed = hold !== undefined;
 	// A standing decision is closed by the person without naming an answer: it has none.
 	const outcomeFor = call.state === "decided" ? undefined : call.standingEntryId;
@@ -77,6 +79,7 @@ export function DecisionCallActions({
 					onAnswer={(choice, note) => {
 						reset();
 						answer.mutate({
+							view,
 							sourceHostId: LOCAL_HOST,
 							callId: call.id,
 							choice: choice === OTHER ? "other" : "option",

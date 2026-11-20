@@ -20,7 +20,9 @@ import {
 import {
 	decisionAnswerGuard,
 	DecisionAnswerHeldError,
+	detailView,
 	guardedDecisionRead,
+	needsYouView,
 	type DecisionAnswerHold,
 } from "../lib/decision-answer-guard";
 import { labelForHost } from "../lib/host-clients";
@@ -41,8 +43,10 @@ export function useDecisionAnswer() {
 	return useMutation({
 		// A call with an answer in flight, or one whose fate is unknown, is never
 		// sent again from any surface until a later read settles it.
-		mutationFn: async (input: DecisionInboxAnswer) => {
-			const hold = guard.state(input.sourceHostId, input.callId);
+		// `view` is the surface sending (its cached copy of the call); without
+		// one, any unconfirmed answer counts as held.
+		mutationFn: async ({ view = "", ...input }: DecisionInboxAnswer & { view?: string }) => {
+			const hold = guard.state(input.sourceHostId, input.callId, view);
 			if (hold) throw new DecisionAnswerHeldError(hold);
 			guard.begin(input.sourceHostId, input.callId);
 			try {
@@ -111,7 +115,7 @@ export function useDecisionInbox(enabled: boolean) {
 	const guard = decisionAnswerGuard(useQueryClient());
 	const localQuery = useQuery({
 		queryKey: decisionInboxQueryKey(LOCAL_HOST),
-		queryFn: ({ signal }) => guardedDecisionRead(guard, LOCAL_HOST, undefined, () => fetchDecisionInboxCalls(LOCAL_HOST, signal)),
+		queryFn: ({ signal }) => guardedDecisionRead(guard, needsYouView(LOCAL_HOST), () => fetchDecisionInboxCalls(LOCAL_HOST, signal)),
 		enabled,
 		retry: 1,
 		refetchInterval: enabled ? 2_000 : false,
@@ -119,7 +123,7 @@ export function useDecisionInbox(enabled: boolean) {
 	const remoteQueries = useQueries({
 		queries: connectedHosts.map((hostId) => ({
 			queryKey: decisionInboxQueryKey(hostId),
-			queryFn: ({ signal }: { signal: AbortSignal }) => guardedDecisionRead(guard, hostId, undefined, () => fetchDecisionInboxCalls(hostId, signal)),
+			queryFn: ({ signal }: { signal: AbortSignal }) => guardedDecisionRead(guard, needsYouView(hostId), () => fetchDecisionInboxCalls(hostId, signal)),
 			enabled,
 			retry: 1,
 			refetchInterval: enabled ? 2_000 : false,
@@ -141,15 +145,17 @@ export function useDecisionInbox(enabled: boolean) {
 		void guardVersion;
 		const holds = new Map<string, DecisionAnswerHold>();
 		for (const { sourceHostId, call } of entries) {
-			const hold = guard.state(sourceHostId, call.id);
+			const hold = guard.state(sourceHostId, call.id, needsYouView(sourceHostId));
 			if (hold) holds.set(`${sourceHostId}:${call.id}`, hold);
 		}
 		return holds;
 	}, [entries, guard, guardVersion]);
 
 	const answer = useCallback((entry: DecisionInboxEntry, option: number, note?: string) => {
-		if (guard.state(entry.sourceHostId, entry.call.id)) return;
+		const view = needsYouView(entry.sourceHostId);
+		if (guard.state(entry.sourceHostId, entry.call.id, view)) return;
 		answerMutation.mutate({
+			view,
 			sourceHostId: entry.sourceHostId,
 			callId: entry.call.id,
 			option,
@@ -183,17 +189,16 @@ export function useDecisionInbox(enabled: boolean) {
  * branch, so it does not poll.
  */
 /** Why the call's answer cannot be sent right now, shared across every surface. */
-export function useDecisionAnswerHold(hostId: HostId, callId: string): DecisionAnswerHold | undefined {
+export function useDecisionAnswerHold(hostId: HostId, callId: string, view: string): DecisionAnswerHold | undefined {
 	const guard = decisionAnswerGuard(useQueryClient());
 	useSyncExternalStore(guard.subscribe, guard.snapshot);
-	return guard.state(hostId, callId);
+	return guard.state(hostId, callId, view);
 }
 
 export function useDecisionBoard() {
-	const guard = decisionAnswerGuard(useQueryClient());
 	return useQuery({
 		queryKey: decisionKeys.board(),
-		queryFn: ({ signal }) => guardedDecisionRead(guard, LOCAL_HOST, undefined, () => fetchDecisionBoard(signal)),
+		queryFn: ({ signal }) => fetchDecisionBoard(signal),
 		retry: 1,
 		// No event fires when a Done card ages out of the seven-day window, so
 		// refetch at the next such moment.
@@ -224,7 +229,7 @@ export function useDecisionDetail(callId: string | undefined) {
 	const guard = decisionAnswerGuard(useQueryClient());
 	return useQuery({
 		queryKey: decisionKeys.detail(callId ?? ""),
-		queryFn: ({ signal }) => guardedDecisionRead(guard, LOCAL_HOST, callId, () => fetchDecisionDetail(callId!, signal)),
+		queryFn: ({ signal }) => guardedDecisionRead(guard, detailView(callId ?? ""), () => fetchDecisionDetail(callId!, signal)),
 		enabled: Boolean(callId),
 		retry: 1,
 	});
