@@ -262,8 +262,28 @@ function noteShareScope(scope: ShareScope): void {
 	shareLinksChanged();
 }
 
+/**
+ * Each link's grant changes and reads (an invite, a removal, a read of the
+ * list), in order: each runs after the one before it settled, so a read sees
+ * every change before it and a change's answer is read against the list it
+ * changed. Kept per link, not per panel: a panel closed while an invite is
+ * pending is unmounted, and the panel opened next must still read the list
+ * after that invite, not before it. Queued work never rejects (each answers
+ * false or catches).
+ */
+const grantQueues = new Map<string, Promise<unknown>>();
+function queueGrantChange(shareId: string, run: () => Promise<boolean>): Promise<boolean> {
+	const sent = (grantQueues.get(shareId) ?? Promise.resolve()).then(run);
+	grantQueues.set(shareId, sent);
+	void sent.then(() => {
+		if (grantQueues.get(shareId) === sent) grantQueues.delete(shareId);
+	});
+	return sent;
+}
+
 /** Forgets every cached link list; for tests. */
 export function resetShareCachesForTests(): void {
+	grantQueues.clear();
 	shareLinksCache.clear();
 	shareLinksReads.clear();
 	lastShareScope = undefined;
@@ -733,16 +753,6 @@ function SharePanel({
 	// number. A full list (a read, or an invite's answer) is shown only if
 	// nothing started after it, so an older answer never replaces a newer one.
 	const grantsSeq = useRef(0);
-	// The grant change or read last queued (an invite, a removal, or a read of
-	// the list); it never rejects (each answers false or catches). Each runs
-	// after the one before it settled, so a read sees every change before it
-	// and a change's answer is read against the list it changed.
-	const grantChangesInFlight = useRef<Promise<unknown>>(Promise.resolve());
-	const queueGrantChange = (run: () => Promise<boolean>): Promise<boolean> => {
-		const sent = grantChangesInFlight.current.then(run);
-		grantChangesInFlight.current = sent;
-		return sent;
-	};
 	// Every action taken in the panel (publish, unpublish, access, people)
 	// takes the next number. The refresh behind an opening from a cached list
 	// only applies while none started since: it never overwrites what an
@@ -756,7 +766,7 @@ function SharePanel({
 		// Queued behind pending invites and removals: a read sent beside one
 		// (Try again after a failed read) could answer with the list from before
 		// it, and its newer number would discard the change's answer.
-		void queueGrantChange(async () => {
+		void queueGrantChange(share.id, async () => {
 			const seq = ++grantsSeq.current;
 			let read: { grants?: CloudShareGrants; grantsError?: true };
 			try {
@@ -1034,7 +1044,7 @@ function SharePanel({
 	// made in quick succession are sent one after another, so each answer is
 	// read after the one before it saved, and the last lists them all.
 	const addSubjects = (shareId: string, input: CloudShareInvite, failed: GrantFailure): Promise<boolean> =>
-		queueGrantChange(() => sendSubjects(shareId, input, failed));
+		queueGrantChange(shareId, () => sendSubjects(shareId, input, failed));
 	const sendSubjects = async (shareId: string, input: CloudShareInvite, failed: GrantFailure): Promise<boolean> => {
 		startAction();
 		const seq = ++grantsSeq.current;
@@ -1062,7 +1072,7 @@ function SharePanel({
 	// before it, so the panel would lose a grant the server kept.
 	const removeGrant = (shown: Extract<Phase, { kind: "published" }>, grantId: string, removingKey: string, failed: GrantFailure = "artifacts.share.people.removeFailed"): Promise<boolean> => {
 		setRemoving(removingKey);
-		return queueGrantChange(() => sendRemoval(shown, grantId, failed));
+		return queueGrantChange(shown.share.id, () => sendRemoval(shown, grantId, failed));
 	};
 	const sendRemoval = async (shown: Extract<Phase, { kind: "published" }>, grantId: string, failed: GrantFailure): Promise<boolean> => {
 		startAction();

@@ -203,6 +203,34 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(screen.queryByText("Only you")).toBeNull();
 	});
 
+	it("reads the list after a workspace invitation left pending by a closed panel", async () => {
+		// What the server holds; reads answer from it.
+		let server: CloudShareGrants = none;
+		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
+		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [share] });
+		vi.spyOn(aoBridge.cloudShare, "grants").mockImplementation(async () => server);
+		let release!: () => void;
+		vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => {
+			release = () => {
+				server = { ...server, workspaces: [everyone] };
+				resolve(server);
+			};
+		}));
+		renderButton(cloudFile);
+		const open = async () => userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
+		await open();
+		await userEvent.click(await screen.findByRole("button", { name: /Only you/ }));
+		await userEvent.click(screen.getByRole("menuitemradio", { name: /Everyone at Acme/ }));
+		// Close the panel while the invitation is pending, then open it again.
+		await userEvent.keyboard("{Escape}");
+		await waitFor(() => expect(screen.queryByRole("region", { name: "People with access" })).toBeNull());
+		await open();
+		await screen.findByRole("region", { name: "People with access" });
+		release();
+		expect(await screen.findByText("Everyone at Acme can open it after signing in, and finds it under Shared with you.")).toBeTruthy();
+		expect(screen.queryByText("Only you")).toBeNull();
+	});
+
 	it("shares a new link with the teams and workspace set up before Publish, once it is live", async () => {
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue(inspection);
 		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue(links);
