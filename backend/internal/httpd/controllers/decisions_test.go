@@ -616,3 +616,15 @@ func TestDecisionsAPI_AnswerPassesTheIdempotencyKeyHeader(t *testing.T) {
 		t.Fatalf("status=%d input=%+v", resp.StatusCode, svc.answer)
 	}
 }
+
+func TestDecisionsAPI_CallShowsTheStandingAnswerKeyDigest(t *testing.T) {
+	call := sampleDecisionCall()
+	call.AnswerKeyDigest = strings.Repeat("ab", 32)
+	svc := &fakeDecisionService{call: &call}
+	srv := newDecisionServer(t, svc)
+	// Every call response goes through one mapper; the fake returns this call from Raise.
+	body, status := decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions", `{"title":"Ship it?","context":"c","options":[{"label":"Yes"},{"label":"No"}]}`, "w-1")
+	if status != http.StatusCreated || !strings.Contains(string(body), `"answerKeyDigest":"`+call.AnswerKeyDigest+`"`) {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+}

@@ -7703,6 +7703,8 @@ export interface components {
             servingHostId: string;
         };
         DecisionCallResponse: {
+            /** @description SHA-256 (hex) of the Idempotency-Key the standing answer was sent with, so a client can tell whether its own uncertain attempt is the one recorded. */
+            answerKeyDigest?: string;
             answerSurface?: string;
             /** Format: date-time */
             answeredAt?: null | string;
