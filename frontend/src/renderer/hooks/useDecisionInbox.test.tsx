@@ -137,6 +137,67 @@ function setupLedger(hostId: string, calls: ReturnType<typeof decisionCall>[]) {
 const pathCalls = (client: { GET: ReturnType<typeof vi.fn> }, path: string) =>
 	client.GET.mock.calls.filter(([called]) => called === path).length;
 
+describe("shared lost-answer guard", () => {
+	// The daemon can record an answer whose response is lost; if the re-read
+	// fails too, every surface still shows the call as waiting.
+	function lossyLocal() {
+		let current = [decisionCall("dec_1", "2026-11-18T10:00:00Z")];
+		let reads: "ok" | "fail" = "ok";
+		const client = {
+			GET: vi.fn().mockImplementation(() => reads === "fail"
+				? Promise.reject(new TypeError("network down"))
+				: Promise.resolve({ data: { calls: current } })),
+			POST: vi.fn().mockImplementation(() => {
+				current = [];
+				reads = "fail";
+				return Promise.reject(new TypeError("response lost"));
+			}),
+			recover: () => { reads = "ok"; },
+		};
+		clients.set("local", client);
+		return client;
+	}
+
+	it("holds the bell after the panel's answer was lost, until a later read succeeds", async () => {
+		connectedHostsMock.mockReturnValue([]);
+		const client = lossyLocal();
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const bell = renderHook(() => useDecisionInbox(true), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(bell.result.current.entries).toHaveLength(1));
+
+		// The Decisions panel sends through the shared mutation and loses the response.
+		const panel = renderHook(() => useDecisionAnswer(), { wrapper: wrapper(queryClient) });
+		await act(async () => {
+			await panel.result.current.mutateAsync({ sourceHostId: "local", callId: "dec_1", option: 1 }).catch(() => undefined);
+		});
+		panel.unmount();
+		await waitFor(() => expect(bell.result.current.held.get("local:dec_1")).toBe("unconfirmed"));
+		expect(bell.result.current.entries).toHaveLength(1);
+		act(() => bell.result.current.answer(bell.result.current.entries[0], 1));
+		expect(client.POST).toHaveBeenCalledTimes(1);
+
+		client.recover();
+		act(() => bell.result.current.retry());
+		await waitFor(() => expect(bell.result.current.entries).toHaveLength(0));
+		expect(bell.result.current.held.size).toBe(0);
+		expect(client.POST).toHaveBeenCalledTimes(1);
+	});
+
+	it("refuses to send a held call through the shared mutation itself", async () => {
+		connectedHostsMock.mockReturnValue([]);
+		const client = lossyLocal();
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const answer = renderHook(() => useDecisionAnswer(), { wrapper: wrapper(queryClient) });
+		await act(async () => {
+			await answer.result.current.mutateAsync({ sourceHostId: "local", callId: "dec_1", option: 1 }).catch(() => undefined);
+		});
+		await act(async () => {
+			await expect(answer.result.current.mutateAsync({ sourceHostId: "local", callId: "dec_1", option: 1 })).rejects.toThrow();
+		});
+		expect(client.POST).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("decision page hooks", () => {
 	it("keeps the bell's needs-you key on the shared host branch", () => {
 		expect(decisionInboxQueryKey("remote-a")).toEqual(decisionKeys.needsYou("remote-a"));

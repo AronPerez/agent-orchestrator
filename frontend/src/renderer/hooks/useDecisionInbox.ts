@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import {
 	answerDecisionInboxCall,
 	DECISION_SEARCH_LIMIT,
@@ -14,8 +14,15 @@ import {
 	type DecisionBoard,
 	type DecisionCall,
 	type DecisionDetail,
+	type DecisionInboxAnswer,
 	type DecisionInboxEntry,
 } from "../lib/decision-inbox";
+import {
+	decisionAnswerGuard,
+	DecisionAnswerHeldError,
+	guardedDecisionRead,
+	type DecisionAnswerHold,
+} from "../lib/decision-answer-guard";
 import { labelForHost } from "../lib/host-clients";
 import { LOCAL_HOST, type HostId } from "../lib/hosts";
 import { useConnectedHosts } from "./useHostConnection";
@@ -30,8 +37,23 @@ export const decisionInboxQueryKey = (hostId: HostId) => decisionKeys.needsYou(h
  */
 export function useDecisionAnswer() {
 	const queryClient = useQueryClient();
+	const guard = decisionAnswerGuard(queryClient);
 	return useMutation({
-		mutationFn: answerDecisionInboxCall,
+		// A call with an answer in flight, or one whose fate is unknown, is never
+		// sent again from any surface until a later read settles it.
+		mutationFn: async (input: DecisionInboxAnswer) => {
+			const hold = guard.state(input.sourceHostId, input.callId);
+			if (hold) throw new DecisionAnswerHeldError(hold);
+			guard.begin(input.sourceHostId, input.callId);
+			try {
+				const confirmed = await answerDecisionInboxCall(input);
+				guard.settle(input.sourceHostId, input.callId, true);
+				return confirmed;
+			} catch (error) {
+				guard.settle(input.sourceHostId, input.callId, false);
+				throw error;
+			}
+		},
 		onSuccess: async (confirmed, input) => {
 			queryClient.setQueryData<DecisionCall[]>(decisionInboxQueryKey(input.sourceHostId), (current) =>
 				current?.filter((call) => call.id !== input.callId),
@@ -86,9 +108,10 @@ function seedConfirmedCall(queryClient: ReturnType<typeof useQueryClient>, confi
 
 export function useDecisionInbox(enabled: boolean) {
 	const connectedHosts = useConnectedHosts();
+	const guard = decisionAnswerGuard(useQueryClient());
 	const localQuery = useQuery({
 		queryKey: decisionInboxQueryKey(LOCAL_HOST),
-		queryFn: ({ signal }) => fetchDecisionInboxCalls(LOCAL_HOST, signal),
+		queryFn: ({ signal }) => guardedDecisionRead(guard, LOCAL_HOST, undefined, () => fetchDecisionInboxCalls(LOCAL_HOST, signal)),
 		enabled,
 		retry: 1,
 		refetchInterval: enabled ? 2_000 : false,
@@ -96,7 +119,7 @@ export function useDecisionInbox(enabled: boolean) {
 	const remoteQueries = useQueries({
 		queries: connectedHosts.map((hostId) => ({
 			queryKey: decisionInboxQueryKey(hostId),
-			queryFn: ({ signal }: { signal: AbortSignal }) => fetchDecisionInboxCalls(hostId, signal),
+			queryFn: ({ signal }: { signal: AbortSignal }) => guardedDecisionRead(guard, hostId, undefined, () => fetchDecisionInboxCalls(hostId, signal)),
 			enabled,
 			retry: 1,
 			refetchInterval: enabled ? 2_000 : false,
@@ -112,15 +135,27 @@ export function useDecisionInbox(enabled: boolean) {
 	]), [connectedHosts, localQuery.data, remoteQueries]);
 
 	const answerMutation = useDecisionAnswer();
+	const guardVersion = useSyncExternalStore(guard.subscribe, guard.snapshot);
+	// `${hostId}:${callId}` → why that call's answer cannot be sent right now.
+	const held = useMemo(() => {
+		void guardVersion;
+		const holds = new Map<string, DecisionAnswerHold>();
+		for (const { sourceHostId, call } of entries) {
+			const hold = guard.state(sourceHostId, call.id);
+			if (hold) holds.set(`${sourceHostId}:${call.id}`, hold);
+		}
+		return holds;
+	}, [entries, guard, guardVersion]);
 
 	const answer = useCallback((entry: DecisionInboxEntry, option: number, note?: string) => {
+		if (guard.state(entry.sourceHostId, entry.call.id)) return;
 		answerMutation.mutate({
 			sourceHostId: entry.sourceHostId,
 			callId: entry.call.id,
 			option,
 			note,
 		});
-	}, [answerMutation.mutate]);
+	}, [answerMutation.mutate, guard]);
 	const retry = useCallback(() => {
 		void localQuery.refetch();
 		for (const query of remoteQueries) void query.refetch();
@@ -136,6 +171,7 @@ export function useDecisionInbox(enabled: boolean) {
 			callId: answerMutation.variables.callId,
 			message: answerMutation.error instanceof Error ? answerMutation.error.message : "Could not send decision",
 		} : undefined,
+		held,
 		answer,
 		retry,
 	};
@@ -146,10 +182,18 @@ export function useDecisionInbox(enabled: boolean) {
  * one query; live `decision_updated` events refresh it through the local host
  * branch, so it does not poll.
  */
+/** Why the call's answer cannot be sent right now, shared across every surface. */
+export function useDecisionAnswerHold(hostId: HostId, callId: string): DecisionAnswerHold | undefined {
+	const guard = decisionAnswerGuard(useQueryClient());
+	useSyncExternalStore(guard.subscribe, guard.snapshot);
+	return guard.state(hostId, callId);
+}
+
 export function useDecisionBoard() {
+	const guard = decisionAnswerGuard(useQueryClient());
 	return useQuery({
 		queryKey: decisionKeys.board(),
-		queryFn: ({ signal }) => fetchDecisionBoard(signal),
+		queryFn: ({ signal }) => guardedDecisionRead(guard, LOCAL_HOST, undefined, () => fetchDecisionBoard(signal)),
 		retry: 1,
 		// No event fires when a Done card ages out of the seven-day window, so
 		// refetch at the next such moment.
@@ -177,9 +221,10 @@ export function nextDoneExpiryDelay(board: DecisionBoard | undefined, now = Date
 
 /** One call and its full history; `null` data means it no longer exists. */
 export function useDecisionDetail(callId: string | undefined) {
+	const guard = decisionAnswerGuard(useQueryClient());
 	return useQuery({
 		queryKey: decisionKeys.detail(callId ?? ""),
-		queryFn: ({ signal }) => fetchDecisionDetail(callId!, signal),
+		queryFn: ({ signal }) => guardedDecisionRead(guard, LOCAL_HOST, callId, () => fetchDecisionDetail(callId!, signal)),
 		enabled: Boolean(callId),
 		retry: 1,
 	});

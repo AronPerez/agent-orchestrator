@@ -72,8 +72,7 @@ const history: DecisionHistoryEntry[] = [
 	entry({ id: "e12", kind: "asked", authorSurface: "desktop", writtenAt: at(12) }),
 ];
 
-function renderPanel(callId = "dec_1", onClose = vi.fn()) {
-	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderPanel(callId = "dec_1", onClose = vi.fn(), client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
 	const view = render(<QueryClientProvider client={client}><DecisionCallPanel callId={callId} onClose={onClose} /></QueryClientProvider>);
 	return { ...view, onClose, client };
 }
@@ -353,6 +352,29 @@ describe("DecisionCallPanel", () => {
 			await userEvent.click(screen.getByRole("button", { name: "Check again" }));
 			await vi.waitFor(() => expect(screen.getByRole("button", { name: "Send decision" })).toBeEnabled());
 			expect(screen.queryByText("Your answer may have been recorded. Check again before sending it.")).not.toBeInTheDocument();
+		});
+
+		it("keeps an unconfirmed answer held after the panel is closed and opened again", async () => {
+			serve(needsYou);
+			const first = renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			postMock.mockRejectedValue(new Error("connection reset"));
+			getMock.mockRejectedValue(new Error("offline"));
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(await screen.findByText("Your answer may have been recorded. Check again before sending it.")).toBeInTheDocument();
+			first.unmount();
+
+			// The cached detail still shows the call waiting; the hold must survive the remount.
+			renderPanel("dec_1", vi.fn(), first.client);
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			expect(screen.getByText("Your answer may have been recorded. Check again before sending it.")).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Send decision" })).toBeDisabled();
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledTimes(1);
+
+			serve(needsYou);
+			await userEvent.click(screen.getByRole("button", { name: "Check again" }));
+			await vi.waitFor(() => expect(screen.getByRole("button", { name: "Send decision" })).toBeEnabled());
 		});
 
 		it("shows an answer recorded despite a lost response and does not send it again", async () => {
