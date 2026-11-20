@@ -23,6 +23,11 @@ ao decision decide --key <name> --kind <id> --what <what-you-decided> --why <why
 ao decision carried-out <id>
 ao decision overrule <id> --note <what-to-do-instead>
 ao decision ls --decided
+ao decision link add <address> --password-stdin [--label <name>]
+ao decision link add --host <saved machine>
+ao decision link ls [--json]
+ao decision link rm <machine>
+ao decision sync [<machine>]
 ```
 
 ## When to raise a call
@@ -45,6 +50,12 @@ related call link in its context so the answer is delivered locally. For an
 unanswered match in your current project, do not raise a second call. If it
 blocks you, hand off the existing call link through your role's coordination or
 status path so the dependent session can resume after the answer.
+
+Search covers every machine linked to this one. A result marked `On <machine>`
+was raised there. If an unanswered call in your project was raised on another
+machine and covers your question, do not raise a second one: its answer goes to
+that machine, so check it with `ao decision show <call-link>` when you resume,
+and report it as blocking with the call link.
 
 Before ending a turn blocked by a new or existing call, make it visible. A
 worker whose prompt names an active project orchestrator sends a needs-input
@@ -255,6 +266,16 @@ When mentioning a call anywhere, always use that link and never a bare id.
 - Check that the facts are still current just before you raise it. This prevents a stale premise from driving the decision.
 - Never put secrets, credentials or personal data in a call. Calls are durable project records and are not a safe place for sensitive data.
 
+## Linked machines
+
+The human can link their machines so every one holds the same decisions. Once
+linked, `ao decision search`, `ls` and `show` include calls raised on any
+linked machine, and an answer given on any machine reaches the session that
+raised the call on its own machine. `ao decision link` and `ao decision sync`
+are the human's commands: a session cannot run them, and must never ask for
+another machine's password.
+
 ## What you cannot do
 
-Only the human answers, dismisses or retires a call.
+Only the human answers, dismisses or retires a call. Only the human links
+machines or syncs decisions between them.

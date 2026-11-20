@@ -40,6 +40,9 @@ type Credential struct {
 	Kind     CredentialKind
 	DeviceID string
 	Scopes   []string
+	// ClientID is the originating installation a scoped device token was
+	// issued for (a peer's host id for decision sync tokens).
+	ClientID string
 }
 
 // HasScope reports whether the accepted credential carries scope.

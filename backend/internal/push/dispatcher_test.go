@@ -839,3 +839,26 @@ func TestDispatcherPushesDecisionOnlyFromItsOrigin(t *testing.T) {
 		t.Fatal("a non-origin host pushed a decision call")
 	}
 }
+
+// A call synced to this machine from another one never pushes here (Q3:
+// origin-only), however many machines hold it.
+func TestSyncedCallDoesNotPushFromNonOrigin(t *testing.T) {
+	for _, host := range []string{"h_laptop", "h_vm"} {
+		got := runDispatcherOnce(t, host, decisionRecord("h_mini"))
+		got.mu.Lock()
+		sent := got.sent
+		got.mu.Unlock()
+		if sent {
+			t.Fatalf("%s pushed a call synced from h_mini", host)
+		}
+	}
+}
+
+func TestOriginStillPushesAfterSync(t *testing.T) {
+	got := runDispatcherOnce(t, "h_mini", decisionRecord("h_mini"))
+	got.mu.Lock()
+	defer got.mu.Unlock()
+	if len(got.gotMsgs) != 1 {
+		t.Fatalf("origin sent %d pushes, want 1", len(got.gotMsgs))
+	}
+}

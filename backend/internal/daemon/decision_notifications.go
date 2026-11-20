@@ -15,10 +15,11 @@ func startDecisionNotifications(
 	ctx context.Context,
 	ledger decisionsvc.NotificationLedger,
 	writer decisionsvc.NotificationWriter,
+	hostID string,
 	log *slog.Logger,
 ) (*decisionsvc.NotificationProjector, <-chan struct{}) {
 	projector := decisionsvc.NewNotificationProjector(decisionsvc.NotificationProjectorDeps{
-		Store: ledger, Writer: writer, Log: log,
+		Store: ledger, Writer: writer, HostID: hostID, Log: log,
 	})
 	done := make(chan struct{})
 	go func() {

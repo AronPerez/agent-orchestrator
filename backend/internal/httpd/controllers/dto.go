@@ -237,6 +237,7 @@ type ListDecisionsQuery struct {
 	Scope string `query:"scope,omitempty" enum:"mine,needs_you,decided" description:"Which calls to list. Defaults to needs_you. Ignored when q is given."`
 	Q     string `query:"q,omitempty" description:"Search words. When given, the response is the search result."`
 	Limit int    `query:"limit,omitempty" minimum:"1" description:"Most search results to return. Defaults to 20; values above 100 are capped. Ignored when q is absent."`
+	IDs   string `query:"ids,omitempty" description:"Comma-separated call ids to look up, at most 100; unknown ids are left out. Takes precedence over q and scope."`
 }
 
 // DecisionBoardResponse is the Decisions page snapshot: every active call plus
@@ -3659,6 +3660,212 @@ type CoordinationTokenResponse struct {
 	DeviceID string `json:"deviceId"`
 	Token    string `json:"token"`
 	Scope    string `json:"scope" enum:"agent-coordination"`
+}
+
+// IssueDecisionSyncTokenRequest names the peer machine that will hold a
+// decision-sync credential for this host. ClientID is the peer's host id; a
+// retry for the same peer replaces its previous token.
+type IssueDecisionSyncTokenRequest struct {
+	Name     string `json:"name,omitempty" description:"Name shown in the host's device list, for example \"Decision sync from laptop\"."`
+	Platform string `json:"platform,omitempty" description:"The requesting machine's platform."`
+	ClientID string `json:"clientId" description:"Required host id of the requesting machine (h_ followed by letters, numbers or hyphens)."`
+}
+
+// DecisionSyncDeviceIDParam identifies a previously issued decision sync token.
+type DecisionSyncDeviceIDParam struct {
+	DeviceID string `path:"deviceId" description:"The decision sync token's device id."`
+}
+
+// DecisionSyncTokenResponse carries a host-bound credential limited to the two
+// decision sync routes. The token is returned once and only its hash is
+// persisted by the host. It can write any decision ledger entry, including
+// answers, so peers must protect it like the ledger itself.
+type DecisionSyncTokenResponse struct {
+	HostID   string `json:"hostId"`
+	DeviceID string `json:"deviceId"`
+	Token    string `json:"token"`
+	Scope    string `json:"scope" enum:"decision-sync"`
+}
+
+// DecisionSyncEntry is one decision ledger entry on the wire: the twelve
+// stored columns. Payload is a JSON string holding the stored payload text
+// byte for byte; Go re-encodes embedded raw JSON, which would change it.
+// The field set must stay identical to decisionsync.WireEntry (the controller
+// converts between them directly, so a mismatch does not compile).
+type DecisionSyncEntry struct {
+	ID            string    `json:"id"`
+	Origin        string    `json:"origin"`
+	OriginSeq     int64     `json:"originSeq"`
+	StampWall     int64     `json:"stampWall"`
+	StampCounter  int64     `json:"stampCounter"`
+	CallID        string    `json:"callId"`
+	Kind          string    `json:"kind"`
+	Payload       string    `json:"payload" description:"The entry's payload JSON as a string, exactly as stored."`
+	WrittenAt     time.Time `json:"writtenAt"`
+	AuthorKind    string    `json:"authorKind"`
+	AuthorSurface string    `json:"authorSurface"`
+	AuthorSession string    `json:"authorSession"`
+}
+
+// DecisionSyncHead is the newest entry a ledger holds for one origin.
+type DecisionSyncHead struct {
+	Seq       int64     `json:"seq"`
+	ID        string    `json:"id"`
+	WrittenAt time.Time `json:"writtenAt"`
+	Stopped   bool      `json:"stopped,omitempty" description:"The sender recorded a conflict for this origin and neither applies nor serves it past the conflict."`
+}
+
+// DecisionSyncExchangeRequest asks the peer for entries the sender lacks.
+type DecisionSyncExchangeRequest struct {
+	Protocol     int                         `json:"protocol"`
+	HostID       string                      `json:"hostId" description:"The sender's host id; must match the credential's peer."`
+	MachineLabel string                      `json:"machineLabel,omitempty"`
+	Have         map[string]int64            `json:"have" description:"Highest origin sequence the sender holds, per origin."`
+	Heads        map[string]DecisionSyncHead `json:"heads,omitempty"`
+	WaitSeconds  int                         `json:"waitSeconds,omitempty" description:"Hold the request up to this many seconds (at most 25) until there is something to send."`
+}
+
+// DecisionSyncExchangeResponse is one page of entries the sender lacks.
+type DecisionSyncExchangeResponse struct {
+	Protocol     int                         `json:"protocol"`
+	HostID       string                      `json:"hostId"`
+	MachineLabel string                      `json:"machineLabel"`
+	Entries      []DecisionSyncEntry         `json:"entries"`
+	More         bool                        `json:"more"`
+	Have         map[string]int64            `json:"have"`
+	Heads        map[string]DecisionSyncHead `json:"heads"`
+	ServerTime   time.Time                   `json:"serverTime"`
+}
+
+// DecisionSyncPushRequest sends the peer one page of entries it lacks.
+type DecisionSyncPushRequest struct {
+	Protocol int                         `json:"protocol"`
+	HostID   string                      `json:"hostId"`
+	Entries  []DecisionSyncEntry         `json:"entries"`
+	Heads    map[string]DecisionSyncHead `json:"heads,omitempty"`
+}
+
+// DecisionSyncGap is a received entry that did not follow the origin's highest.
+type DecisionSyncGap struct {
+	Origin string `json:"origin"`
+	Have   int64  `json:"have"`
+	Got    int64  `json:"got"`
+}
+
+// DecisionSyncConflict is two different entries claiming one identity.
+type DecisionSyncConflict struct {
+	Origin        string    `json:"origin"`
+	OriginSeq     int64     `json:"originSeq"`
+	LocalEntryID  string    `json:"localEntryId"`
+	RemoteEntryID string    `json:"remoteEntryId"`
+	PeerHostID    string    `json:"peerHostId"`
+	DetectedAt    time.Time `json:"detectedAt"`
+}
+
+// DecisionSyncPushResponse is what applying a pushed page did.
+type DecisionSyncPushResponse struct {
+	Applied    int                         `json:"applied"`
+	Duplicates int                         `json:"duplicates"`
+	Gaps       []DecisionSyncGap           `json:"gaps"`
+	Conflicts  []DecisionSyncConflict      `json:"conflicts"`
+	Have       map[string]int64            `json:"have"`
+	Heads      map[string]DecisionSyncHead `json:"heads"`
+}
+
+// DecisionSyncPeerStatus is one peer's freshness. It carries no URL or secret.
+type DecisionSyncPeerStatus struct {
+	HostID        string     `json:"hostId"`
+	Label         string     `json:"label"`
+	Direction     string     `json:"direction" enum:"outbound,inbound"`
+	LastSuccessAt *time.Time `json:"lastSuccessAt,omitempty"`
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
+	LastErrorCode string     `json:"lastErrorCode,omitempty"`
+	InSync        bool       `json:"inSync"`
+	ClockAheadMs  int64      `json:"clockAheadMs"`
+	State         string     `json:"state" enum:"linked_in_sync,linked_behind,unreachable,revoked,incompatible,identity_conflict,inbound"`
+}
+
+// DecisionSyncOriginStatus is a machine whose decisions this ledger holds.
+type DecisionSyncOriginStatus struct {
+	HostID       string    `json:"hostId"`
+	MachineLabel string    `json:"machineLabel"`
+	LastHeardAt  time.Time `json:"lastHeardAt" description:"When the newest entry from this machine was written, whichever peer relayed it."`
+}
+
+// DecisionSyncStatusResponse is this machine's decision sync freshness.
+type DecisionSyncStatusResponse struct {
+	HostID       string                     `json:"hostId"`
+	MachineLabel string                     `json:"machineLabel"`
+	Peers        []DecisionSyncPeerStatus   `json:"peers"`
+	Origins      []DecisionSyncOriginStatus `json:"origins"`
+	Conflicts    []DecisionSyncConflict     `json:"conflicts"`
+}
+
+// LinkDecisionPeerRequest links a machine for decision sync. Credential is a
+// full credential for that machine, presented once to mint a scoped token and
+// never stored.
+type LinkDecisionPeerRequest struct {
+	URL            string `json:"url" description:"The machine's remote-access address, for example http://mac-mini.local:3011."`
+	ExpectedHostID string `json:"expectedHostId,omitempty" description:"Refuse the link if the address answers with another host id."`
+	Label          string `json:"label,omitempty"`
+	Credential     string `json:"credential" description:"The machine's password, account token or device token. Used once; not stored."`
+}
+
+// DecisionPeer is one machine this machine syncs decisions with. It never
+// carries a token.
+type DecisionPeer struct {
+	HostID        string     `json:"hostId"`
+	Label         string     `json:"label"`
+	URL           string     `json:"url,omitempty"`
+	Direction     string     `json:"direction" enum:"outbound,inbound"`
+	State         string     `json:"state" enum:"linked_in_sync,linked_behind,unreachable,revoked,incompatible,identity_conflict,inbound"`
+	LastSuccessAt *time.Time `json:"lastSuccessAt,omitempty"`
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
+	LastErrorCode string     `json:"lastErrorCode,omitempty"`
+	InSync        bool       `json:"inSync"`
+	ClockAheadMs  int64      `json:"clockAheadMs"`
+}
+
+// DecisionSecretWarning names an existing entry that looks like it holds a credential.
+type DecisionSecretWarning struct {
+	CallID string `json:"callId"`
+	Field  string `json:"field"`
+}
+
+// LinkDecisionPeerResponse is the linked machine and any warnings.
+type LinkDecisionPeerResponse struct {
+	Peer     DecisionPeer            `json:"peer"`
+	Warnings []DecisionSecretWarning `json:"warnings"`
+}
+
+// ListDecisionPeersResponse lists linked and linking machines.
+type ListDecisionPeersResponse struct {
+	Peers []DecisionPeer `json:"peers"`
+}
+
+// DecisionPeerHostIDParam identifies a linked machine.
+type DecisionPeerHostIDParam struct {
+	HostID string `path:"hostId" description:"The linked machine's host id."`
+}
+
+// SyncDecisionPeersRequest syncs one linked machine, or all when hostId is empty.
+type SyncDecisionPeersRequest struct {
+	HostID string `json:"hostId,omitempty"`
+}
+
+// DecisionPeerSyncResult is one machine's sync result.
+type DecisionPeerSyncResult struct {
+	HostID    string `json:"hostId"`
+	Label     string `json:"label"`
+	Pulled    int    `json:"pulled"`
+	Pushed    int    `json:"pushed"`
+	InSync    bool   `json:"inSync"`
+	ErrorCode string `json:"errorCode,omitempty"`
+}
+
+// SyncDecisionPeersResponse lists each synced machine's result.
+type SyncDecisionPeersResponse struct {
+	Results []DecisionPeerSyncResult `json:"results"`
 }
 
 // SetRequireDeviceCredentialsRequest turns the pairing password off or on.

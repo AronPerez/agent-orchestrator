@@ -493,6 +493,31 @@ type DecisionEntry struct {
 	AuthorSession string
 }
 
+type DecisionSyncConflict struct {
+	Origin        string
+	OriginSeq     int64
+	LocalEntryID  string
+	RemoteEntryID string
+	PeerHostID    string
+	DetectedAt    time.Time
+}
+
+type DecisionSyncPeer struct {
+	HostID        string
+	Label         string
+	URL           string
+	Direction     string
+	DeviceID      string
+	CreatedAt     time.Time
+	LastAttemptAt sql.NullTime
+	LastSuccessAt sql.NullTime
+	LastErrorCode string
+	InSync        int64
+	PeerVector    string
+	ClockAheadMs  int64
+	PeerProtocol  int64
+}
+
 type DeletedSessionAccountUsage struct {
 	AccountID          string
 	Day                string

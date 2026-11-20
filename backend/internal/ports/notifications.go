@@ -36,6 +36,11 @@ type NotificationIntent struct {
 	DecisionProjectName  string
 	DecisionStreamName   string
 	DecisionTitle        string
+
+	// InitiallyRead stores a new row as already read and announces nothing:
+	// no live "created" event, so no OS toast and no unread badge. It is for
+	// decisions this machine learns of by sync long after they were raised.
+	InitiallyRead bool
 }
 
 // NotificationResolution is the lifecycle-to-notification-producer contract for
