@@ -307,7 +307,7 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(invite).not.toHaveBeenCalled();
 	});
 
-	it("takes back a grant whose pick was removed while its invitation was on its way, even after closing", async () => {
+	it("keeps a pick whose invitation is on its way from being removed until it settles", async () => {
 		mocks.candidates = [];
 		const maya = { id: "4a0b0b4e-be7f-4a7d-be95-9b4d7a5b6c85", email: "maya@acme.co", createdAt: "" };
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
@@ -315,18 +315,22 @@ describe("ShareArtifactButton on a team workspace", () => {
 		vi.spyOn(aoBridge.cloudShare, "grants").mockResolvedValue(none);
 		let answer!: () => void;
 		const invite = vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => { answer = () => resolve({ ...none, people: [maya] }); }));
-		const remove = vi.spyOn(aoBridge.cloudShare, "removeGrant").mockResolvedValue();
 		renderButton(cloudFile);
 		await userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
 		await waitFor(() => expect(screen.getByRole("button", { name: /Only you/ })).toHaveProperty("disabled", false));
 		const field = screen.getByRole("combobox", { name: "Add people by email or team" });
 		await userEvent.type(field, "maya@acme.co{Enter}");
-		// The request is on its way: remove the pick, then close the panel.
 		await waitFor(() => expect(invite).toHaveBeenCalledOnce());
+		// Sent and not yet answered: the pick can't be removed, by its button or Backspace.
+		const removeChip = screen.getByRole("button", { name: /Remove maya@acme.co/ });
+		expect(removeChip).toHaveProperty("disabled", true);
 		await userEvent.type(field, "{Backspace}");
-		await userEvent.keyboard("{Escape}");
+		expect(screen.getByRole("button", { name: /Remove maya@acme.co/ })).toBeTruthy();
 		answer();
-		await waitFor(() => expect(remove).toHaveBeenCalledExactlyOnceWith("https://cp.test", SHARE_ID, maya.id));
+		// Once answered, Maya is listed with access, where removing her applies.
+		const people = await screen.findByRole("region", { name: "People with access" });
+		expect(await within(people).findByText("maya@acme.co")).toBeTruthy();
+		expect(within(people).getByRole("button", { name: "Remove access for maya@acme.co" })).toBeTruthy();
 	});
 
 	it("shares with a typed email on Enter", async () => {

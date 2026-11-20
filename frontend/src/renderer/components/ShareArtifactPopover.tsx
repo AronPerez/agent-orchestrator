@@ -281,18 +281,6 @@ function queueGrantChange(shareId: string, run: () => Promise<boolean>): Promise
 	return sent;
 }
 
-/** The new grants for recipients that were sent but are no longer picked. */
-function droppedGrants(sent: ArtifactRecipients, kept: ArtifactRecipients, grants: CloudShareGrants): Array<{ id: string }> {
-	const sentEmails = new Set(sent.emails.map((email) => email.toLowerCase()));
-	const keptEmails = new Set(kept.emails.map((email) => email.toLowerCase()));
-	const sentTeams = new Set(sent.teams.map((team) => team.teamId));
-	const keptTeams = new Set(kept.teams.map((team) => team.teamId));
-	return [
-		...grants.people.filter((grant) => sentEmails.has(grant.email.toLowerCase()) && !keptEmails.has(grant.email.toLowerCase())),
-		...grants.teams.filter((grant) => grant.teamId && sentTeams.has(grant.teamId) && !keptTeams.has(grant.teamId)),
-	];
-}
-
 /** Forgets every cached link list; for tests. */
 export function resetShareCachesForTests(): void {
 	grantQueues.clear();
@@ -1060,7 +1048,7 @@ function SharePanel({
 	// read after the one before it saved, and the last lists them all.
 	const addSubjects = (shareId: string, input: CloudShareInvite, failed: GrantFailure): Promise<boolean> =>
 		queueGrantChange(shareId, () => sendSubjects(shareId, input, failed));
-	const sendSubjects = async (shareId: string, input: CloudShareInvite, failed: GrantFailure, onShared?: (grants: CloudShareGrants) => void): Promise<boolean> => {
+	const sendSubjects = async (shareId: string, input: CloudShareInvite, failed: GrantFailure): Promise<boolean> => {
 		startAction();
 		const seq = ++grantsSeq.current;
 		try {
@@ -1069,7 +1057,6 @@ function SharePanel({
 			setPhase((current) => current.kind === "published" && current.share.id === shareId && newest
 				? { ...current, grants, share: { ...current.share, grantCount: grants.people.length }, grantsError: undefined, error: undefined }
 				: current);
-			onShared?.(grants);
 			return true;
 		} catch (error) {
 			setPhase((current) => current.kind === "published" ? { ...current, error: t(failed, { message: errorMessage(error) }) } : current);
@@ -1078,21 +1065,14 @@ function SharePanel({
 	};
 	// Which recipients to share with is read when the invite's turn comes:
 	// one removed from the field while it waited in the queue is not shared.
-	// One removed while the request was already on its way cannot be recalled,
-	// so its new grant is taken back as soon as the answer lands, on the same
-	// queue, which runs even after the panel closed.
 	const invite = (shown: Extract<Phase, { kind: "published" }>, picked: ArtifactRecipients, stillPicked: () => ArtifactRecipients = () => picked): Promise<boolean> =>
 		queueGrantChange(shown.share.id, () => {
-			const sending = stillPicked();
-			if (sending.emails.length === 0 && sending.teams.length === 0) return Promise.resolve(true);
+			const { emails, teams } = stillPicked();
+			if (emails.length === 0 && teams.length === 0) return Promise.resolve(true);
 			return sendSubjects(shown.share.id, {
-				...(sending.emails.length > 0 ? { emails: sending.emails } : {}),
-				...(sending.teams.length > 0 && teamWorkspace ? { orgId: teamWorkspace.id, teamIds: sending.teams.map((team) => team.teamId) } : {}),
-			}, "artifacts.share.people.inviteFailed", (grants) => {
-				for (const grant of droppedGrants(sending, stillPicked(), grants)) {
-					void queueGrantChange(shown.share.id, () => sendRemoval(shown, grant.id, "artifacts.share.people.removeFailed"));
-				}
-			});
+				...(emails.length > 0 ? { emails } : {}),
+				...(teams.length > 0 && teamWorkspace ? { orgId: teamWorkspace.id, teamIds: teams.map((team) => team.teamId) } : {}),
+			}, "artifacts.share.people.inviteFailed");
 		});
 
 	// Stops the link being shared with one person, team or workspace. Queued

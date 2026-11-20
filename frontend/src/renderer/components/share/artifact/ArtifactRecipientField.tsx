@@ -46,7 +46,9 @@ export function ArtifactRecipientField({ orgId, teams: teamsOffered, unavailable
 	/**
 	 * Called with each pick; resolves true when it was taken. stillPicked reads
 	 * which of those recipients the field still holds, for a caller that sends
-	 * them later: a pick removed while it waited must not be shared.
+	 * them later: a pick removed while it waited must not be shared. Calling it
+	 * marks the request as on its way: those picks can't be removed until it
+	 * settles, since a sent invitation can't be recalled.
 	 */
 	onSubmit: (recipients: ArtifactRecipients, stillPicked: () => ArtifactRecipients) => Promise<boolean> | boolean;
 }) {
@@ -69,18 +71,33 @@ export function ArtifactRecipientField({ orgId, teams: teamsOffered, unavailable
 		heldNow.current = next(heldNow.current);
 		setHeld(heldNow.current);
 	};
+	// Picks whose invitation is on its way: shown, but not removable.
+	const [locked, setLocked] = useState<ReadonlySet<string>>(new Set());
+	const lock = (keys: readonly string[], on: boolean) => setLocked((current) => {
+		const next = new Set(current);
+		for (const key of keys) {
+			if (on) next.add(key);
+			else next.delete(key);
+		}
+		return next;
+	});
 	const send = (picked: readonly Recipient[]) => {
 		const recipients = splitRecipients(picked);
 		if (recipients.emails.length === 0 && recipients.teams.length === 0) return;
 		const sent = new Set(picked.map(recipientKey));
+		let sending: string[] = [];
 		const stillPicked = () => {
 			const kept = new Set(heldNow.current.map(recipientKey));
-			return splitRecipients(picked.filter((recipient) => kept.has(recipientKey(recipient))));
+			const still = picked.filter((recipient) => kept.has(recipientKey(recipient)));
+			sending = still.map(recipientKey);
+			lock(sending, true);
+			return splitRecipients(still);
 		};
 		void Promise.resolve()
 			.then(() => onSubmit(recipients, stillPicked))
 			.catch(() => false)
 			.then((taken) => {
+				lock(sending, false);
 				if (taken) updateHeld((current) => current.filter((recipient) => !sent.has(recipientKey(recipient))));
 			});
 	};
@@ -99,6 +116,7 @@ export function ArtifactRecipientField({ orgId, teams: teamsOffered, unavailable
 				allowTeams={teamsOffered}
 				ariaLabel={label}
 				commitOnBlur={false}
+				locked={locked}
 				onChange={change}
 				onNewTeam={teamsOffered ? (_people, typed) => {
 					// A typed email joins the new team; other text names it.
