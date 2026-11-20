@@ -3876,6 +3876,8 @@
 	"artifacts.share.access.onlyYou": "나만",
 	"artifacts.share.access.invited": "초대된 사용자만",
 	"artifacts.share.access.anyone": "링크가 있는 모든 사용자",
+	"artifacts.share.access.unknown": "액세스 권한 확인 중…",
+	"artifacts.share.access.unknownSentence": "공유 대상 목록이 로드되면 열 수 있는 사람이 표시됩니다.",
 	"artifacts.share.access.onlyYouSentence": "다른 사람은 링크를 열 수 없습니다. 사람들을 초대하거나 링크가 있는 모든 사용자를 허용하세요.",
 	"artifacts.share.access.invitedSentence": "초대한 사람만 해당 이메일로 로그인한 후 열 수 있습니다.",
 	"artifacts.share.access.anyoneSentence": "공개. 링크가 있는 누구나 로그인 없이 볼 수 있습니다.",

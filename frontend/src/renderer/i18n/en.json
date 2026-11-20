@@ -3853,6 +3853,8 @@
 	"artifacts.share.access.onlyYou": "Only you",
 	"artifacts.share.access.invited": "Only people invited",
 	"artifacts.share.access.anyone": "Anyone with the link",
+	"artifacts.share.access.unknown": "Checking who has access…",
+	"artifacts.share.access.unknownSentence": "Who can open it shows once the list of people it's shared with loads.",
 	"artifacts.share.access.onlyYouSentence": "Nobody else can open the link. Invite people, or allow anyone with the link.",
 	"artifacts.share.access.invitedSentence": "Only people you invite can open it, after signing in with that email.",
 	"artifacts.share.access.anyoneSentence": "Public. Anyone with the link can view it without signing in.",

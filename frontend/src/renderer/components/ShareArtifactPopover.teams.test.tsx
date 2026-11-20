@@ -149,6 +149,29 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(screen.queryByText("Only you")).toBeNull();
 	});
 
+	it("shows access as unknown, and offers no change, until it has read who the link is shared with", async () => {
+		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
+		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [share] });
+		let fail!: () => void;
+		const grants = vi.spyOn(aoBridge.cloudShare, "grants")
+			.mockImplementationOnce(() => new Promise<CloudShareGrants>((_resolve, reject) => { fail = () => reject(new Error("offline")); }))
+			.mockResolvedValueOnce({ ...none, workspaces: [everyone] });
+		renderButton(cloudFile);
+		await userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
+		// Shared with the workspace, but not read yet: neither Only you nor a choice.
+		const checking = await screen.findByRole("button", { name: "Checking who has access…" });
+		expect(checking).toHaveProperty("disabled", true);
+		expect(screen.queryByText("Only you")).toBeNull();
+		fail();
+		// A failed read stays unknown until a retry reads it.
+		await screen.findByText("Couldn't load who this link is shared with.");
+		expect(screen.getByRole("button", { name: "Checking who has access…" })).toHaveProperty("disabled", true);
+		await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+		expect(await screen.findByText("Everyone at Acme can open it after signing in, and finds it under Shared with you.")).toBeTruthy();
+		expect(screen.getByRole("button", { name: /Everyone at Acme/ })).toHaveProperty("disabled", false);
+		expect(grants).toHaveBeenCalledTimes(2);
+	});
+
 	it("shares a new link with the teams and workspace set up before Publish, once it is live", async () => {
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue(inspection);
 		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue(links);

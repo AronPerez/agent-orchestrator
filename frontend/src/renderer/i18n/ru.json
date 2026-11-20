@@ -4046,6 +4046,8 @@
 	"artifacts.share.access.onlyYou": "Только вы",
 	"artifacts.share.access.invited": "Только приглашённые",
 	"artifacts.share.access.anyone": "Все, у кого есть ссылка",
+	"artifacts.share.access.unknown": "Проверяем, у кого есть доступ…",
+	"artifacts.share.access.unknownSentence": "Кто может открыть ссылку, будет показано после загрузки списка тех, с кем ею поделились.",
 	"artifacts.share.access.onlyYouSentence": "Больше никто не может открыть ссылку. Пригласите людей или откройте доступ всем, у кого есть ссылка.",
 	"artifacts.share.access.invitedSentence": "Открыть могут только приглашённые вами люди, войдя с этим адресом эл. почты.",
 	"artifacts.share.access.anyoneSentence": "Общедоступно. Смотреть может любой, у кого есть ссылка, без входа.",

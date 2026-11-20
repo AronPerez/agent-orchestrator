@@ -3876,6 +3876,8 @@
 	"artifacts.share.access.onlyYou": "自分のみ",
 	"artifacts.share.access.invited": "招待したユーザーのみ",
 	"artifacts.share.access.anyone": "リンクを知っている全員",
+	"artifacts.share.access.unknown": "アクセスできるユーザーを確認中…",
+	"artifacts.share.access.unknownSentence": "共有先の一覧が読み込まれると、開けるユーザーが表示されます。",
 	"artifacts.share.access.onlyYouSentence": "ほかの人はリンクを開けません。ユーザーを招待するか、リンクを知っている全員に許可してください。",
 	"artifacts.share.access.invitedSentence": "招待したユーザーだけが、そのメールでサインインした後に開けます。",
 	"artifacts.share.access.anyoneSentence": "公開。リンクを知っている人は誰でもサインインなしで閲覧できます。",

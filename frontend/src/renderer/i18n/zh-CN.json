@@ -3858,6 +3858,8 @@
 	"artifacts.share.access.onlyYou": "仅自己",
 	"artifacts.share.access.invited": "仅受邀者",
 	"artifacts.share.access.anyone": "拥有链接的任何人",
+	"artifacts.share.access.unknown": "正在检查谁有访问权限…",
+	"artifacts.share.access.unknownSentence": "共享对象列表加载后，将显示谁可以打开它。",
 	"artifacts.share.access.onlyYouSentence": "其他人无法打开此链接。请邀请他人，或允许拥有链接的任何人访问。",
 	"artifacts.share.access.invitedSentence": "只有你邀请的人使用该邮箱登录后才能打开。",
 	"artifacts.share.access.anyoneSentence": "公开。拥有链接的任何人无需登录即可查看。",

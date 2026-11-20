@@ -1277,6 +1277,10 @@ function SharePanel({
 			const invited = grants ? grants.people.length + grants.teams.length : share.grantCount ?? 0;
 			const sharedWithWorkspace = Boolean(teamWorkspace && grants?.workspaces.some((workspace) => workspace.orgId === teamWorkspace.id));
 			const audience: ArtifactAudience = access === "restricted" && sharedWithWorkspace ? "workspace" : access;
+			// A private link on a team workspace may be shared with the whole
+			// workspace; until the list is read that cannot be told apart from
+			// Only you, so the access is shown as unknown and cannot be changed.
+			const audienceUnknown = Boolean(teamWorkspace) && access === "restricted" && !grants;
 			if (phase.unpublishing === "confirm" || phase.unpublishing === "busy") {
 				const busy = phase.unpublishing === "busy";
 				return (
@@ -1337,6 +1341,7 @@ function SharePanel({
 							choosable={privateLinks || access === "restricted"}
 							disabled={changingAccess}
 							invited={invited}
+							unknown={audienceUnknown}
 							onChange={(next) => void changeAudience(phase, next)}
 							workspace={privateLinks ? workspaceChoice : undefined}
 						/>

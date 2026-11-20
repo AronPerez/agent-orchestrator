@@ -3970,6 +3970,8 @@
 	"artifacts.share.access.onlyYou": "Vous seul",
 	"artifacts.share.access.invited": "Personnes invitées uniquement",
 	"artifacts.share.access.anyone": "Toute personne disposant du lien",
+	"artifacts.share.access.unknown": "Vérification des accès…",
+	"artifacts.share.access.unknownSentence": "Les personnes qui peuvent l'ouvrir s'afficheront une fois la liste de partage chargée.",
 	"artifacts.share.access.onlyYouSentence": "Personne d’autre ne peut ouvrir le lien. Invitez des personnes ou autorisez toute personne disposant du lien.",
 	"artifacts.share.access.invitedSentence": "Seules les personnes invitées peuvent l’ouvrir, après s’être connectées avec cet e-mail.",
 	"artifacts.share.access.anyoneSentence": "Public. Toute personne disposant du lien peut le voir sans se connecter.",

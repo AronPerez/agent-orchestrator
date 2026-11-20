@@ -3853,6 +3853,8 @@
 	"artifacts.share.access.onlyYou": "Yalnızca siz",
 	"artifacts.share.access.invited": "Yalnızca davet edilen kişiler",
 	"artifacts.share.access.anyone": "Bağlantıya sahip olan herkes",
+	"artifacts.share.access.unknown": "Erişimi olanlar kontrol ediliyor…",
+	"artifacts.share.access.unknownSentence": "Kimlerin açabileceği, paylaşılan kişiler listesi yüklendiğinde gösterilir.",
 	"artifacts.share.access.onlyYouSentence": "Bağlantıyı başka kimse açamaz. Kişileri davet edin veya bağlantıya sahip olan herkese izin verin.",
 	"artifacts.share.access.invitedSentence": "Yalnızca davet ettiğiniz kişiler, davet edilen e-posta adresiyle oturum açtıktan sonra bağlantıyı açabilir.",
 	"artifacts.share.access.anyoneSentence": "Herkese açık. Bağlantıya sahip olan herkes oturum açmadan görüntüleyebilir.",

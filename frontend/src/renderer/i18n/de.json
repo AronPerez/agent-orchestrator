@@ -3876,6 +3876,8 @@
 	"artifacts.share.access.onlyYou": "Nur du",
 	"artifacts.share.access.invited": "Nur eingeladene Personen",
 	"artifacts.share.access.anyone": "Jeder mit dem Link",
+	"artifacts.share.access.unknown": "Zugriff wird geprüft…",
+	"artifacts.share.access.unknownSentence": "Wer es öffnen kann, wird angezeigt, sobald die Liste der freigegebenen Personen geladen ist.",
 	"artifacts.share.access.onlyYouSentence": "Niemand sonst kann den Link öffnen. Lade Personen ein oder erlaube jedem mit dem Link den Zugriff.",
 	"artifacts.share.access.invitedSentence": "Nur von dir eingeladene Personen können ihn öffnen, nachdem sie sich mit dieser E-Mail angemeldet haben.",
 	"artifacts.share.access.anyoneSentence": "Öffentlich. Jeder mit dem Link kann ihn ohne Anmeldung ansehen.",

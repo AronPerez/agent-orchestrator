@@ -38,13 +38,19 @@ export function accessSentence(t: TFunction, access: ArtifactAudience, invited: 
  * (choosable false) it only says the link is public. The change applies to
  * the link at once; its URL stays the same.
  */
-export function ArtifactGeneralAccess({ access, invited, onChange, choosable = true, disabled = false, workspace }: {
+export function ArtifactGeneralAccess({ access, invited, onChange, choosable = true, disabled = false, unknown = false, workspace }: {
 	access: ArtifactAudience;
 	/** How many people and teams the link is shared with. */
 	invited: number;
 	onChange: (access: ArtifactAudience) => void;
 	choosable?: boolean;
 	disabled?: boolean;
+	/**
+	 * Who the link is shared with is not read yet (or failed to load), so the
+	 * audience cannot be told: say so and offer no change, rather than show a
+	 * private link shared with the workspace as Only you.
+	 */
+	unknown?: boolean;
 	/** The team workspace whose members the link can be shared with, by its name. */
 	workspace?: { name: string };
 }) {
@@ -54,18 +60,20 @@ export function ArtifactGeneralAccess({ access, invited, onChange, choosable = t
 	const PrivateIcon = shareAccessIcon("restricted");
 	const PublicIcon = shareAccessIcon("anyone");
 	const workspaceName = workspace?.name ?? "";
-	const name = accessName(t, access, invited, workspaceName);
+	const name = unknown ? t("artifacts.share.access.unknown") : accessName(t, access, invited, workspaceName);
+	const sentence = unknown ? t("artifacts.share.access.unknownSentence") : accessSentence(t, access, invited, workspaceName);
+	const inactive = disabled || unknown;
 	return (
-		<section className="flex flex-col gap-2" aria-label={t("artifacts.share.access.title")} data-artifact-access={access}>
+		<section className="flex flex-col gap-2" aria-label={t("artifacts.share.access.title")} data-artifact-access={unknown ? "unknown" : access}>
 			<p className="text-xs text-muted-foreground">{t("artifacts.share.access.title")}</p>
-			<div className={cn("flex items-start gap-2.5 rounded-md bg-muted/40 py-2 pr-2 pl-2.5", disabled && "opacity-70")} aria-busy={disabled || undefined}>
+			<div className={cn("flex items-start gap-2.5 rounded-md bg-muted/40 py-2 pr-2 pl-2.5", inactive && "opacity-70")} aria-busy={inactive || undefined}>
 				<span className={cn("grid size-6 shrink-0 place-items-center rounded-full bg-muted", iconClass)} aria-hidden="true">
 					<Icon className="size-3.5" />
 				</span>
 				<div className="flex min-w-0 flex-1 flex-col">
 					{choosable ? (
 						<DropdownMenu modal={false}>
-							<DropdownMenuTrigger asChild disabled={disabled}>
+							<DropdownMenuTrigger asChild disabled={inactive}>
 								<Button
 									aria-describedby={sentenceId}
 									className="-ml-2 h-7 self-start gap-1 px-2 text-control font-medium"
@@ -108,7 +116,7 @@ export function ArtifactGeneralAccess({ access, invited, onChange, choosable = t
 						<span className="flex min-h-7 items-center text-control font-medium text-foreground">{name}</span>
 					)}
 					<p id={sentenceId} className="pr-2 text-xs leading-5 text-muted-foreground" data-artifact-access-sentence="">
-						{accessSentence(t, access, invited, workspaceName)}
+						{sentence}
 					</p>
 				</div>
 			</div>
