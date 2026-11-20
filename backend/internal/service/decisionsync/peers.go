@@ -43,11 +43,22 @@ type PeerAPI interface {
 	RevokeOwnToken(ctx context.Context, peer StoredPeer) error
 }
 
+// IssuedCredentials is this machine's own record of the sync credentials it
+// issued to other machines.
+type IssuedCredentials interface {
+	// RevokeDecisionSyncDevicesFor removes every decision sync credential
+	// issued to hostID and returns how many it removed.
+	RevokeDecisionSyncDevicesFor(ctx context.Context, hostID string) (int, error)
+}
+
 // PeersDeps configures the link manager.
 type PeersDeps struct {
-	Secrets      *PeerSecrets
-	Store        PeerStore
-	API          PeerAPI
+	Secrets *PeerSecrets
+	Store   PeerStore
+	API     PeerAPI
+	// Issued, when set, lets Unlink revoke the credentials this machine
+	// issued to the other one, which stops a link that machine made here.
+	Issued       IssuedCredentials
 	HostID       string
 	MachineLabel func() string
 	Now          func() time.Time
@@ -154,12 +165,22 @@ func (m *Peers) Link(ctx context.Context, in LinkInput) (PeerStatus, []SecretWar
 	return PeerStatus{DecisionSyncPeer: peer, State: PeerLinkedBehind}, nil, nil
 }
 
-// Unlink removes the link's status row and token here first, then asks the
-// machine to revoke the token, giving up after a few seconds. Every entry
-// stays on both machines.
+// Unlink stops syncing with a machine in both directions: it revokes every
+// sync credential this machine issued to it (a link that machine made here,
+// even one not used yet), removes the link's status row and token here, then
+// asks the machine to revoke that token, giving up after a few seconds.
+// Every entry stays on both machines.
 func (m *Peers) Unlink(ctx context.Context, hostID string) error {
 	stored, hadToken := m.deps.Secrets.Get(hostID)
-	if !hadToken {
+	issued := 0
+	if m.deps.Issued != nil {
+		n, err := m.deps.Issued.RevokeDecisionSyncDevicesFor(ctx, hostID)
+		if err != nil {
+			return ErrLinkFailed
+		}
+		issued = n
+	}
+	if !hadToken && m.deps.Issued == nil {
 		// A peer that only links to this machine holds a token this machine
 		// issued; deleting its row here would leave that access in place.
 		row, found, err := m.deps.Store.GetDecisionSyncPeer(ctx, hostID)
@@ -179,7 +200,7 @@ func (m *Peers) Unlink(ctx context.Context, hostID string) error {
 			return ErrLinkFailed
 		}
 	}
-	if !hadToken && !hadRow {
+	if !hadToken && !hadRow && issued == 0 {
 		return ErrPeerNotLinked
 	}
 	if m.deps.OnChange != nil {

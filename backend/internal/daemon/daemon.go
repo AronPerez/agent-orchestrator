@@ -1240,7 +1240,7 @@ func Run(buildVersion string) (retErr error) {
 			}
 		}),
 	})
-	decisionSync := startDecisionSync(ctx, cfg.DataDir, store, decisionSvc, hostIdentity.HostID, log, wakeDecisionDeliverer, decisionNotifications.Wake)
+	decisionSync := startDecisionSync(ctx, cfg.DataDir, store, decisionSvc, hostIdentity.HostID, bs, log, wakeDecisionDeliverer, decisionNotifications.Wake)
 	syncRuntime.Store(decisionSync)
 	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
 		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,

@@ -350,3 +350,68 @@ func TestLinkRollsBackWhenTheStatusRowFails(t *testing.T) {
 		t.Fatalf("minted token not revoked on the peer: %v", peer.revoked)
 	}
 }
+
+// fakeIssued is this machine's record of sync credentials issued to others.
+type fakeIssued struct {
+	held    map[string]int
+	revoked []string
+}
+
+func (f *fakeIssued) RevokeDecisionSyncDevicesFor(_ context.Context, hostID string) (int, error) {
+	n := f.held[hostID]
+	delete(f.held, hostID)
+	f.revoked = append(f.revoked, hostID)
+	return n, nil
+}
+
+func newIssuedLinkFixture(t *testing.T, issued *fakeIssued) *linkFixture {
+	t.Helper()
+	f := newLinkFixture(t)
+	f.peers = decisionsync.NewPeers(decisionsync.PeersDeps{
+		Secrets: f.secrets, Store: f.store, API: decisionsync.NewHTTPClient(nil), Issued: issued,
+		HostID: "h_laptop", MachineLabel: func() string { return "laptop" }, Now: fixedNow(t0),
+		OnChange: func() { f.changes++ },
+	})
+	return f
+}
+
+func TestUnlinkRevokesCredentialsIssuedToThatMachine(t *testing.T) {
+	ctx := context.Background()
+	t.Run("OpposingLinks", func(t *testing.T) {
+		peer := newFakePeer(t, "h_mini")
+		issued := &fakeIssued{held: map[string]int{"h_mini": 1}}
+		f := newIssuedLinkFixture(t, issued)
+		if _, _, err := f.peers.Link(ctx, decisionsync.LinkInput{URL: peer.server.URL, Credential: "pw"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.peers.Unlink(ctx, "h_mini"); err != nil {
+			t.Fatal(err)
+		}
+		if _, still := f.secrets.Get("h_mini"); still || len(issued.held) != 0 || len(peer.revoked) != 1 {
+			t.Fatalf("token kept %v, issued left %v, revoked at peer %v", still, issued.held, peer.revoked)
+		}
+	})
+	t.Run("InboundOnly", func(t *testing.T) {
+		issued := &fakeIssued{held: map[string]int{"h_laptop2": 1}}
+		f := newIssuedLinkFixture(t, issued)
+		if err := f.store.UpsertDecisionSyncPeer(ctx, domain.DecisionSyncPeer{HostID: "h_laptop2", Direction: domain.DecisionSyncInbound}); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.peers.Unlink(ctx, "h_laptop2"); err != nil {
+			t.Fatalf("inbound-only unlink: %v", err)
+		}
+		if f.store.get("h_laptop2").HostID != "" || len(issued.held) != 0 {
+			t.Fatalf("row %+v, issued left %v", f.store.get("h_laptop2"), issued.held)
+		}
+	})
+	t.Run("IssuedBeforeFirstExchange", func(t *testing.T) {
+		issued := &fakeIssued{held: map[string]int{"h_new": 1}}
+		f := newIssuedLinkFixture(t, issued)
+		if err := f.peers.Unlink(ctx, "h_new"); err != nil {
+			t.Fatalf("a credential with no row yet: %v", err)
+		}
+		if err := f.peers.Unlink(ctx, "h_new"); !errors.Is(err, decisionsync.ErrPeerNotLinked) {
+			t.Fatalf("nothing left: err = %v, want ErrPeerNotLinked", err)
+		}
+	})
+}

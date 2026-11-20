@@ -1,6 +1,7 @@
 package httpd
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -210,5 +211,24 @@ func TestDecisionSyncTokenRevokesItself(t *testing.T) {
 	}
 	if status, _ := h.remote(http.MethodPost, "/api/v1/decision-sync/exchange", token, map[string]string{}); status != http.StatusUnauthorized {
 		t.Fatalf("self-revoked token still authenticates: %d", status)
+	}
+}
+
+func TestRevokeDecisionSyncDevicesForOneMachine(t *testing.T) {
+	h := newDecisionSyncHost(t)
+	_, laptop := h.mustIssueDecisionSync("secret12", "h_laptop")
+	_, other := h.mustIssueDecisionSync("secret12", "h_desk")
+	removed, err := h.bridge.RevokeDecisionSyncDevicesFor(context.Background(), "h_laptop")
+	if err != nil || removed != 1 {
+		t.Fatalf("removed = %d, %v", removed, err)
+	}
+	if status, _ := h.remote(http.MethodPost, "/api/v1/decision-sync/exchange", laptop, map[string]string{}); status != http.StatusUnauthorized {
+		t.Errorf("a revoked token still reaches sync: %d", status)
+	}
+	if again, err := h.bridge.RevokeDecisionSyncDevicesFor(context.Background(), "h_laptop"); err != nil || again != 0 {
+		t.Fatalf("second revoke = %d, %v", again, err)
+	}
+	if status, _ := h.remote(http.MethodPost, "/api/v1/decision-sync/exchange", other, map[string]string{}); status != http.StatusOK {
+		t.Errorf("another machine's token was revoked: %d", status)
 	}
 }
