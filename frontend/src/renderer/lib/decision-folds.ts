@@ -21,11 +21,23 @@ export const decisionRowFoldKey = (bandKey: string, rowKey: string): string => J
 const OPEN_LANES: readonly DecisionLane[] = DECISION_LANES.filter((lane) => lane !== "done");
 const hasOpen = (counts: Record<DecisionLane, number>) => OPEN_LANES.some((lane) => counts[lane] > 0);
 
-/** The keys folded right now: the saved choice where there is one, else folded when nothing is open. */
-export function resolveDecisionFolds(model: DecisionBoardModel, preferences: DecisionFoldPreferences): ReadonlySet<string> {
+/** The fold keys of the project and the stream that hold a call, or none when it is not on the board. */
+function groupKeysOf(model: DecisionBoardModel, callId: string | undefined): string[] {
+	const at = callId ? model.cardById.get(callId) : undefined;
+	return at ? [decisionBandFoldKey(at.bandKey), decisionRowFoldKey(at.bandKey, at.rowKey)] : [];
+}
+
+/**
+ * The keys folded right now: the saved choice where there is one, else folded
+ * when nothing is open. The selected call's project and stream never fold by
+ * default, so a call that finishes while its panel is open stays on the board
+ * in the same render; a fold the person made still wins.
+ */
+export function resolveDecisionFolds(model: DecisionBoardModel, preferences: DecisionFoldPreferences, selectedId?: string): ReadonlySet<string> {
+	const held = new Set(groupKeysOf(model, selectedId));
 	const folded = new Set<string>();
 	const settle = (key: string, open: boolean) => {
-		if (preferences[key] ?? !open) folded.add(key);
+		if (preferences[key] ?? !(open || held.has(key))) folded.add(key);
 	};
 	for (const band of model.bands) {
 		settle(decisionBandFoldKey(band.key), hasOpen(band.counts));
@@ -54,12 +66,24 @@ export function foldAllDecisions(model: DecisionBoardModel, preferences: Decisio
  * Returns the same object when the call is already on screen or not on the board.
  */
 export function revealDecisionCard(model: DecisionBoardModel, preferences: DecisionFoldPreferences, callId: string): DecisionFoldPreferences {
-	const at = model.cardById.get(callId);
-	if (!at) return preferences;
 	const folded = resolveDecisionFolds(model, preferences);
 	let next = preferences;
-	for (const key of [decisionBandFoldKey(at.bandKey), decisionRowFoldKey(at.bandKey, at.rowKey)]) {
+	for (const key of groupKeysOf(model, callId)) {
 		if (folded.has(key)) next = rememberDecisionFold(next, key, false);
+	}
+	return next;
+}
+
+/**
+ * Save as open the project and stream of a call that would otherwise fold by
+ * default, so they stay open once the call is no longer selected. A fold the
+ * person made is left alone. Returns the same object when there is nothing to save.
+ */
+export function keepDecisionCardOpen(model: DecisionBoardModel, preferences: DecisionFoldPreferences, callId: string): DecisionFoldPreferences {
+	const folded = resolveDecisionFolds(model, preferences);
+	let next = preferences;
+	for (const key of groupKeysOf(model, callId)) {
+		if (preferences[key] === undefined && folded.has(key)) next = rememberDecisionFold(next, key, false);
 	}
 	return next;
 }

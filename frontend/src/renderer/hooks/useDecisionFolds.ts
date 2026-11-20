@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { DecisionBoardModel } from "../lib/decision-board";
 import {
 	foldAllDecisions,
+	keepDecisionCardOpen,
 	readDecisionFolds,
 	rememberDecisionFold,
 	resolveDecisionFolds,
@@ -25,6 +26,8 @@ export function useDecisionFolds(model: DecisionBoardModel, selectedId?: string)
 	const [preferences, setPreferences] = useState(readDecisionFolds);
 	const latestModel = useRef(model);
 	latestModel.current = model;
+	const latestSelected = useRef(selectedId);
+	latestSelected.current = selectedId;
 
 	// Save choices, but not the ones just read on mount.
 	const loaded = useRef(preferences);
@@ -32,21 +35,31 @@ export function useDecisionFolds(model: DecisionBoardModel, selectedId?: string)
 		if (preferences !== loaded.current) writeDecisionFolds(preferences);
 	}, [preferences]);
 
-	// The selected call is always shown. This follows the selection, the call's
-	// place on the board and its state, not the fold state: a call that finishes
-	// can leave its stream with nothing open, which folds by default, so the
-	// state change reveals it again; folding the group afterwards stays the
+	// Selecting a call opens the project and stream that hold it, even ones the
+	// person folded. This follows the selection and the call's place on the
+	// board, not the fold state, so folding its group afterwards stays the
 	// person's choice. Before paint, so the group never flashes folded.
 	const at = selectedId ? model.cardById.get(selectedId) : undefined;
-	const place = at ? `${at.bandKey}\n${at.rowKey}\n${at.card.lane}` : undefined;
+	const place = at ? `${at.bandKey}\n${at.rowKey}` : undefined;
 	useLayoutEffect(() => {
 		if (!selectedId || place === undefined) return;
 		setPreferences((current) => revealDecisionCard(latestModel.current, current, selectedId));
 	}, [selectedId, place]);
 
-	const folded = useMemo(() => resolveDecisionFolds(model, preferences), [model, preferences]);
+	// A selected call that changes state (answered, finished) can leave its
+	// group with nothing open. resolveDecisionFolds already keeps that group
+	// open in the same render, so the card and its focus are never dropped;
+	// this saves it as open so it stays once the panel closes. Unlike a new
+	// selection, a state change never undoes a fold the person made.
+	const lane = at?.card.lane;
+	useLayoutEffect(() => {
+		if (!selectedId || lane === undefined) return;
+		setPreferences((current) => keepDecisionCardOpen(latestModel.current, current, selectedId));
+	}, [selectedId, lane]);
+
+	const folded = useMemo(() => resolveDecisionFolds(model, preferences, selectedId), [model, preferences, selectedId]);
 	const toggle = useCallback((key: string) => {
-		setPreferences((current) => rememberDecisionFold(current, key, !resolveDecisionFolds(latestModel.current, current).has(key)));
+		setPreferences((current) => rememberDecisionFold(current, key, !resolveDecisionFolds(latestModel.current, current, latestSelected.current).has(key)));
 	}, []);
 	const setAll = useCallback((value: boolean) => {
 		setPreferences((current) => foldAllDecisions(latestModel.current, current, value));

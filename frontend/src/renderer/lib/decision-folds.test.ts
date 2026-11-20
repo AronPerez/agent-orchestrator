@@ -6,6 +6,7 @@ import {
 	decisionBandFoldKey,
 	decisionRowFoldKey,
 	foldAllDecisions,
+	keepDecisionCardOpen,
 	readDecisionFolds,
 	rememberDecisionFold,
 	resolveDecisionFolds,
@@ -62,6 +63,13 @@ describe("resolveDecisionFolds", () => {
 		expect(folded.has(nango)).toBe(false);
 	});
 
+	it("never folds the selected call's project or stream by default, but respects a fold the person made", () => {
+		expect([...resolveDecisionFolds(board, {}, "old")].sort()).toEqual([shop, shopWide].sort());
+		expect([...resolveDecisionFolds(board, {}, "shop")].sort()).toEqual([aide]);
+		expect(resolveDecisionFolds(board, { [aide]: true }, "old").has(aide)).toBe(true);
+		expect(resolveDecisionFolds(board, { [cloud]: true }, "old").has(cloud)).toBe(true);
+	});
+
 	it("ignores saved choices for groups that are no longer on the board", () => {
 		expect(resolveDecisionFolds(board, { [decisionBandFoldKey("gone")]: true }).has(decisionBandFoldKey("gone"))).toBe(false);
 	});
@@ -81,6 +89,17 @@ describe("fold choices", () => {
 		expect(folded.has(cloud)).toBe(false);
 		expect(folded.has(aide)).toBe(false);
 		expect(folded.has(shop)).toBe(true);
+	});
+
+	it("saves a default-folded group as open for a call, without touching a fold the person made", () => {
+		expect(keepDecisionCardOpen(board, {}, "shop")).toEqual({ [shop]: false, [shopWide]: false });
+		const explicit = { [shop]: true, [shopWide]: true };
+		expect(keepDecisionCardOpen(board, explicit, "shop")).toBe(explicit);
+		expect(keepDecisionCardOpen(board, { [shop]: true }, "shop")).toEqual({ [shop]: true, [shopWide]: false });
+		// Nothing to save when the group is open by default, or the call is unknown.
+		const none = {};
+		expect(keepDecisionCardOpen(board, none, "need")).toBe(none);
+		expect(keepDecisionCardOpen(board, none, "missing")).toBe(none);
 	});
 
 	it("returns the same choices when the call is already on screen or unknown", () => {

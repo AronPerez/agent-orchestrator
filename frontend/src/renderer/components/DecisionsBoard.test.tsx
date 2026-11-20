@@ -198,6 +198,34 @@ describe("DecisionsBoard", () => {
 		expect(within(screen.getByRole("group", { name: "Power BI and Nango" })).getByRole("button", { name: /Power BI and Nango/ })).toHaveAttribute("aria-expanded", "false");
 	});
 
+	it("keeps a stream the person folded when its selected call changes state", async () => {
+		const { rerender, onSelect } = renderBoard({ selectedId: "need" });
+		const toggle = () => within(screen.getByRole("group", { name: "Power BI and Nango" })).getByRole("button", { name: /Power BI and Nango/ });
+		await userEvent.click(toggle());
+		expect(toggle()).toHaveAttribute("aria-expanded", "false");
+		// Answered in the still-open panel: Needs you becomes In progress.
+		const answered = calls.map((item) => item.id === "need"
+			? { ...item, state: "in_progress" as const, stateLabel: "In progress", chosenLabel: "Ship", delivery: "pending" as const, answeredAt: "2026-11-18T11:30:00Z" }
+			: item);
+		rerender(<DecisionsBoard model={buildDecisionBoard(answered)} now={NOW} onSelect={onSelect} selectedId="need" />);
+		expect(toggle()).toHaveAttribute("aria-expanded", "false");
+		expect(screen.queryByRole("button", { name: /^Question need/ })).not.toBeInTheDocument();
+		expect(JSON.parse(window.localStorage.getItem(DECISION_FOLD_STORAGE_KEY) ?? "{}")).toEqual({ [decisionRowFoldKey("cloud", "h_a:nango")]: true });
+	});
+
+	it("keeps keyboard focus on a selected card that finishes as the last open call in its stream", () => {
+		const { rerender, onSelect } = renderBoard({ selectedId: "need" });
+		act(() => screen.getByRole("button", { name: /^Question need/ }).focus());
+		const finished = calls.map((item) => item.id === "need"
+			? { ...item, state: "done" as const, stateLabel: "Done", chosenLabel: "Ship", outcome: "Shipped", answeredAt: "2026-11-18T11:30:00Z", outcomeAt: "2026-11-18T11:45:00Z" }
+			: item);
+		rerender(<DecisionsBoard model={buildDecisionBoard(finished)} now={NOW} onSelect={onSelect} selectedId="need" />);
+		expect(screen.getByRole("button", { name: /^Question need/ })).toHaveFocus();
+		// Closing the panel leaves the card where focus can return to it.
+		rerender(<DecisionsBoard model={buildDecisionBoard(finished)} now={NOW} onSelect={onSelect} />);
+		expect(screen.getByRole("button", { name: /^Question need/ })).toBeInTheDocument();
+	});
+
 	describe("done cap", () => {
 		const finished = [1, 2, 3, 4, 5].map((minute) => call({
 			id: `fin${minute}`, projectId: "cloud", projectName: "skyvern-cloud", state: "done", outcome: "Shipped", outcomeAt: `2026-11-18T11:0${minute}:00Z`,
