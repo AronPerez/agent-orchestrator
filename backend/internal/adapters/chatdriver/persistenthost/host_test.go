@@ -41,6 +41,16 @@ func TestProviderHelper(t *testing.T) {
 		runACPProviderHelper()
 		return
 	}
+	if os.Getenv("AO_CHAT_HOST_TOOL_SLEEP") == "1" {
+		// The "away" tool started by a provider below.
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	if mode := os.Getenv("AO_CHAT_HOST_SPAWN_TOOL"); mode != "" {
+		// Like Claude Code: run a command that outlives this provider in a
+		// process group, or a session, of its own.
+		startProviderTestTool(mode, os.Getenv("AO_CHAT_HOST_TOOL_PID_FILE"))
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		var frame struct {
@@ -1257,7 +1267,7 @@ func TestLaunchProbeClearsReadinessFromPriorBoot(t *testing.T) {
 		func(int) bool { return true },
 		func() (string, error) { return ready.BootID + "-next", nil },
 		false,
-		processGroupExited,
+		provenProviderTreeAbsence,
 	)
 	if err != nil {
 		t.Fatalf("probe prior-boot readiness: %v", err)
@@ -1593,48 +1603,53 @@ func TestShutdownStaleDescriptorPreservesUnpublishedReplacement(t *testing.T) {
 	}
 }
 
+// testTreeMarker is a well-formed provider tree marker for records written by
+// tests.
+var testTreeMarker = strings.Repeat("ab", 32)
+
 func TestAdmittedHostProviderRecordDecidesSameBootFence(t *testing.T) {
 	const providerPGID = 424242
 	tests := []struct {
 		name           string
 		record         func(t *testing.T, dataDir, sessionID, token string)
-		leaderExited   bool
-		groupExited    bool
+		treeErr        error
 		wantCleared    bool
 		wantErrContain string
 	}{
 		{
-			name:         "recorded group is empty",
-			record:       publishTestProvider(providerPGID),
-			leaderExited: true, groupExited: true, wantCleared: true,
+			name:        "whole provider tree proven absent",
+			record:      publishTestProvider(providerPGID),
+			wantCleared: true,
 		},
 		{
-			name:         "recorded group still has members",
-			record:       publishTestProvider(providerPGID),
-			leaderExited: true, groupExited: false,
-			wantErrContain: "provider process group 424242 is not proven absent",
+			name:           "a provider process survives",
+			record:         publishTestProvider(providerPGID),
+			treeErr:        errors.New("provider process 777 is still running"),
+			wantErrContain: "provider process 777 is still running",
 		},
 		{
-			name:         "provider leader still alive",
-			record:       publishTestProvider(providerPGID),
-			leaderExited: false, groupExited: true,
-			wantErrContain: "provider process group 424242 is not proven absent",
-		},
-		{
-			name:         "no provider record",
-			record:       func(*testing.T, string, string, string) {},
-			leaderExited: true, groupExited: true,
-			wantErrContain: "no provider process group was recorded",
+			name:           "no provider record",
+			record:         func(*testing.T, string, string, string) {},
+			wantErrContain: "no provider process tree was recorded",
 		},
 		{
 			name: "record from another host launch",
 			record: func(t *testing.T, dataDir, sessionID, token string) {
 				writeTestProviderRecord(t, dataDir, sessionID, launchProvider{
 					Token: token, HostPID: os.Getpid() + 1, ProviderPGID: providerPGID,
+					TreeMarker: testTreeMarker, Workdir: dataDir,
 				})
 			},
-			leaderExited: true, groupExited: true,
 			wantErrContain: "belongs to another host launch",
+		},
+		{
+			name: "record without a tree marker",
+			record: func(t *testing.T, dataDir, sessionID, token string) {
+				writeTestProviderRecord(t, dataDir, sessionID, launchProvider{
+					Token: token, HostPID: os.Getpid(), ProviderPGID: providerPGID, Workdir: dataDir,
+				})
+			},
+			wantErrContain: "invalid chat host provider record",
 		},
 	}
 	for _, tt := range tests {
@@ -1655,17 +1670,26 @@ func TestAdmittedHostProviderRecordDecidesSameBootFence(t *testing.T) {
 			}
 			tt.record(t, dataDir, sessionID, token)
 
+			var inspected []launchProvider
 			err = probeLaunchTokenWithProbes(
 				dataDir, sessionID, token,
-				func(pid int) bool { return pid != providerPGID || tt.leaderExited },
+				func(int) bool { return true },
 				func() (string, error) { return ready.BootID, nil },
 				false,
-				func(pgid int) bool { return pgid == providerPGID && tt.groupExited },
+				func(provider launchProvider) error {
+					inspected = append(inspected, provider)
+					return tt.treeErr
+				},
 			)
 			_, readyErr := readLaunchReady(dataDir, sessionID, token)
 			if tt.wantCleared {
 				if err != nil {
-					t.Fatalf("probe error = %v, want the empty provider group to settle ownership", err)
+					t.Fatalf("probe error = %v, want the absent provider tree to settle ownership", err)
+				}
+				if len(inspected) != 1 || inspected[0].ProviderPGID != providerPGID ||
+					inspected[0].TreeMarker != testTreeMarker || inspected[0].HostPID != os.Getpid() ||
+					inspected[0].Workdir != dataDir {
+					t.Fatalf("inspected provider trees = %+v, want the recorded one", inspected)
 				}
 				if !errors.Is(readyErr, os.ErrNotExist) {
 					t.Fatalf("readiness remains after proven cleanup: %v", readyErr)
@@ -1688,9 +1712,17 @@ func TestAdmittedHostProviderRecordDecidesSameBootFence(t *testing.T) {
 func publishTestProvider(pgid int) func(*testing.T, string, string, string) {
 	return func(t *testing.T, dataDir, sessionID, token string) {
 		t.Helper()
-		if err := publishLaunchProvider(dataDir, sessionID, token, pgid); err != nil {
+		if err := publishLaunchProvider(dataDir, sessionID, token, pgid, testTreeMarker, dataDir); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestEnvWithProviderTreeMarkerReplacesInheritedMarker(t *testing.T) {
+	env := envWithProviderTreeMarker([]string{"A=1", providerTreeEnv + "=outer", "B=2"}, testTreeMarker)
+	want := []string{"A=1", "B=2", providerTreeEnv + "=" + testTreeMarker}
+	if strings.Join(env, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("env = %q, want %q", env, want)
 	}
 }
 
@@ -1720,17 +1752,23 @@ func TestPublishLaunchProviderRequiresOwnReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
-	if err := publishLaunchProvider(dataDir, sessionID, token, 4242); !errors.Is(err, os.ErrNotExist) {
+	if err := publishLaunchProvider(dataDir, sessionID, token, 4242, testTreeMarker, dataDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("publish without readiness error = %v, want missing readiness", err)
 	}
 	if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()+1); err != nil {
 		t.Fatal(err)
 	}
-	if err := publishLaunchProvider(dataDir, sessionID, token, 4242); err == nil {
+	if err := publishLaunchProvider(dataDir, sessionID, token, 4242, testTreeMarker, dataDir); err == nil {
 		t.Fatal("published a provider record for another host's readiness")
 	}
-	if err := publishLaunchProvider(dataDir, sessionID, token, 1); err == nil {
+	if err := publishLaunchProvider(dataDir, sessionID, token, 1, testTreeMarker, dataDir); err == nil {
 		t.Fatal("published an invalid provider process group")
+	}
+	if err := publishLaunchProvider(dataDir, sessionID, token, 4242, "not-a-marker", dataDir); err == nil {
+		t.Fatal("published an invalid provider tree marker")
+	}
+	if err := publishLaunchProvider(dataDir, sessionID, token, 4242, testTreeMarker, "relative"); err == nil {
+		t.Fatal("published a relative provider workdir")
 	}
 }
 
@@ -1741,7 +1779,7 @@ func TestLaunchProbeSweepsStrayProviderRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTestProviderRecord(t, dataDir, sessionID, launchProvider{Token: token, HostPID: 4242, ProviderPGID: 4243})
+	writeTestProviderRecord(t, dataDir, sessionID, launchProvider{Token: token, HostPID: 4242, ProviderPGID: 4243, TreeMarker: testTreeMarker})
 
 	if err := probeUnpublishedHost(dataDir, sessionID); err != nil {
 		t.Fatalf("probe with only a stray provider record: %v", err)

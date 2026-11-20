@@ -304,3 +304,81 @@ func TestKilledHostStaysFencedWhileProviderGroupLives(t *testing.T) {
 		t.Fatalf("refused recovery stopped provider %d", providerPID)
 	}
 }
+
+// startProviderTestTool runs a "tool" command from the provider helper that
+// keeps running after the provider exits, inheriting the provider's
+// environment as Claude Code's commands do:
+//   - "group": a system binary in a process group of its own;
+//   - "session": a system binary in a session of its own, like Claude Code's
+//     detached /bin/bash, in the worktree;
+//   - "away": a non-system binary in a session of its own, outside the
+//     worktree, which only the environment marker can find.
+func startProviderTestTool(mode, pidFile string) {
+	tool := exec.Command("sleep", "30") //nolint:gosec // Fixed test helper command.
+	switch mode {
+	case "group":
+		tool.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	case "session":
+		tool.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	case "away":
+		tool = exec.Command(os.Args[0], "-test.run=^TestProviderHelper$") //nolint:gosec // The test binary itself.
+		tool.Env = append(os.Environ(), "AO_CHAT_HOST_TOOL_SLEEP=1")
+		tool.Dir = os.TempDir()
+		tool.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	default:
+		os.Exit(3)
+	}
+	if err := tool.Start(); err != nil {
+		os.Exit(3)
+	}
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(tool.Process.Pid)), 0o600); err != nil {
+		os.Exit(3)
+	}
+}
+
+func TestKilledHostStaysFencedWhileProviderToolSurvives(t *testing.T) {
+	for _, mode := range []string{"group", "session", "away"} {
+		t.Run("tool "+mode, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "tool.pid")
+			cfg, transport, d, providerPID := startFencedHost(t, "tool-"+mode,
+				"AO_CHAT_HOST_SPAWN_TOOL="+mode, "AO_CHAT_HOST_TOOL_PID_FILE="+pidFile)
+			var toolPID int
+			waitUntil(t, "tool start", func() bool {
+				b, _ := os.ReadFile(pidFile) //nolint:gosec // Test-owned temporary path.
+				toolPID, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+				return toolPID > 0
+			})
+			t.Cleanup(func() { _ = syscall.Kill(toolPID, syscall.SIGKILL) })
+
+			if err := syscall.Kill(d.PID, syscall.SIGKILL); err != nil {
+				t.Fatal(err)
+			}
+			waitUntil(t, "chat host exit", func() bool { return processalive.Exited(d.PID) })
+			_ = transport.Stdin.Close()
+			waitUntil(t, "provider group exit", func() bool { return processGroupExited(providerPID) })
+			if !processalive.Alive(toolPID) {
+				t.Fatalf("tool %d did not outlive its provider", toolPID)
+			}
+
+			_, err := ConnectOrStart(context.Background(), cfg)
+			if !errors.Is(err, ErrOwnershipInconclusive) {
+				t.Fatalf("ConnectOrStart error = %v, want the surviving tool to keep the fence", err)
+			}
+			if !strings.Contains(err.Error(), "provider process "+strconv.Itoa(toolPID)+" is still running") {
+				t.Fatalf("ConnectOrStart error = %v, want it to name surviving tool %d", err, toolPID)
+			}
+			if len(launchRecords(t, cfg, launchReadySuffix)) != 1 {
+				t.Fatal("refused recovery removed readiness")
+			}
+			if !processalive.Alive(toolPID) {
+				t.Fatalf("refused recovery stopped tool %d", toolPID)
+			}
+
+			if err := syscall.Kill(toolPID, syscall.SIGKILL); err != nil {
+				t.Fatal(err)
+			}
+			waitUntil(t, "tool exit", func() bool { return processalive.Exited(toolPID) })
+			assertResumes(t, cfg)
+		})
+	}
+}

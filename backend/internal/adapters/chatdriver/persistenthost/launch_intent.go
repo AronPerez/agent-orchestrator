@@ -22,6 +22,9 @@ const (
 	launchIntentSuffix   = ".json"
 	launchReadySuffix    = ".ready.json"
 	launchProviderSuffix = ".provider.json"
+	// providerTreeEnv marks every process the provider starts, so recovery can
+	// find work that left the provider's process group or session.
+	providerTreeEnv = "AO_CHAT_HOST_TREE"
 )
 
 // clearLaunchIntentRetryDelays bounds how long a host keeps retrying the
@@ -41,13 +44,16 @@ type launchReady struct {
 	BootID  string `json:"bootId,omitempty"`
 }
 
-// launchProvider records the process group an admitted host gave its provider.
-// After an abrupt host exit on the same boot it is the evidence recovery uses
-// to prove the provider tree is gone.
+// launchProvider records how to find the provider tree an admitted host
+// started: the provider's process group, the marker in the environment of
+// every process the provider starts, and the worktree those processes work in. After an abrupt host exit on the same
+// boot it is the evidence recovery uses to prove the whole tree is gone.
 type launchProvider struct {
 	Token        string `json:"token"`
 	HostPID      int    `json:"hostPid"`
 	ProviderPGID int    `json:"providerPgid"`
+	TreeMarker   string `json:"treeMarker"`
+	Workdir      string `json:"workdir"`
 	BootID       string `json:"bootId,omitempty"`
 }
 
@@ -102,9 +108,18 @@ func launchProviderPath(dataDir, sessionID, token string) (string, error) {
 // publishLaunchProvider records the provider process group of the admitted
 // host that is calling it. It runs after the provider starts, so a host that
 // dies before the record exists stays fenced.
-func publishLaunchProvider(dataDir, sessionID, token string, providerPGID int) (retErr error) {
+func publishLaunchProvider(
+	dataDir, sessionID, token string,
+	providerPGID int, treeMarker, workdir string,
+) (retErr error) {
 	if providerPGID <= 1 {
 		return errors.New("invalid chat host provider process group")
+	}
+	if !validLaunchToken(treeMarker) {
+		return errors.New("invalid chat host provider tree marker")
+	}
+	if !filepath.IsAbs(workdir) {
+		return errors.New("chat host provider workdir must be absolute")
 	}
 	ownershipLock, err := acquireHostOwnershipMutationLock(dataDir, sessionID)
 	if err != nil {
@@ -127,7 +142,8 @@ func publishLaunchProvider(dataDir, sessionID, token string, providerPGID int) (
 		return err
 	}
 	b, err := json.Marshal(launchProvider{
-		Token: token, HostPID: ready.HostPID, ProviderPGID: providerPGID, BootID: ready.BootID,
+		Token: token, HostPID: ready.HostPID, ProviderPGID: providerPGID,
+		TreeMarker: treeMarker, Workdir: workdir, BootID: ready.BootID,
 	})
 	if err != nil {
 		return err
@@ -144,7 +160,8 @@ func readLaunchProvider(dataDir, sessionID, token string) (launchProvider, error
 	if err := readLaunchJSON(path, &provider); err != nil {
 		return launchProvider{}, err
 	}
-	if provider.Token != token || provider.HostPID <= 0 || provider.ProviderPGID <= 1 {
+	if provider.Token != token || provider.HostPID <= 0 || provider.ProviderPGID <= 1 ||
+		!validLaunchToken(provider.TreeMarker) || !filepath.IsAbs(provider.Workdir) {
 		return launchProvider{}, errors.New("invalid chat host provider record")
 	}
 	return provider, nil
@@ -396,6 +413,22 @@ func awaitLaunchReady(ctx context.Context, cfg Config) error {
 	}
 }
 
+// envWithProviderTreeMarker gives the provider this host's tree marker in
+// place of any marker inherited from an enclosing tree.
+func envWithProviderTreeMarker(env []string, marker string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+	prefix := providerTreeEnv + "="
+	marked := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			marked = append(marked, entry)
+		}
+	}
+	return append(marked, prefix+marker)
+}
+
 func launchTokenFromEnv(env []string) (string, []string) {
 	if env == nil {
 		return "", nil
@@ -562,7 +595,7 @@ func probeLaunchToken(dataDir, sessionID, token string) error {
 		processalive.Exited,
 		currentBootIdentity,
 		providerTreeDiesWithHost(),
-		processGroupExited,
+		provenProviderTreeAbsence,
 	)
 }
 
@@ -575,7 +608,7 @@ func probeLaunchTokenWithExitProbe(
 		exited,
 		currentBootIdentity,
 		providerTreeDiesWithHost(),
-		processGroupExited,
+		provenProviderTreeAbsence,
 	)
 }
 
@@ -584,11 +617,11 @@ func probeLaunchTokenWithProbes(
 	exited func(int) bool,
 	bootIdentity func() (string, error),
 	providerTreeDies bool,
-	groupExited func(int) bool,
+	treeAbsent func(launchProvider) error,
 ) error {
 	return probeLaunchTokenWithProbesAndClear(
 		dataDir, sessionID, token,
-		exited, bootIdentity, providerTreeDies, groupExited,
+		exited, bootIdentity, providerTreeDies, treeAbsent,
 		clearLaunchIntent,
 	)
 }
@@ -596,7 +629,7 @@ func probeLaunchTokenWithProbes(
 func probeLaunchTokenUnderOwnershipLock(dataDir, sessionID, token string) error {
 	return probeLaunchTokenWithProbesAndClear(
 		dataDir, sessionID, token,
-		processalive.Exited, currentBootIdentity, providerTreeDiesWithHost(), processGroupExited,
+		processalive.Exited, currentBootIdentity, providerTreeDiesWithHost(), provenProviderTreeAbsence,
 		clearLaunchIntentUnlocked,
 	)
 }
@@ -606,7 +639,7 @@ func probeLaunchTokenWithProbesAndClear(
 	exited func(int) bool,
 	bootIdentity func() (string, error),
 	providerTreeDies bool,
-	groupExited func(int) bool,
+	treeAbsent func(launchProvider) error,
 	clearIntent func(string, string, string),
 ) error {
 	intent, intentErr := readLaunchIntent(dataDir, sessionID, token)
@@ -620,7 +653,7 @@ func probeLaunchTokenWithProbesAndClear(
 	settle := func(ready launchReady) error {
 		return settleAdmittedHostOwnership(
 			dataDir, sessionID, token, ready,
-			exited, bootIdentity, providerTreeDies, groupExited, clearIntent,
+			exited, bootIdentity, providerTreeDies, treeAbsent, clearIntent,
 		)
 	}
 	if readyErr == nil {
@@ -664,11 +697,11 @@ func settleAdmittedHostOwnership(
 	exited func(int) bool,
 	bootIdentity func() (string, error),
 	providerTreeDies bool,
-	groupExited func(int) bool,
+	treeAbsent func(launchProvider) error,
 	clearIntent func(string, string, string),
 ) error {
 	providerTreeAbsent := func() error {
-		return recordedProviderTreeAbsence(dataDir, sessionID, token, ready, exited, groupExited)
+		return recordedProviderTreeAbsence(dataDir, sessionID, token, ready, treeAbsent)
 	}
 	if err := admittedHostOwnershipError(ready, exited, bootIdentity, providerTreeDies, providerTreeAbsent); err != nil {
 		return err
@@ -677,29 +710,52 @@ func settleAdmittedHostOwnership(
 	return nil
 }
 
-// recordedProviderTreeAbsence proves that the provider tree of an exited host
-// is gone: the host recorded its provider's process group, the provider
-// (the group leader) has exited, and the group has no members left. That is
-// the same evidence orderly teardown gives, since it stops the provider by
-// terminating that group. A reused PGID can only keep the fence in place.
+// recordedProviderTreeAbsence checks the provider record of an exited host
+// and asks treeAbsent to prove that the tree it describes is gone.
 func recordedProviderTreeAbsence(
 	dataDir, sessionID, token string,
 	ready launchReady,
-	exited func(int) bool,
-	groupExited func(int) bool,
+	treeAbsent func(launchProvider) error,
 ) error {
 	provider, err := readLaunchProvider(dataDir, sessionID, token)
 	if errors.Is(err, os.ErrNotExist) {
-		return errors.New("no provider process group was recorded")
+		return errors.New("no provider process tree was recorded")
 	}
 	if err != nil {
-		return fmt.Errorf("read recorded provider process group: %w", err)
+		return fmt.Errorf("read recorded provider process tree: %w", err)
 	}
 	if provider.HostPID != ready.HostPID || provider.BootID != ready.BootID {
-		return errors.New("recorded provider process group belongs to another host launch")
+		return errors.New("recorded provider process tree belongs to another host launch")
 	}
-	if groupExited == nil || !exited(provider.ProviderPGID) || !groupExited(provider.ProviderPGID) {
+	return treeAbsent(provider)
+}
+
+// provenProviderTreeAbsence proves that no process of a dead host's provider
+// tree is left. The provider (its group leader) must have exited and its
+// process group must be empty. Then no live process of this user may:
+//   - remain in the host's session, which holds every descendant that only
+//     changed process group;
+//   - carry the tree marker, which follows descendants that started a session
+//     of their own (macOS hides the environment of system binaries such as
+//     /bin/bash, so this alone misses Claude Code's detached shell there);
+//   - work inside the session's worktree, which catches any command still able
+//     to change it, wherever it moved.
+//
+// The scan runs twice so a member that forks while the first scan passes it
+// is still seen. A reused PID or PGID, or an unrelated process in the
+// worktree, can only keep the fence in place, never lift it.
+func provenProviderTreeAbsence(provider launchProvider) error {
+	if !processalive.Exited(provider.ProviderPGID) || !processGroupExited(provider.ProviderPGID) {
 		return fmt.Errorf("provider process group %d is not proven absent", provider.ProviderPGID)
+	}
+	for range 2 {
+		pid, err := providerTreeMember(provider.HostPID, provider.TreeMarker, provider.Workdir)
+		if err != nil {
+			return fmt.Errorf("look for surviving provider processes: %w", err)
+		}
+		if pid != 0 {
+			return fmt.Errorf("provider process %d is still running", pid)
+		}
 	}
 	return nil
 }
