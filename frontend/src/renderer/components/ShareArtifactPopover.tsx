@@ -761,23 +761,23 @@ function SharePanel({
 	const startAction = () => {
 		actions.current += 1;
 	};
-	const loadGrants = (share: CloudShareLink) => {
-		setPhase((current) => current.kind === "published" && current.share.id === share.id ? { ...current, grantsError: undefined } : current);
+	const loadGrants = (shareId: string) => {
+		setPhase((current) => current.kind === "published" && current.share.id === shareId ? { ...current, grantsError: undefined } : current);
 		// Queued behind pending invites and removals: a read sent beside one
 		// (Try again after a failed read) could answer with the list from before
 		// it, and its newer number would discard the change's answer.
-		void queueGrantChange(share.id, async () => {
+		void queueGrantChange(shareId, async () => {
 			const seq = ++grantsSeq.current;
 			let read: { grants?: CloudShareGrants; grantsError?: true };
 			try {
-				read = { grants: await aoBridge.cloudShare.grants(baseUrl, share.id), grantsError: undefined };
+				read = { grants: await aoBridge.cloudShare.grants(baseUrl, shareId), grantsError: undefined };
 			} catch {
 				read = { grantsError: true };
 			}
 			// Whether the answer is still the newest is decided when it lands: a
 			// state updater runs later, after a change queued behind it took a number.
 			const newest = seq === grantsSeq.current;
-			setPhase((current) => current.kind === "published" && current.share.id === share.id && newest ? { ...current, ...read } : current);
+			setPhase((current) => current.kind === "published" && current.share.id === shareId && newest ? { ...current, ...read } : current);
 			return true;
 		});
 	};
@@ -785,7 +785,7 @@ function SharePanel({
 		setPhase({ kind: "published", share, ...extra });
 		// Who it is shared with; listed when it answers.
 		// A team workspace's link can be shared with its teams even when public.
-		if (isPrivateShare(share) || share.grantCount || teamWorkspace) loadGrants(share);
+		if (isPrivateShare(share) || share.grantCount || teamWorkspace) loadGrants(share.id);
 	};
 
 	// Shows how a publish ended. Its own refusal is shown as it came, not
@@ -1059,7 +1059,13 @@ function SharePanel({
 				: current);
 			return true;
 		} catch (error) {
-			setPhase((current) => current.kind === "published" ? { ...current, error: t(failed, { message: errorMessage(error) }) } : current);
+			// A failed answer is ambiguous: the server may have saved the grant
+			// before the answer was lost. The list is unknown until read again,
+			// so access shows as unknown (no choice offered) meanwhile.
+			setPhase((current) => current.kind === "published"
+				? { ...current, error: t(failed, { message: errorMessage(error) }), ...(current.share.id === shareId ? { grants: undefined } : {}) }
+				: current);
+			loadGrants(shareId);
 			return false;
 		}
 	};
@@ -1346,7 +1352,7 @@ function SharePanel({
 								{phase.grantsError ? (
 									<div className="-mt-1 flex items-center justify-between gap-2" role="alert" data-share-grants-error="">
 										<p className="text-caption leading-4 text-error">{t("artifacts.share.people.loadFailed")}</p>
-										<Button onClick={() => loadGrants(share)} size="xs" type="button" variant="secondary">{t("artifacts.share.retry")}</Button>
+										<Button onClick={() => loadGrants(share.id)} size="xs" type="button" variant="secondary">{t("artifacts.share.retry")}</Button>
 									</div>
 								) : null}
 								<ArtifactPeopleList
