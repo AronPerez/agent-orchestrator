@@ -477,6 +477,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 						throw new Error(`No fake remote for ${url}`);
 					},
 					disconnect: async () => undefined,
+					setDecisionSync: async () => ({ ok: false as const, code: "UNAVAILABLE" }),
 					computerName: async () => "E2E computer",
 					previewUrl: async (_hostId: string, _sessionId: string, sourceUrl: string) => sourceUrl,
 					resolvePreviewUrl: async (_hostId: string, _sessionId: string, viewedUrl: string) => viewedUrl,
@@ -1487,6 +1488,7 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 						throw new Error(`No fake remote for ${url}`);
 					},
 					disconnect: async () => undefined,
+					setDecisionSync: async () => ({ ok: false as const, code: "UNAVAILABLE" }),
 					computerName: async () => "E2E computer",
 					previewUrl: async (_hostId: string, _sessionId: string, sourceUrl: string) => sourceUrl,
 					resolvePreviewUrl: async (_hostId: string, _sessionId: string, viewedUrl: string) => viewedUrl,
