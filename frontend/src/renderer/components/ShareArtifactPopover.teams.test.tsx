@@ -115,6 +115,40 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(setAccess).not.toHaveBeenCalled();
 	});
 
+	it("keeps the workspace grant when a removal overlaps the workspace invitation", async () => {
+		mocks.candidates = [];
+		const maya = { id: "4a0b0b4e-be7f-4a7d-be95-9b4d7a5b6c85", email: "maya@acme.co", createdAt: "" };
+		// What the server holds; each call answers from it.
+		let server: CloudShareGrants = { ...none, people: [maya] };
+		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
+		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [{ ...share, grantCount: 1 }] });
+		vi.spyOn(aoBridge.cloudShare, "grants").mockImplementation(async () => server);
+		let release!: () => void;
+		vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => {
+			release = () => {
+				server = { ...server, workspaces: [everyone] };
+				resolve(server);
+			};
+		}));
+		const remove = vi.spyOn(aoBridge.cloudShare, "removeGrant").mockImplementation(async (_baseUrl, _shareId, grantId) => {
+			server = { ...server, people: server.people.filter((grant) => grant.id !== grantId) };
+		});
+		renderButton(cloudFile);
+		await userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
+		const people = await screen.findByRole("region", { name: "People with access" });
+		await within(people).findByText("maya@acme.co");
+		await userEvent.click(screen.getByRole("button", { name: /Only people invited/ }));
+		await userEvent.click(screen.getByRole("menuitemradio", { name: /Everyone at Acme/ }));
+		// Remove Maya while the workspace invitation is still open.
+		await userEvent.click(within(people).getByRole("button", { name: "Remove access for maya@acme.co" }));
+		release();
+		await waitFor(() => expect(remove).toHaveBeenCalledExactlyOnceWith("https://cp.test", SHARE_ID, maya.id));
+		await waitFor(() => expect(within(people).queryByText("maya@acme.co")).toBeNull());
+		// The server shares it with the whole workspace, and so does the panel.
+		expect(await screen.findByText("Everyone at Acme can open it after signing in, and finds it under Shared with you.")).toBeTruthy();
+		expect(screen.queryByText("Only you")).toBeNull();
+	});
+
 	it("shares a new link with the teams and workspace set up before Publish, once it is live", async () => {
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue(inspection);
 		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue(links);

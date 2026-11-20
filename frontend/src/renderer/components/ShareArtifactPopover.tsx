@@ -733,8 +733,15 @@ function SharePanel({
 	// number. A full list (a read, or an invite's answer) is shown only if
 	// nothing started after it, so an older answer never replaces a newer one.
 	const grantsSeq = useRef(0);
-	// The invite last sent; it never rejects (sendSubjects answers false).
-	const invitesInFlight = useRef<Promise<unknown>>(Promise.resolve());
+	// The grant change last queued (an invite or a removal); it never rejects
+	// (sendSubjects and sendRemoval answer false). Each change runs after the
+	// one before it settled, so its answer is read against the list it changed.
+	const grantChangesInFlight = useRef<Promise<unknown>>(Promise.resolve());
+	const queueGrantChange = (run: () => Promise<boolean>): Promise<boolean> => {
+		const sent = grantChangesInFlight.current.then(run);
+		grantChangesInFlight.current = sent;
+		return sent;
+	};
 	// Every action taken in the panel (publish, unpublish, access, people)
 	// takes the next number. The refresh behind an opening from a cached list
 	// only applies while none started since: it never overwrites what an
@@ -746,11 +753,19 @@ function SharePanel({
 	const loadGrants = (share: CloudShareLink) => {
 		const seq = ++grantsSeq.current;
 		setPhase((current) => current.kind === "published" && current.share.id === share.id ? { ...current, grantsError: undefined } : current);
+		// Whether the answer is still the newest is decided when it lands: a
+		// state updater runs later, after a change queued behind it took a number.
 		void aoBridge.cloudShare.grants(baseUrl, share.id)
-			.then((grants) => setPhase((current) => current.kind === "published" && current.share.id === share.id && seq === grantsSeq.current
-				? { ...current, grants, grantsError: undefined } : current))
-			.catch(() => setPhase((current) => current.kind === "published" && current.share.id === share.id && seq === grantsSeq.current
-				? { ...current, grantsError: true } : current));
+			.then((grants) => {
+				const newest = seq === grantsSeq.current;
+				setPhase((current) => current.kind === "published" && current.share.id === share.id && newest
+					? { ...current, grants, grantsError: undefined } : current);
+			})
+			.catch(() => {
+				const newest = seq === grantsSeq.current;
+				setPhase((current) => current.kind === "published" && current.share.id === share.id && newest
+					? { ...current, grantsError: true } : current);
+			});
 	};
 	const showPublished = (share: CloudShareLink, extra: Partial<Extract<Phase, { kind: "published" }>> = {}) => {
 		setPhase({ kind: "published", share, ...extra });
@@ -1014,17 +1029,15 @@ function SharePanel({
 	// workspace, and the answer lists everyone it is shared with now. Picks
 	// made in quick succession are sent one after another, so each answer is
 	// read after the one before it saved, and the last lists them all.
-	const addSubjects = (shareId: string, input: CloudShareInvite, failed: GrantFailure): Promise<boolean> => {
-		const sent = invitesInFlight.current.then(() => sendSubjects(shareId, input, failed));
-		invitesInFlight.current = sent;
-		return sent;
-	};
+	const addSubjects = (shareId: string, input: CloudShareInvite, failed: GrantFailure): Promise<boolean> =>
+		queueGrantChange(() => sendSubjects(shareId, input, failed));
 	const sendSubjects = async (shareId: string, input: CloudShareInvite, failed: GrantFailure): Promise<boolean> => {
 		startAction();
 		const seq = ++grantsSeq.current;
 		try {
 			const grants = await aoBridge.cloudShare.invite(baseUrl, shareId, input);
-			setPhase((current) => current.kind === "published" && current.share.id === shareId && seq === grantsSeq.current
+			const newest = seq === grantsSeq.current;
+			setPhase((current) => current.kind === "published" && current.share.id === shareId && newest
 				? { ...current, grants, share: { ...current.share, grantCount: grants.people.length }, grantsError: undefined, error: undefined }
 				: current);
 			return true;
@@ -1039,10 +1052,16 @@ function SharePanel({
 			...(teams.length > 0 && teamWorkspace ? { orgId: teamWorkspace.id, teamIds: teams.map((team) => team.teamId) } : {}),
 		}, "artifacts.share.people.inviteFailed");
 
-	// Stops the link being shared with one person, team or workspace.
-	const removeGrant = async (shown: Extract<Phase, { kind: "published" }>, grantId: string, removingKey: string, failed: GrantFailure = "artifacts.share.people.removeFailed"): Promise<boolean> => {
-		startAction();
+	// Stops the link being shared with one person, team or workspace. Queued
+	// behind invites: a removal that overlapped an invite would discard the
+	// invite's answer (it takes a newer number) and then filter the list from
+	// before it, so the panel would lose a grant the server kept.
+	const removeGrant = (shown: Extract<Phase, { kind: "published" }>, grantId: string, removingKey: string, failed: GrantFailure = "artifacts.share.people.removeFailed"): Promise<boolean> => {
 		setRemoving(removingKey);
+		return queueGrantChange(() => sendRemoval(shown, grantId, failed));
+	};
+	const sendRemoval = async (shown: Extract<Phase, { kind: "published" }>, grantId: string, failed: GrantFailure): Promise<boolean> => {
+		startAction();
 		// A list read or invited before this is out of date once it lands.
 		++grantsSeq.current;
 		try {
