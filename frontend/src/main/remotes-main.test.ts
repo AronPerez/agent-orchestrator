@@ -1324,15 +1324,22 @@ describe("remotes:setDecisionSync", () => {
 		expect(await ipc.invoke("remotes:list")).toEqual([]);
 	});
 
-	it("remove goes ahead when there is no outbound link to stop", async () => {
-		for (const status of [404, 409]) {
-			const { ipc } = await setup(
-				`{"remotes":[{"hostId":"h_mini","label":"mac-mini","url":"http://192.0.2.7:3011","password":"saved-secret-4"}]}`,
-				() => ({ status, body: "{}" }),
-			);
-			await ipc.invoke("remotes:remove", "http://192.0.2.7:3011");
-			expect(await ipc.invoke("remotes:list")).toEqual([]);
-		}
+	it("remove goes ahead when decision sync was never on", async () => {
+		const { ipc } = await setup(
+			`{"remotes":[{"hostId":"h_mini","label":"mac-mini","url":"http://192.0.2.7:3011","password":"saved-secret-4"}]}`,
+			() => ({ status: 404, body: "{}" }),
+		);
+		await ipc.invoke("remotes:remove", "http://192.0.2.7:3011");
+		expect(await ipc.invoke("remotes:list")).toEqual([]);
+	});
+
+	it("remove keeps a host that still syncs decisions with this computer by its own link", async () => {
+		const { ipc } = await setup(
+			`{"remotes":[{"hostId":"h_mini","label":"mac-mini","url":"http://192.0.2.7:3011","password":"saved-secret-6"}]}`,
+			() => ({ status: 409, body: JSON.stringify({ code: "DECISION_PEER_INBOUND" }) }),
+		);
+		await expect(ipc.invoke("remotes:remove", "http://192.0.2.7:3011")).rejects.toThrow(/links to this computer/);
+		expect((await ipc.invoke("remotes:list") as { hostId: string }[]).map((host) => host.hostId)).toEqual(["h_mini"]);
 	});
 
 	it("remove keeps the host when decision sync cannot be stopped", async () => {

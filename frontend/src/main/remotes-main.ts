@@ -625,9 +625,14 @@ export function registerRemotesIpc(
 		if (!localDaemonRequest || !hostId) return;
 		const status = await localDaemonRequest("DELETE", `/api/v1/decision-peers/${encodeURIComponent(hostId)}`)
 			.then((response) => response.status, () => 0);
-		// 404: never linked, or a daemon without decision sync; 409: only the
-		// other machine links to this one, so there is nothing here to stop.
-		if (status === 204 || status === 404 || status === 409) return;
+		// 404: never linked, or a daemon without decision sync.
+		if (status === 204 || status === 404) return;
+		// 409: that machine links to this one and keeps syncing on its own
+		// credential. Forgetting the host here would hide that link.
+		if (status === 409) {
+			throw new ExpectedIpcError("That machine links to this computer to sync decisions, so it was not removed. "
+				+ "Turn off its link on that machine, or revoke its \u201cDecision sync from\u201d device in Settings, then remove it.");
+		}
 		throw new ExpectedIpcError("Could not stop decision sync with this host, so it was not removed. Try again.");
 	}
 	// Linking a saved host for decision sync hands its saved (possibly
