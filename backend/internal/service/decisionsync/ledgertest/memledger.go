@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -19,6 +20,10 @@ import (
 // speak for the real store as long as the conformance suite passes on both.
 type MemLedger struct {
 	HostID string
+	// NoRepairs makes this ledger behave like a build without identity
+	// repair: repair entries are stored like any unknown kind, and nothing
+	// is skipped or moved out because of them.
+	NoRepairs bool
 
 	mu        sync.Mutex
 	byID      map[string]domain.DecisionEntry
@@ -43,6 +48,23 @@ func NewMemLedger(hostID string) *MemLedger {
 		byOrigin: map[string]map[int64]domain.DecisionEntry{},
 		archived: map[string]ArchivedEntry{},
 	}
+}
+
+// Clone returns an independent copy of the ledger, as a copied data
+// directory would be.
+func (l *MemLedger) Clone() *MemLedger {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := NewMemLedger(l.HostID)
+	out.NoRepairs = l.NoRepairs
+	for _, e := range l.byID {
+		out.insertLocked(e)
+	}
+	out.conflicts = slices.Clone(l.conflicts)
+	for id, a := range l.archived {
+		out.archived[id] = a
+	}
+	return out
 }
 
 // Archived returns the entries identity repairs moved out of the log.
@@ -207,6 +229,71 @@ func (l *MemLedger) DecisionOriginIDs(_ context.Context, origin string, from int
 	return out, nil
 }
 
+// ListDecisionSyncConflicts implements decisionsync.RepairStore.
+func (l *MemLedger) ListDecisionSyncConflicts(context.Context) ([]domain.DecisionSyncConflict, error) {
+	return l.Conflicts(), nil
+}
+
+// DecisionEntriesFrom implements decisionsync.RepairStore.
+func (l *MemLedger) DecisionEntriesFrom(_ context.Context, origin string, from int64) ([]domain.DecisionEntry, error) {
+	var out []domain.DecisionEntry
+	for _, e := range l.Entries() {
+		if e.Origin == origin && e.OriginSeq >= from {
+			out = append(out, e)
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.DecisionEntry) int { return cmp.Compare(a.OriginSeq, b.OriginSeq) })
+	return out, nil
+}
+
+// ReissueDecisionFork implements decisionsync.RepairStore as the store does.
+func (l *MemLedger) ReissueDecisionFork(_ context.Context, plan domain.DecisionRepairPlan, newID func() string, now time.Time) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.byID {
+		if e.CallID == domain.DecisionRepairCallID(plan.RepairID) {
+			return false, nil
+		}
+	}
+	fork := make([]domain.DecisionEntry, 0, len(plan.ForkIDs))
+	for _, id := range plan.ForkIDs {
+		e, ok := l.byID[id]
+		if !ok {
+			return false, fmt.Errorf("fork entry %s is not held", id)
+		}
+		fork = append(fork, e)
+	}
+	slices.SortFunc(fork, func(a, b domain.DecisionEntry) int { return cmp.Compare(a.OriginSeq, b.OriginSeq) })
+	newest := domain.DecisionStamp{}
+	if all := l.sortedLocked(); len(all) > 0 {
+		newest = all[len(all)-1].Stamp
+	}
+	entries, err := domain.BuildDecisionRepairEntries(domain.DecisionRepairInput{
+		RepairID: plan.RepairID, Origin: plan.Origin, FromSeq: plan.FromSeq, NewOrigin: plan.NewOrigin,
+		StartSeq: l.highestLocked(plan.NewOrigin) + 1, Fork: fork, Stamp: newest.Next(now.UnixMilli()), Now: now, NewID: newID,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		l.insertLocked(e)
+	}
+	return true, nil
+}
+
+// ArchiveDecisionFork implements decisionsync.RepairStore as the store does.
+func (l *MemLedger) ArchiveDecisionFork(_ context.Context, repairID string, now time.Time) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	view := &memView{l: l}
+	_, complete, err := domain.FinishDecisionRepair(view, repairID, now)
+	if err != nil {
+		return false, err
+	}
+	view.commit()
+	return complete, nil
+}
+
 // CheckDecisionHeads implements decisionsync.Ledger.
 func (l *MemLedger) CheckDecisionHeads(_ context.Context, peerHostID string, heads domain.DecisionHeads, now time.Time) ([]domain.DecisionSyncConflict, error) {
 	l.mu.Lock()
@@ -286,6 +373,9 @@ func (v *memView) all() []domain.DecisionEntry {
 }
 
 func (v *memView) RepairEntries() ([]domain.DecisionEntry, error) {
+	if v.l.NoRepairs {
+		return nil, nil
+	}
 	var out []domain.DecisionEntry
 	for _, e := range v.all() {
 		if e.Kind == domain.DecisionKindIdentityRepaired {
