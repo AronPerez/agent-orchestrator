@@ -20,6 +20,7 @@ import {
 import {
 	decisionAnswerGuard,
 	DecisionAnswerHeldError,
+	decisionViewMeta,
 	detailView,
 	guardedDecisionRead,
 	needsYouView,
@@ -116,6 +117,7 @@ export function useDecisionInbox(enabled: boolean) {
 	const localQuery = useQuery({
 		queryKey: decisionInboxQueryKey(LOCAL_HOST),
 		queryFn: ({ signal }) => guardedDecisionRead(guard, needsYouView(LOCAL_HOST), () => fetchDecisionInboxCalls(LOCAL_HOST, signal)),
+		meta: decisionViewMeta(needsYouView(LOCAL_HOST)),
 		enabled,
 		retry: 1,
 		refetchInterval: enabled ? 2_000 : false,
@@ -124,6 +126,7 @@ export function useDecisionInbox(enabled: boolean) {
 		queries: connectedHosts.map((hostId) => ({
 			queryKey: decisionInboxQueryKey(hostId),
 			queryFn: ({ signal }: { signal: AbortSignal }) => guardedDecisionRead(guard, needsYouView(hostId), () => fetchDecisionInboxCalls(hostId, signal)),
+			meta: decisionViewMeta(needsYouView(hostId)),
 			enabled,
 			retry: 1,
 			refetchInterval: enabled ? 2_000 : false,
@@ -230,6 +233,7 @@ export function useDecisionDetail(callId: string | undefined) {
 	return useQuery({
 		queryKey: decisionKeys.detail(callId ?? ""),
 		queryFn: ({ signal }) => guardedDecisionRead(guard, detailView(callId ?? ""), () => fetchDecisionDetail(callId!, signal)),
+		meta: decisionViewMeta(detailView(callId ?? "")),
 		enabled: Boolean(callId),
 		retry: 1,
 	});

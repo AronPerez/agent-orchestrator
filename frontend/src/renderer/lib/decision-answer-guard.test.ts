@@ -1,6 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
-import { decisionAnswerGuard, guardedDecisionRead } from "./decision-answer-guard";
+import { decisionAnswerGuard, decisionViewMeta, guardedDecisionRead } from "./decision-answer-guard";
 
 const bell = "needs-you:local";
 const panel = "detail:dec_1";
@@ -73,27 +73,72 @@ describe("decision answer guard", () => {
 		expect(changes).toBe(3);
 	});
 
-	// A live refresh can read the call while the answer is still being sent;
-	// it finishing after the answer fails proves nothing about the answer.
-	it("keeps a lost answer held when a read that was already in flight finishes after the failure", async () => {
-		const guard = decisionAnswerGuard(new QueryClient());
-		let finish!: (calls: string[]) => void;
-		guard.begin("local", "dec_1");
-		const read = guardedDecisionRead(guard, bell, () => new Promise<string[]>((resolve) => { finish = resolve; }));
-		guard.settle("local", "dec_1", false);
-		finish(["dec_1"]);
-		await expect(read).resolves.toEqual(["dec_1"]);
-		expect(guard.state("local", "dec_1", bell)).toBe("unconfirmed");
-
-		await guardedDecisionRead(guard, bell, async () => []);
-		expect(guard.state("local", "dec_1", bell)).toBeUndefined();
+	// Views advance only when React Query installs a fetched result for them.
+	function deferred<T>() {
+		let resolve!: (value: T) => void;
+		let reject!: (error: Error) => void;
+		const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+		return { promise, resolve, reject };
+	}
+	const viewQuery = (guard: ReturnType<typeof decisionAnswerGuard>, view: string, read: () => Promise<string[]>) => ({
+		queryKey: ["decisions", "test", view],
+		queryFn: () => guardedDecisionRead(guard, view, read),
+		meta: decisionViewMeta(view),
+		retry: false,
 	});
 
-	it("advances nothing when a read fails", async () => {
-		const guard = decisionAnswerGuard(new QueryClient());
+	it("releases a view once React Query applies a read that started after the failure", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
 		guard.begin("local", "dec_1");
 		guard.settle("local", "dec_1", false);
-		await expect(guardedDecisionRead(guard, panel, () => Promise.reject(new Error("offline")))).rejects.toThrow("offline");
+		await client.fetchQuery(viewQuery(guard, bell, async () => ["dec_1"]));
+		expect(guard.state("local", "dec_1", bell)).toBeUndefined();
 		expect(guard.state("local", "dec_1", panel)).toBe("unconfirmed");
+	});
+
+	// A live refresh can read the call while the answer is still being sent;
+	// it being applied after the answer fails proves nothing about the answer.
+	it("keeps a lost answer held when a read that was already in flight is applied after the failure", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		const read = deferred<string[]>();
+		guard.begin("local", "dec_1");
+		const fetching = client.fetchQuery(viewQuery(guard, bell, () => read.promise));
+		await Promise.resolve();
+		guard.settle("local", "dec_1", false);
+		read.resolve(["dec_1"]);
+		await fetching;
+		expect(guard.state("local", "dec_1", bell)).toBe("unconfirmed");
+	});
+
+	// A refresh cancelled by an unmount or another invalidation may still get
+	// its response; React Query discards it, so the view has learned nothing.
+	it("keeps a hold when a cancelled refresh completes late and the next refresh fails", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		guard.begin("local", "dec_1");
+		guard.settle("local", "dec_1", false);
+		const late = deferred<string[]>();
+		const cancelled = client.fetchQuery(viewQuery(guard, panel, () => late.promise)).catch(() => undefined);
+		await Promise.resolve();
+		await client.cancelQueries({ queryKey: ["decisions", "test", panel] });
+		late.resolve(["dec_1"]);
+		await cancelled;
+		await client.fetchQuery(viewQuery(guard, panel, () => Promise.reject(new Error("offline")))).catch(() => undefined);
+		expect(guard.state("local", "dec_1", panel)).toBe("unconfirmed");
+
+		await client.fetchQuery(viewQuery(guard, panel, async () => ["dec_1"]));
+		expect(guard.state("local", "dec_1", panel)).toBeUndefined();
+	});
+
+	it("does not treat a cache write as a read of the daemon", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		await client.fetchQuery(viewQuery(guard, bell, async () => ["dec_1"]));
+		guard.begin("local", "dec_1");
+		guard.settle("local", "dec_1", false);
+		client.setQueryData(["decisions", "test", bell], ["dec_1", "dec_2"]);
+		expect(guard.state("local", "dec_1", bell)).toBe("unconfirmed");
 	});
 });

@@ -25,6 +25,8 @@ export class DecisionAnswerGuard {
 	private readonly entries = new Map<string, Entry>();
 	/** Per view: when its latest successful read started. */
 	private readonly viewReads = new Map<string, number>();
+	/** Per view: when its most recent fetch started (the one React Query would apply). */
+	private readonly fetchStarts = new Map<string, number>();
 	private readonly listeners = new Set<() => void>();
 	private version = 0;
 
@@ -62,6 +64,21 @@ export class DecisionAnswerGuard {
 		return ++this.sequence;
 	}
 
+	/** A fetch for `view` is being sent. */
+	fetchStarted(view: string): void {
+		this.fetchStarts.set(view, this.readStarted());
+	}
+
+	/**
+	 * React Query installed a fetched result for `view`. It applies only the
+	 * result of the latest fetch it started (a cancelled one is discarded), so
+	 * that fetch's start is what the view now reflects.
+	 */
+	fetchApplied(view: string): void {
+		const startedAt = this.fetchStarts.get(view);
+		if (startedAt !== undefined) this.viewRead(view, startedAt);
+	}
+
 	/** `view` successfully applied a read that started at `startedAt`. */
 	viewRead(view: string, startedAt: number): void {
 		if (startedAt <= (this.viewReads.get(view) ?? 0)) return;
@@ -83,17 +100,23 @@ export class DecisionAnswerGuard {
 	}
 }
 
+/** Query `meta` naming the answer-bearing view a decision query feeds. */
+export const decisionViewMeta = (view: string) => ({ decisionAnswerView: view });
+
 /** The bell's needs-you list for one machine. */
 export const needsYouView = (hostId: string) => `needs-you:${hostId}`;
 /** This computer's detail for one call (the Decisions panel). */
 export const detailView = (callId: string) => `detail:${callId}`;
 
-/** Runs a read for `view` and, if it succeeds, records when it started. */
-export async function guardedDecisionRead<T>(guard: DecisionAnswerGuard, view: string, read: () => Promise<T>): Promise<T> {
-	const startedAt = guard.readStarted();
-	const result = await read();
-	guard.viewRead(view, startedAt);
-	return result;
+/**
+ * The query function wrapper for an answer-bearing view: records when the
+ * fetch started. The view advances only when React Query applies the result
+ * (see decisionAnswerGuard), never from this continuation, so a cancelled or
+ * superseded fetch whose response arrives late releases nothing.
+ */
+export function guardedDecisionRead<T>(guard: DecisionAnswerGuard, view: string, read: () => Promise<T>): Promise<T> {
+	guard.fetchStarted(view);
+	return read();
 }
 
 /** A refused send: an earlier answer for the call is in flight or unconfirmed. */
@@ -110,8 +133,16 @@ const guards = new WeakMap<QueryClient, DecisionAnswerGuard>();
 export function decisionAnswerGuard(queryClient: QueryClient): DecisionAnswerGuard {
 	let guard = guards.get(queryClient);
 	if (!guard) {
-		guard = new DecisionAnswerGuard();
-		guards.set(queryClient, guard);
+		const created = new DecisionAnswerGuard();
+		// A fetched result counts once React Query installs it. Manual cache
+		// writes (setQueryData) are not reads of the daemon.
+		queryClient.getQueryCache().subscribe((event) => {
+			if (event.type !== "updated" || event.action.type !== "success" || event.action.manual) return;
+			const view = event.query.meta?.decisionAnswerView;
+			if (typeof view === "string") created.fetchApplied(view);
+		});
+		guards.set(queryClient, created);
+		guard = created;
 	}
 	return guard;
 }
