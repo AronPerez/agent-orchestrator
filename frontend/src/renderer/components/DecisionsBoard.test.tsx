@@ -1,9 +1,17 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useDecisionFolds } from "../hooks/useDecisionFolds";
 import { buildDecisionBoard } from "../lib/decision-board";
+import { DECISION_FOLD_STORAGE_KEY, decisionBandFoldKey, decisionRowFoldKey } from "../lib/decision-folds";
 import type { DecisionCall } from "../lib/decision-inbox";
-import { DecisionsBoard } from "./DecisionsBoard";
+import { DecisionsBoard as BareBoard, type DecisionsBoardProps } from "./DecisionsBoard";
+
+/** The board with the page's fold state, as DecisionsView mounts it. */
+function DecisionsBoard(props: Omit<DecisionsBoardProps, "folds">) {
+	const folds = useDecisionFolds(props.model, props.selectedId);
+	return <BareBoard {...props} folds={folds} />;
+}
 
 const NOW = Date.parse("2026-11-18T12:00:00Z");
 
@@ -42,6 +50,8 @@ function renderBoard(props: Partial<Parameters<typeof DecisionsBoard>[0]> = {}) 
 }
 
 describe("DecisionsBoard", () => {
+	beforeEach(() => window.localStorage.clear());
+
 	it("heads one continuous grid with the three states, their dots and exact counts", () => {
 		renderBoard();
 		const header = screen.getByRole("list", { name: "Decision states" });
@@ -76,12 +86,114 @@ describe("DecisionsBoard", () => {
 		expect(within(card("done")).getByText("Changed after it closed")).toBeInTheDocument();
 	});
 
-	it("gives only Needs you the needs-you colour", () => {
+	it("draws only the title on a card and keeps the rest for the tooltip and assistive tech", () => {
 		renderBoard();
-		expect(screen.getByText("Waiting 3h")).toHaveClass("text-status-needs-you");
-		for (const status of ["Sent to worker 5498", "Not delivered yet", "Migrated in PR #412"]) {
-			expect(screen.getByText(status)).not.toHaveClass("text-status-needs-you");
-		}
+		const card = screen.getByRole("button", { name: /^Question need/ });
+		expect(card).toHaveAttribute("title", "Question need\nmac-mini · worker 5512\nWaiting 3h");
+		expect(within(card).getByText("Question need")).not.toHaveClass("sr-only");
+		expect(within(card).getByText("mac-mini · worker 5512")).toHaveClass("sr-only");
+		expect(within(card).getByText("Waiting 3h")).toHaveClass("sr-only");
+	});
+
+	it("still says on the card when an answer has not reached a session", () => {
+		renderBoard();
+		const card = (id: string) => screen.getByRole("button", { name: new RegExp(`^Question ${id}`) });
+		expect(within(card("pending")).getByText("Not delivered yet")).not.toHaveClass("sr-only");
+		expect(within(card("orphan")).getByText("No session to carry this out")).not.toHaveClass("sr-only");
+		expect(within(card("sent")).getByText("Sent to worker 5498")).toHaveClass("sr-only");
+		expect(within(card("done")).getByText("Migrated in PR #412")).toHaveClass("sr-only");
+	});
+
+	it("folds a stream to its counts and opens it again", async () => {
+		renderBoard();
+		const row = screen.getByRole("group", { name: "Power BI and Nango" });
+		const toggle = within(row).getByRole("button", { name: /Power BI and Nango/ });
+		expect(toggle).toHaveAttribute("aria-expanded", "true");
+		await userEvent.click(toggle);
+		expect(toggle).toHaveAttribute("aria-expanded", "false");
+		expect(toggle).toHaveTextContent("Needs you: 1");
+		expect(screen.queryByRole("button", { name: /^Question need/ })).not.toBeInTheDocument();
+		expect(within(row).getAllByTestId("decision-fold-count").map((cell) => cell.textContent)).toEqual(["1", "", ""]);
+		await userEvent.click(toggle);
+		expect(screen.getByRole("button", { name: /^Question need/ })).toBeInTheDocument();
+	});
+
+	it("lets the project's own row fold too", async () => {
+		renderBoard();
+		const row = within(screen.getByRole("region", { name: "skyvern-cloud" })).getByRole("group", { name: "Project-wide" });
+		await userEvent.click(within(row).getByRole("button", { name: /Project-wide/ }));
+		expect(screen.queryByRole("button", { name: /^Question wide/ })).not.toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /^Question need/ })).toBeInTheDocument();
+	});
+
+	it("starts a project folded when nothing in it is open, and shows its counts in the state columns", () => {
+		const finished = call({ id: "fin", projectId: "shop", projectName: "Shop", state: "done", outcome: "Shipped", outcomeAt: "2026-11-18T11:00:00Z" });
+		render(<DecisionsBoard model={buildDecisionBoard([...calls, finished])} now={NOW} onSelect={vi.fn()} />);
+		const band = screen.getByRole("region", { name: "Shop" });
+		expect(within(band).getByRole("button", { name: /Shop/ })).toHaveAttribute("aria-expanded", "false");
+		expect(screen.queryByRole("button", { name: /^Question fin/ })).not.toBeInTheDocument();
+		expect(within(band).getAllByTestId("decision-band-count").map((cell) => cell.textContent)).toEqual(["", "", "1"]);
+		const open = screen.getByRole("region", { name: "skyvern-cloud" });
+		expect(within(open).getAllByTestId("decision-band-count").map((cell) => cell.textContent)).toEqual(["2", "1", ""]);
+	});
+
+	it("saves folds and restores them on the next visit", async () => {
+		const first = renderBoard();
+		await userEvent.click(screen.getByRole("button", { name: /agent-orchestrator/ }));
+		await userEvent.click(within(screen.getByRole("group", { name: "Power BI and Nango" })).getByRole("button", { name: /Power BI and Nango/ }));
+		expect(JSON.parse(window.localStorage.getItem(DECISION_FOLD_STORAGE_KEY) ?? "{}")).toEqual({
+			[decisionBandFoldKey("orch")]: true,
+			[decisionRowFoldKey("cloud", "h_a:nango")]: true,
+		});
+		first.unmount();
+		renderBoard();
+		expect(screen.getByRole("button", { name: /agent-orchestrator/ })).toHaveAttribute("aria-expanded", "false");
+		expect(screen.queryByRole("button", { name: /^Question need/ })).not.toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /^Question wide/ })).toBeInTheDocument();
+	});
+
+	it("opens a folded stream when one of its calls is selected", async () => {
+		const { rerender, onSelect } = renderBoard();
+		await userEvent.click(within(screen.getByRole("group", { name: "Power BI and Nango" })).getByRole("button", { name: /Power BI and Nango/ }));
+		expect(screen.queryByRole("button", { name: /^Question need/ })).not.toBeInTheDocument();
+		rerender(<DecisionsBoard model={buildDecisionBoard(calls)} now={NOW} onSelect={onSelect} selectedId="need" />);
+		expect(screen.getByRole("button", { name: /^Question need/ })).toHaveAttribute("aria-current", "true");
+	});
+
+	describe("done cap", () => {
+		const finished = [1, 2, 3, 4, 5].map((minute) => call({
+			id: `fin${minute}`, projectId: "cloud", projectName: "skyvern-cloud", state: "done", outcome: "Shipped", outcomeAt: `2026-11-18T11:0${minute}:00Z`,
+		}));
+		const many = [...calls, ...finished];
+		const doneCards = () => screen.getAllByRole("button").filter((button) => /^Question fin/.test(button.textContent ?? "")).map((button) => button.getAttribute("data-decision-card"));
+
+		it("shows a row's three newest Done cards, then the rest on request", async () => {
+			render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} />);
+			expect(doneCards()).toEqual(["fin5", "fin4", "fin3"]);
+			const more = screen.getByRole("button", { name: "2 more" });
+			expect(more).toHaveAttribute("aria-expanded", "false");
+			await userEvent.click(more);
+			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin2", "fin1"]);
+			await userEvent.click(screen.getByRole("button", { name: "Show fewer" }));
+			expect(doneCards()).toEqual(["fin5", "fin4", "fin3"]);
+		});
+
+		it("offers no button when a row has three or fewer", () => {
+			renderBoard();
+			expect(screen.queryByRole("button", { name: /more$/ })).not.toBeInTheDocument();
+		});
+
+		it("shows a selected Done card even when it is past the cap", () => {
+			render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} selectedId="fin1" />);
+			expect(screen.getByRole("button", { name: /^Question fin1/ })).toHaveAttribute("aria-current", "true");
+		});
+
+		it("keeps arrow keys to the cards on screen", async () => {
+			render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} />);
+			screen.getByRole("button", { name: /^Question fin3/ }).focus();
+			await userEvent.keyboard("{ArrowDown}");
+			expect(screen.getByRole("button", { name: /^Question done/ })).toHaveFocus();
+		});
 	});
 
 	it("selects a card through the route and marks the selected one", async () => {

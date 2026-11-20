@@ -281,3 +281,35 @@ test("decisions: a call another machine owns says where it waits, and the footer
 	await emitDecision(page, "dec_far");
 	await expect(card).toContainText("Sent to worker far");
 });
+
+test("decisions: streams fold to their counts, folds survive a reload, and Done shows its newest three", async ({ page }) => {
+	const done = (n: number) => call(`dec_done${n}`, `Finished ${n}`, {
+		state: "done", stateLabel: "Done", chosenLabel: "Ship it", outcome: `Shipped ${n}`, answeredAt: iso((n + 1) * hour), outcomeAt: iso(n * hour),
+	});
+	const ledger = new Ledger([
+		call("dec_a", "Stream question", { streamSessionId: "epic", streamName: "Checkout epic" }),
+		call("dec_b", "Project question"),
+		...[1, 2, 3, 4, 5].map(done),
+	]);
+	await openDecisions(page, ledger);
+
+	const toggle = page.getByRole("group", { name: "Checkout epic" }).getByRole("button", { name: /Checkout epic/ });
+	await expect(toggle).toHaveAttribute("aria-expanded", "true");
+	await toggle.click();
+	await expect(toggle).toHaveAttribute("aria-expanded", "false");
+	await expect(page.getByRole("button", { name: /^Stream question/ })).toHaveCount(0);
+	await expect(page.getByRole("group", { name: "Checkout epic" }).getByTestId("decision-fold-count").first()).toHaveText("1");
+
+	await page.reload();
+	await expect(page.getByRole("button", { name: /^Project question/ })).toBeVisible();
+	await expect(page.getByRole("group", { name: "Checkout epic" }).getByRole("button", { name: /Checkout epic/ })).toHaveAttribute("aria-expanded", "false");
+
+	await expect(page.getByRole("button", { name: /^Finished/ })).toHaveCount(3);
+	await page.getByRole("button", { name: "2 more" }).click();
+	await expect(page.getByRole("button", { name: /^Finished/ })).toHaveCount(5);
+
+	await page.getByRole("button", { name: "Collapse all" }).click();
+	await expect(page.locator("[data-decision-card]")).toHaveCount(0);
+	await page.getByRole("button", { name: "Expand all" }).click();
+	await expect(page.getByRole("button", { name: /^Stream question/ })).toBeVisible();
+});

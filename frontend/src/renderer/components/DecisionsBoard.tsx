@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, 
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { ChevronRight, ShieldAlert, TriangleAlert } from "@/components/app-icons";
+import type { DecisionFolds } from "../hooks/useDecisionFolds";
 import {
 	DECISION_LANES,
 	initialDecisionFocusId,
@@ -15,9 +16,11 @@ import {
 	type DecisionStreamRow,
 } from "../lib/decision-board";
 import { decisionSecondaryText, decisionStatusText } from "../lib/decision-card-text";
+import { DECISION_DONE_SHOWN, decisionBandFoldKey, decisionRowFoldKey, visibleDecisionTopology } from "../lib/decision-folds";
 import type { DecisionSyncStatus } from "../lib/decision-sync";
 import { cn } from "../lib/utils";
 import { DecisionStateDot, decisionStateLabel } from "./DecisionStateLabel";
+import { Button } from "./ui/button";
 import { Pressable } from "./ui/pressable";
 
 
@@ -33,51 +36,62 @@ export type DecisionsBoardProps = {
 	now: number;
 	/** Sync freshness, for calls another machine must still deliver. */
 	sync?: DecisionSyncStatus;
+	/** Which projects and streams are folded; the page owns it so its toolbar can fold everything. */
+	folds: DecisionFolds;
 };
 
-// Narrow pane: three lane columns, each stream's name as a header row above
-// them. From @3xl the name moves into its own leading column.
+// Narrow pane: the state columns alone, each project's and stream's name as a
+// header row above them. From @3xl the names move into their own leading column.
 // Literal class strings for three or four lanes (the Decided for you lane
 // shows only while decisions stand), so Tailwind can see both.
-const GRID_CLASS = {
-	3: "grid min-w-[33rem] grid-cols-[repeat(3,minmax(11rem,1fr))] @3xl:min-w-[45rem] @3xl:grid-cols-[minmax(7rem,10rem)_repeat(3,minmax(11rem,1fr))]",
-	4: "grid min-w-[44rem] grid-cols-[repeat(4,minmax(11rem,1fr))] @3xl:min-w-[56rem] @3xl:grid-cols-[minmax(7rem,10rem)_repeat(4,minmax(11rem,1fr))]",
+export const DECISION_GRID_CLASS = {
+	3: "grid min-w-[27rem] grid-cols-[repeat(3,minmax(9rem,1fr))] @3xl:min-w-[35rem] @3xl:grid-cols-[minmax(8rem,13rem)_repeat(3,minmax(9rem,1fr))]",
+	4: "grid min-w-[36rem] grid-cols-[repeat(4,minmax(9rem,1fr))] @3xl:min-w-[44rem] @3xl:grid-cols-[minmax(8rem,13rem)_repeat(4,minmax(9rem,1fr))]",
 } as const;
 
 function laneLabel(lane: DecisionLane, t: TFunction) {
 	return decisionStateLabel(lane, t);
 }
 
+/** "Needs you: 2, Done: 1" for a toggle's accessible name; the visible counts are decoration beside it. */
+function countsText(counts: Record<DecisionLane, number>, t: TFunction): string {
+	return DECISION_LANES.filter((lane) => counts[lane] > 0)
+		.map((lane) => t("decisions.countFor", { state: decisionStateLabel(lane, t), count: counts[lane] }))
+		.join(", ");
+}
+
 /**
- * The Decisions swimlanes: one continuous grid whose columns are the three
- * states, whose bands are projects and whose rows are work streams. Cards are
- * the only individually bordered objects; everything else shares hairlines.
+ * The Decisions swimlanes: one continuous grid whose columns are the states,
+ * whose bands are projects and whose rows are work streams. Projects and
+ * streams both fold to their counts. Cards are the only individually bordered
+ * objects; everything else shares hairlines.
  */
-export function DecisionsBoard({ model, selectedId, onSelect, now, sync }: DecisionsBoardProps) {
+export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds }: DecisionsBoardProps) {
 	const { t } = useTranslation();
 	const hintId = useId();
-	const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
-	const selectedBand = selectedId ? model.cardById.get(selectedId)?.bandKey : undefined;
-	// Opening a call always shows it, even inside a band the person folded away.
-	useEffect(() => {
-		if (!selectedBand) return;
-		setCollapsed((current) => {
-			if (!current.has(selectedBand)) return current;
-			const next = new Set(current);
-			next.delete(selectedBand);
-			return next;
-		});
-	}, [selectedBand]);
-	const toggleBand = (key: string) => setCollapsed((current) => {
+
+	// A row's Done cell shows its newest cards; the rest open on request, or when one of them is selected.
+	const [expandedDone, setExpandedDone] = useState<ReadonlySet<string>>(() => new Set());
+	const toggleDone = (key: string) => setExpandedDone((current) => {
 		const next = new Set(current);
 		if (next.has(key)) next.delete(key);
 		else next.add(key);
 		return next;
 	});
+	const selectedPastCap = useMemo(() => {
+		const at = selectedId ? model.cardById.get(selectedId) : undefined;
+		if (!at || at.card.lane !== "done") return undefined;
+		const row = model.topology.find((item) => item.bandKey === at.bandKey && item.rowKey === at.rowKey);
+		return row && row.lanes.done.indexOf(at.card.id) >= DECISION_DONE_SHOWN ? decisionRowFoldKey(at.bandKey, at.rowKey) : undefined;
+	}, [model, selectedId]);
+	useEffect(() => {
+		if (!selectedPastCap) return;
+		setExpandedDone((current) => (current.has(selectedPastCap) ? current : new Set(current).add(selectedPastCap)));
+	}, [selectedPastCap]);
 
 	// Roving focus: one card is the board's tab stop; arrows move it.
 	const gridRef = useRef<HTMLDivElement>(null);
-	const visible = useMemo(() => model.topology.filter((row) => !collapsed.has(row.bandKey)), [model.topology, collapsed]);
+	const visible = useMemo(() => visibleDecisionTopology(model, folds.folded, expandedDone), [model, folds.folded, expandedDone]);
 	const visibleIds = useMemo(() => new Set(visible.flatMap((row) => DECISION_LANES.flatMap((lane) => row.lanes[lane]))), [visible]);
 	const [focusId, setFocusId] = useState<string | undefined>(undefined);
 	const tabStop = focusId && visibleIds.has(focusId) ? focusId : initialDecisionFocusId(visible, selectedId);
@@ -90,8 +104,8 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync }: Decis
 		if (selectedId) setFocusId(selectedId);
 	}, [selectedId]);
 	// When the focused card leaves the board (its state changed, it was
-	// removed, or its band folded), keep focus on the board instead of losing
-	// it to the page.
+	// removed, or its project or stream folded), keep focus on the board
+	// instead of losing it to the page.
 	// A card that changes lane is remounted in its new cell, which drops the
 	// focus it had; cardHadFocus remembers that a card held it.
 	const previousVisible = useRef(visible);
@@ -104,7 +118,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync }: Decis
 		const target = stillVisible ? focusId : replacementDecisionFocusId(before, focusId, visible);
 		if (!stillVisible) setFocusId(target);
 		// Only when the focused card itself was lost: focus elsewhere (the
-		// search field, the panel) is never taken.
+		// search field, the panel, a fold toggle) is never taken.
 		const active = document.activeElement;
 		if (!target || (active && active !== document.body)) return;
 		if (stillVisible && !cardHadFocus.current) return;
@@ -124,7 +138,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync }: Decis
 			<p id={hintId} className="sr-only">{t("decisions.keyboardHint")}</p>
 			<div
 				ref={gridRef}
-				className={GRID_CLASS[model.lanes.length === 4 ? 4 : 3]}
+				className={DECISION_GRID_CLASS[model.lanes.length === 4 ? 4 : 3]}
 				aria-label={t("decisions.boardLabel")}
 				aria-describedby={hintId}
 				role="group"
@@ -160,9 +174,10 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync }: Decis
 					<DecisionBand
 						key={band.key}
 						band={band}
-						collapsed={collapsed.has(band.key)}
-						onToggle={() => toggleBand(band.key)}
+						folds={folds}
 						lanes={model.lanes}
+						expandedDone={expandedDone}
+						onToggleDone={toggleDone}
 						selectedId={selectedId}
 						tabStop={tabStop}
 						onSelect={onSelect}
@@ -175,132 +190,160 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync }: Decis
 	);
 }
 
-function DecisionBand({
-	band,
-	lanes,
-	collapsed,
-	onToggle,
-	selectedId,
-	tabStop,
-	onSelect,
-	now,
-}: {
-	band: DecisionProjectBand;
+type RowShared = {
 	lanes: readonly DecisionLane[];
-	collapsed: boolean;
-	onToggle: () => void;
+	folds: DecisionFolds;
+	expandedDone: ReadonlySet<string>;
+	onToggleDone: (key: string) => void;
 	selectedId?: string;
 	tabStop?: string;
 	onSelect: (callId: string) => void;
 	now: number;
-}) {
-	const { t } = useTranslation();
-	const name = band.name ?? t("decisions.noProject");
+};
+
+function FoldChevron({ open, className }: { open: boolean; className?: string }) {
 	return (
-		<section aria-label={name} className="contents">
-			<div className="col-span-full flex min-w-0 items-center border-b border-border bg-muted/40">
-				<Pressable
-					aria-expanded={!collapsed}
-					onClick={onToggle}
-					className="flex min-h-8 min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-caption focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-				>
-					<ChevronRight
-						aria-hidden="true"
-						className={cn("size-3 shrink-0 text-muted-foreground transition-transform duration-(--duration-fast) motion-reduce:transition-none", !collapsed && "rotate-90")}
-					/>
-					<span className="min-w-0 truncate font-medium text-foreground">{name}</span>
-					<span className="ml-auto flex shrink-0 items-center gap-2.5 text-muted-foreground tabular-nums">
-						{DECISION_LANES.filter((lane) => band.counts[lane] > 0).map((lane) => (
-							<span key={lane} className={cn("inline-flex items-center gap-1", lane === "needs_you" && "font-medium text-status-needs-you")}>
-								<DecisionStateDot state={lane} />
-								<span aria-hidden="true">{band.counts[lane]}</span>
-								<span className="sr-only">{t("decisions.countFor", { state: decisionStateLabel(lane, t), count: band.counts[lane] })}</span>
-							</span>
-						))}
-					</span>
-				</Pressable>
-			</div>
-			{collapsed ? null : band.rows.map((row) => (
-				<DecisionRow key={row.key} row={row} lanes={lanes} selectedId={selectedId} tabStop={tabStop} onSelect={onSelect} now={now} />
-			))}
-		</section>
+		<ChevronRight
+			aria-hidden="true"
+			className={cn("size-3 shrink-0 text-muted-foreground transition-transform duration-(--duration-fast) motion-reduce:transition-none", open && "rotate-90", className)}
+		/>
 	);
 }
 
-function DecisionRow({ row, lanes, selectedId, tabStop, onSelect, now }: { row: DecisionStreamRow; lanes: readonly DecisionLane[]; selectedId?: string; tabStop?: string; onSelect: (callId: string) => void; now: number }) {
-	const { t } = useTranslation();
-	const name = row.projectWide
-		? t("decisions.projectWide")
-		: [row.name ?? "", row.machine].filter(Boolean).join(" · ");
+/** A folded project's or stream's count in one state column. Decoration: the toggle's name already says the counts. */
+function LaneCount({ lane, count, testId, className }: { lane: DecisionLane; count: number; testId: string; className: string }) {
 	return (
-		<div role="group" aria-label={name} className="contents">
-			<div
-				data-slot="decision-row-name"
-				className={cn(
-					"col-span-full min-w-0 border-b border-border px-3 pt-2 pb-1 text-caption leading-4 text-muted-foreground @3xl:col-span-1 @3xl:pb-2",
-					// The project's own row has no name; it only needs a header cell beside the lanes.
-					row.projectWide && "hidden @3xl:block",
-				)}
-			>
-				{row.projectWide ? <span className="sr-only">{name}</span> : <span className="line-clamp-3 break-words" title={name}>{name}</span>}
-			</div>
-			{lanes.map((lane) => (
-				<ul
-					key={lane}
-					aria-label={decisionStateLabel(lane, t)}
-					className="flex min-h-14 min-w-0 flex-col gap-1.5 border-b border-l border-border p-1.5"
-				>
-					{row.lanes[lane].map((card) => (
-						<li key={card.id} className="min-w-0">
-							<DecisionCard card={card} selected={card.id === selectedId} tabStop={card.id === tabStop} onSelect={onSelect} now={now} />
-						</li>
-					))}
-				</ul>
-			))}
+		<div
+			aria-hidden="true"
+			data-testid={testId}
+			className={cn("min-w-0 border-b border-l border-border px-2.5 text-caption tabular-nums text-muted-foreground", lane === "needs_you" && "font-medium text-status-needs-you", className)}
+		>
+			{count > 0 ? count : ""}
 		</div>
 	);
 }
 
+function DecisionBand({ band, ...shared }: { band: DecisionProjectBand } & RowShared) {
+	const { t } = useTranslation();
+	const name = band.name ?? t("decisions.noProject");
+	const foldKey = decisionBandFoldKey(band.key);
+	const open = !shared.folds.folded.has(foldKey);
+	return (
+		<section aria-label={name} className="contents">
+			{/* Narrow: one full-width row with the counts at its end. From @3xl the counts sit in the state columns. */}
+			<Pressable
+				aria-expanded={open}
+				onClick={() => shared.folds.toggle(foldKey)}
+				className="col-span-full flex min-h-8 min-w-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 text-caption focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset @3xl:col-span-1"
+			>
+				<FoldChevron open={open} />
+				<span className="min-w-0 truncate font-medium text-foreground">{name}</span>
+				<span className="sr-only">{countsText(band.counts, t)}</span>
+				<span aria-hidden="true" className="ml-auto flex shrink-0 items-center gap-2.5 text-muted-foreground tabular-nums @3xl:hidden">
+					{DECISION_LANES.filter((lane) => band.counts[lane] > 0).map((lane) => (
+						<span key={lane} className={cn("inline-flex items-center gap-1", lane === "needs_you" && "font-medium text-status-needs-you")}>
+							<DecisionStateDot state={lane} />
+							{band.counts[lane]}
+						</span>
+					))}
+				</span>
+			</Pressable>
+			{shared.lanes.map((lane) => (
+				<LaneCount key={lane} lane={lane} count={band.counts[lane]} testId="decision-band-count" className="hidden items-center bg-muted/40 @3xl:flex" />
+			))}
+			{open ? band.rows.map((row) => <DecisionRow key={row.key} bandKey={band.key} row={row} {...shared} />) : null}
+		</section>
+	);
+}
+
+function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, selectedId, tabStop, onSelect, now }: { bandKey: string; row: DecisionStreamRow } & RowShared) {
+	const { t } = useTranslation();
+	const name = row.projectWide
+		? t("decisions.projectWide")
+		: [row.name ?? "", row.machine].filter(Boolean).join(" · ");
+	const foldKey = decisionRowFoldKey(bandKey, row.key);
+	const open = !folds.folded.has(foldKey);
+	const allDone = expandedDone.has(foldKey);
+	return (
+		<div role="group" aria-label={name} className="contents">
+			<Pressable
+				aria-expanded={open}
+				data-slot="decision-row-name"
+				onClick={() => folds.toggle(foldKey)}
+				className="col-span-full flex min-w-0 items-start gap-1.5 border-b border-border px-3 pt-2 pb-1 text-caption leading-4 text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset @3xl:col-span-1 @3xl:pb-2"
+			>
+				<FoldChevron open={open} className="mt-0.5" />
+				<span className="line-clamp-3 min-w-0 break-words" title={name}>{name}</span>
+				<span className="sr-only">{countsText(row.counts, t)}</span>
+			</Pressable>
+			{lanes.map((lane) => {
+				if (!open) return <LaneCount key={lane} lane={lane} count={row.counts[lane]} testId="decision-fold-count" className="py-2 leading-4" />;
+				const cards = row.lanes[lane];
+				const capped = lane === "done" && cards.length > DECISION_DONE_SHOWN;
+				const shown = capped && !allDone ? cards.slice(0, DECISION_DONE_SHOWN) : cards;
+				return (
+					<ul
+						key={lane}
+						aria-label={decisionStateLabel(lane, t)}
+						className="flex min-h-10 min-w-0 flex-col gap-1 border-b border-l border-border p-1.5"
+					>
+						{shown.map((card) => (
+							<li key={card.id} className="min-w-0">
+								<DecisionCard card={card} selected={card.id === selectedId} tabStop={card.id === tabStop} onSelect={onSelect} now={now} />
+							</li>
+						))}
+						{capped ? (
+							<li>
+								<Button aria-expanded={allDone} size="xs" variant="quiet" onClick={() => onToggleDone(foldKey)}>
+									{allDone ? t("decisions.showFewer") : t("decisions.showMore", { count: cards.length - DECISION_DONE_SHOWN })}
+								</Button>
+							</li>
+						) : null}
+					</ul>
+				);
+			})}
+		</div>
+	);
+}
+
+/**
+ * A card draws the call's title alone. Who raised it and how it stands are in
+ * its tooltip and its accessible name; the column already gives the state.
+ * What a person must not miss stays on the card: the two flags keep their
+ * glyph, and an answer that has not reached a session says so under the title.
+ */
 function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: DecisionCardModel; selected: boolean; tabStop: boolean; onSelect: (callId: string) => void; now: number }) {
 	const { t, i18n } = useTranslation();
 	const sync = useContext(DecisionSyncContext);
 	const status = decisionStatusText(card.status, now, t, { sync, locale: i18n.language });
 	const secondary = decisionSecondaryText(card.secondary, t);
+	const undelivered = card.status.kind === "pending" || card.status.kind === "no_session";
+	const flags = [
+		...(card.outsidePolicy ? [{ Icon: ShieldAlert, label: t("decisions.outsidePolicyShort") }] : []),
+		...(card.changedAfterClose ? [{ Icon: TriangleAlert, label: t("decisions.changedAfterClose") }] : []),
+	];
 	return (
 		<Pressable
 			aria-current={selected ? "true" : undefined}
 			data-decision-card={card.id}
 			tabIndex={tabStop ? 0 : -1}
+			title={[card.title, secondary, status, ...flags.map((flag) => flag.label)].filter(Boolean).join("\n")}
 			onClick={() => onSelect(card.id)}
 			className={cn(
-				"block w-full min-w-0 rounded-md border border-border bg-card px-2 py-1.5 transition-colors duration-(--duration-fast) hover:bg-interactive-hover focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+				"flex w-full min-w-0 flex-wrap items-start gap-x-1 rounded-md border border-border bg-card px-2 py-1 transition-colors duration-(--duration-fast) hover:bg-interactive-hover focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
 				selected && "border-border-strong bg-interactive-active hover:bg-interactive-active",
 			)}
 		>
-			<span className="line-clamp-2 block text-xs font-medium leading-4 text-foreground" title={card.title}>{card.title}</span>
-			{secondary ? <span className="mt-0.5 block truncate text-caption text-muted-foreground" title={secondary}>{secondary}</span> : null}
-			<span className="mt-0.5 flex min-w-0 items-start gap-1 text-caption">
-				{status ? (
-					<span
-						className={cn("line-clamp-2 min-w-0", card.lane === "needs_you" ? "font-medium text-status-needs-you" : "text-muted-foreground")}
-						title={card.status.kind === "outcome" ? status : undefined}
-					>
-						{status}
-					</span>
-				) : null}
-				{card.outsidePolicy ? (
-					<span className="ml-auto inline-flex shrink-0 items-center text-status-in-review" title={t("decisions.outsidePolicyShort")}>
-						<ShieldAlert aria-hidden="true" className="size-3" />
-						<span className="sr-only">{t("decisions.outsidePolicyShort")}</span>
-					</span>
-				) : null}
-				{card.changedAfterClose ? (
-					<span className="ml-auto inline-flex shrink-0 items-center text-status-in-review" title={t("decisions.changedAfterClose")}>
-						<TriangleAlert aria-hidden="true" className="size-3" />
-						<span className="sr-only">{t("decisions.changedAfterClose")}</span>
-					</span>
-				) : null}
-			</span>
+			<span className="line-clamp-2 min-w-0 flex-1 text-xs leading-4 text-foreground">{card.title}</span>
+			{secondary ? <>{" "}<span className="sr-only">{secondary}</span></> : null}
+			{status && !undelivered ? <>{" "}<span className="sr-only">{status}</span></> : null}
+			{flags.map((flag) => (
+				<span key={flag.label} className="mt-0.5 inline-flex shrink-0 items-center text-status-in-review">
+					<flag.Icon aria-hidden="true" className="size-3" />
+					{" "}<span className="sr-only">{flag.label}</span>
+				</span>
+			))}
+			{status && undelivered ? <>{" "}<span className="line-clamp-2 w-full text-caption leading-4 text-muted-foreground">{status}</span></> : null}
 		</Pressable>
 	);
 }

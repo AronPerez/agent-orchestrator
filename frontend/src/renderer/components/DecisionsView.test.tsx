@@ -71,6 +71,7 @@ const boardFetches = () => getMock.mock.calls.filter(([path]) => path === "/api/
 beforeEach(() => {
 	getMock.mockReset();
 	navigateMock.mockReset();
+	window.localStorage.clear();
 });
 
 describe("DecisionsView", () => {
@@ -114,6 +115,26 @@ describe("DecisionsView", () => {
 		renderView(<DecisionsView />);
 		expect(await screen.findByRole("status", { name: "Nothing needs you" })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: /^Question dec_prog/ })).toBeInTheDocument();
+	});
+
+	it("folds and opens every project and stream from the top bar", async () => {
+		answer(board([call({ id: "dec_1" }), call({ id: "dec_2", projectId: "cloud", projectName: "skyvern-cloud", streamSessionId: "nango", streamName: "Nango" })]));
+		renderView(<DecisionsView />);
+		expect(await screen.findByRole("button", { name: /^Question dec_1/ })).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+		expect(screen.queryByRole("button", { name: /^Question dec_/ })).not.toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /Shop/ })).toHaveAttribute("aria-expanded", "false");
+		expect(screen.getByRole("button", { name: /skyvern-cloud/ })).toHaveAttribute("aria-expanded", "false");
+		await userEvent.click(screen.getByRole("button", { name: "Expand all" }));
+		expect(screen.getByRole("button", { name: /^Question dec_1/ })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /^Question dec_2/ })).toBeInTheDocument();
+	});
+
+	it("offers no fold controls while searching or before any decision exists", async () => {
+		answer(board([]));
+		renderView(<DecisionsView />);
+		expect(await screen.findByText(/ao decision raise/)).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Collapse all" })).not.toBeInTheDocument();
 	});
 
 	it("opens a card as the selected call in the URL and marks the selected one", async () => {
