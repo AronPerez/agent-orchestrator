@@ -1641,6 +1641,38 @@ func (b *BridgeService) RevokeOwnDecisionSyncToken(ctx context.Context, id strin
 	return false, nil
 }
 
+// RevokeDecisionSyncDevicesFor removes every decision sync device this
+// machine issued to the machine with clientID, and drops their open
+// connections. Unlinking that machine uses it, so a link the other machine
+// made to this one stops too. It returns how many it removed.
+func (b *BridgeService) RevokeDecisionSyncDevicesFor(ctx context.Context, clientID string) (int, error) {
+	if err := b.lockTransition(ctx); err != nil {
+		return 0, err
+	}
+	defer b.transitionMu.Unlock()
+	if b.Devices == nil || clientID == "" {
+		return 0, nil
+	}
+	removed := 0
+	for _, device := range b.Devices.List() {
+		if device.ClientID != clientID || len(device.Scopes) != 1 || device.Scopes[0] != mobilebridge.DeviceScopeDecisionSync {
+			continue
+		}
+		revoked, found, err := b.Devices.Revoke(device.ID)
+		if err != nil {
+			return removed, err
+		}
+		if !found {
+			continue
+		}
+		removed++
+		if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
+			lan.DisconnectCredential(revoked.TokenHash)
+		}
+	}
+	return removed, nil
+}
+
 func (b *BridgeService) revokeScopedToken(ctx context.Context, scope, id string, credential requestscope.Credential, presentedToken string) (bool, error) {
 	if err := b.lockTransition(ctx); err != nil {
 		return false, err
