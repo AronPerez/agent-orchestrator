@@ -28,7 +28,7 @@ type decisionSyncRuntime struct {
 // notification projector), wake waiting exchanges, and poke every other link
 // so they relay on. It never blocks the daemon: a peer that is down only
 // backs off its own worker.
-func startDecisionSync(ctx context.Context, dataDir string, store *sqlite.Store, decisions *decisionsvc.Service, hostID string, log *slog.Logger, wakes ...func()) *decisionSyncRuntime {
+func startDecisionSync(ctx context.Context, dataDir string, store *sqlite.Store, decisions *decisionsvc.Service, hostID string, issued decisionsync.IssuedCredentials, log *slog.Logger, wakes ...func()) *decisionSyncRuntime {
 	rt := &decisionSyncRuntime{}
 	// Received pages, pulled or pushed, go through the decision service so a
 	// synced answer passes the same plan-first gate as a local one.
@@ -54,7 +54,7 @@ func startDecisionSync(ctx context.Context, dataDir string, store *sqlite.Store,
 		Ledger: ledger, HostID: hostID, MachineLabel: label, OnApplied: onApplied,
 	})
 	rt.peers = decisionsync.NewPeers(decisionsync.PeersDeps{
-		Secrets: secrets, Store: store, API: client, HostID: hostID, MachineLabel: label, Entries: store,
+		Secrets: secrets, Store: store, API: client, Issued: issued, HostID: hostID, MachineLabel: label, Entries: store,
 		OnChange: func() { rt.scheduler.Refresh() },
 	})
 	rt.scheduler = decisionsync.NewScheduler(decisionsync.SchedulerDeps{
