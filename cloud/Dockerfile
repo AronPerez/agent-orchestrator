@@ -60,42 +60,35 @@ RUN dpkg-source -x expat_2.9.0-1.dsc source && \
     cc -Wall -Wextra -Werror expat-buffer-bounds.c -lexpat -o /out/expat-buffer-bounds && \
     /out/expat-buffer-bounds
 
-# Trixie has no fix for CVE-2026-111497 yet. Rebuild Debian's pinned Brotli
-# 1.1.0 source on Trixie with upstream's decoder fix, the only change in
-# upstream 1.1.1, and version the package 1.1.1 to match that release.
-# Remove this stage once Trixie's libbrotli1 includes the upstream fix.
+# Trixie's base libbrotli1 (1.1.0-2) lacks the CVE-2026-111497 decoder fix,
+# upstream commit 0ed4268a44. Debian's Security Team backported it as
+# Detect-and-report-invalid-stream-earlier.patch in 1.1.0-2+deb13u1
+# (trixie-security, 2026-10-23). Rebuild that source package on Trixie so the
+# image does not depend on which point release the base image has reached.
+# Remove this stage once Trixie's base libbrotli1 is at or past 1.1.0-2+deb13u1.
 FROM ${BROTLI_BUILD_IMAGE} AS brotli-build
 WORKDIR /build
 RUN apt-get update && \
     apt-get install --yes --no-install-recommends \
         build-essential cmake debhelper fakeroot && \
     rm -rf /var/lib/apt/lists/*
-ADD --checksum=sha256:39b06802a852629132d549a7f7449dee7f435e801706714a4bc2ea2f15b28f36 \
-    https://deb.debian.org/debian/pool/main/b/brotli/brotli_1.1.0-2.dsc ./
+# Pin every source file by snapshot.debian.org identity and SHA-256. Snapshot
+# files are content-addressed by SHA-1 and never change or expire, unlike
+# GitHub's generated commit .patch output or superseded pool files.
+ADD --checksum=sha256:64a1cd7422150e5c639d9892d6ffa837438b341f521e68ac4e75f6ef4eca49a2 \
+    https://snapshot.debian.org/file/a3d0de606950140a8d02a17dc643e97743ce3093/brotli_1.1.0-2+deb13u1.dsc ./
 ADD --checksum=sha256:10973f4b4199eafa1d5735ef661ddb2ec2f97319ee9fd1824d4aabe08cff5265 \
-    https://deb.debian.org/debian/pool/main/b/brotli/brotli_1.1.0.orig.tar.gz ./
-ADD --checksum=sha256:3d913a3740bcad9a294007575a6beb1846beadbd62b44fb2bf9fdaeddea3236f \
-    https://deb.debian.org/debian/pool/main/b/brotli/brotli_1.1.0-2.debian.tar.xz ./
-ADD --checksum=sha256:d6f962509000223def7062958229bd08457e5e032e7ed0d1d94fb790b054b1fc \
-    https://github.com/google/brotli/commit/0ed4268a4401abcb4472096340477cf4af7d1a2b.patch?full_index=1 \
-    ./0ed4268a44-detect-invalid-stream-earlier.patch
-RUN dpkg-source -x brotli_1.1.0-2.dsc source && \
+    https://snapshot.debian.org/file/c1a06bd9cb912a8b5f07b2bd504af78ec6d0335c/brotli_1.1.0.orig.tar.gz ./
+ADD --checksum=sha256:848994612c6eb5e413d7df0e307ec7661855f5383c8cd10507e890fb7ee809ff \
+    https://snapshot.debian.org/file/01a075ff6eea245f1e32fea5ab42dcae8e9ff9a2/brotli_1.1.0-2+deb13u1.debian.tar.xz ./
+RUN dpkg-source -x brotli_1.1.0-2+deb13u1.dsc source && \
     cd source && \
-    mv /build/0ed4268a44-detect-invalid-stream-earlier.patch debian/patches/ && \
-    echo 0ed4268a44-detect-invalid-stream-earlier.patch >> debian/patches/series && \
-    { printf '%s\n' \
-        'brotli (1.1.1-0+ao1) trixie; urgency=high' \
-        '' \
-        '  * Apply upstream commit 0ed4268a44 (CVE-2026-111497).' \
-        '' \
-        ' -- Agent Orchestrator <root@localhost>  Fri, 23 Oct 2026 00:00:00 +0000' \
-        '' && cat debian/changelog; } > debian/changelog.new && \
-    mv debian/changelog.new debian/changelog && \
+    grep -q 'FORMAT_, BLOCK_SWITCH, -17' c/include/brotli/decode.h && \
     dpkg-buildpackage -b -us -uc -Pnopython --jobs=2 && \
     cd /build && \
-    test "$(dpkg-deb -f libbrotli1_1.1.1-0+ao1_*.deb Version)" = 1.1.1-0+ao1 && \
+    test "$(dpkg-deb -f libbrotli1_1.1.0-2+deb13u1_*.deb Version)" = 1.1.0-2+deb13u1 && \
     mkdir /out && \
-    cp libbrotli1_1.1.1-0+ao1_*.deb /out/libbrotli1.deb
+    cp libbrotli1_1.1.0-2+deb13u1_*.deb /out/libbrotli1.deb
 
 FROM node:22-trixie-slim AS worker
 ARG TARGETARCH
@@ -188,9 +181,13 @@ RUN --mount=type=bind,from=expat-build,source=/out,target=/tmp/expat-fix \
     dpkg -i /tmp/expat-fix/libexpat1.deb && \
     /tmp/expat-fix/expat-buffer-bounds && \
     test "$(dpkg-query -W -f='${Version}' libexpat1)" = 2.9.0-1
+# Install the rebuilt package only over an older libbrotli1, so a newer Trixie
+# security update pulled in by apt-get upgrade above is never downgraded.
 RUN --mount=type=bind,from=brotli-build,source=/out,target=/tmp/brotli-fix \
-    dpkg -i /tmp/brotli-fix/libbrotli1.deb && \
-    test "$(dpkg-query -W -f='${Version}' libbrotli1)" = 1.1.1-0+ao1 && \
+    if dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libbrotli1)" lt 1.1.0-2+deb13u1; then \
+        dpkg -i /tmp/brotli-fix/libbrotli1.deb; \
+    fi && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libbrotli1)" ge 1.1.0-2+deb13u1 && \
     curl --version | grep -q brotli
 COPY --from=build --chown=ao-worker:ao-worker /out/ao-worker /ao-worker
 COPY --from=build --chown=ao-worker:ao-worker /out/ao /usr/local/bin/ao
