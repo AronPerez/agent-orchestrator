@@ -89,8 +89,13 @@ func AccessDevicesPath(dataDir string) string {
 
 // AccessDevices is the registry of device tokens the remote listener accepts.
 type AccessDevices struct {
-	mu   sync.RWMutex
-	path string
+	// liveMu orders a device's local writes against its removal: WhileLive
+	// holds it for reading around one bounded write, and everything that
+	// removes a device holds it for writing, so a removal returns only after
+	// every write it admitted has finished. Taken before mu.
+	liveMu sync.RWMutex
+	mu     sync.RWMutex
+	path   string
 	// writeErr refuses every write when a damaged file could not be moved aside.
 	writeErr error
 	devices  map[string]AccessDevice
@@ -194,6 +199,9 @@ func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, 
 		CreatedAt:  now.UTC(),
 		LastSeenAt: now.UTC(),
 	}
+	// Reissuing for a client replaces, and so removes, its earlier device.
+	r.liveMu.Lock()
+	defer r.liveMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	replaced := make([]AccessDevice, 0, 1)
@@ -264,6 +272,22 @@ func (r *AccessDevices) Match(token string) (AccessDevice, bool) {
 		return AccessDevice{}, false
 	}
 	return cloneAccessDevice(device), true
+}
+
+// WhileLive runs fn only while device id exists, and keeps the device from
+// being removed until fn returns. It reports false, without calling fn, for
+// a device that is gone. fn must be a short local write: never a network
+// read or a wait, since every removal waits for it.
+func (r *AccessDevices) WhileLive(id string, fn func() error) (bool, error) {
+	if r == nil {
+		return false, nil
+	}
+	r.liveMu.RLock()
+	defer r.liveMu.RUnlock()
+	if !r.Has(id) {
+		return false, nil
+	}
+	return true, fn()
 }
 
 // Has reports whether a device with id is still registered (not revoked).
@@ -337,6 +361,8 @@ func (r *AccessDevices) LinkInstall(id, installID string) error {
 
 // Revoke removes a device and reports whether it existed.
 func (r *AccessDevices) Revoke(id string) (AccessDevice, bool, error) {
+	r.liveMu.Lock()
+	defer r.liveMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	device, ok := r.devices[id]
@@ -360,6 +386,8 @@ func (r *AccessDevices) RevokeIssuedBy(issuer string) ([]AccessDevice, error) {
 	if issuer == "" {
 		return nil, nil
 	}
+	r.liveMu.Lock()
+	defer r.liveMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	revoked := make([]AccessDevice, 0)
@@ -395,6 +423,8 @@ func (r *AccessDevices) RevokeIssuedBy(issuer string) ([]AccessDevice, error) {
 
 // RevokeAll removes every device.
 func (r *AccessDevices) RevokeAll() error {
+	r.liveMu.Lock()
+	defer r.liveMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.devices) == 0 {

@@ -132,12 +132,34 @@ func (c *DecisionSyncController) entries(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req DecisionSyncPushRequest
-	if !decodeSyncBody(w, r, &req) || !c.stillValid(w, r) {
+	if !decodeSyncBody(w, r, &req) {
 		return
 	}
-	resp, err := c.Svc.Push(r.Context(), peer, decisionsync.PushRequest{
+	push := decisionsync.PushRequest{
 		Protocol: req.Protocol, HostID: req.HostID, Entries: EntriesFromDTO(req.Entries), Heads: headsFromDTO(req.Heads),
-	})
+	}
+	var resp decisionsync.PushResponse
+	var err error
+	// The page is applied while the device is held live, so revoking it
+	// returns only after this write, and a write after that is refused.
+	if live, ok := c.Devices.(interface {
+		WhileLive(string, func() error) (bool, error)
+	}); ok {
+		found, _ := live.WhileLive(requestscope.CredentialFrom(r.Context()).DeviceID, func() error {
+			resp, err = c.Svc.Push(r.Context(), peer, push)
+			return nil
+		})
+		if !found {
+			envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "DEVICE_REVOKED",
+				"This decision sync credential was revoked.", nil)
+			return
+		}
+	} else {
+		if !c.stillValid(w, r) {
+			return
+		}
+		resp, err = c.Svc.Push(r.Context(), peer, push)
+	}
 	if err != nil {
 		writeDecisionSyncError(w, r, err)
 		return
