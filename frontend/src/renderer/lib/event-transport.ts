@@ -18,6 +18,7 @@ import { shellTerminalsQueryKey, shellTerminalsQueryKeyForHost } from "../hooks/
 import { baseUrlForHost, connectedHosts, subscribeConnectedHosts } from "./host-clients";
 import { probeRemoteSse } from "./remote-sse-probe";
 import { decisionKeys } from "./decision-inbox";
+import { decisionSyncKey } from "./decision-sync";
 import { LOCAL_HOST } from "./hosts";
 import { persistRemoteCache } from "./remote-chat-cache";
 
@@ -39,9 +40,10 @@ const EVENTSOURCE_CLOSED = 2;
 // CDC event types the daemon pushes over the SSE stream (see
 // backend/internal/cdc/event.go). The SSE writer tags each frame with
 // `event: <type>`, so named events bypass EventSource.onmessage and must be
-// subscribed explicitly. Every one of these except decision_updated can change
-// the project/session list the sidebar renders, so they trigger a (batched)
-// workspace refetch; decision_updated refreshes only that host's decision views.
+// subscribed explicitly. Every one of these except the two decision events can
+// change the project/session list the sidebar renders, so they trigger a
+// (batched) workspace refetch; decision_updated refreshes only that host's
+// decision views, and decision_sync_updated only this computer's sync status.
 const CDC_EVENT_TYPES = [
 	"session_created",
 	"session_updated",
@@ -54,6 +56,7 @@ const CDC_EVENT_TYPES = [
 	"review_run_created",
 	"review_run_updated",
 	"decision_updated",
+	"decision_sync_updated",
 ] as const;
 
 /**
@@ -79,6 +82,7 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 			let workspaceInvalidationPending = false;
 			// This computer's decision views (bell list, board, detail, search).
 			let decisionInvalidationPending = false;
+			let decisionSyncInvalidationPending = false;
 			let allConversationsInvalidationPending = false;
 			let allEditorHandoffsInvalidationPending = false;
 			// Reviews, interface transitions and model catalogs are otherwise only
@@ -227,6 +231,9 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 									// Only that machine's own decision list changed.
 									invalidate(decisionKeys.host(hostId));
 									conversationOnly = true;
+								} else if (decoded.type === "decision_sync_updated") {
+									// Another machine's sync status is not shown anywhere here.
+									conversationOnly = true;
 								} else if (typeof payload?.reviewId === "string") {
 									invalidate(["reviewer-conversation", hostId, payload.reviewId]);
 									conversationOnly = typeof payload.conversationId === "string";
@@ -308,6 +315,10 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 				if (decisionInvalidationPending) {
 					invalidate(decisionKeys.host(LOCAL_HOST));
 					decisionInvalidationPending = false;
+				}
+				if (decisionSyncInvalidationPending) {
+					invalidate(decisionSyncKey());
+					decisionSyncInvalidationPending = false;
 				}
 				if (allEventScopedCachesInvalidationPending) {
 					invalidate(["session-reviews"]);
@@ -433,6 +444,11 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 						// project or session list shows calls, so refresh decision views alone.
 						if (decoded.type === "decision_updated") {
 							decisionInvalidationPending = true;
+							conversationOnly = true;
+						}
+						// Sync freshness changed: only the Decisions footer and cards read it.
+						if (decoded.type === "decision_sync_updated") {
+							decisionSyncInvalidationPending = true;
 							conversationOnly = true;
 						}
 						// A shell's program title changed; only the shell list shows it.

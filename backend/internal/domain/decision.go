@@ -306,7 +306,10 @@ func ValidateDecisionRaise(p DecisionRaisedPayload) error {
 	if err := validateDecisionLinksAndReference(p.Links, p.Reference); err != nil {
 		return err
 	}
-	return validateDecisionAutonomy(p)
+	if err := validateDecisionAutonomy(p); err != nil {
+		return err
+	}
+	return validateRaiseSecrets(p)
 }
 
 func validateDecisionLinksAndReference(links []DecisionLink, reference string) error {
@@ -386,7 +389,7 @@ func ValidateDecisionNote(note string) error {
 	if n := utf8.RuneCountInString(strings.TrimSpace(note)); n > MaxDecisionNote {
 		return decisionRule("note_too_long", fmt.Sprintf("The note is %d characters; the limit is 1000.", n))
 	}
-	return nil
+	return rejectDecisionSecrets(note)
 }
 
 // ValidateDecisionOutcome checks the final result recorded for a call.
@@ -408,7 +411,7 @@ func ValidateDecisionOutcome(p DecisionOutcomePayload) error {
 	if link != "" && !validDecisionURL(link) {
 		return decisionRule("outcome_link_invalid", "The outcome link must be an http or https URL.")
 	}
-	return nil
+	return rejectDecisionSecrets(p.Text, p.Link)
 }
 
 // DecisionCallURL is the in-app link for a decision call.

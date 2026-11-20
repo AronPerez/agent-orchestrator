@@ -1217,7 +1217,7 @@ func Run(buildVersion string) (retErr error) {
 	// Reconcile above; the projector's first pass creates any that a crash
 	// left missing. Appends only wake it, so a ledger write never waits on
 	// notification I/O.
-	decisionNotifications, decisionNotificationsDone := startDecisionNotifications(ctx, store, notificationWriter, log)
+	decisionNotifications, decisionNotificationsDone := startDecisionNotifications(ctx, store, notificationWriter, hostIdentity.HostID, log)
 	decisionMutationGate := &decisionsvc.MutationGate{}
 	wakeDecisionDeliverer := func() {
 		if decisionDeliverer != nil {

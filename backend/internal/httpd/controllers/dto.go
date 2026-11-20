@@ -237,6 +237,7 @@ type ListDecisionsQuery struct {
 	Scope string `query:"scope,omitempty" enum:"mine,needs_you,decided" description:"Which calls to list. Defaults to needs_you. Ignored when q is given."`
 	Q     string `query:"q,omitempty" description:"Search words. When given, the response is the search result."`
 	Limit int    `query:"limit,omitempty" minimum:"1" description:"Most search results to return. Defaults to 20; values above 100 are capped. Ignored when q is absent."`
+	IDs   string `query:"ids,omitempty" description:"Comma-separated call ids to look up, at most 100; unknown ids are left out. Takes precedence over q and scope."`
 }
 
 // DecisionBoardResponse is the Decisions page snapshot: every active call plus

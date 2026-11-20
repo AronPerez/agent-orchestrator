@@ -4147,6 +4147,14 @@ paths:
             100 are capped. Ignored when q is absent.
           minimum: 1
           type: integer
+      - description: Comma-separated call ids to look up, at most 100; unknown ids
+          are left out. Takes precedence over q and scope.
+        in: query
+        name: ids
+        schema:
+          description: Comma-separated call ids to look up, at most 100; unknown ids
+            are left out. Takes precedence over q and scope.
+          type: string
       responses:
         "200":
           content:

@@ -144,10 +144,11 @@ func TestOnlyTheOwnerOnThisMachineCanWithdraw(t *testing.T) {
 		}
 	}
 	appendRemoteRaisedCall(t, fixture, "dec_far")
-	if _, err := fixture.service.Withdraw(ctx, Actor{Session: fixture.w1}, "dec_far"); apiCode(err) != "DECISION_NOT_OWNER" {
+	// Another machine's call names that machine (plan decision 20).
+	if _, err := fixture.service.Withdraw(ctx, Actor{Session: fixture.w1}, "dec_far"); apiCode(err) != "DECISION_OTHER_MACHINE" {
 		t.Fatalf("remote withdraw error = %v", err)
 	}
-	if _, err := fixture.service.RecordOutcome(ctx, Actor{Session: fixture.w1}, "dec_far", OutcomeInput{Text: "Done"}); apiCode(err) != "DECISION_NOT_OWNER" {
+	if _, err := fixture.service.RecordOutcome(ctx, Actor{Session: fixture.w1}, "dec_far", OutcomeInput{Text: "Done"}); apiCode(err) != "DECISION_OTHER_MACHINE" {
 		t.Fatalf("remote outcome error = %v", err)
 	}
 

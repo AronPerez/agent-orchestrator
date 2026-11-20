@@ -3873,6 +3873,15 @@ registerRemotesIpc(ipcMain, {
 	localIdentity: createLocalHostIdentity(() => daemonStatus.state === "ready" && daemonStatus.port
 		? { port: daemonStatus.port, pid: daemonStatus.pid, generation: daemonAttachmentGeneration }
 		: null),
+	localDaemonRequest: async (method, path, body) => {
+		if (daemonStatus.state !== "ready" || !daemonStatus.port) return { status: 503, body: JSON.stringify({ code: "DAEMON_NOT_READY" }) };
+		const response = await fetch(`http://127.0.0.1:${daemonStatus.port}${path}`, {
+			method,
+			...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+			signal: AbortSignal.timeout(60_000),
+		});
+		return { status: response.status, body: await response.text() };
+	},
 });
 
 ipcMain.handle("app:chooseDirectory", async (_event, input?: string | { title?: string; defaultPath?: string }) => {

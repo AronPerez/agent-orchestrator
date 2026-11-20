@@ -9,6 +9,8 @@ import {
 	fetchDecisionInboxCalls,
 	fetchDecisionSearch,
 	mergeDecisionInboxSources,
+	fetchDecisionLookup,
+	MAX_DECISION_LOOKUP_IDS,
 	runDecisionAction,
 	type DecisionAction,
 	type DecisionBoard,
@@ -102,6 +104,24 @@ export function useDecisionInbox(enabled: boolean) {
 			refetchInterval: enabled ? 2_000 : false,
 		})),
 	});
+	// Calls only a connected host lists: ask this computer's ledger for its
+	// own state of each, so an answer given here hides the host's stale copy.
+	const remoteOnlyIds = useMemo(() => {
+		const local = new Set((localQuery.data ?? []).map((call) => call.id));
+		const ids = new Set<string>();
+		for (const query of remoteQueries) for (const call of query.data ?? []) if (!local.has(call.id)) ids.add(call.id);
+		return [...ids].sort().slice(0, MAX_DECISION_LOOKUP_IDS);
+	}, [localQuery.data, remoteQueries]);
+	const lookupQuery = useQuery({
+		queryKey: [...decisionKeys.host(LOCAL_HOST), "lookup", remoteOnlyIds.join(",")],
+		queryFn: ({ signal }) => fetchDecisionLookup(remoteOnlyIds, signal),
+		enabled: enabled && remoteOnlyIds.length > 0,
+		retry: 1,
+	});
+	const localStates = useMemo(
+		() => new Map((lookupQuery.data ?? []).map((call) => [call.id, call.state] as const)),
+		[lookupQuery.data],
+	);
 	const entries = useMemo(() => mergeDecisionInboxSources([
 		{ hostId: LOCAL_HOST, label: "", calls: localQuery.data ?? [] },
 		...connectedHosts.map((hostId, index) => ({
@@ -109,7 +129,7 @@ export function useDecisionInbox(enabled: boolean) {
 			label: labelForHost(hostId) ?? hostId,
 			calls: remoteQueries[index]?.data ?? [],
 		})),
-	]), [connectedHosts, localQuery.data, remoteQueries]);
+	], localStates), [connectedHosts, localQuery.data, remoteQueries, localStates]);
 
 	const answerMutation = useDecisionAnswer();
 
@@ -128,6 +148,8 @@ export function useDecisionInbox(enabled: boolean) {
 
 	return {
 		entries,
+		/** This computer's state of calls only a connected host listed. */
+		localStates,
 		isLoading: localQuery.isLoading || remoteQueries.some((query) => query.isLoading),
 		loadFailed: localQuery.isError || remoteQueries.some((query) => query.isError),
 		pending: answerMutation.isPending ? answerMutation.variables : undefined,

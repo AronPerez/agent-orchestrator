@@ -289,6 +289,7 @@ func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) 
 		"ao decision link add <address> --password-stdin",
 		"ao decision sync [<machine>]",
 		"a session cannot run them, and must never ask for another machine's password.",
+		"If an unanswered call in your project was raised on another machine and covers your question, do not raise a second one: its answer goes to that machine",
 	} {
 		if !strings.Contains(guidance, want) {
 			t.Fatalf("decision guidance missing %q", want)

@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -8,6 +9,8 @@ import { apiErrorRequestId } from "../lib/api-client";
 import { buildDecisionBoard, DECISION_LANES } from "../lib/decision-board";
 import { DecisionCallPanel } from "./DecisionCallPanel";
 import { DecisionSearchResults } from "./DecisionSearchResults";
+import { DecisionSyncFooter } from "./DecisionSyncFooter";
+import { decisionSyncKey, fetchDecisionSyncStatus } from "../lib/decision-sync";
 import { DecisionsBoard } from "./DecisionsBoard";
 import { ToolbarSearch } from "./PageToolbar";
 import { PageTopbar, PageTopbarTitle } from "./PageTopbar";
@@ -43,7 +46,8 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 	const navigate = useNavigate();
 	const board = useDecisionBoard();
 	const now = useMinuteClock();
-	const model = useMemo(() => buildDecisionBoard(board.data?.calls ?? []), [board.data]);
+	const model = useMemo(() => buildDecisionBoard(board.data?.calls ?? [], board.data?.servingHostId), [board.data]);
+	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
 	const search = useDecisionSearch(words);
 	// The URL owns the search: the field shows what the person is typing and
@@ -117,7 +121,7 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 						{t("decisions.nothingNeedsYou")}
 					</p>
 				) : null}
-				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} />
+				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} />
 			</>
 		);
 	} else if (board.data && !board.isError) {
@@ -154,9 +158,9 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 				<ResizablePanel id="decisions-board" minSize="30%">
 					<div className="flex h-full min-w-0 flex-col">
 						<main className="min-h-0 flex-1 overflow-auto overscroll-contain">{body}</main>
-						{/* Slice 4 replaces this with sync freshness; until then it names whose ledger this is. */}
+						{/* Whose ledger this is, and how fresh each linked machine is. */}
 						<footer className="shrink-0 border-t border-border px-(--space-4_5) py-1.5 text-caption text-muted-foreground">
-							{t("decisions.footerLocal")}
+							<DecisionSyncFooter now={now} />
 						</footer>
 					</div>
 				</ResizablePanel>

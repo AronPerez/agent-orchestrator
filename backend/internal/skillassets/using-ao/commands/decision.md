@@ -51,6 +51,12 @@ unanswered match in your current project, do not raise a second call. If it
 blocks you, hand off the existing call link through your role's coordination or
 status path so the dependent session can resume after the answer.
 
+Search covers every machine linked to this one. A result marked `On <machine>`
+was raised there. If an unanswered call in your project was raised on another
+machine and covers your question, do not raise a second one: its answer goes to
+that machine, so check it with `ao decision show <call-link>` when you resume,
+and report it as blocking with the call link.
+
 Before ending a turn blocked by a new or existing call, make it visible. A
 worker whose prompt names an active project orchestrator sends a needs-input
 status report with the call link, but must not rely on the report alone because

@@ -2,6 +2,7 @@ package decisionsync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"runtime"
@@ -64,6 +65,11 @@ type PeersDeps struct {
 	Now          func() time.Time
 	// OnChange runs after a link is added or removed.
 	OnChange func()
+	// Entries, when set, is scanned after a link for existing entries whose
+	// text looks like a credential: they are about to be copied to the peer.
+	Entries interface {
+		ListDecisionEntriesAfter(context.Context, domain.DecisionVector, int, int) ([]domain.DecisionEntry, bool, error)
+	}
 }
 
 // Peers links and unlinks machines. It holds each link's scoped token in the
@@ -94,7 +100,7 @@ type LinkInput struct {
 }
 
 // SecretWarning names an existing entry that looks like it holds a
-// credential. It is filled only once the credential guard exists (plan Q4).
+// credential: the call and the payload field, never the text.
 type SecretWarning struct {
 	CallID string
 	Field  string
@@ -162,7 +168,66 @@ func (m *Peers) Link(ctx context.Context, in LinkInput) (PeerStatus, []SecretWar
 	if peer.Label == "" {
 		peer.Label = defaultPeerLabel(base)
 	}
-	return PeerStatus{DecisionSyncPeer: peer, State: PeerLinkedBehind}, nil, nil
+	var warnings []SecretWarning
+	if m.deps.Entries != nil {
+		// A scan failure must not undo a working link; it only loses the warning.
+		warnings, _ = ScanSecretWarnings(ctx, m.deps.Entries)
+	}
+	return PeerStatus{DecisionSyncPeer: peer, State: PeerLinkedBehind}, warnings, nil
+}
+
+// ScanSecretWarnings pages through every entry and names each call field
+// whose text looks like a credential, once per call and field.
+func ScanSecretWarnings(ctx context.Context, entries interface {
+	ListDecisionEntriesAfter(context.Context, domain.DecisionVector, int, int) ([]domain.DecisionEntry, bool, error)
+}) ([]SecretWarning, error) {
+	var out []SecretWarning
+	seen := map[SecretWarning]bool{}
+	have := domain.DecisionVector{}
+	for {
+		page, more, err := entries.ListDecisionEntriesAfter(ctx, have, domain.MaxDecisionSyncPageEntries, domain.MaxDecisionSyncPageBytes)
+		if err != nil {
+			return out, err
+		}
+		for _, e := range page {
+			have[e.Origin] = e.OriginSeq
+			var payload any
+			if json.Unmarshal(e.Payload, &payload) != nil {
+				continue
+			}
+			walkStrings(payload, "", func(field, text string) {
+				if _, found := domain.FindDecisionSecret(text); found {
+					w := SecretWarning{CallID: e.CallID, Field: field}
+					if !seen[w] {
+						seen[w] = true
+						out = append(out, w)
+					}
+				}
+			})
+		}
+		if !more || len(page) == 0 {
+			return out, nil
+		}
+	}
+}
+
+func walkStrings(v any, path string, visit func(field, text string)) {
+	switch t := v.(type) {
+	case string:
+		visit(path, t)
+	case map[string]any:
+		for key, child := range t {
+			next := key
+			if path != "" {
+				next = path + "." + key
+			}
+			walkStrings(child, next, visit)
+		}
+	case []any:
+		for _, child := range t {
+			walkStrings(child, path, visit)
+		}
+	}
 }
 
 // Unlink stops syncing with a machine in both directions: it revokes every

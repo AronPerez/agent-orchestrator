@@ -96,6 +96,25 @@ describe("mergeDecisionInboxSources", () => {
 	});
 });
 
+describe("mergeDecisionInboxSources with this computer's states", () => {
+	const remote = (calls: ReturnType<typeof call>[]): DecisionInboxSource[] => [
+		{ hostId: "local", label: "This computer", calls: [] },
+		{ hostId: "remote-a", label: "Laptop", calls },
+	];
+
+	it("drops remote copy closed locally", () => {
+		const entries = mergeDecisionInboxSources(remote([call("dec_answered", "2026-11-18T09:00:00Z")]), new Map([["dec_answered", "in_progress"]]));
+		expect(entries).toEqual([]);
+	});
+
+	it("keeps unknown remote call", () => {
+		const entries = mergeDecisionInboxSources(remote([call("dec_elsewhere", "2026-11-18T09:00:00Z")]), new Map());
+		expect(entries.map((entry) => entry.call.id)).toEqual(["dec_elsewhere"]);
+		const stillOpen = mergeDecisionInboxSources(remote([call("dec_open", "2026-11-18T09:00:00Z")]), new Map([["dec_open", "needs_you"]]));
+		expect(stillOpen.map((entry) => entry.call.id)).toEqual(["dec_open"]);
+	});
+});
+
 describe("decision query keys", () => {
 	it("keeps one root partitioned by host, with page views under this computer", () => {
 		expect(decisionKeys.all).toEqual(["decision-inbox"]);

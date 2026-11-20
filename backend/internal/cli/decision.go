@@ -486,7 +486,7 @@ func newDecisionSearchCommand(ctx *commandContext) *cobra.Command {
 			if jsonOutput {
 				return writeJSON(cmd.OutOrStdout(), response)
 			}
-			return writeDecisionCalls(cmd.OutOrStdout(), response.Calls, "No decisions match.", false)
+			return writeDecisionCalls(cmd.OutOrStdout(), response.Calls, "No decisions match.", false, ctx.decisionMachines(cmd))
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON")
@@ -523,7 +523,7 @@ func newDecisionListCommand(ctx *commandContext) *cobra.Command {
 			if jsonOutput {
 				return writeJSON(cmd.OutOrStdout(), response)
 			}
-			return writeDecisionCalls(cmd.OutOrStdout(), response.Calls, "No calls.", scope == "mine")
+			return writeDecisionCalls(cmd.OutOrStdout(), response.Calls, "No calls.", scope == "mine", ctx.decisionMachines(cmd))
 		},
 	}
 	cmd.Flags().BoolVar(&needsYou, "needs-you", false, "List calls waiting for the person")
@@ -567,7 +567,7 @@ func newDecisionShowCommand(ctx *commandContext) *cobra.Command {
 			if jsonOutput {
 				return writeJSON(cmd.OutOrStdout(), response)
 			}
-			return writeDecisionDetail(cmd.OutOrStdout(), response)
+			return writeDecisionDetail(cmd.OutOrStdout(), response, ctx.decisionMachines(cmd))
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON")
@@ -903,7 +903,7 @@ func decisionActionPath(id, action string) string {
 	return "decisions/" + url.PathEscape(id) + "/" + action
 }
 
-func writeDecisionCalls(w io.Writer, calls []decisionCallAPI, empty string, outcomeOwed bool) error {
+func writeDecisionCalls(w io.Writer, calls []decisionCallAPI, empty string, outcomeOwed bool, machines *decisionMachines) error {
 	if len(calls) == 0 {
 		_, err := fmt.Fprintln(w, empty)
 		return err
@@ -914,14 +914,14 @@ func writeDecisionCalls(w io.Writer, calls []decisionCallAPI, empty string, outc
 				return err
 			}
 		}
-		if err := writeDecisionCall(w, call, outcomeOwed); err != nil {
+		if err := writeDecisionCall(w, call, outcomeOwed, machines); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func writeDecisionCall(w io.Writer, call decisionCallAPI, outcomeOwed bool) error {
+func writeDecisionCall(w io.Writer, call decisionCallAPI, outcomeOwed bool, machines *decisionMachines) error {
 	if _, err := fmt.Fprintf(w, "%s  %s  %s\n", call.ID, call.StateLabel, call.Title); err != nil {
 		return err
 	}
@@ -930,6 +930,9 @@ func writeDecisionCall(w io.Writer, call decisionCallAPI, outcomeOwed bool) erro
 		metadata = append(metadata, call.RaisedAt.Format("2006-01-02"))
 	}
 	if _, err := fmt.Fprintf(w, "  %s\n", strings.Join(metadata, " · ")); err != nil {
+		return err
+	}
+	if err := machines.writeOrigin(w, call); err != nil {
 		return err
 	}
 	if call.Choice != "" {
@@ -968,9 +971,9 @@ func writeDecisionCall(w io.Writer, call decisionCallAPI, outcomeOwed bool) erro
 	return nil
 }
 
-func writeDecisionDetail(w io.Writer, detail decisionDetailAPIResponse) error {
+func writeDecisionDetail(w io.Writer, detail decisionDetailAPIResponse, machines *decisionMachines) error {
 	call := detail.Call
-	if err := writeDecisionCall(w, call, false); err != nil {
+	if err := writeDecisionCall(w, call, false, machines); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "Link: %s\nContext: %s\n", call.Link, call.Context); err != nil {
