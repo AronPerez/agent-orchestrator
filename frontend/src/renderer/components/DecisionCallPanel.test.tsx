@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, renderHook, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -437,7 +438,12 @@ describe("DecisionCallPanel", () => {
 			renderPanel();
 			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
 			postMock.mockRejectedValueOnce(new Error("connection reset"));
-			serve({ ...inProgress, option: 2, chosenLabel: "Per-tenant API keys", standingEntryId: "dent_2" });
+			// The daemon recorded this very attempt: the call shows its key's digest.
+			getMock.mockImplementation(async () => {
+				const sent = (postMock.mock.calls[0]?.[1] as { params: { header: Record<string, string> } } | undefined)?.params.header["Idempotency-Key"] ?? "";
+				const answerKeyDigest = createHash("sha256").update(sent).digest("hex");
+				return { data: { call: { ...inProgress, option: 2, chosenLabel: "Per-tenant API keys", standingEntryId: "dent_2", answerKeyDigest }, history }, response: { status: 200 } };
+			});
 			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
 			expect(await screen.findByText("Sending a different pick delivers it to the session as an update.")).toBeInTheDocument();
 

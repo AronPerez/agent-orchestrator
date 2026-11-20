@@ -136,6 +136,7 @@ type DecisionCallResponse struct {
 	AnsweredAt        *time.Time              `json:"answeredAt,omitempty"`
 	AnswerSurface     string                  `json:"answerSurface,omitempty"`
 	StandingEntryID   string                  `json:"standingEntryId,omitempty"`
+	AnswerKeyDigest   string                  `json:"answerKeyDigest,omitempty" description:"SHA-256 (hex) of the Idempotency-Key the standing answer was sent with, so a client can tell whether its own uncertain attempt is the one recorded."`
 	Outcome           string                  `json:"outcome,omitempty"`
 	OutcomeLink       string                  `json:"outcomeLink,omitempty"`
 	OutcomeAt         *time.Time              `json:"outcomeAt,omitempty"`
@@ -286,6 +287,10 @@ type DecisionEntryResponse struct {
 	SessionName   string    `json:"sessionName,omitempty"`
 	Fallback      bool      `json:"fallback,omitempty"`
 	Retired       *bool     `json:"retired,omitempty"`
+	// AnswerKeyDigest is the SHA-256 (hex) of the Idempotency-Key an answered
+	// entry was sent with, so a client can tell its uncertain attempt was
+	// recorded even after a later answer replaced it.
+	AnswerKeyDigest string `json:"answerKeyDigest,omitempty"`
 }
 
 // DecisionDetailResponse combines a call projection with its immutable log.

@@ -440,7 +440,7 @@ func decisionCallResponse(call domain.DecisionCall) DecisionCallResponse {
 		HostID: call.Origin, MachineLabel: call.Raised.MachineLabel,
 		OwnerSessionID: string(call.Raised.OwnerSessionID), OwnerSessionName: call.Raised.OwnerSessionName,
 		RaisedAt: call.RaisedAt, Choice: call.Choice, Option: call.Option, ChosenLabel: call.ChosenLabel(), Note: call.Note,
-		AnswerSurface: string(call.AnswerSurface), StandingEntryID: call.StandingEntryID,
+		AnswerSurface: string(call.AnswerSurface), StandingEntryID: call.StandingEntryID, AnswerKeyDigest: call.AnswerKeyDigest,
 		Outcome: call.Outcome, OutcomeLink: call.OutcomeLink,
 		Retired: call.Retired, Delivery: string(call.Delivery), DeliveredTo: string(call.DeliveredTo),
 		DeliveredToName: call.DeliveredToName, DeliveredFallback: call.DeliveredFallback,
@@ -488,6 +488,7 @@ func decisionEntryResponse(entry domain.DecisionEntry) DecisionEntryResponse {
 		var payload domain.DecisionAnsweredPayload
 		if json.Unmarshal(entry.Payload, &payload) == nil {
 			response.Choice, response.Option, response.Note = payload.Choice, payload.Option, payload.Note
+			response.AnswerKeyDigest = payload.KeyDigest()
 		}
 	case domain.DecisionKindDecided:
 		var payload domain.DecisionDecidedPayload

@@ -22574,6 +22574,11 @@ components:
       type: object
     DecisionCallResponse:
       properties:
+        answerKeyDigest:
+          description: SHA-256 (hex) of the Idempotency-Key the standing answer was
+            sent with, so a client can tell whether its own uncertain attempt is the
+            one recorded.
+          type: string
         answerSurface:
           type: string
         answeredAt:
@@ -22751,6 +22756,8 @@ components:
       type: object
     DecisionEntryResponse:
       properties:
+        answerKeyDigest:
+          type: string
         authorKind:
           enum:
           - person

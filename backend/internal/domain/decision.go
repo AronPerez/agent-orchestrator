@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -213,10 +215,42 @@ type DecisionAnsweredPayload struct {
 	Choice string `json:"choice"`
 	Option int    `json:"option,omitempty"`
 	Note   string `json:"note,omitempty"`
-	// IdempotencyKey is chosen by the person's client for one answer attempt
-	// and reused when it retries a send whose result it could not see. A
-	// second answer with the same key on the same call is not appended.
-	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+	// IdempotencyKeyDigest is the SHA-256 (hex) of the key the person's client
+	// chose for this answer attempt and reuses when it retries a send whose
+	// result it could not see. A second answer with the same key on the same
+	// call is not appended. Only the digest is kept: the key is client text
+	// and must never be stored or synced as written.
+	IdempotencyKeyDigest string `json:"idempotencyKeyDigest,omitempty"`
+	// LegacyIdempotencyKey is the raw key the first idempotency release stored.
+	// It is read so those entries (and ones synced from a machine still on that
+	// release) keep deduplicating retries; new answers never set it.
+	LegacyIdempotencyKey string `json:"idempotencyKey,omitempty"`
+}
+
+// KeyDigest is the digest of the key this answer was sent with, whichever
+// release wrote it; empty when it was sent without one.
+func (p DecisionAnsweredPayload) KeyDigest() string {
+	if p.IdempotencyKeyDigest != "" {
+		return p.IdempotencyKeyDigest
+	}
+	if p.LegacyIdempotencyKey != "" {
+		return DecisionIdempotencyKeyDigest(p.LegacyIdempotencyKey)
+	}
+	return ""
+}
+
+// DecisionIdempotencyKeyDigest is the stored form of an answer's idempotency key.
+func DecisionIdempotencyKeyDigest(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+// ValidateDecisionIdempotencyKey checks a client-supplied answer key.
+func ValidateDecisionIdempotencyKey(key string) error {
+	if len(key) > MaxDecisionIdempotencyKey || strings.IndexFunc(key, unicode.IsControl) >= 0 {
+		return decisionRule("idempotency_key_invalid", fmt.Sprintf("The answer's idempotency key must be at most %d characters on one line.", MaxDecisionIdempotencyKey))
+	}
+	return nil
 }
 
 // DecisionDismissedPayload records why a person dismissed a call.
@@ -388,9 +422,6 @@ func ValidateDecisionAnswer(optionCount int, p DecisionAnsweredPayload) error {
 	}
 	if p.Choice == DecisionChoiceOther && strings.TrimSpace(p.Note) == "" {
 		return decisionRule("note_required", "\"Something else\" needs a note that says what to do.")
-	}
-	if len(p.IdempotencyKey) > MaxDecisionIdempotencyKey || strings.IndexFunc(p.IdempotencyKey, unicode.IsControl) >= 0 {
-		return decisionRule("idempotency_key_invalid", fmt.Sprintf("The answer's idempotency key must be at most %d characters on one line.", MaxDecisionIdempotencyKey))
 	}
 	return ValidateDecisionNote(p.Note)
 }

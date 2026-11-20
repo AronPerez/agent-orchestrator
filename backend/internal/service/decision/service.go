@@ -484,6 +484,9 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	}
 	// Holding the call's lock, a retry of an attempt the daemon already recorded
 	// (its response was lost) sees that entry and returns the call as it is.
+	if err := domain.ValidateDecisionIdempotencyKey(input.IdempotencyKey); err != nil {
+		return domain.DecisionCall{}, invalidDecision(err)
+	}
 	if recorded, err := s.answeredWithKey(ctx, call.ID, input.IdempotencyKey); err != nil || recorded {
 		if err != nil {
 			return domain.DecisionCall{}, err
@@ -499,8 +502,9 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	if call.State != domain.DecisionStateNeedsYou && call.State != domain.DecisionStateInProgress && call.State != domain.DecisionStateDismissed {
 		return domain.DecisionCall{}, wrongState(call, `This call is closed. Its state is "%s".`)
 	}
-	payload := domain.DecisionAnsweredPayload{
-		Choice: input.Choice, Option: input.Option, Note: strings.TrimSpace(input.Note), IdempotencyKey: input.IdempotencyKey,
+	payload := domain.DecisionAnsweredPayload{Choice: input.Choice, Option: input.Option, Note: strings.TrimSpace(input.Note)}
+	if input.IdempotencyKey != "" {
+		payload.IdempotencyKeyDigest = domain.DecisionIdempotencyKeyDigest(input.IdempotencyKey)
 	}
 	if err := domain.ValidateDecisionAnswer(len(call.Raised.Options), payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
@@ -521,12 +525,13 @@ func (s *Service) answeredWithKey(ctx context.Context, callID, key string) (bool
 	if err != nil {
 		return false, fmt.Errorf("read decision entries: %w", err)
 	}
+	digest := domain.DecisionIdempotencyKeyDigest(key)
 	for _, entry := range entries {
 		if entry.Kind != domain.DecisionKindAnswered {
 			continue
 		}
 		var payload domain.DecisionAnsweredPayload
-		if json.Unmarshal(entry.Payload, &payload) == nil && payload.IdempotencyKey == key {
+		if json.Unmarshal(entry.Payload, &payload) == nil && payload.KeyDigest() == digest {
 			return true, nil
 		}
 	}

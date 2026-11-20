@@ -16,6 +16,10 @@ type Entry = {
 	 * so a deliberate change is not mistaken for that retry.
 	 */
 	key: string;
+	/** SHA-256 (hex) of `key`, as the daemon reports it on the standing answer. */
+	keyDigest?: string;
+	/** A read showed the standing answer was sent with this key: the attempt landed. */
+	recorded?: boolean;
 	/** The machine the latest attempt was sent to: its reads settle what happened. */
 	source: string;
 	sending: number;
@@ -64,10 +68,16 @@ export class DecisionAnswerGuard {
 	 */
 	begin(source: string, callId: string): string {
 		const entry = this.entries.get(callId);
-		const key = entry && entry.sourceWaiting !== false ? entry.key : newAttemptKey();
+		// Only proof that this attempt itself was recorded makes the next send a
+		// deliberate change. The call's state cannot say so: changing an answer,
+		// or answering a dismissed call, leaves it in progress either way.
+		const reuse = entry !== undefined && !entry.recorded;
+		const key = reuse ? entry.key : newAttemptKey();
 		this.entries.set(callId, {
 			...entry,
 			key,
+			keyDigest: reuse ? entry.keyDigest : undefined,
+			recorded: false,
 			source,
 			sending: (entry?.sending ?? 0) + 1,
 			// A new attempt starts a new account of what happened to it.
@@ -76,6 +86,12 @@ export class DecisionAnswerGuard {
 		});
 		this.changed();
 		return key;
+	}
+
+	/** Records the digest of the key an attempt was sent with. */
+	attemptDigest(callId: string, key: string, digest: string): void {
+		const entry = this.entries.get(callId);
+		if (entry?.key === key) entry.keyDigest = digest;
 	}
 
 	/** The answer settled: confirmed by the daemon, or failed with its fate unknown. */
@@ -107,6 +123,7 @@ export class DecisionAnswerGuard {
 		for (const [callId, entry] of this.entries) {
 			if (entry.sending > 0 || entry.failedAt === undefined || startedAt <= entry.failedAt) continue;
 			if (scope.callId !== undefined && scope.callId !== callId) continue;
+			if (entry.keyDigest !== undefined && recordedIn(scope, callId, data, entry.keyDigest)) entry.recorded = true;
 			const stillWaiting = waitingIn(scope, callId, data);
 			entry.observed.set(view, stillWaiting);
 			if (scope.hostId === entry.source) entry.sourceWaiting = stillWaiting;
@@ -147,6 +164,29 @@ function viewScope(view: string): { hostId: string; callId?: string } | undefine
 	if (view.startsWith(NEEDS_YOU)) return { hostId: view.slice(NEEDS_YOU.length) };
 	if (view.startsWith(DETAIL)) return { hostId: LOCAL_HOST, callId: view.slice(DETAIL.length) };
 	return undefined;
+}
+
+/**
+ * Whether the view's data shows an answer recorded with this key digest: the
+ * standing answer, or (in a call's detail) any answered entry in its history,
+ * since another answer may have replaced the attempt after it was recorded.
+ */
+function recordedIn(scope: { callId?: string }, callId: string, data: unknown, digest: string): boolean {
+	const call = scope.callId === undefined
+		? (Array.isArray(data) ? data.find((item) => (item as { id?: unknown } | null)?.id === callId) : undefined)
+		: (data as { call?: unknown } | null | undefined)?.call;
+	if ((call as { answerKeyDigest?: unknown } | undefined)?.answerKeyDigest === digest) return true;
+	const history = scope.callId === undefined ? undefined : (data as { history?: unknown } | null | undefined)?.history;
+	return Array.isArray(history) && history.some((entry) => {
+		const answered = entry as { kind?: unknown; answerKeyDigest?: unknown } | null;
+		return answered?.kind === "answered" && answered.answerKeyDigest === digest;
+	});
+}
+
+/** SHA-256 (hex) of an attempt key: what the daemon stores and reports in its place. */
+export async function attemptKeyDigest(key: string): Promise<string> {
+	const sum = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+	return [...new Uint8Array(sum)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** Whether a view's freshly applied data still shows the call in Needs you. */

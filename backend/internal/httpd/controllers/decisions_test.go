@@ -616,3 +616,61 @@ func TestDecisionsAPI_AnswerPassesTheIdempotencyKeyHeader(t *testing.T) {
 		t.Fatalf("status=%d input=%+v", resp.StatusCode, svc.answer)
 	}
 }
+
+func TestDecisionsAPI_CallShowsTheStandingAnswerKeyDigest(t *testing.T) {
+	call := sampleDecisionCall()
+	call.AnswerKeyDigest = strings.Repeat("ab", 32)
+	svc := &fakeDecisionService{call: &call}
+	srv := newDecisionServer(t, svc)
+	// Every call response goes through one mapper; the fake returns this call from Raise.
+	body, status := decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions", `{"title":"Ship it?","context":"c","options":[{"label":"Yes"},{"label":"No"}]}`, "w-1")
+	if status != http.StatusCreated || !strings.Contains(string(body), `"answerKeyDigest":"`+call.AnswerKeyDigest+`"`) {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+}
+
+type historyDecisionService struct {
+	*fakeDecisionService
+	entries []domain.DecisionEntry
+}
+
+func (f *historyDecisionService) Get(_ context.Context, _ string) (decisionsvc.Detail, error) {
+	return decisionsvc.Detail{Call: sampleDecisionCall(), Entries: f.entries}, nil
+}
+
+// A client checks the whole history, not just the standing answer, to learn
+// whether its uncertain attempt was recorded before another answer replaced it.
+func TestDecisionsAPI_HistoryShowsEachAnswersKeyDigest(t *testing.T) {
+	at := time.Date(2026, 11, 20, 3, 0, 0, 0, time.UTC)
+	answered := func(id, payload string) domain.DecisionEntry {
+		return domain.DecisionEntry{ID: id, Origin: "h_a", CallID: "dec_1", Kind: domain.DecisionKindAnswered,
+			Payload: json.RawMessage(payload), WrittenAt: at, AuthorKind: domain.DecisionAuthorPerson, AuthorSurface: domain.RequestSurfaceDesktop}
+	}
+	digest := strings.Repeat("cd", 32)
+	svc := &historyDecisionService{fakeDecisionService: &fakeDecisionService{}, entries: []domain.DecisionEntry{
+		answered("dent_new", `{"choice":"option","option":1,"idempotencyKeyDigest":"`+digest+`"}`),
+		answered("dent_old", `{"choice":"option","option":2,"idempotencyKey":"ans_old"}`),
+		answered("dent_plain", `{"choice":"option","option":1}`),
+	}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Decisions: svc}, httpd.ControlDeps{}))
+	defer srv.Close()
+	body, status := decisionRequest(t, srv, http.MethodGet, "/api/v1/decisions/dec_1", "", "")
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var detail controllers.DecisionDetailResponse
+	if err := json.Unmarshal(body, &detail); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, entry := range detail.History {
+		got[entry.ID] = entry.AnswerKeyDigest
+	}
+	if got["dent_new"] != digest || got["dent_old"] != domain.DecisionIdempotencyKeyDigest("ans_old") || got["dent_plain"] != "" {
+		t.Fatalf("history digests = %v", got)
+	}
+	if strings.Contains(string(body), "ans_old") {
+		t.Fatalf("raw key leaked in the response: %s", body)
+	}
+}
