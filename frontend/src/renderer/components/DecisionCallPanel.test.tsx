@@ -208,7 +208,7 @@ describe("DecisionCallPanel", () => {
 			await userEvent.click(send);
 			expect(postMock).toHaveBeenCalledTimes(1);
 			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
-				params: { path: { id: "dec_1" } },
+				params: { path: { id: "dec_1" }, header: { "Idempotency-Key": expect.stringMatching(/^ans_/) } },
 				body: { choice: "option", option: 2, note: "Rotate monthly" },
 			});
 		});
@@ -225,7 +225,7 @@ describe("DecisionCallPanel", () => {
 			await userEvent.type(note, "Use the shared vault");
 			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
 			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
-				params: { path: { id: "dec_1" } },
+				params: { path: { id: "dec_1" }, header: { "Idempotency-Key": expect.stringMatching(/^ans_/) } },
 				body: { choice: "other", note: "Use the shared vault" },
 			});
 		});
@@ -247,7 +247,7 @@ describe("DecisionCallPanel", () => {
 			await userEvent.type(screen.getByLabelText("Note for the session"), "Split the migration first");
 			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
 			expect(postMock).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
-				params: { path: { id: "dec_1" } },
+				params: { path: { id: "dec_1" }, header: { "Idempotency-Key": expect.stringMatching(/^ans_/) } },
 				body: { choice: "option", option: 2, note: "Split the migration first" },
 			});
 		});

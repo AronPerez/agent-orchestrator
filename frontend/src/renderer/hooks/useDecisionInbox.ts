@@ -49,9 +49,9 @@ export function useDecisionAnswer() {
 		mutationFn: async ({ view = "", ...input }: DecisionInboxAnswer & { view?: string }) => {
 			const hold = guard.state(input.sourceHostId, input.callId, view);
 			if (hold) throw new DecisionAnswerHeldError(hold);
-			guard.begin(input.sourceHostId, input.callId);
+			const idempotencyKey = guard.begin(input.sourceHostId, input.callId);
 			try {
-				const confirmed = await answerDecisionInboxCall(input);
+				const confirmed = await answerDecisionInboxCall({ ...input, idempotencyKey });
 				guard.settle(input.sourceHostId, input.callId, true);
 				return confirmed;
 			} catch (error) {

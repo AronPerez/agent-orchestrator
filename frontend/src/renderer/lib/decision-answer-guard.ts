@@ -7,7 +7,8 @@ import type { QueryClient } from "@tanstack/react-query";
  */
 export type DecisionAnswerHold = "sending" | "unconfirmed";
 
-type Entry = { sending: number; failedAt?: number };
+/** `key` names the person's current answer attempt for the daemon's idempotency check. */
+type Entry = { sending: number; failedAt?: number; key: string };
 
 /**
  * One record per host and call of answers whose result is unknown, shared by
@@ -39,12 +40,17 @@ export class DecisionAnswerGuard {
 		return undefined;
 	}
 
-	/** An answer for the call is about to be sent. */
-	begin(hostId: string, callId: string): void {
+	/**
+	 * An answer for the call is about to be sent. Returns the idempotency key to
+	 * send with it: the same key as an earlier send whose result was not seen,
+	 * so the daemon returns that answer instead of recording a second one.
+	 */
+	begin(hostId: string, callId: string): string {
 		const id = key(hostId, callId);
-		const entry = this.entries.get(id) ?? { sending: 0 };
+		const entry = this.entries.get(id) ?? { sending: 0, key: newAttemptKey() };
 		this.entries.set(id, { ...entry, sending: entry.sending + 1 });
 		this.changed();
+		return entry.key;
 	}
 
 	/** The answer settled: confirmed by the daemon, or failed with its fate unknown. */
@@ -55,7 +61,7 @@ export class DecisionAnswerGuard {
 		const sending = Math.max(0, entry.sending - 1);
 		// A confirmed answer says what the daemon recorded, even after an earlier failure.
 		if (confirmed && sending === 0) this.entries.delete(id);
-		else this.entries.set(id, { sending, failedAt: confirmed ? entry.failedAt : ++this.sequence });
+		else this.entries.set(id, { ...entry, sending, failedAt: confirmed ? entry.failedAt : ++this.sequence });
 		this.changed();
 	}
 
@@ -146,6 +152,8 @@ export function decisionAnswerGuard(queryClient: QueryClient): DecisionAnswerGua
 	}
 	return guard;
 }
+
+const newAttemptKey = () => `ans_${crypto.randomUUID()}`;
 
 // JSON keeps host and call ids apart whatever characters they contain.
 const key = (hostId: string, callId: string) => JSON.stringify([hostId, callId]);

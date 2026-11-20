@@ -104,7 +104,7 @@ describe("useDecisionInbox", () => {
 		});
 
 		await waitFor(() => expect(remote.POST).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", {
-			params: { path: { id: "dec_1" } },
+			params: { path: { id: "dec_1" }, header: { "Idempotency-Key": expect.stringMatching(/^ans_/) } },
 			body: { choice: "option", option: 2 },
 		}));
 		await waitFor(() => expect(result.current.entries).toEqual([]));
@@ -198,6 +198,39 @@ describe("shared lost-answer guard", () => {
 	});
 });
 
+describe("idempotent answer retries", () => {
+	// A proxy times out (504) while the daemon is still recording the answer; a
+	// later read shows the call waiting, so the person sends again. The resend
+	// must carry the first attempt's key so the daemon can return that answer.
+	it("resends an uncertain answer with the same Idempotency-Key", async () => {
+		connectedHostsMock.mockReturnValue([]);
+		let gatewayTimeout = true;
+		const client = {
+			GET: vi.fn().mockImplementation(() => Promise.resolve({ data: { calls: [decisionCall("dec_1", "2026-11-18T10:00:00Z")] } })),
+			POST: vi.fn().mockImplementation(() => gatewayTimeout
+				? Promise.resolve({ error: { error: "gateway_timeout", code: "GATEWAY_TIMEOUT", message: "504" }, response: { status: 504 } })
+				: Promise.resolve({ data: { ...decisionCall("dec_1", "2026-11-18T10:00:00Z"), state: "in_progress", stateLabel: "In progress" } })),
+		};
+		clients.set("local", client);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => useDecisionInbox(true), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.entries).toHaveLength(1));
+
+		act(() => result.current.answer(result.current.entries[0], 1));
+		await waitFor(() => expect(client.POST).toHaveBeenCalledTimes(1));
+		// The re-read after the failure still shows the call waiting, so the bell lets the person send again.
+		await waitFor(() => expect(result.current.held.size).toBe(0));
+		gatewayTimeout = false;
+		act(() => result.current.answer(result.current.entries[0], 1));
+		await waitFor(() => expect(client.POST).toHaveBeenCalledTimes(2));
+
+		const keyOf = (call: unknown[]) => (call[1] as { params: { header?: Record<string, string> } }).params.header?.["Idempotency-Key"];
+		const first = keyOf(client.POST.mock.calls[0]);
+		expect(first).toEqual(expect.any(String));
+		expect(keyOf(client.POST.mock.calls[1])).toBe(first);
+	});
+});
+
 describe("decision page hooks", () => {
 	it("keeps the bell's needs-you key on the shared host branch", () => {
 		expect(decisionInboxQueryKey("remote-a")).toEqual(decisionKeys.needsYou("remote-a"));
@@ -262,7 +295,7 @@ describe("decision page mutations", () => {
 
 		await act(() => result.current.answer.mutateAsync({ sourceHostId: "local", callId: "dec_1", choice: "other", note: "Vault" }));
 		expect(local.POST).toHaveBeenCalledTimes(1);
-		expect(local.POST).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", { params: { path: { id: "dec_1" } }, body: { choice: "other", note: "Vault" } });
+		expect(local.POST).toHaveBeenCalledWith("/api/v1/decisions/{id}/answer", { params: { path: { id: "dec_1" }, header: { "Idempotency-Key": expect.stringMatching(/^ans_/) } }, body: { choice: "other", note: "Vault" } });
 		await waitFor(() => expect(pathCalls(local, "/api/v1/decisions/board")).toBe(before + 1));
 	});
 

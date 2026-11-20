@@ -141,4 +141,17 @@ describe("decision answer guard", () => {
 		client.setQueryData(["decisions", "test", bell], ["dec_1", "dec_2"]);
 		expect(guard.state("local", "dec_1", bell)).toBe("unconfirmed");
 	});
+
+	// The daemon makes a repeat of the same attempt safe: one key per attempt,
+	// kept across sends whose result was not seen, replaced once one is confirmed.
+	it("reuses one idempotency key across uncertain sends and starts a new one after a confirmed answer", () => {
+		const guard = decisionAnswerGuard(new QueryClient());
+		const first = guard.begin("local", "dec_1");
+		guard.settle("local", "dec_1", false);
+		expect(guard.begin("local", "dec_1")).toBe(first);
+		guard.settle("local", "dec_1", true);
+		const next = guard.begin("local", "dec_1");
+		expect(next).not.toBe(first);
+		expect(guard.begin("local", "dec_2")).not.toBe(next);
+	});
 });

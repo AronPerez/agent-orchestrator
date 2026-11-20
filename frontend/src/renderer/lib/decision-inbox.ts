@@ -48,6 +48,8 @@ export type DecisionInboxAnswer = {
 	choice?: "option" | "other";
 	option?: number;
 	note?: string;
+	/** Sent as Idempotency-Key; reused when retrying an answer whose result was not seen. */
+	idempotencyKey?: string;
 };
 
 export async function fetchDecisionInboxCalls(hostId: HostId = LOCAL_HOST, signal?: AbortSignal): Promise<DecisionCall[]> {
@@ -61,7 +63,10 @@ export async function fetchDecisionInboxCalls(hostId: HostId = LOCAL_HOST, signa
 
 export async function answerDecisionInboxCall(input: DecisionInboxAnswer): Promise<DecisionCall> {
 	const { data, error } = await clientForSessionHost(input.sourceHostId).POST("/api/v1/decisions/{id}/answer", {
-		params: { path: { id: input.callId } },
+		params: {
+			path: { id: input.callId },
+			...(input.idempotencyKey ? { header: { "Idempotency-Key": input.idempotencyKey } } : {}),
+		},
 		body: answerBody(input),
 	});
 	if (error || !data) throw apiErrorException(error, "Could not send decision");
