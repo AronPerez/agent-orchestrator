@@ -58,4 +58,19 @@ A phone push for a call comes only from the machine where the call was raised. A
 
 ## When two machines share one identity
 
-If you copied a data directory from one machine to another, both machines write decisions under one identity. Orchestrator notices when the two histories disagree, stops syncing decisions from that identity, and says that two machines share one identity. Other machines' decisions keep syncing, and nothing already stored is changed. A repair step is not available yet; until it is, unlink the copy from your other machines.
+If you copied a data directory from one machine to another, both machines write decisions under one identity. Orchestrator notices when the two histories disagree, stops syncing decisions from that identity, and says that two machines share one identity. Other machines' decisions keep syncing, and nothing already stored is changed.
+
+To repair it, run this on the machine that should give up the identity, usually the copy:
+
+```bash
+ao decision identity repair
+```
+
+It compares this computer's history with your linked machines' to find where the two parted. At least one linked machine must have synced with the other machine. It then shows what changes and asks you to type this computer's name. Orchestrator finishes the repair when it restarts, and the command offers to restart it:
+
+- This computer gets a new identity. The other machine keeps the old one.
+- Every decision this computer wrote since the copy is written again under the new identity. Answers, order and "the later answer stands" are unchanged, and nothing already delivered is delivered again.
+- The originals leave the shared history on every machine that receives the repair. They are kept, unchanged, in an archive on each of those machines.
+- This computer's links are removed. Add them again with `ao decision link add`. Machines that link to this computer, phones paired with it and other desktops' saved entries for it must connect again.
+
+Decision sync stays off on this computer from the moment you confirm until the restart finishes. `ao decision identity status` shows where a repair stands. A machine running an older Orchestrator keeps the identity stopped until it is updated.

@@ -198,7 +198,11 @@ ao decision link add <address> --password-stdin [--label <name>]
 ao decision link ls
 ao decision link rm <machine>
 ao decision sync [<machine>]
+ao decision identity repair [--yes]
+ao decision identity status
 ```
+
+`ao decision identity repair` gives this computer a new identity when a copied data directory makes it share one with another machine. See [Sync decisions between machines](/configuration/decision-sync#when-two-machines-share-one-identity).
 
 ### `ao orchestrator ls`
 

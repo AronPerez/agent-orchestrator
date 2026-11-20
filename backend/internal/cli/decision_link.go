@@ -253,7 +253,7 @@ func peerStateText(p decisionPeerAPI) string {
 	case "incompatible":
 		return "needs a newer Orchestrator"
 	case "identity_conflict":
-		return "shares an identity with another machine"
+		return "shares an identity with another machine; run ao decision identity repair on the copy"
 	case "inbound":
 		return "syncs when it connects"
 	}
