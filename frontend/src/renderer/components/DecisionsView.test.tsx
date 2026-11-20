@@ -327,6 +327,22 @@ describe("DecisionsView", () => {
 			expect(screen.getByRole("complementary", { name: "Decision" })).toBeInTheDocument();
 		});
 
+		it("closes the panel with one Escape from inside it while another card's details are showing", async () => {
+			const selected = call({ id: "dec_1" });
+			answer(board([selected, call({ id: "dec_2" })]), { dec_1: selected });
+			renderView(<DecisionsView callId="dec_1" />);
+			const other = await screen.findByRole("button", { name: /^Question dec_2/ });
+			const close = await screen.findByRole("button", { name: "Close decision" });
+			act(() => close.focus());
+			await userEvent.hover(other);
+			expect(await screen.findByRole("tooltip")).toHaveTextContent("Question dec_2");
+			navigateMock.mockClear();
+
+			await userEvent.keyboard("{Escape}");
+			expect(navigateMock).toHaveBeenCalledTimes(1);
+			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: {} });
+		});
+
 		it("announces the Needs-you count in one polite live region", async () => {
 			answer(board([call({ id: "dec_1" }), call({ id: "dec_2" })]));
 			const { container } = renderView(<DecisionsView />);

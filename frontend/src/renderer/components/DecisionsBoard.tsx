@@ -39,14 +39,6 @@ export type DecisionsBoardProps = {
 	sync?: DecisionSyncStatus;
 	/** Which projects and streams are folded; the page owns it so its toolbar can fold everything. */
 	folds: DecisionFolds;
-	/**
-	 * Escape pressed on a card whose details are showing. The tooltip takes
-	 * that key first and marks it handled, so the page's own Escape handler
-	 * never sees it; this keeps one press closing the details and the open call
-	 * together. Not called for Escape pressed elsewhere while a card is only
-	 * hovered: that key belongs to whatever has focus, such as the search field.
-	 */
-	onEscape?: () => void;
 };
 
 // Narrow pane: the state columns alone, each project's and stream's name as a
@@ -75,7 +67,7 @@ function countsText(counts: Record<DecisionLane, number>, t: TFunction): string 
  * streams both fold to their counts. Cards are the only individually bordered
  * objects; everything else shares hairlines.
  */
-export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds, onEscape }: DecisionsBoardProps) {
+export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds }: DecisionsBoardProps) {
 	const { t } = useTranslation();
 	const hintId = useId();
 
@@ -193,7 +185,6 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds, 
 						selectedId={selectedId}
 						tabStop={tabStop}
 						onSelect={onSelect}
-						onEscape={onEscape}
 						now={now}
 					/>
 				))}
@@ -211,7 +202,6 @@ type RowShared = {
 	selectedId?: string;
 	tabStop?: string;
 	onSelect: (callId: string) => void;
-	onEscape?: () => void;
 	now: number;
 };
 
@@ -270,7 +260,7 @@ function DecisionBand({ band, ...shared }: { band: DecisionProjectBand } & RowSh
 	);
 }
 
-function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, selectedId, tabStop, onSelect, onEscape, now }: { bandKey: string; row: DecisionStreamRow } & RowShared) {
+function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, selectedId, tabStop, onSelect, now }: { bandKey: string; row: DecisionStreamRow } & RowShared) {
 	const { t } = useTranslation();
 	const name = row.projectWide
 		? t("decisions.projectWide")
@@ -303,7 +293,7 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
 					>
 						{shown.map((card) => (
 							<li key={card.id} className="min-w-0">
-								<DecisionCard card={card} selected={card.id === selectedId} tabStop={card.id === tabStop} onSelect={onSelect} onEscape={onEscape} now={now} />
+								<DecisionCard card={card} selected={card.id === selectedId} tabStop={card.id === tabStop} onSelect={onSelect} now={now} />
 							</li>
 						))}
 						{capped ? (
@@ -324,17 +314,17 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
  * A card draws the call's title alone. Who raised it and how it stands are in
  * its accessible name and in a tooltip that opens on keyboard focus as well as
  * hover, so arrowing through the board shows them; the column already gives
- * the state. What a person must not miss stays on the card: the two flags keep
+ * the state. The tooltip passes Escape on, so the key still closes the open
+ * call from a card, the panel or the search field in one press. What a person must not miss stays on the card: the two flags keep
  * their glyph, and an answer that has not reached a session says so under the
  * title.
  */
-function DecisionCard({ card, selected, tabStop, onSelect, onEscape, now }: { card: DecisionCardModel; selected: boolean; tabStop: boolean; onSelect: (callId: string) => void; onEscape?: () => void; now: number }) {
+function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: DecisionCardModel; selected: boolean; tabStop: boolean; onSelect: (callId: string) => void; now: number }) {
 	const { t, i18n } = useTranslation();
 	const sync = useContext(DecisionSyncContext);
 	const status = decisionStatusText(card.status, now, t, { sync, locale: i18n.language });
 	const secondary = decisionSecondaryText(card.secondary, t);
 	const undelivered = card.status.kind === "pending" || card.status.kind === "no_session";
-	const cardRef = useRef<HTMLButtonElement>(null);
 	const flags = [
 		...(card.outsidePolicy ? [{ Icon: ShieldAlert, label: t("decisions.outsidePolicyShort") }] : []),
 		...(card.changedAfterClose ? [{ Icon: TriangleAlert, label: t("decisions.changedAfterClose") }] : []),
@@ -343,7 +333,6 @@ function DecisionCard({ card, selected, tabStop, onSelect, onEscape, now }: { ca
 		<Tooltip>
 		<TooltipTrigger asChild>
 		<Pressable
-			ref={cardRef}
 			aria-current={selected ? "true" : undefined}
 			data-decision-card={card.id}
 			tabIndex={tabStop ? 0 : -1}
@@ -365,12 +354,7 @@ function DecisionCard({ card, selected, tabStop, onSelect, onEscape, now }: { ca
 			{status && undelivered ? <>{" "}<span className="line-clamp-2 w-full text-caption leading-4 text-muted-foreground">{status}</span></> : null}
 		</Pressable>
 		</TooltipTrigger>
-		<TooltipContent side="bottom" align="start" hideArrow className="flex max-w-xs flex-col gap-0.5"
-			// Radix hears Escape for the whole document while the details show, hover included.
-			onEscapeKeyDown={(event) => {
-				if (event.target instanceof Node && cardRef.current?.contains(event.target)) onEscape?.();
-			}}
-		>
+		<TooltipContent side="bottom" align="start" hideArrow className="flex max-w-xs flex-col gap-0.5" passEscape>
 			<span className="font-medium">{card.title}</span>
 			{secondary ? <span className="text-muted-foreground">{secondary}</span> : null}
 			{status ? <span className={card.lane === "needs_you" ? "text-status-needs-you" : "text-muted-foreground"}>{status}</span> : null}
