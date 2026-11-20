@@ -7829,6 +7829,7 @@ export interface components {
             history: components["schemas"]["DecisionEntryResponse"][];
         };
         DecisionEntryResponse: {
+            answerKeyDigest?: string;
             /** @enum {string} */
             authorKind: "person" | "session" | "system";
             authorSession?: string;

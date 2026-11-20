@@ -123,7 +123,7 @@ export class DecisionAnswerGuard {
 		for (const [callId, entry] of this.entries) {
 			if (entry.sending > 0 || entry.failedAt === undefined || startedAt <= entry.failedAt) continue;
 			if (scope.callId !== undefined && scope.callId !== callId) continue;
-			if (entry.keyDigest !== undefined && answerKeyDigestIn(scope, callId, data) === entry.keyDigest) entry.recorded = true;
+			if (entry.keyDigest !== undefined && recordedIn(scope, callId, data, entry.keyDigest)) entry.recorded = true;
 			const stillWaiting = waitingIn(scope, callId, data);
 			entry.observed.set(view, stillWaiting);
 			if (scope.hostId === entry.source) entry.sourceWaiting = stillWaiting;
@@ -166,12 +166,21 @@ function viewScope(view: string): { hostId: string; callId?: string } | undefine
 	return undefined;
 }
 
-/** The idempotency-key digest of the call's standing answer, as the view's data shows it. */
-function answerKeyDigestIn(scope: { callId?: string }, callId: string, data: unknown): unknown {
+/**
+ * Whether the view's data shows an answer recorded with this key digest: the
+ * standing answer, or (in a call's detail) any answered entry in its history,
+ * since another answer may have replaced the attempt after it was recorded.
+ */
+function recordedIn(scope: { callId?: string }, callId: string, data: unknown, digest: string): boolean {
 	const call = scope.callId === undefined
 		? (Array.isArray(data) ? data.find((item) => (item as { id?: unknown } | null)?.id === callId) : undefined)
 		: (data as { call?: unknown } | null | undefined)?.call;
-	return (call as { answerKeyDigest?: unknown } | undefined)?.answerKeyDigest;
+	if ((call as { answerKeyDigest?: unknown } | undefined)?.answerKeyDigest === digest) return true;
+	const history = scope.callId === undefined ? undefined : (data as { history?: unknown } | null | undefined)?.history;
+	return Array.isArray(history) && history.some((entry) => {
+		const answered = entry as { kind?: unknown; answerKeyDigest?: unknown } | null;
+		return answered?.kind === "answered" && answered.answerKeyDigest === digest;
+	});
 }
 
 /** SHA-256 (hex) of an attempt key: what the daemon stores and reports in its place. */

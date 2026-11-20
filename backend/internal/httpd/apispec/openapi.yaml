@@ -22756,6 +22756,8 @@ components:
       type: object
     DecisionEntryResponse:
       properties:
+        answerKeyDigest:
+          type: string
         authorKind:
           enum:
           - person

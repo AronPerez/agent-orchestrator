@@ -488,6 +488,7 @@ func decisionEntryResponse(entry domain.DecisionEntry) DecisionEntryResponse {
 		var payload domain.DecisionAnsweredPayload
 		if json.Unmarshal(entry.Payload, &payload) == nil {
 			response.Choice, response.Option, response.Note = payload.Choice, payload.Option, payload.Note
+			response.AnswerKeyDigest = payload.KeyDigest()
 		}
 	case domain.DecisionKindDecided:
 		var payload domain.DecisionDecidedPayload

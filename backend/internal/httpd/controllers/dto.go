@@ -287,6 +287,10 @@ type DecisionEntryResponse struct {
 	SessionName   string    `json:"sessionName,omitempty"`
 	Fallback      bool      `json:"fallback,omitempty"`
 	Retired       *bool     `json:"retired,omitempty"`
+	// AnswerKeyDigest is the SHA-256 (hex) of the Idempotency-Key an answered
+	// entry was sent with, so a client can tell its uncertain attempt was
+	// recorded even after a later answer replaced it.
+	AnswerKeyDigest string `json:"answerKeyDigest,omitempty"`
 }
 
 // DecisionDetailResponse combines a call projection with its immutable log.

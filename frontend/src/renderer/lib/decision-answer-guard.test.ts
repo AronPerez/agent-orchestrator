@@ -205,4 +205,37 @@ describe("decision answer guard", () => {
 		await read(client, guard, panel, { call: { id: "dec_1", state: "in_progress" }, history: [] });
 		expect(guard.begin("local", "dec_1")).toBe(change);
 	});
+
+	// A's response is lost, then another device records B before this view
+	// refreshes. A is no longer the standing answer, but it was recorded: a
+	// change to C must not reuse A's key, or the daemon would return A instead.
+	it("starts a new key when the history shows this attempt was recorded and then replaced", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		const attemptA = guard.begin("local", "dec_1");
+		guard.attemptDigest("dec_1", attemptA, "digest-a");
+		guard.settle("dec_1", false);
+		await read(client, guard, panel, {
+			call: { id: "dec_1", state: "in_progress", answerKeyDigest: "digest-b" },
+			history: [
+				{ id: "dent_a", kind: "answered", answerKeyDigest: "digest-a" },
+				{ id: "dent_b", kind: "answered", answerKeyDigest: "digest-b" },
+			],
+		});
+		expect(guard.state("dec_1", panel)).toBeUndefined();
+		expect(guard.begin("local", "dec_1")).not.toBe(attemptA);
+	});
+
+	it("keeps the key when the history does not include this attempt", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		const attemptA = guard.begin("local", "dec_1");
+		guard.attemptDigest("dec_1", attemptA, "digest-a");
+		guard.settle("dec_1", false);
+		await read(client, guard, panel, {
+			call: { id: "dec_1", state: "in_progress", answerKeyDigest: "digest-b" },
+			history: [{ id: "dent_b", kind: "answered", answerKeyDigest: "digest-b" }],
+		});
+		expect(guard.begin("local", "dec_1")).toBe(attemptA);
+	});
 });
