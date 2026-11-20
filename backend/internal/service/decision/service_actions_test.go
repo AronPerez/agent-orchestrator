@@ -565,3 +565,46 @@ func TestAnswerRetryAfterADelayedCommitReturnsTheOriginal(t *testing.T) {
 		t.Fatalf("answered entries = %d, want 1 (the retry must not append)", n)
 	}
 }
+
+// The key is client-supplied: whatever it holds (even credential-shaped text)
+// must never be stored or synced. Only its digest is kept, and the call shows
+// the digest of its standing answer so a client can tell whether its own
+// uncertain attempt is the one recorded.
+func TestAnswerKeepsOnlyADigestOfTheIdempotencyKey(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	call := raiseDecision(t, fixture, fixture.w1)
+	person := Actor{Surface: domain.RequestSurfaceDesktop}
+	secret := "ghp_" + strings.Repeat("A1b2C3", 6)
+
+	answered, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 2, IdempotencyKey: secret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := domain.DecisionIdempotencyKeyDigest(secret)
+	if answered.AnswerKeyDigest != digest || len(digest) != 64 || strings.Contains(digest, secret) {
+		t.Fatalf("answer key digest = %q, want sha256 hex %q", answered.AnswerKeyDigest, digest)
+	}
+	entries, err := fixture.store.ListDecisionEntries(ctx, call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(string(entry.Payload), secret) {
+			t.Fatalf("raw key stored in %s entry: %s", entry.Kind, entry.Payload)
+		}
+	}
+	stored, _, err := fixture.store.GetDecisionCall(ctx, call.ID)
+	if err != nil || stored.AnswerKeyDigest != digest {
+		t.Fatalf("stored call digest = %q err=%v", stored.AnswerKeyDigest, err)
+	}
+
+	// A later answer without a key is not that attempt.
+	changed, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.AnswerKeyDigest != "" {
+		t.Fatalf("keyless answer kept digest %q", changed.AnswerKeyDigest)
+	}
+}

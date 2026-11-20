@@ -55,18 +55,22 @@ const (
 
 // DecisionCall is the read model reduced from a call's immutable entries.
 type DecisionCall struct {
-	ID                string                `json:"id"`
-	Origin            string                `json:"origin"`
-	Raised            DecisionRaisedPayload `json:"raised"`
-	RaisedAt          time.Time             `json:"raisedAt"`
-	State             DecisionCallState     `json:"state"`
-	StandingEntryID   string                `json:"standingEntryId,omitempty"`
-	StandingKind      DecisionEntryKind     `json:"standingKind,omitempty"`
-	Choice            string                `json:"choice,omitempty"`
-	Option            int                   `json:"option,omitempty"`
-	Note              string                `json:"note,omitempty"`
-	AnsweredAt        time.Time             `json:"answeredAt"`
-	AnswerSurface     RequestSurface        `json:"answerSurface,omitempty"`
+	ID              string                `json:"id"`
+	Origin          string                `json:"origin"`
+	Raised          DecisionRaisedPayload `json:"raised"`
+	RaisedAt        time.Time             `json:"raisedAt"`
+	State           DecisionCallState     `json:"state"`
+	StandingEntryID string                `json:"standingEntryId,omitempty"`
+	StandingKind    DecisionEntryKind     `json:"standingKind,omitempty"`
+	Choice          string                `json:"choice,omitempty"`
+	Option          int                   `json:"option,omitempty"`
+	Note            string                `json:"note,omitempty"`
+	AnsweredAt      time.Time             `json:"answeredAt"`
+	AnswerSurface   RequestSurface        `json:"answerSurface,omitempty"`
+	// AnswerKeyDigest is the idempotency-key digest of the standing answer, if
+	// it was sent with one: a client can tell whether its uncertain attempt is
+	// the one recorded.
+	AnswerKeyDigest   string                `json:"answerKeyDigest,omitempty"`
 	Outcome           string                `json:"outcome,omitempty"`
 	OutcomeLink       string                `json:"outcomeLink,omitempty"`
 	OutcomeAt         time.Time             `json:"outcomeAt"`
@@ -172,6 +176,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Note = payload.Note
 			call.AnsweredAt = entry.WrittenAt
 			call.AnswerSurface = entry.AuthorSurface
+			call.AnswerKeyDigest = ""
 		case DecisionKindCarriedOut:
 			var payload DecisionCarriedOutPayload
 			if call.Decided == nil || json.Unmarshal(entry.Payload, &payload) != nil || current(payload.ForEntry) != call.Decided.EntryID {
@@ -204,6 +209,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Note = payload.Note
 			call.AnsweredAt = entry.WrittenAt
 			call.AnswerSurface = entry.AuthorSurface
+			call.AnswerKeyDigest = payload.IdempotencyKeyDigest
 		case DecisionKindDismissed:
 			var payload DecisionDismissedPayload
 			if json.Unmarshal(entry.Payload, &payload) != nil {
@@ -218,6 +224,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.Note = payload.Note
 			call.AnsweredAt = time.Time{}
 			call.AnswerSurface = ""
+			call.AnswerKeyDigest = ""
 		case DecisionKindDelivered:
 			var payload DecisionDeliveredPayload
 			if json.Unmarshal(entry.Payload, &payload) != nil {

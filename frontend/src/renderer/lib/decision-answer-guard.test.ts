@@ -174,17 +174,35 @@ describe("decision answer guard", () => {
 		const client = new QueryClient();
 		const guard = decisionAnswerGuard(client);
 		const lost = guard.begin("local", "dec_1");
+		guard.attemptDigest("dec_1", lost, "digest-lost");
 		guard.settle("dec_1", false);
 		await read(client, guard, panel, detail("needs_you"));
 		expect(guard.begin("local", "dec_1")).toBe(lost);
 	});
 
-	it("starts a new key once the source shows the lost answer was recorded", async () => {
+	it("starts a new key once a read shows this attempt is the answer recorded", async () => {
 		const client = new QueryClient();
 		const guard = decisionAnswerGuard(client);
 		const lost = guard.begin("local", "dec_1");
+		guard.attemptDigest("dec_1", lost, "digest-lost");
 		guard.settle("dec_1", false);
-		await read(client, guard, panel, detail("in_progress"));
+		await read(client, guard, panel, { call: { id: "dec_1", state: "in_progress", answerKeyDigest: "digest-lost" }, history: [] });
 		expect(guard.begin("local", "dec_1")).not.toBe(lost);
+	});
+
+	// Changing an existing answer leaves the call in progress either way, so the
+	// state says nothing about whether the change landed: only the digest does.
+	it("keeps the key for a delayed change to an existing answer while the earlier answer still stands", async () => {
+		const client = new QueryClient();
+		const guard = decisionAnswerGuard(client);
+		const change = guard.begin("local", "dec_1");
+		guard.attemptDigest("dec_1", change, "digest-change");
+		guard.settle("dec_1", false);
+		await read(client, guard, panel, { call: { id: "dec_1", state: "in_progress", answerKeyDigest: "digest-earlier" }, history: [] });
+		expect(guard.begin("local", "dec_1")).toBe(change);
+		guard.settle("dec_1", false);
+		// A dismissed call answered again is the same: no digest, not this attempt.
+		await read(client, guard, panel, { call: { id: "dec_1", state: "in_progress" }, history: [] });
+		expect(guard.begin("local", "dec_1")).toBe(change);
 	});
 });

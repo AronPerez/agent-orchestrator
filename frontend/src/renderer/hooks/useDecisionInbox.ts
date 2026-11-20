@@ -20,6 +20,7 @@ import {
 	type DecisionInboxEntry,
 } from "../lib/decision-inbox";
 import {
+	attemptKeyDigest,
 	decisionAnswerGuard,
 	DecisionAnswerHeldError,
 	decisionViewMeta,
@@ -53,6 +54,7 @@ export function useDecisionAnswer() {
 			if (hold) throw new DecisionAnswerHeldError(hold);
 			const idempotencyKey = guard.begin(input.sourceHostId, input.callId);
 			try {
+				guard.attemptDigest(input.callId, idempotencyKey, await attemptKeyDigest(idempotencyKey));
 				const confirmed = await answerDecisionInboxCall({ ...input, idempotencyKey });
 				guard.settle(input.callId, true);
 				return confirmed;

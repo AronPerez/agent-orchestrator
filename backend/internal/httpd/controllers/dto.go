@@ -136,6 +136,7 @@ type DecisionCallResponse struct {
 	AnsweredAt        *time.Time              `json:"answeredAt,omitempty"`
 	AnswerSurface     string                  `json:"answerSurface,omitempty"`
 	StandingEntryID   string                  `json:"standingEntryId,omitempty"`
+	AnswerKeyDigest   string                  `json:"answerKeyDigest,omitempty" description:"SHA-256 (hex) of the Idempotency-Key the standing answer was sent with, so a client can tell whether its own uncertain attempt is the one recorded."`
 	Outcome           string                  `json:"outcome,omitempty"`
 	OutcomeLink       string                  `json:"outcomeLink,omitempty"`
 	OutcomeAt         *time.Time              `json:"outcomeAt,omitempty"`
