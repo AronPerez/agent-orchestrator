@@ -14,6 +14,7 @@ import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { SettingsRow } from "./SettingsRow";
 import { SettingsSection } from "./SettingsSection";
+import { DecisionSyncRow, useDecisionPeers } from "./DecisionSyncRow";
 
 type SavedHost = { hostId: string; label: string; url: string };
 
@@ -37,6 +38,7 @@ export function RemoteHostsSettings({ titleHidden }: { titleHidden?: boolean }) 
 	const [removeBusy, setRemoveBusy] = useState(false);
 	const [removeError, setRemoveError] = useState("");
 	const formRef = useRef<HTMLFormElement>(null);
+	const decisionPeers = useDecisionPeers();
 	const loadGeneration = useRef(0);
 
 	const load = async () => {
@@ -109,8 +111,10 @@ export function RemoteHostsSettings({ titleHidden }: { titleHidden?: boolean }) 
 		setRemoveBusy(true);
 		setRemoveError("");
 		try {
-			if (status === "authenticated" && confirmingRemoval.hostId && cloudBaseUrl) await deleteAccountRemoteHost(cloudBaseUrl, confirmingRemoval.hostId);
+			// Removing it here first stops its decision sync, or refuses and keeps
+			// everything; only then does the account directory forget it.
 			await aoBridge.remotes.remove(confirmingRemoval.url);
+			if (status === "authenticated" && confirmingRemoval.hostId && cloudBaseUrl) await deleteAccountRemoteHost(cloudBaseUrl, confirmingRemoval.hostId);
 			if (confirmingRemoval.hostId) await disconnectHost(confirmingRemoval.hostId);
 			await load();
 			setConfirmingRemoval(null);
@@ -151,6 +155,7 @@ export function RemoteHostsSettings({ titleHidden }: { titleHidden?: boolean }) 
 					</div>
 				</SettingsRow>
 				{!host.hostId ? <p className="px-3 py-1 text-xs text-settings-muted">{t("remote.repairRequired")}</p> : null}
+				<DecisionSyncRow host={host} peers={decisionPeers.peers} onChanged={decisionPeers.reload} />
 			</div>)}
 			{loadError ? <div className="flex items-center gap-2 px-3 py-2 text-xs text-error" role="alert">{loadError}<Button onClick={() => void load()} size="sm" type="button" variant="outline">{t("notify.retry")}</Button></div> : null}
 		</SettingsSection>

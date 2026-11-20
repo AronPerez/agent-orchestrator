@@ -210,3 +210,44 @@ func (h DecisionHeads) Stopped() []string {
 	}
 	return out
 }
+
+// DecisionSyncDirection says which side configured a sync link.
+type DecisionSyncDirection string
+
+// DecisionSyncOutbound is a link this machine initiates; DecisionSyncInbound a
+// peer that initiates exchanges with this machine and is not linked from here.
+const (
+	DecisionSyncOutbound DecisionSyncDirection = "outbound"
+	DecisionSyncInbound  DecisionSyncDirection = "inbound"
+)
+
+// DecisionSyncPeer is the operational status of one machine this one syncs
+// with. It holds no secrets; bearer tokens live outside the database.
+type DecisionSyncPeer struct {
+	HostID        string
+	Label         string
+	URL           string
+	Direction     DecisionSyncDirection
+	DeviceID      string
+	CreatedAt     time.Time
+	LastAttemptAt time.Time
+	LastSuccessAt time.Time
+	// LastErrorCode is empty after a successful exchange.
+	LastErrorCode string
+	InSync        bool
+	PeerVector    DecisionVector
+	ClockAheadMS  int64
+	PeerProtocol  int
+}
+
+// DecisionSyncAttempt is the result of one exchange with a peer, as recorded
+// in its status row. An empty ErrorCode is a success.
+type DecisionSyncAttempt struct {
+	At           time.Time
+	ErrorCode    string
+	InSync       bool
+	PeerLabel    string
+	PeerVector   DecisionVector
+	ClockAheadMS int64
+	PeerProtocol int
+}

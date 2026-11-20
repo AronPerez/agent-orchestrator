@@ -24,7 +24,8 @@ export type DecisionCardSecondary =
 export type DecisionCardStatus =
 	| { kind: "waiting"; since: string }
 	| { kind: "sent"; to: string; fallback: boolean }
-	| { kind: "pending" }
+	/** originHostId is set when another machine owns the call and must deliver it. */
+	| { kind: "pending"; originHostId?: string }
 	| { kind: "no_session" }
 	| { kind: "outcome"; text: string }
 	| { kind: "decided"; carriedOut: boolean; carriedOutAt?: string };
@@ -132,7 +133,7 @@ function secondaryOf(call: DecisionCall, lane: DecisionLane): DecisionCardSecond
 	return { kind: "choice", label: call.chosenLabel ?? "" };
 }
 
-function statusOf(call: DecisionCall, lane: DecisionLane): DecisionCardStatus {
+function statusOf(call: DecisionCall, lane: DecisionLane, servingHostId?: string): DecisionCardStatus {
 	if (lane === "needs_you") return { kind: "waiting", since: call.raisedAt };
 	if (lane === "decided") {
 		return { kind: "decided", carriedOut: Boolean(call.decided?.carriedOut), carriedOutAt: call.decided?.carriedOutAt ?? undefined };
@@ -142,6 +143,7 @@ function statusOf(call: DecisionCall, lane: DecisionLane): DecisionCardStatus {
 		return { kind: "sent", to: call.deliveredToName || call.deliveredTo || "", fallback: Boolean(call.deliveredFallback) };
 	}
 	if (call.delivery === "no_session") return { kind: "no_session" };
+	if (servingHostId && call.hostId && call.hostId !== servingHostId) return { kind: "pending", originHostId: call.hostId };
 	return { kind: "pending" };
 }
 
@@ -168,7 +170,7 @@ const compareNames = (a: string | undefined, b: string | undefined, aKey: string
  * each call recorded. The same project on several machines shares a band; a
  * stream is keyed by its origin machine as well as its manager session id.
  */
-export function buildDecisionBoard(calls: readonly DecisionCall[]): DecisionBoardModel {
+export function buildDecisionBoard(calls: readonly DecisionCall[], servingHostId?: string): DecisionBoardModel {
 	const bands = new Map<string, BandDraft>();
 	const totals = emptyCounts();
 
@@ -215,7 +217,7 @@ export function buildDecisionBoard(calls: readonly DecisionCall[]): DecisionBoar
 			lane,
 			title: call.title,
 			secondary: secondaryOf(call, lane),
-			status: statusOf(call, lane),
+			status: statusOf(call, lane, servingHostId),
 			changedAfterClose: Boolean(call.changedAfterClose),
 			outsidePolicy: call.decided?.outsidePolicy || undefined,
 			call,

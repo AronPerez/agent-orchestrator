@@ -70,8 +70,9 @@ class Ledger {
 	}
 }
 
-async function openDecisions(page: Page, ledger: Ledger, path = "/#/decisions") {
+async function openDecisions(page: Page, ledger: Ledger, path = "/#/decisions", setup?: (page: Page) => Promise<void>) {
 	await installFakeAgent(page, { projectId: "shop", projectName: "Shop", workers: [] });
+	await setup?.(page);
 	await page.route("http://127.0.0.1:8080/api/v1/decisions**", async (route) => {
 		const url = new URL(route.request().url());
 		const method = route.request().method();
@@ -247,4 +248,36 @@ test("decisions: a decision made for the person has its own lane and can be over
 	await expect(panel.getByRole("list", { name: "History" }).getByText(/Overruled/)).toBeVisible();
 	await expect(panel.getByRole("button", { name: "Record outcome" })).toBeVisible();
 	await expect(panel.getByRole("button", { name: "Send decision" })).toHaveCount(0);
+});
+
+test("decisions: a call another machine owns says where it waits, and the footer tells sync freshness", async ({ page }) => {
+	const remote = call("dec_far", "Cache for the laptop build?", {
+		hostId: "h_laptop", machineLabel: "laptop", state: "in_progress", stateLabel: "In progress",
+		chosenLabel: "Ship it", delivery: "pending", answeredAt: iso(hour),
+	});
+	const ledger = new Ledger([remote]);
+	const laptop = { hostId: "h_laptop", label: "laptop", direction: "outbound" as const, state: "linked_in_sync" as const, inSync: true, clockAheadMs: 0, lastSuccessAt: iso(30_000) };
+	let status: components["schemas"]["DecisionSyncStatusResponse"] = {
+		hostId: HOST, machineLabel: "mac-mini", conflicts: [],
+		peers: [laptop], origins: [{ hostId: "h_laptop", machineLabel: "laptop", lastHeardAt: iso(30_000) }],
+	};
+	await openDecisions(page, ledger, "/#/decisions", async (p) => {
+		await p.route("http://127.0.0.1:8080/api/v1/decision-sync/status", (route) => route.fulfill({ json: status }));
+	});
+
+	const card = page.getByRole("button", { name: /^Cache for the laptop build/ });
+	await expect(card).toContainText("Not delivered yet · waiting for laptop");
+	const footer = page.getByTestId("decision-sync-footer");
+	await expect(footer).toHaveText("In sync with laptop");
+
+	// The laptop goes quiet, then stops accepting this computer.
+	status = { ...status, peers: [{ ...laptop, state: "revoked" }], origins: [{ hostId: "h_laptop", machineLabel: "laptop", lastHeardAt: iso(3 * hour) }] };
+	await page.evaluate(() => (window as unknown as { __aoFakeAgent: FakeAgentController }).__aoFakeAgent.emitCdc("decision_sync_updated", { hostId: "h_laptop" }));
+	await expect(footer).toHaveText("laptop no longer accepts this computer. Turn Sync decisions off and on again.");
+	await expect(card).toContainText("Not delivered yet · laptop last heard 3 hours ago");
+
+	// The laptop's delivery arrives by sync.
+	Object.assign(remote, { delivery: "sent", deliveredToName: "worker far" });
+	await emitDecision(page, "dec_far");
+	await expect(card).toContainText("Sent to worker far");
 });

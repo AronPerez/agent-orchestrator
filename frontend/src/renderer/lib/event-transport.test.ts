@@ -1367,6 +1367,28 @@ describe("decision events", () => {
 		}
 	});
 
+	it("refreshes only the sync status for decision_sync_updated", () => {
+		vi.useFakeTimers();
+		try {
+			const client = fakeQueryClient();
+			const disconnect = createEventTransport(client).connect();
+			expect(cdcSources()[0].listeners).toContain("decision_sync_updated");
+			vi.advanceTimersByTime(1_000);
+			vi.mocked(client.invalidateQueries).mockClear();
+			cdcSources()[0].emit("decision_sync_updated", JSON.stringify({
+				seq: 10, projectId: "", type: "decision_sync_updated", payload: { hostId: "h_mini" }, createdAt: "2026-11-19T10:00:00Z",
+			}));
+			vi.advanceTimersByTime(1_000);
+			const keys = invalidated(client);
+			expect(keys).toContainEqual(["decision-inbox", "local", "sync"]);
+			expect(keys).not.toContainEqual(["decision-inbox", "local"]);
+			expect(keys).not.toContainEqual(["workspaces"]);
+			disconnect();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("refreshes this computer's decision views when the stream reopens", () => {
 		vi.useFakeTimers();
 		try {

@@ -86,15 +86,22 @@ export function groupNotifications(items: HostedNotification[]): NotificationGro
 	});
 }
 
-/** Decision alert metadata keyed by call id, for joining onto the call cards. */
-export function decisionAlertStateByCall(groups: NotificationGroup[]): Map<string, DecisionAlertState> {
+/** Decision alert metadata keyed by call id, for joining onto the call cards. localStates is this computer's own state of calls it was asked about. */
+export function decisionAlertStateByCall(
+	groups: NotificationGroup[],
+	localStates: ReadonlyMap<string, string> = new Map(),
+): Map<string, DecisionAlertState> {
 	const states = new Map<string, DecisionAlertState>();
 	for (const group of groups) {
 		const callId = decisionCallIdOf(group.primary.notification);
 		if (!callId) continue;
+		// This computer's ledger wins: once it knows the call left Needs you, a
+		// connected host's row that has not caught up does not keep it open.
+		const local = localStates.get(callId);
+		const closedHere = local !== undefined && local !== "needs_you";
 		states.set(callId, {
-			unread: group.sources.some(({ notification }) => notification.status === "unread"),
-			resolved: group.sources.every(({ notification }) => Boolean(notification.resolvedAt)),
+			unread: !closedHere && group.sources.some(({ notification }) => notification.status === "unread"),
+			resolved: closedHere || group.sources.every(({ notification }) => Boolean(notification.resolvedAt)),
 			sources: group.sources.map(({ hostId, notification }) => ({ hostId, id: notification.id })),
 		});
 	}

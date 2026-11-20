@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { ChevronRight, ShieldAlert, TriangleAlert } from "@/components/app-icons";
@@ -15,9 +15,14 @@ import {
 	type DecisionStreamRow,
 } from "../lib/decision-board";
 import { decisionSecondaryText, decisionStatusText } from "../lib/decision-card-text";
+import type { DecisionSyncStatus } from "../lib/decision-sync";
 import { cn } from "../lib/utils";
 import { DecisionStateDot, decisionStateLabel } from "./DecisionStateLabel";
 import { Pressable } from "./ui/pressable";
+
+
+/** Sync freshness for the cards of calls another machine must still deliver. */
+const DecisionSyncContext = createContext<DecisionSyncStatus | undefined>(undefined);
 
 export type DecisionsBoardProps = {
 	model: DecisionBoardModel;
@@ -26,6 +31,8 @@ export type DecisionsBoardProps = {
 	onSelect: (callId: string) => void;
 	/** Clock for "Waiting 3h"; the view passes a minute-resolution value. */
 	now: number;
+	/** Sync freshness, for calls another machine must still deliver. */
+	sync?: DecisionSyncStatus;
 };
 
 // Narrow pane: three lane columns, each stream's name as a header row above
@@ -46,7 +53,7 @@ function laneLabel(lane: DecisionLane, t: TFunction) {
  * states, whose bands are projects and whose rows are work streams. Cards are
  * the only individually bordered objects; everything else shares hairlines.
  */
-export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBoardProps) {
+export function DecisionsBoard({ model, selectedId, onSelect, now, sync }: DecisionsBoardProps) {
 	const { t } = useTranslation();
 	const hintId = useId();
 	const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
@@ -112,6 +119,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 	};
 
 	return (
+		<DecisionSyncContext.Provider value={sync}>
 		<div className="@container min-w-0">
 			<p id={hintId} className="sr-only">{t("decisions.keyboardHint")}</p>
 			<div
@@ -163,6 +171,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now }: DecisionsBo
 				))}
 			</div>
 		</div>
+		</DecisionSyncContext.Provider>
 	);
 }
 
@@ -253,8 +262,9 @@ function DecisionRow({ row, lanes, selectedId, tabStop, onSelect, now }: { row: 
 }
 
 function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: DecisionCardModel; selected: boolean; tabStop: boolean; onSelect: (callId: string) => void; now: number }) {
-	const { t } = useTranslation();
-	const status = decisionStatusText(card.status, now, t);
+	const { t, i18n } = useTranslation();
+	const sync = useContext(DecisionSyncContext);
+	const status = decisionStatusText(card.status, now, t, { sync, locale: i18n.language });
 	const secondary = decisionSecondaryText(card.secondary, t);
 	return (
 		<Pressable

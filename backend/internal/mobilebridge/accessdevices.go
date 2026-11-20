@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -60,6 +61,10 @@ const (
 // agents run with the user's OS authority, this is not an authority sandbox.
 const DeviceScopeAgentCoordination = "agent-coordination"
 
+// DeviceScopeDecisionSync limits a peer machine to the two decision ledger
+// sync routes. It is minted by this host for one peer host id (ClientID).
+const DeviceScopeDecisionSync = "decision-sync"
+
 // maxAccessDevices bounds the device and capability tokens a full credential can mint.
 const maxAccessDevices = 64
 
@@ -85,8 +90,17 @@ func AccessDevicesPath(dataDir string) string {
 
 // AccessDevices is the registry of device tokens the remote listener accepts.
 type AccessDevices struct {
-	mu   sync.RWMutex
-	path string
+	// live holds one barrier per device: WhileLive holds a device's barrier
+	// for reading around one bounded write, and removing that device holds
+	// it for writing, so a removal returns only after every write that
+	// device had admitted. Other devices and new pairings never wait on it.
+	// Barriers are taken before mu; liveMu guards only the map. A barrier is
+	// never deleted: a write may still hold or wait on it, and a removal
+	// must always find that same barrier.
+	liveMu sync.Mutex
+	live   map[string]*sync.RWMutex
+	mu     sync.RWMutex
+	path   string
 	// writeErr refuses every write when a damaged file could not be moved aside.
 	writeErr error
 	devices  map[string]AccessDevice
@@ -190,6 +204,10 @@ func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, 
 		CreatedAt:  now.UTC(),
 		LastSeenAt: now.UTC(),
 	}
+	// Reissuing for a client replaces, and so removes, its earlier device.
+	if clientID != "" {
+		defer r.holdRemoval(r.deviceIDsWhere(func(d AccessDevice) bool { return d.ClientID == clientID }))()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	replaced := make([]AccessDevice, 0, 1)
@@ -262,6 +280,79 @@ func (r *AccessDevices) Match(token string) (AccessDevice, bool) {
 	return cloneAccessDevice(device), true
 }
 
+// WhileLive runs fn only while device id exists, and keeps the device from
+// being removed until fn returns. It reports false, without calling fn, for
+// a device that is gone. fn must be a short local write: never a network
+// read or a wait, since every removal waits for it.
+func (r *AccessDevices) WhileLive(id string, fn func() error) (bool, error) {
+	if r == nil {
+		return false, nil
+	}
+	barrier := r.barrier(id)
+	barrier.RLock()
+	defer barrier.RUnlock()
+	if !r.Has(id) {
+		return false, nil
+	}
+	return true, fn()
+}
+
+func (r *AccessDevices) barrier(id string) *sync.RWMutex {
+	r.liveMu.Lock()
+	defer r.liveMu.Unlock()
+	if r.live == nil {
+		r.live = map[string]*sync.RWMutex{}
+	}
+	b := r.live[id]
+	if b == nil {
+		b = &sync.RWMutex{}
+		r.live[id] = b
+	}
+	return b
+}
+
+// holdRemoval waits for the admitted writes of every device in ids and keeps
+// new ones out until the returned release runs. Call it before taking mu.
+func (r *AccessDevices) holdRemoval(ids []string) func() {
+	ids = slices.Clone(ids)
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	held := make([]*sync.RWMutex, len(ids))
+	for i, id := range ids {
+		held[i] = r.barrier(id)
+		held[i].Lock()
+	}
+	return func() {
+		for _, b := range held {
+			b.Unlock()
+		}
+	}
+}
+
+// deviceIDsWhere lists the devices that match.
+func (r *AccessDevices) deviceIDsWhere(match func(AccessDevice) bool) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var ids []string
+	for id, d := range r.devices {
+		if match(d) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// Has reports whether a device with id is still registered (not revoked).
+func (r *AccessDevices) Has(id string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.devices[id]
+	return ok
+}
+
 // Touch updates the device's last-seen time.
 func (r *AccessDevices) Touch(id string, now time.Time) {
 	r.mu.RLock()
@@ -322,6 +413,7 @@ func (r *AccessDevices) LinkInstall(id, installID string) error {
 
 // Revoke removes a device and reports whether it existed.
 func (r *AccessDevices) Revoke(id string) (AccessDevice, bool, error) {
+	defer r.holdRemoval([]string{id})()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	device, ok := r.devices[id]
@@ -345,6 +437,7 @@ func (r *AccessDevices) RevokeIssuedBy(issuer string) ([]AccessDevice, error) {
 	if issuer == "" {
 		return nil, nil
 	}
+	defer r.holdRemoval(r.deviceIDsWhere(func(d AccessDevice) bool { return d.Issuer == issuer }))()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	revoked := make([]AccessDevice, 0)
@@ -380,6 +473,7 @@ func (r *AccessDevices) RevokeIssuedBy(issuer string) ([]AccessDevice, error) {
 
 // RevokeAll removes every device.
 func (r *AccessDevices) RevokeAll() error {
+	defer r.holdRemoval(r.deviceIDsWhere(func(AccessDevice) bool { return true }))()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.devices) == 0 {

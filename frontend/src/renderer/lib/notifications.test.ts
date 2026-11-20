@@ -966,6 +966,14 @@ describe("decision alert grouping", () => {
 		expect(settled).toMatchObject({ unread: false, resolved: true });
 	});
 
+	it("is resolved once this computer's ledger says the call left Needs you", () => {
+		const groups = groupNotifications([
+			{ hostId: "h_remote", notification: decision("r1", { status: "unread" }) },
+		]);
+		expect(decisionAlertStateByCall(groups, new Map([["dec_1", "in_progress"]])).get("dec_1")).toMatchObject({ unread: false, resolved: true });
+		expect(decisionAlertStateByCall(groups, new Map([["dec_1", "needs_you"]])).get("dec_1")).toMatchObject({ unread: true, resolved: false });
+	});
+
 	it("never manufactures alert state for a malformed decision row", () => {
 		const state = decisionAlertStateByCall(groupNotifications([
 			{ hostId: "local", notification: decision("x", { target: { kind: "session", sessionId: "" } }) },
