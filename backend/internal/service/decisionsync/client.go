@@ -239,12 +239,10 @@ func (r *httpRemote) OriginIDs(ctx context.Context, req OriginIDsRequest) (Origi
 		return OriginIDsResponse{}, err
 	}
 	var out WireOriginIDsResponse
-	if err := r.client.post(ctx, requestTimeout, r.peer.URL+"/api/v1/decision-sync/origin-ids", r.peer.HostID, r.peer.Token, WireOriginIDsRequest{
-		Protocol: req.Protocol, HostID: req.HostID, Origin: req.Origin, From: req.From, Limit: req.Limit,
-	}, &out); err != nil {
+	if err := r.client.post(ctx, requestTimeout, r.peer.URL+"/api/v1/decision-sync/origin-ids", r.peer.HostID, r.peer.Token, WireOriginIDsRequest(req), &out); err != nil {
 		return OriginIDsResponse{}, err
 	}
-	return OriginIDsResponse{HostID: out.HostID, IDs: out.IDs, More: out.More}, nil
+	return OriginIDsResponse(out), nil
 }
 
 // Push implements Remote.

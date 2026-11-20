@@ -158,7 +158,7 @@ func (c *DecisionIdentityController) repair(w http.ResponseWriter, r *http.Reque
 }
 
 func writeDecisionRepairError(w http.ResponseWriter, r *http.Request, err error) {
-	code := ""
+	var code string
 	switch {
 	case errors.Is(err, decisionsync.ErrRepairNothingToDo):
 		code = "DECISION_REPAIR_NOTHING_TO_DO"
