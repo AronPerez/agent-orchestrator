@@ -263,6 +263,12 @@ func (l *MemLedger) ReissueDecisionFork(_ context.Context, plan domain.DecisionR
 		}
 		fork = append(fork, e)
 	}
+	through := plan.ForkThrough(fork)
+	for seq, e := range l.byOrigin[plan.Origin] {
+		if seq > through {
+			fork = append(fork, e)
+		}
+	}
 	slices.SortFunc(fork, func(a, b domain.DecisionEntry) int { return cmp.Compare(a.OriginSeq, b.OriginSeq) })
 	newest := domain.DecisionStamp{}
 	if all := l.sortedLocked(); len(all) > 0 {
@@ -401,13 +407,14 @@ func (v *memView) ArchiveForked(repairID string, ids []string, now time.Time) ([
 	return moved, nil
 }
 
-func (v *memView) OriginIDsFrom(origin string, from int64) ([]string, error) {
-	var out []string
+func (v *memView) OriginIDsFrom(origin string, from int64) ([]domain.DecisionOriginID, error) {
+	var out []domain.DecisionOriginID
 	for _, e := range v.all() {
 		if e.Origin == origin && e.OriginSeq >= from {
-			out = append(out, e.ID)
+			out = append(out, domain.DecisionOriginID{Seq: e.OriginSeq, ID: e.ID})
 		}
 	}
+	slices.SortFunc(out, func(a, b domain.DecisionOriginID) int { return cmp.Compare(a.Seq, b.Seq) })
 	return out, nil
 }
 

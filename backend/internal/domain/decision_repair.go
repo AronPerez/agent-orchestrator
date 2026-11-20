@@ -40,17 +40,17 @@ type DecisionOriginID struct {
 	ID  string `json:"id"`
 }
 
-// DecisionForkPoint returns the first sequence at which local, this
-// machine's history of an origin, holds an entry the peer does not hold at
-// that sequence. found is false when every local entry matches the peer.
-// Both lists are in ascending sequence order.
+// DecisionForkPoint returns the first sequence that both local, this
+// machine's history of an origin, and the peer hold under different entry
+// ids. A sequence the peer lacks proves nothing: the peer may only be
+// behind. found is false when no held sequence differs.
 func DecisionForkPoint(local, peer []DecisionOriginID) (seq int64, found bool) {
 	peerAt := make(map[int64]string, len(peer))
 	for _, p := range peer {
 		peerAt[p.Seq] = p.ID
 	}
 	for _, l := range local {
-		if peerAt[l.Seq] != l.ID {
+		if id, held := peerAt[l.Seq]; held && id != l.ID {
 			return l.Seq, true
 		}
 	}
@@ -114,6 +114,23 @@ type DecisionRepairPlan struct {
 	FromSeq   int64    `json:"fromSeq"`
 	NewOrigin string   `json:"newOrigin"`
 	ForkIDs   []string `json:"forkIds"`
+	// StagedThrough is this machine's highest sequence under Origin when the
+	// repair was staged. Sync is off from then on, so every entry above it
+	// was written here and belongs to the fork too.
+	StagedThrough int64 `json:"stagedThrough,omitempty"`
+}
+
+// ForkThrough is the sequence above which every entry under Origin is this
+// machine's own: StagedThrough, or for a plan without it the last fork entry.
+func (p DecisionRepairPlan) ForkThrough(fork []DecisionEntry) int64 {
+	if p.StagedThrough > 0 {
+		return p.StagedThrough
+	}
+	var highest int64
+	for _, e := range fork {
+		highest = max(highest, e.OriginSeq)
+	}
+	return highest
 }
 
 // DecisionRepairInput is what a machine giving up Origin knows when it

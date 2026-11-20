@@ -344,6 +344,21 @@ func RunApplyConformance(t *testing.T, newLedger func(t *testing.T, hostID strin
 		}
 	})
 
+	t.Run("RepairLeavingAHoleKeepsQuarantine", func(t *testing.T) {
+		l := newLedger(t, "h_b")
+		apply(t, l, "h_c", ReceivedRun("h_x", 1, 1, "dec_s"))
+		fork := RepairFork("h_x", 2, 4, "dec_f")
+		apply(t, l, "h_c", fork)
+		if c, _ := l.CheckDecisionHeads(ctx, "h_o", domain.DecisionHeads{"h_x": {Seq: 2, ID: "dent_o_2"}}, conformanceAt); len(c) != 1 {
+			t.Fatalf("fork not noticed: %+v", c)
+		}
+		// The repair lists 2 and 3 only; 4 stays and leaves a hole at 2.
+		apply(t, l, "h_c", RepairEntries(t, "rep_1", fork[:2], "h_y", 0))
+		if !stopped(t, l, "h_x") {
+			t.Fatal("an origin with a hole in its history resumed")
+		}
+	})
+
 	t.Run("RepairedOriginalsNeverReturn", func(t *testing.T) {
 		l := newLedger(t, "h_b")
 		apply(t, l, "h_c", ReceivedRun("h_x", 1, 2, "dec_s"))

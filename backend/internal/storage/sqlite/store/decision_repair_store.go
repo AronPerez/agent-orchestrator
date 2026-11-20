@@ -68,6 +68,13 @@ func (s *Store) ReissueDecisionFork(ctx context.Context, plan domain.DecisionRep
 			}
 			fork = append(fork, decisionEntryFromGen(row))
 		}
+		later, err := q.ListDecisionEntriesForOriginAfter(ctx, gen.ListDecisionEntriesForOriginAfterParams{
+			Origin: plan.Origin, AfterSeq: plan.ForkThrough(fork), BeforeSeq: math.MaxInt64, ResultLimit: math.MaxInt32,
+		})
+		if err != nil {
+			return err
+		}
+		fork = append(fork, decisionEntriesFromGen(later)...)
 		slices.SortFunc(fork, func(a, b domain.DecisionEntry) int { return cmp.Compare(a.OriginSeq, b.OriginSeq) })
 		start, err := q.NextDecisionOriginSequence(ctx, plan.NewOrigin)
 		if err != nil {
@@ -218,14 +225,14 @@ func (v *sqlDecisionApplyView) ArchiveForked(repairID string, ids []string, now 
 	return moved, nil
 }
 
-func (v *sqlDecisionApplyView) OriginIDsFrom(origin string, from int64) ([]string, error) {
+func (v *sqlDecisionApplyView) OriginIDsFrom(origin string, from int64) ([]domain.DecisionOriginID, error) {
 	rows, err := v.q.ListDecisionOriginIDs(v.ctx, gen.ListDecisionOriginIDsParams{Origin: origin, FromSeq: from, ResultLimit: math.MaxInt32})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, len(rows))
+	out := make([]domain.DecisionOriginID, len(rows))
 	for i, row := range rows {
-		out[i] = row.ID
+		out[i] = domain.DecisionOriginID{Seq: row.OriginSeq, ID: row.ID}
 	}
 	return out, nil
 }

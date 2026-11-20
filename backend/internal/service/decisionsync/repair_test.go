@@ -156,6 +156,8 @@ func TestRepairProposesTheCopysOwnEntries(t *testing.T) {
 func TestRepairConverges(t *testing.T) {
 	f := newForkedFleet(t, false)
 	env, proposal := stageRepair(t, f.c, f.b, f.d)
+	// A session answers after the repair is staged, before the restart.
+	late := f.c.ledger.Append(ledgertest.Answer("dec_c", 1, "after staging"), t0.Add(6*time.Second))
 	rec, err := env.resume(t, f.c.ledger, nil)
 	if err != nil || rec.State != decisionsync.RepairDone || !slices.Equal(env.unlinked, []string{"h_b", "h_d"}) {
 		t.Fatalf("repair = %+v, %v, unlinked %v", rec, err, env.unlinked)
@@ -164,7 +166,7 @@ func TestRepairConverges(t *testing.T) {
 		t.Fatalf("identity = %s, want %s", env.hostID, rec.Plan.NewOrigin)
 	}
 	archived := f.c.ledger.Archived()
-	for _, id := range proposal.ForkIDs {
+	for _, id := range append(slices.Clone(proposal.ForkIDs), late.ID) {
 		if _, ok := archived[id]; !ok {
 			t.Fatalf("%s was not moved out on the copy", id)
 		}
@@ -182,6 +184,9 @@ func TestRepairConverges(t *testing.T) {
 	}
 	if got := calls["dec_b2"]; got.Delivery != domain.DecisionDeliveryPending || got.Redelivery || got.Option != 2 {
 		t.Fatalf("an undelivered answer = %+v, want pending once", got)
+	}
+	if got := calls["dec_c"]; got.Note != "after staging" {
+		t.Fatalf("the answer written after staging was lost: %+v", got)
 	}
 	if v, _ := f.b.ledger.DecisionVector(context.Background()); v["h_x"] != 2 {
 		t.Fatalf("the original's history did not replace the fork: %v", v)
@@ -231,6 +236,21 @@ func TestRepairRefusals(t *testing.T) {
 		}
 		if _, err := repairOn(t, f.c).repairer.Propose(ctx); !errors.Is(err, decisionsync.ErrRepairNeedsPeer) {
 			t.Fatalf("no links: err = %v", err)
+		}
+	})
+	t.Run("LaggingPeerIsNoEvidence", func(t *testing.T) {
+		f := newForkedFleet(t, false)
+		lag := newMachine("h_l", nil)
+		shared := slices.DeleteFunc(f.o.ledger.Entries(), func(e domain.DecisionEntry) bool { return e.Origin != "h_x" || e.OriginSeq > 1 })
+		if _, err := lag.ledger.ApplyDecisionEntries(ctx, "h_o", shared, t0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repairOn(t, f.c, lag).repairer.Propose(ctx); !errors.Is(err, decisionsync.ErrRepairNeedsPeer) {
+			t.Fatalf("a peer that is only behind proved a fork: err = %v", err)
+		}
+		proposal, err := repairOn(t, f.c, lag, f.d).repairer.Propose(ctx)
+		if err != nil || proposal.FromSeq != 2 {
+			t.Fatalf("with a lagging peer too: %+v, %v", proposal, err)
 		}
 	})
 	t.Run("OnTheOriginal", func(t *testing.T) {

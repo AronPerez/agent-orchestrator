@@ -26,7 +26,8 @@ func TestDecisionForkPoint(t *testing.T) {
 		{"equal length", append(shared, originIDs("c", 5, 7)...), append(shared, originIDs("o", 5, 7)...), 5, true},
 		{"copy is longer", append(shared, originIDs("c", 5, 9)...), append(shared, originIDs("o", 5, 6)...), 5, true},
 		{"original is longer", append(shared, originIDs("c", 5, 6)...), append(shared, originIDs("o", 5, 9)...), 5, true},
-		{"copy only added to a matching history", append(shared, originIDs("c", 5, 6)...), shared, 5, true},
+		{"a lagging peer is no evidence", append(shared, originIDs("c", 5, 6)...), shared, 0, false},
+		{"a lagging peer that differs where it holds", append(shared, originIDs("c", 5, 9)...), append(originIDs("s", 1, 3), DecisionOriginID{Seq: 4, ID: "o4"}), 4, true},
 		{"nothing differs", shared, append(shared, originIDs("o", 5, 6)...), 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

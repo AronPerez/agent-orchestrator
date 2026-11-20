@@ -63,13 +63,20 @@ func TestArchiveDecisionForkKeepsEveryColumn(t *testing.T) {
 	if c, err := s.CheckDecisionHeads(ctx, "h_peer", domain.DecisionHeads{"h_x": {Seq: 3, ID: "dent_o_3"}}, now); err != nil || len(c) != 1 {
 		t.Fatalf("conflict = %+v, %v", c, err)
 	}
+	// Written here after the repair was staged through sequence 4.
+	late := ledgertest.Received("h_x", 5, "dec_f", domain.DecisionKindAnswered, `{"choice":"B","option":2}`)
+	late, _, err := s.AppendDecisionEntry(ctx, late, now)
+	if err != nil || late.OriginSeq != 5 {
+		t.Fatalf("late write = %+v, %v", late, err)
+	}
 	raw := openRawDB(t, dir)
 	before := rawDecisionRows(t, raw, "decision_entries")
 
 	plan := domain.DecisionRepairPlan{
 		RepairID: "rep_1", Origin: "h_x", FromSeq: 3, NewOrigin: "h_y",
-		ForkIDs: []string{fork[0].ID, fork[1].ID},
+		ForkIDs: []string{fork[0].ID, fork[1].ID}, StagedThrough: 4,
 	}
+	fork = append(fork, late)
 	n := 0
 	newID := func() string { n++; return fmt.Sprintf("dent_new_%d", n) }
 	if wrote, err := s.ReissueDecisionFork(ctx, plan, newID, now); err != nil || !wrote {
@@ -78,8 +85,8 @@ func TestArchiveDecisionForkKeepsEveryColumn(t *testing.T) {
 	if wrote, err := s.ReissueDecisionFork(ctx, plan, newID, now); err != nil || wrote {
 		t.Fatalf("second reissue = %v, %v", wrote, err)
 	}
-	if v, _ := s.DecisionVector(ctx); v["h_y"] != 3 {
-		t.Fatalf("new identity holds %d entries, want 3", v["h_y"])
+	if v, _ := s.DecisionVector(ctx); v["h_y"] != 4 {
+		t.Fatalf("new identity holds %d entries, want 4", v["h_y"])
 	}
 	for range 2 {
 		if complete, err := s.ArchiveDecisionFork(ctx, "rep_1", now); err != nil || !complete {
@@ -105,12 +112,12 @@ func TestArchiveDecisionForkKeepsEveryColumn(t *testing.T) {
 			t.Fatalf("%s changed: %q, was %q", id, after[id], row)
 		}
 	}
-	if len(after) != len(before)-2+3 {
+	if len(after) != len(before)-3+4 {
 		t.Fatalf("log holds %d rows, want %d", len(after), len(before)+1)
 	}
 
 	archived, err := s.ListArchivedDecisionEntries(ctx, "rep_1")
-	if err != nil || len(archived) != 2 || !archived[0].ArchivedAt.Equal(now) {
+	if err != nil || len(archived) != 3 || !archived[0].ArchivedAt.Equal(now) {
 		t.Fatalf("archived = %+v, %v", archived, err)
 	}
 	if conflicts, _ := s.ListDecisionSyncConflicts(ctx); len(conflicts) != 0 {
@@ -119,5 +126,34 @@ func TestArchiveDecisionForkKeepsEveryColumn(t *testing.T) {
 	call, ok, err := s.GetDecisionCall(ctx, "dec_f")
 	if err != nil || !ok || call.Origin != "h_y" {
 		t.Fatalf("repaired call = %+v, %v, %v", call, ok, err)
+	}
+}
+
+func TestDeliveredOriginalIsNotDueAgainAfterRepair(t *testing.T) {
+	ctx := context.Background()
+	s := sqlitetest.MustOpenAt(t, t.TempDir())
+	now := time.UnixMilli(1_800_000_000_000).UTC()
+	raised := ledgertest.Received("h_b", 1, "dec_b", domain.DecisionKindRaised, string(ledgertest.Raised("dec_b", "w-b", "b-label").Payload))
+	answer := ledgertest.Received("h_x", 1, "dec_b", domain.DecisionKindAnswered, `{"choice":"A","option":1}`)
+	delivered, err := json.Marshal(domain.DecisionDeliveredPayload{ForEntry: answer.ID, Status: domain.DecisionDeliveredSent, SessionID: "w-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := ledgertest.Received("h_b", 2, "dec_b", domain.DecisionKindDelivered, string(delivered))
+	if _, err := s.ApplyDecisionEntries(ctx, "h_peer", []domain.DecisionEntry{raised, answer, sent}, now); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.ListDecisionCallsAwaitingDelivery(ctx, "h_b"); err != nil || len(due) != 0 {
+		t.Fatalf("before repair: %d due, %v", len(due), err)
+	}
+	if _, err := s.ApplyDecisionEntries(ctx, "h_y", ledgertest.RepairEntries(t, "rep_1", []domain.DecisionEntry{answer}, "h_y", 0), now); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.ListDecisionCallsAwaitingDelivery(ctx, "h_b"); err != nil || len(due) != 0 {
+		t.Fatalf("the copy of a delivered answer is due again: %d, %v", len(due), err)
+	}
+	call, _, _ := s.GetDecisionCall(ctx, "dec_b")
+	if call.Delivery != domain.DecisionDeliverySent {
+		t.Fatalf("delivery = %q", call.Delivery)
 	}
 }

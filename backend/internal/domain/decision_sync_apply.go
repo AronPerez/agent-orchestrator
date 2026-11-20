@@ -27,8 +27,9 @@ type DecisionApplyView interface {
 	// ArchiveForked moves the listed entries that are still in the log into
 	// the archive, verbatim, under repairID, and returns the moved entries.
 	ArchiveForked(repairID string, ids []string, now time.Time) ([]DecisionEntry, error)
-	// OriginIDsFrom returns the ids of origin's entries from seq on.
-	OriginIDsFrom(origin string, from int64) ([]string, error)
+	// OriginIDsFrom returns origin's (sequence, id) pairs from seq on, in
+	// sequence order.
+	OriginIDsFrom(origin string, from int64) ([]DecisionOriginID, error)
 	// ClearConflicts removes every recorded conflict of origin.
 	ClearConflicts(origin string) error
 }
@@ -97,11 +98,20 @@ func FinishDecisionRepair(view DecisionApplyView, repairID string, now time.Time
 	for _, e := range moved {
 		callIDs = append(callIDs, e.CallID)
 	}
-	remaining, err := view.OriginIDsFrom(repair.Origin, repair.FromSeq)
+	// Resume only on a history that is now a clean prefix: no original left,
+	// and no hole where an original this repair does not list was skipped.
+	remaining, err := view.OriginIDsFrom(repair.Origin, 1)
 	if err != nil {
 		return nil, false, err
 	}
-	if !slices.ContainsFunc(remaining, func(have string) bool { return repairs.forked[have] }) {
+	clean := true
+	for i, have := range remaining {
+		if repairs.forked[have.ID] || have.Seq != int64(i+1) {
+			clean = false
+			break
+		}
+	}
+	if clean {
 		if err := view.ClearConflicts(repair.Origin); err != nil {
 			return nil, false, err
 		}

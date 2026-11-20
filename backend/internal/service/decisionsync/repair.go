@@ -106,6 +106,8 @@ type RepairProposal struct {
 	OutboundLinks []StoredPeer
 	PeersAsked    int
 	PeersFailed   int
+	// Highest is this machine's highest sequence under Origin.
+	Highest int64
 }
 
 // RepairerDeps configures identity repair on a running daemon.
@@ -210,6 +212,9 @@ func (r *Repairer) Propose(ctx context.Context) (RepairProposal, error) {
 		return RepairProposal{}, ErrRepairNeedsPeer
 	}
 	out.FromSeq = from
+	if len(local) > 0 {
+		out.Highest = local[len(local)-1].Seq
+	}
 	for _, id := range local {
 		if id.Seq >= from && !sharedAt[id.Seq][id.ID] {
 			out.ForkIDs = append(out.ForkIDs, id.ID)
@@ -269,7 +274,7 @@ func (r *Repairer) Stage(ctx context.Context, fromSeq int64, forkIDs []string) (
 		State: RepairStaged,
 		Plan: domain.DecisionRepairPlan{
 			RepairID: r.deps.NewID("rep_"), Origin: proposal.Origin, FromSeq: proposal.FromSeq,
-			NewOrigin: r.deps.NewID("h_"), ForkIDs: proposal.ForkIDs,
+			NewOrigin: r.deps.NewID("h_"), ForkIDs: proposal.ForkIDs, StagedThrough: proposal.Highest,
 		},
 		StagedAt: now, UpdatedAt: now,
 	}
