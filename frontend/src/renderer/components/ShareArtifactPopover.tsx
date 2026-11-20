@@ -1063,11 +1063,17 @@ function SharePanel({
 			return false;
 		}
 	};
-	const invite = (shown: Extract<Phase, { kind: "published" }>, { emails, teams }: ArtifactRecipients): Promise<boolean> =>
-		addSubjects(shown.share.id, {
-			...(emails.length > 0 ? { emails } : {}),
-			...(teams.length > 0 && teamWorkspace ? { orgId: teamWorkspace.id, teamIds: teams.map((team) => team.teamId) } : {}),
-		}, "artifacts.share.people.inviteFailed");
+	// Which recipients to share with is read when the invite's turn comes:
+	// one removed from the field while it waited in the queue is not shared.
+	const invite = (shown: Extract<Phase, { kind: "published" }>, picked: ArtifactRecipients, stillPicked: () => ArtifactRecipients = () => picked): Promise<boolean> =>
+		queueGrantChange(shown.share.id, () => {
+			const { emails, teams } = stillPicked();
+			if (emails.length === 0 && teams.length === 0) return Promise.resolve(true);
+			return sendSubjects(shown.share.id, {
+				...(emails.length > 0 ? { emails } : {}),
+				...(teams.length > 0 && teamWorkspace ? { orgId: teamWorkspace.id, teamIds: teams.map((team) => team.teamId) } : {}),
+			}, "artifacts.share.people.inviteFailed");
+		});
 
 	// Stops the link being shared with one person, team or workspace. Queued
 	// behind invites: a removal that overlapped an invite would discard the
@@ -1332,7 +1338,7 @@ function SharePanel({
 						{privateLinks ? (
 							<>
 								<ArtifactRecipientField
-									onSubmit={(recipients) => invite(phase, recipients)}
+									onSubmit={(recipients, stillPicked) => invite(phase, recipients, stillPicked)}
 									orgId={org?.id ?? ""}
 									teams={Boolean(teamWorkspace)}
 									unavailable={new Set([...people.map((person) => `email:${person.email}`), ...teams.map(teamRemovingKey)])}

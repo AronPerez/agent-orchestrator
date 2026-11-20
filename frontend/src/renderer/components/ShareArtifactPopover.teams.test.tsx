@@ -286,6 +286,27 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(await screen.findByText("Everyone at Acme can open it after signing in, and finds it under Shared with you.")).toBeTruthy();
 	});
 
+	it("does not share with a pick removed while its invitation waited in the queue", async () => {
+		mocks.candidates = [];
+		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
+		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [share] });
+		let answer!: () => void;
+		const grants = vi.spyOn(aoBridge.cloudShare, "grants").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => { answer = () => resolve(none); }));
+		const invite = vi.spyOn(aoBridge.cloudShare, "invite").mockResolvedValue(none);
+		renderButton(cloudFile);
+		await userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
+		const field = await screen.findByRole("combobox", { name: "Add people by email or team" });
+		await waitFor(() => expect(grants).toHaveBeenCalledOnce());
+		// The first read is still open, so the invitation waits behind it.
+		await userEvent.type(field, "maya@acme.co{Enter}");
+		expect(invite).not.toHaveBeenCalled();
+		// Removed before its turn came: Backspace on the empty field.
+		await userEvent.type(field, "{Backspace}");
+		answer();
+		await waitFor(() => expect(screen.getByRole("button", { name: /Only you/ })).toHaveProperty("disabled", false));
+		expect(invite).not.toHaveBeenCalled();
+	});
+
 	it("shares with a typed email on Enter", async () => {
 		mocks.candidates = [];
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });

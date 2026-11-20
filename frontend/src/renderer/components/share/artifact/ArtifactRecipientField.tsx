@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { looksLikeEmail } from "../../../hooks/useTeams";
 import { NewTeamDialog } from "../../teams/NewTeamDialog";
@@ -29,6 +29,13 @@ export function dialogOverSharePopover(): boolean {
  * one, as session sharing does, and shares the link with it. Everyone in
  * the workspace is General access's choice, not a pick here.
  */
+function splitRecipients(picked: readonly Recipient[]): ArtifactRecipients {
+	return {
+		emails: picked.flatMap((recipient) => recipient.kind === "person" ? [recipient.email] : []),
+		teams: picked.filter((recipient): recipient is Extract<Recipient, { kind: "team" }> => recipient.kind === "team"),
+	};
+}
+
 export function ArtifactRecipientField({ orgId, teams: teamsOffered, unavailable, onSubmit }: {
 	/** The workspace whose people (and teams) are suggested; empty until it is known. */
 	orgId: string;
@@ -36,8 +43,12 @@ export function ArtifactRecipientField({ orgId, teams: teamsOffered, unavailable
 	teams: boolean;
 	/** People (email:…) and teams (team:…) the link is already shared with. */
 	unavailable?: ReadonlySet<string>;
-	/** Called with each pick; resolves true when it was taken. */
-	onSubmit: (recipients: ArtifactRecipients) => Promise<boolean> | boolean;
+	/**
+	 * Called with each pick; resolves true when it was taken. stillPicked reads
+	 * which of those recipients the field still holds, for a caller that sends
+	 * them later: a pick removed while it waited must not be shared.
+	 */
+	onSubmit: (recipients: ArtifactRecipients, stillPicked: () => ArtifactRecipients) => Promise<boolean> | boolean;
 }) {
 	const { t } = useTranslation();
 	const label = t(teamsOffered ? "artifacts.share.people.addPeopleOrTeams" : "artifacts.share.people.addByEmail");
@@ -50,26 +61,36 @@ export function ArtifactRecipientField({ orgId, teams: teamsOffered, unavailable
 		};
 	}, [newTeamFor !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 	// Picks not yet shared: being sent, or refused and waiting for a retry.
+	// heldNow is updated with every change, before React renders it, so a send
+	// that runs right away still reads the pick it was made for.
 	const [held, setHeld] = useState<Recipient[]>([]);
+	const heldNow = useRef<Recipient[]>([]);
+	const updateHeld = (next: (current: Recipient[]) => Recipient[]) => {
+		heldNow.current = next(heldNow.current);
+		setHeld(heldNow.current);
+	};
 	const send = (picked: readonly Recipient[]) => {
-		const emails = picked.flatMap((recipient) => recipient.kind === "person" ? [recipient.email] : []);
-		const teams = picked.filter((recipient): recipient is Extract<Recipient, { kind: "team" }> => recipient.kind === "team");
-		if (emails.length === 0 && teams.length === 0) return;
+		const recipients = splitRecipients(picked);
+		if (recipients.emails.length === 0 && recipients.teams.length === 0) return;
 		const sent = new Set(picked.map(recipientKey));
+		const stillPicked = () => {
+			const kept = new Set(heldNow.current.map(recipientKey));
+			return splitRecipients(picked.filter((recipient) => kept.has(recipientKey(recipient))));
+		};
 		void Promise.resolve()
-			.then(() => onSubmit({ emails, teams }))
+			.then(() => onSubmit(recipients, stillPicked))
 			.catch(() => false)
 			.then((taken) => {
-				if (taken) setHeld((current) => current.filter((recipient) => !sent.has(recipientKey(recipient))));
+				if (taken) updateHeld((current) => current.filter((recipient) => !sent.has(recipientKey(recipient))));
 			});
 	};
 	const change = (next: Recipient[]) => {
-		const before = new Set(held.map(recipientKey));
-		setHeld(next);
+		const before = new Set(heldNow.current.map(recipientKey));
+		updateHeld(() => next);
 		send(next.filter((recipient) => !before.has(recipientKey(recipient))));
 	};
 	const take = (picked: readonly Recipient[]) => {
-		setHeld((current) => [...current, ...picked.filter((recipient) => !current.some((other) => recipientKey(other) === recipientKey(recipient)))]);
+		updateHeld((current) => [...current, ...picked.filter((recipient) => !current.some((other) => recipientKey(other) === recipientKey(recipient)))]);
 		send(picked);
 	};
 	return (
