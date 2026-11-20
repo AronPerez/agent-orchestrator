@@ -1,6 +1,7 @@
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { useDecisionAction, useDecisionAnswer } from "../hooks/useDecisionInbox";
+import { useDecisionAction, useDecisionAnswer, useDecisionAnswerHold } from "../hooks/useDecisionInbox";
+import { detailView } from "../lib/decision-answer-guard";
 import { apiErrorRequestId } from "../lib/api-client";
 import { decisionOptionRequiresNote, type DecisionCall } from "../lib/decision-inbox";
 import { LOCAL_HOST } from "../lib/hosts";
@@ -42,23 +43,22 @@ export function decisionAcceptsAnswer(call: DecisionCall): boolean {
 export function DecisionCallActions({
 	call,
 	extraActions,
-	readAt,
 	onRecheck,
 }: {
 	call: DecisionCall;
 	extraActions?: ReactNode;
-	/** When this call was last read from the daemon (the detail query's dataUpdatedAt). */
-	readAt?: number;
 	onRecheck?: () => void;
 }) {
 	const { t } = useTranslation();
 	const answer = useDecisionAnswer();
 	const action = useDecisionAction();
 	const busy = answer.isPending || action.isPending;
-	// The daemon may commit an answer whose response is lost. Until a read made
-	// after that answer was sent succeeds, sending again could deliver it twice.
-	const [lostAnswerAt, setLostAnswerAt] = useState<number>();
-	const unconfirmed = lostAnswerAt !== undefined && !(readAt !== undefined && readAt > lostAnswerAt);
+	// The daemon may commit an answer whose response is lost. The hold is shared
+	// with the bell and outlives this panel: until a read started after the
+	// failure succeeds, sending again could deliver the answer twice.
+	const view = detailView(call.id);
+	const hold = useDecisionAnswerHold(LOCAL_HOST, call.id, view);
+	const unconfirmed = hold !== undefined;
 	// A standing decision is closed by the person without naming an answer: it has none.
 	const outcomeFor = call.state === "decided" ? undefined : call.standingEntryId;
 	const failure = answer.isError ? answer.error : action.isError ? action.error : undefined;
@@ -78,14 +78,14 @@ export function DecisionCallActions({
 					extraActions={extraActions}
 					onAnswer={(choice, note) => {
 						reset();
-						const sentAt = Date.now();
 						answer.mutate({
+							view,
 							sourceHostId: LOCAL_HOST,
 							callId: call.id,
 							choice: choice === OTHER ? "other" : "option",
 							option: choice === OTHER ? undefined : Number(choice),
 							note,
-						}, { onError: () => setLostAnswerAt(sentAt) });
+						});
 					}}
 					onDismiss={(note) => {
 						reset();
@@ -112,7 +112,7 @@ export function DecisionCallActions({
 					}}
 				/>
 			) : null}
-			{unconfirmed && decisionAcceptsAnswer(call) ? (
+			{hold === "unconfirmed" && decisionAcceptsAnswer(call) ? (
 				<p role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-status-in-review">
 					<span>{t("decisions.answerUnconfirmed")}</span>
 					{onRecheck ? <Button type="button" size="sm" variant="secondary" onClick={onRecheck}>{t("decisions.checkAgain")}</Button> : null}

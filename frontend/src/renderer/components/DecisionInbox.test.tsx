@@ -154,4 +154,34 @@ describe("DecisionInbox", () => {
 		expect(screen.getByRole("listitem")).not.toHaveClass("bg-interactive-hover");
 		expect(screen.queryByText("Unread")).not.toBeInTheDocument();
 	});
+
+	it("holds every choice for a call whose answer may already be recorded until it is checked again", async () => {
+		const onAnswer = vi.fn();
+		const onRetry = vi.fn();
+		render(
+			<DecisionInbox
+				entries={[entry]}
+				held={new Map([["remote-a:dec_1", "unconfirmed" as const]])}
+				isLoading={false}
+				loadFailed={false}
+				onAnswer={onAnswer}
+				onRetry={onRetry}
+			/>,
+		);
+		for (const name of ["Ship today", "Soak overnight"]) {
+			expect(screen.getByRole("button", { name: new RegExp(name) })).toBeDisabled();
+		}
+		expect(screen.getByRole("status")).toHaveTextContent("Your answer may have been recorded. Check again before sending it.");
+		await userEvent.click(screen.getByRole("button", { name: "Check again" }));
+		expect(onRetry).toHaveBeenCalledTimes(1);
+		expect(onAnswer).not.toHaveBeenCalled();
+	});
+
+	it("holds the choices without the notice while another surface's answer is in flight", () => {
+		render(
+			<DecisionInbox entries={[entry]} held={new Map([["remote-a:dec_1", "sending" as const]])} isLoading={false} loadFailed={false} onAnswer={vi.fn()} onRetry={vi.fn()} />,
+		);
+		expect(screen.getByRole("button", { name: /Ship today/ })).toBeDisabled();
+		expect(screen.queryByRole("status")).not.toBeInTheDocument();
+	});
 });

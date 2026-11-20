@@ -80,7 +80,7 @@ export function DecisionCallPanel({ callId, onClose }: DecisionCallPanelProps) {
 		body = (
 			<>
 				{detail.isError ? <RefreshError error={detail.error} onRetry={() => void detail.refetch()} /> : null}
-				<DecisionCallDetail call={detail.data.call} history={detail.data.history} readAt={detail.dataUpdatedAt} onRecheck={() => void detail.refetch()} />
+				<DecisionCallDetail call={detail.data.call} history={detail.data.history} onRecheck={() => void detail.refetch()} />
 			</>
 		);
 	} else if (detail.data === null) {
@@ -138,7 +138,7 @@ function RefreshError({ error, onRetry }: { error: unknown; onRetry: () => void 
 /** States in which an answer or overrule still has to reach the owning machine. */
 const DECISION_OPEN_STATES = new Set<string>(["needs_you", "in_progress", "decided"]);
 
-function DecisionCallDetail({ call, history, readAt, onRecheck }: { call: DecisionCall; history: DecisionHistoryEntry[]; readAt: number; onRecheck: () => void }) {
+function DecisionCallDetail({ call, history, onRecheck }: { call: DecisionCall; history: DecisionHistoryEntry[]; onRecheck: () => void }) {
 	const { t } = useTranslation();
 	const exactTime = useExactTime();
 	const place = decisionPlace(call);
@@ -204,7 +204,7 @@ function DecisionCallDetail({ call, history, readAt, onRecheck }: { call: Decisi
 				})}
 			</ul>}
 			{call.note && !decisionAcceptsAnswer(call) ? <p className="whitespace-pre-wrap break-words border-l-2 border-border pl-3 text-sm text-muted-foreground">{call.note}</p> : null}
-			<DecisionCallActions call={call} extraActions={<OpenSessionButton call={call} />} readAt={readAt} onRecheck={onRecheck} />
+			<DecisionCallActions call={call} extraActions={<OpenSessionButton call={call} />} onRecheck={onRecheck} />
 			{call.outcome ? (
 				<section aria-label={t("decisions.outcome")} className="text-sm">
 					<p className="font-medium text-foreground">{call.outcome}</p>

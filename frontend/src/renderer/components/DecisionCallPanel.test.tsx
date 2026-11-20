@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, renderHook, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DecisionCall, DecisionHistoryEntry } from "../lib/decision-inbox";
@@ -14,6 +14,7 @@ const { navigateMock, sessionTarget } = vi.hoisted(() => ({
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigateMock }));
 vi.mock("../hooks/useDecisionSessionTarget", () => ({ useDecisionSessionTarget: () => sessionTarget.current }));
 
+import { useDecisionBoard } from "../hooks/useDecisionInbox";
 import { DecisionCallPanel } from "./DecisionCallPanel";
 
 const call: DecisionCall = {
@@ -72,8 +73,7 @@ const history: DecisionHistoryEntry[] = [
 	entry({ id: "e12", kind: "asked", authorSurface: "desktop", writtenAt: at(12) }),
 ];
 
-function renderPanel(callId = "dec_1", onClose = vi.fn()) {
-	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderPanel(callId = "dec_1", onClose = vi.fn(), client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
 	const view = render(<QueryClientProvider client={client}><DecisionCallPanel callId={callId} onClose={onClose} /></QueryClientProvider>);
 	return { ...view, onClose, client };
 }
@@ -374,6 +374,59 @@ describe("DecisionCallPanel", () => {
 			await userEvent.click(screen.getByRole("button", { name: "Check again" }));
 			await vi.waitFor(() => expect(screen.getByRole("button", { name: "Send decision" })).toBeEnabled());
 			expect(screen.queryByText("Your answer may have been recorded. Check again before sending it.")).not.toBeInTheDocument();
+		});
+
+		it("keeps an unconfirmed answer held after the panel is closed and opened again", async () => {
+			serve(needsYou);
+			const first = renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			postMock.mockRejectedValue(new Error("connection reset"));
+			getMock.mockRejectedValue(new Error("offline"));
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(await screen.findByText("Your answer may have been recorded. Check again before sending it.")).toBeInTheDocument();
+			first.unmount();
+
+			// The cached detail still shows the call waiting; the hold must survive the remount.
+			renderPanel("dec_1", vi.fn(), first.client);
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			expect(screen.getByText("Your answer may have been recorded. Check again before sending it.")).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Send decision" })).toBeDisabled();
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledTimes(1);
+
+			serve(needsYou);
+			await userEvent.click(screen.getByRole("button", { name: "Check again" }));
+			await vi.waitFor(() => expect(screen.getByRole("button", { name: "Send decision" })).toBeEnabled());
+		});
+
+		// The sidebar board can refresh while the panel's own detail read fails:
+		// the panel still shows its cached waiting call, so it must stay held.
+		it("keeps the panel held when only the board's refresh succeeds after a lost answer", async () => {
+			serve(needsYou);
+			const { client } = renderPanel();
+			await userEvent.click(await screen.findByRole("radio", { name: /Per-tenant API keys/ }));
+			postMock.mockRejectedValue(new Error("connection reset"));
+			getMock.mockRejectedValue(new Error("offline"));
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(await screen.findByText("Your answer may have been recorded. Check again before sending it.")).toBeInTheDocument();
+
+			// The board (sidebar count and page) refreshes successfully and already
+			// shows the answer; the panel's own detail read keeps failing.
+			const board = { calls: [{ ...inProgress, option: 2, standingEntryId: "dent_2" }], needsYouCount: 0, doneSince: "2026-11-11T00:00:00Z" };
+			getMock.mockImplementation((path: string) => path === "/api/v1/decisions/board"
+				? Promise.resolve({ data: board, response: { status: 200 } })
+				: Promise.reject(new Error("offline")));
+			const boardView = renderHook(() => useDecisionBoard(), {
+				wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+			});
+			await vi.waitFor(() => expect(boardView.result.current.isSuccess).toBe(true));
+			boardView.unmount();
+			// The person picks the option again on the still-waiting cached call.
+			await userEvent.click(screen.getByRole("radio", { name: /Per-tenant API keys/ }));
+			expect(screen.getByText("Your answer may have been recorded. Check again before sending it.")).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Send decision" })).toBeDisabled();
+			await userEvent.click(screen.getByRole("button", { name: "Send decision" }));
+			expect(postMock).toHaveBeenCalledTimes(1);
 		});
 
 		it("shows an answer recorded despite a lost response and does not send it again", async () => {
