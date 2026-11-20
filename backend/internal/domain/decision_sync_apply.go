@@ -3,6 +3,7 @@ package domain
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"time"
@@ -21,6 +22,104 @@ type DecisionApplyView interface {
 	// RecordConflict stores c once per (origin, seq) and reports whether this
 	// call recorded it.
 	RecordConflict(c DecisionSyncConflict) (bool, error)
+	// RepairEntries returns every held identity_repaired entry.
+	RepairEntries() ([]DecisionEntry, error)
+	// ArchiveForked moves the listed entries that are still in the log into
+	// the archive, verbatim, under repairID, and returns the moved entries.
+	ArchiveForked(repairID string, ids []string, now time.Time) ([]DecisionEntry, error)
+	// OriginIDsFrom returns the ids of origin's entries from seq on.
+	OriginIDsFrom(origin string, from int64) ([]string, error)
+	// ClearConflicts removes every recorded conflict of origin.
+	ClearConflicts(origin string) error
+}
+
+// decisionRepairs is what the held identity_repaired entries say: every
+// original a repair moved out of the log, and each complete repair.
+type decisionRepairs struct {
+	forked   map[string]bool
+	complete map[string]DecisionIdentityRepairedPayload // by repair id; Reissued holds every part's pairs
+}
+
+func readDecisionRepairs(entries []DecisionEntry) decisionRepairs {
+	out := decisionRepairs{forked: map[string]bool{}, complete: map[string]DecisionIdentityRepairedPayload{}}
+	for id, parts := range DecisionRepairParts(entries) {
+		seen := map[int]bool{}
+		var all [][2]string
+		for _, p := range parts {
+			for _, pair := range p.Reissued {
+				out.forked[pair[0]] = true
+			}
+			if !seen[p.Part] {
+				seen[p.Part] = true
+				all = append(all, p.Reissued...)
+			}
+		}
+		if first := parts[0]; first.Parts > 0 && len(seen) == first.Parts {
+			first.Reissued = all
+			out.complete[id] = first
+		}
+	}
+	return out
+}
+
+// loadDecisionRepairs reads the repairs view holds, plus any in batch.
+func loadDecisionRepairs(view DecisionApplyView, batch []DecisionEntry) (decisionRepairs, error) {
+	held, err := view.RepairEntries()
+	if err != nil {
+		return decisionRepairs{}, err
+	}
+	return readDecisionRepairs(append(held, batch...)), nil
+}
+
+// FinishDecisionRepair moves the originals of repair repairID that are still
+// in the log into the archive, then resumes the repaired origin once none of
+// its entries from the fork point on is an original. It does nothing until
+// every part of the repair is held. It returns the call ids whose entries
+// moved, and whether the repair is complete here.
+func FinishDecisionRepair(view DecisionApplyView, repairID string, now time.Time) ([]string, bool, error) {
+	repairs, err := loadDecisionRepairs(view, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	repair, ok := repairs.complete[repairID]
+	if !ok {
+		return nil, false, nil
+	}
+	originals := make([]string, len(repair.Reissued))
+	for i, pair := range repair.Reissued {
+		originals[i] = pair[0]
+	}
+	moved, err := view.ArchiveForked(repairID, originals, now)
+	if err != nil {
+		return nil, false, err
+	}
+	callIDs := make([]string, 0, len(moved))
+	for _, e := range moved {
+		callIDs = append(callIDs, e.CallID)
+	}
+	remaining, err := view.OriginIDsFrom(repair.Origin, repair.FromSeq)
+	if err != nil {
+		return nil, false, err
+	}
+	if !slices.ContainsFunc(remaining, func(have string) bool { return repairs.forked[have] }) {
+		if err := view.ClearConflicts(repair.Origin); err != nil {
+			return nil, false, err
+		}
+	}
+	return callIDs, true, nil
+}
+
+// finishDecisionRepairs finishes every repair with a part in inserted.
+func finishDecisionRepairs(view DecisionApplyView, inserted []DecisionEntry, now time.Time) ([]string, error) {
+	var callIDs []string
+	for _, id := range slices.Sorted(maps.Keys(DecisionRepairParts(inserted))) {
+		moved, _, err := FinishDecisionRepair(view, id, now)
+		if err != nil {
+			return nil, err
+		}
+		callIDs = append(callIDs, moved...)
+	}
+	return callIDs, nil
 }
 
 // ApplyDecisionSyncBatch applies received entries to view, origin by origin in
@@ -45,9 +144,22 @@ func ApplyDecisionSyncBatch(view DecisionApplyView, peerHostID string, entries [
 	slices.SortStableFunc(ordered, func(a, b DecisionEntry) int {
 		return cmp.Or(cmp.Compare(a.Origin, b.Origin), cmp.Compare(a.OriginSeq, b.OriginSeq))
 	})
+	// An original that a repair moved out of the log is never stored again,
+	// whoever still holds it.
+	var batchRepairs []DecisionEntry
+	for _, e := range ordered {
+		if e.Kind == DecisionKindIdentityRepaired {
+			batchRepairs = append(batchRepairs, e)
+		}
+	}
+	repairs, err := loadDecisionRepairs(view, batchRepairs)
+	if err != nil {
+		return DecisionApplyResult{}, nil, err
+	}
 	held := highest.Clone()
 	halted := map[string]bool{}
 	affected := map[string]bool{}
+	var inserted []DecisionEntry
 	conflict := func(e DecisionEntry, localID string) error {
 		c := DecisionSyncConflict{
 			Origin: e.Origin, OriginSeq: e.OriginSeq, LocalEntryID: localID,
@@ -65,6 +177,10 @@ func ApplyDecisionSyncBatch(view DecisionApplyView, peerHostID string, entries [
 	}
 	for _, e := range ordered {
 		if stopped[e.Origin] || halted[e.Origin] {
+			continue
+		}
+		if repairs.forked[e.ID] {
+			result.Duplicates++
 			continue
 		}
 		existing, ok, err := view.EntryByID(e.ID)
@@ -104,7 +220,15 @@ func ApplyDecisionSyncBatch(view DecisionApplyView, peerHostID string, entries [
 		}
 		held[e.Origin] = e.OriginSeq
 		affected[e.CallID] = true
+		inserted = append(inserted, e)
 		result.Applied++
+	}
+	moved, err := finishDecisionRepairs(view, inserted, now)
+	if err != nil {
+		return DecisionApplyResult{}, nil, err
+	}
+	for _, id := range moved {
+		affected[id] = true
 	}
 	callIDs := make([]string, 0, len(affected))
 	for id := range affected {
@@ -119,6 +243,10 @@ func ApplyDecisionSyncBatch(view DecisionApplyView, peerHostID string, entries [
 // conflict is recorded. Heads beyond what view holds cannot be compared here;
 // the peer compares this ledger's heads instead.
 func CheckDecisionSyncHeads(view DecisionApplyView, peerHostID string, heads DecisionHeads, now time.Time) ([]DecisionSyncConflict, error) {
+	repairs, err := loadDecisionRepairs(view, nil)
+	if err != nil {
+		return nil, err
+	}
 	origins := make([]string, 0, len(heads))
 	for origin := range heads {
 		origins = append(origins, origin)
@@ -127,7 +255,8 @@ func CheckDecisionSyncHeads(view DecisionApplyView, peerHostID string, heads Dec
 	var out []DecisionSyncConflict
 	for _, origin := range origins {
 		head := heads[origin]
-		if head.Seq < 1 || head.ID == "" {
+		// A peer that still holds a repaired fork has not caught up yet.
+		if head.Seq < 1 || head.ID == "" || repairs.forked[head.ID] {
 			continue
 		}
 		at, ok, err := view.EntryAt(origin, head.Seq)

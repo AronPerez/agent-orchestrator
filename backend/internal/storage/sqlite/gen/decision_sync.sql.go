@@ -11,6 +11,33 @@ import (
 	"time"
 )
 
+const archiveDecisionEntry = `-- name: ArchiveDecisionEntry :execrows
+INSERT OR IGNORE INTO decision_entries_forked (
+    id, origin, origin_seq, stamp_wall, stamp_counter, call_id, kind, payload,
+    written_at, author_kind, author_surface, author_session, archived_at, repair_id
+)
+SELECT id, origin, origin_seq, stamp_wall, stamp_counter, call_id, kind, payload,
+       written_at, author_kind, author_surface, author_session,
+       ?1, ?2
+FROM decision_entries
+WHERE decision_entries.id = ?3
+`
+
+type ArchiveDecisionEntryParams struct {
+	ArchivedAt time.Time
+	RepairID   string
+	ID         string
+}
+
+// Copies the row byte for byte; a row archived before stays as it was.
+func (q *Queries) ArchiveDecisionEntry(ctx context.Context, arg ArchiveDecisionEntryParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, archiveDecisionEntry, arg.ArchivedAt, arg.RepairID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const auditDecisionOrigins = `-- name: AuditDecisionOrigins :many
 SELECT origin,
        CAST(COUNT(*) AS INTEGER) AS held,
@@ -174,6 +201,30 @@ func (q *Queries) DecisionVector(ctx context.Context) ([]DecisionVectorRow, erro
 	return items, nil
 }
 
+const deleteDecisionCall = `-- name: DeleteDecisionCall :execrows
+DELETE FROM decision_calls WHERE call_id = ?
+`
+
+func (q *Queries) DeleteDecisionCall(ctx context.Context, callID string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDecisionCall, callID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteDecisionSyncConflictsForOrigin = `-- name: DeleteDecisionSyncConflictsForOrigin :execrows
+DELETE FROM decision_sync_conflicts WHERE origin = ?
+`
+
+func (q *Queries) DeleteDecisionSyncConflictsForOrigin(ctx context.Context, origin string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDecisionSyncConflictsForOrigin, origin)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteDecisionSyncPeer = `-- name: DeleteDecisionSyncPeer :execrows
 DELETE FROM decision_sync_peers WHERE host_id = ?
 `
@@ -296,6 +347,50 @@ func (q *Queries) InsertDecisionSyncConflict(ctx context.Context, arg InsertDeci
 	return result.RowsAffected()
 }
 
+const listArchivedDecisionEntries = `-- name: ListArchivedDecisionEntries :many
+SELECT id, origin, origin_seq, stamp_wall, stamp_counter, call_id, kind, payload, written_at, author_kind, author_surface, author_session, archived_at, repair_id FROM decision_entries_forked
+WHERE repair_id = ?
+ORDER BY origin, origin_seq
+`
+
+func (q *Queries) ListArchivedDecisionEntries(ctx context.Context, repairID string) ([]DecisionEntriesForked, error) {
+	rows, err := q.db.QueryContext(ctx, listArchivedDecisionEntries, repairID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DecisionEntriesForked{}
+	for rows.Next() {
+		var i DecisionEntriesForked
+		if err := rows.Scan(
+			&i.ID,
+			&i.Origin,
+			&i.OriginSeq,
+			&i.StampWall,
+			&i.StampCounter,
+			&i.CallID,
+			&i.Kind,
+			&i.Payload,
+			&i.WrittenAt,
+			&i.AuthorKind,
+			&i.AuthorSurface,
+			&i.AuthorSession,
+			&i.ArchivedAt,
+			&i.RepairID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDecisionEntriesForOriginAfter = `-- name: ListDecisionEntriesForOriginAfter :many
 SELECT id, origin, origin_seq, stamp_wall, stamp_counter, call_id, kind, payload, written_at, author_kind, author_surface, author_session
 FROM decision_entries
@@ -320,6 +415,89 @@ func (q *Queries) ListDecisionEntriesForOriginAfter(ctx context.Context, arg Lis
 		arg.BeforeSeq,
 		arg.ResultLimit,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DecisionEntry{}
+	for rows.Next() {
+		var i DecisionEntry
+		if err := rows.Scan(
+			&i.ID,
+			&i.Origin,
+			&i.OriginSeq,
+			&i.StampWall,
+			&i.StampCounter,
+			&i.CallID,
+			&i.Kind,
+			&i.Payload,
+			&i.WrittenAt,
+			&i.AuthorKind,
+			&i.AuthorSurface,
+			&i.AuthorSession,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDecisionOriginIDs = `-- name: ListDecisionOriginIDs :many
+SELECT origin_seq, id FROM decision_entries
+WHERE origin = ?1 AND origin_seq >= ?2
+ORDER BY origin_seq
+LIMIT ?3
+`
+
+type ListDecisionOriginIDsParams struct {
+	Origin      string
+	FromSeq     int64
+	ResultLimit int64
+}
+
+type ListDecisionOriginIDsRow struct {
+	OriginSeq int64
+	ID        string
+}
+
+func (q *Queries) ListDecisionOriginIDs(ctx context.Context, arg ListDecisionOriginIDsParams) ([]ListDecisionOriginIDsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listDecisionOriginIDs, arg.Origin, arg.FromSeq, arg.ResultLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDecisionOriginIDsRow{}
+	for rows.Next() {
+		var i ListDecisionOriginIDsRow
+		if err := rows.Scan(&i.OriginSeq, &i.ID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDecisionRepairEntries = `-- name: ListDecisionRepairEntries :many
+SELECT id, origin, origin_seq, stamp_wall, stamp_counter, call_id, kind, payload, written_at, author_kind, author_surface, author_session FROM decision_entries
+WHERE kind = 'identity_repaired'
+ORDER BY origin, origin_seq
+`
+
+func (q *Queries) ListDecisionRepairEntries(ctx context.Context) ([]DecisionEntry, error) {
+	rows, err := q.db.QueryContext(ctx, listDecisionRepairEntries)
 	if err != nil {
 		return nil, err
 	}
@@ -520,6 +698,21 @@ func (q *Queries) RecordInboundDecisionSyncPeer(ctx context.Context, arg RecordI
 		arg.At,
 		arg.PeerProtocol,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const removeArchivedDecisionEntry = `-- name: RemoveArchivedDecisionEntry :execrows
+DELETE FROM decision_entries
+WHERE decision_entries.id = ?1
+  AND EXISTS (SELECT 1 FROM decision_entries_forked AS f WHERE f.id = decision_entries.id)
+`
+
+// Only a row the archive already holds leaves the log.
+func (q *Queries) RemoveArchivedDecisionEntry(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, removeArchivedDecisionEntry, id)
 	if err != nil {
 		return 0, err
 	}

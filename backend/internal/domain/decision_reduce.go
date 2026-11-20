@@ -107,6 +107,21 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 	var closedUnconfirmed, reopened bool
 	answered := make(map[string]DecisionEntry)
 	deliveries := make([]reducedDelivery, 0)
+	// After an identity repair a copy stands in for its original: an entry
+	// that names the original (a delivery, an outcome, a confirmation) counts
+	// for the copy, so nothing already delivered is delivered again.
+	copyOf := map[string]string{}
+	for _, entry := range ordered {
+		if from, err := DecisionReissuedFrom(entry.Payload); err == nil && from != "" {
+			copyOf[from] = entry.ID
+		}
+	}
+	current := func(id string) string {
+		if c, ok := copyOf[id]; ok {
+			return c
+		}
+		return id
+	}
 
 	for _, entry := range ordered {
 		call.LastStamp = entry.Stamp
@@ -159,7 +174,7 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			call.AnswerSurface = entry.AuthorSurface
 		case DecisionKindCarriedOut:
 			var payload DecisionCarriedOutPayload
-			if call.Decided == nil || json.Unmarshal(entry.Payload, &payload) != nil || payload.ForEntry != call.Decided.EntryID {
+			if call.Decided == nil || json.Unmarshal(entry.Payload, &payload) != nil || current(payload.ForEntry) != call.Decided.EntryID {
 				continue
 			}
 			if !call.Decided.CarriedOut {
@@ -208,11 +223,15 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			if json.Unmarshal(entry.Payload, &payload) != nil {
 				continue
 			}
+			payload.ForEntry = current(payload.ForEntry)
 			deliveries = append(deliveries, reducedDelivery{entry: entry, payload: payload})
 		case DecisionKindOutcome:
 			var payload DecisionOutcomePayload
 			if json.Unmarshal(entry.Payload, &payload) != nil {
 				continue
+			}
+			if payload.ForEntry != "" {
+				payload.ForEntry = current(payload.ForEntry)
 			}
 			// New outcomes name the immutable answer they carried out. If a
 			// newer answer already stands, keep the stale outcome in history but

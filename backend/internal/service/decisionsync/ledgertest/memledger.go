@@ -24,6 +24,15 @@ type MemLedger struct {
 	byID      map[string]domain.DecisionEntry
 	byOrigin  map[string]map[int64]domain.DecisionEntry
 	conflicts []domain.DecisionSyncConflict
+	// archived holds entries an identity repair moved out of the log, by id.
+	archived map[string]ArchivedEntry
+}
+
+// ArchivedEntry is an entry an identity repair moved out of the log.
+type ArchivedEntry struct {
+	Entry    domain.DecisionEntry
+	RepairID string
+	At       time.Time
 }
 
 // NewMemLedger returns an empty ledger for hostID.
@@ -32,7 +41,19 @@ func NewMemLedger(hostID string) *MemLedger {
 		HostID:   hostID,
 		byID:     map[string]domain.DecisionEntry{},
 		byOrigin: map[string]map[int64]domain.DecisionEntry{},
+		archived: map[string]ArchivedEntry{},
 	}
+}
+
+// Archived returns the entries identity repairs moved out of the log.
+func (l *MemLedger) Archived() map[string]ArchivedEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make(map[string]ArchivedEntry, len(l.archived))
+	for id, a := range l.archived {
+		out[id] = a
+	}
+	return out
 }
 
 // Append writes a local entry as this machine: origin, sequence and stamp are
@@ -217,11 +238,75 @@ func (l *MemLedger) sortedLocked() []domain.DecisionEntry {
 }
 
 // memView stages a batch's writes so a failing batch stores nothing, like the
-// store's transaction.
+// store's transaction. Inserts land before archive moves and conflict clears,
+// the order the apply rules make them in.
 type memView struct {
 	l         *MemLedger
 	inserted  []domain.DecisionEntry
 	conflicts []domain.DecisionSyncConflict
+	archive   []ArchivedEntry
+	cleared   []string
+}
+
+func (v *memView) gone(id string) bool {
+	return slices.ContainsFunc(v.archive, func(a ArchivedEntry) bool { return a.Entry.ID == id })
+}
+
+// all is every entry the batch would leave in the log.
+func (v *memView) all() []domain.DecisionEntry {
+	var out []domain.DecisionEntry
+	for _, e := range v.l.byID {
+		if !v.gone(e.ID) {
+			out = append(out, e)
+		}
+	}
+	for _, e := range v.inserted {
+		if !v.gone(e.ID) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (v *memView) RepairEntries() ([]domain.DecisionEntry, error) {
+	var out []domain.DecisionEntry
+	for _, e := range v.all() {
+		if e.Kind == domain.DecisionKindIdentityRepaired {
+			out = append(out, e)
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.DecisionEntry) int {
+		return cmp.Or(cmp.Compare(a.Origin, b.Origin), cmp.Compare(a.OriginSeq, b.OriginSeq))
+	})
+	return out, nil
+}
+
+func (v *memView) ArchiveForked(repairID string, ids []string, now time.Time) ([]domain.DecisionEntry, error) {
+	var moved []domain.DecisionEntry
+	for _, id := range ids {
+		e, ok, _ := v.EntryByID(id)
+		if !ok || v.gone(id) {
+			continue
+		}
+		v.archive = append(v.archive, ArchivedEntry{Entry: e, RepairID: repairID, At: now})
+		moved = append(moved, e)
+	}
+	return moved, nil
+}
+
+func (v *memView) OriginIDsFrom(origin string, from int64) ([]string, error) {
+	var out []string
+	for _, e := range v.all() {
+		if e.Origin == origin && e.OriginSeq >= from {
+			out = append(out, e.ID)
+		}
+	}
+	return out, nil
+}
+
+func (v *memView) ClearConflicts(origin string) error {
+	v.cleared = append(v.cleared, origin)
+	return nil
 }
 
 func (v *memView) EntryByID(id string) (domain.DecisionEntry, bool, error) {
@@ -264,4 +349,22 @@ func (v *memView) commit() {
 		v.l.insertLocked(e)
 	}
 	v.l.conflicts = append(v.l.conflicts, v.conflicts...)
+	for _, a := range v.archive {
+		v.l.archiveLocked(a)
+	}
+	for _, origin := range v.cleared {
+		v.l.conflicts = slices.DeleteFunc(v.l.conflicts, func(c domain.DecisionSyncConflict) bool { return c.Origin == origin })
+	}
+}
+
+func (l *MemLedger) archiveLocked(a ArchivedEntry) {
+	if _, ok := l.byID[a.Entry.ID]; !ok {
+		return
+	}
+	delete(l.byID, a.Entry.ID)
+	delete(l.byOrigin[a.Entry.Origin], a.Entry.OriginSeq)
+	if len(l.byOrigin[a.Entry.Origin]) == 0 {
+		delete(l.byOrigin, a.Entry.Origin)
+	}
+	l.archived[a.Entry.ID] = a
 }
