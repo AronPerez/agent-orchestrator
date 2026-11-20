@@ -46,16 +46,17 @@ export function useDecisionFolds(model: DecisionBoardModel, selectedId?: string)
 		setPreferences((current) => revealDecisionCard(latestModel.current, current, selectedId));
 	}, [selectedId, place]);
 
-	// A selected call that changes state (answered, finished) can leave its
-	// group with nothing open. resolveDecisionFolds already keeps that group
-	// open in the same render, so the card and its focus are never dropped;
-	// this saves it as open so it stays once the panel closes. Unlike a new
-	// selection, a state change never undoes a fold the person made.
-	const lane = at?.card.lane;
+	// The selected call's group can be left with nothing open: the call itself
+	// finishes, or the last other open call beside it does. resolveDecisionFolds
+	// already keeps that group open in the same render, so the card and its
+	// focus are never dropped. This saves it as open whenever that hold is all
+	// that keeps it there, so it stays once the panel closes. Unlike a new
+	// selection, it never undoes a fold the person made.
+	const heldOpen = selectedId ? keepDecisionCardOpen(model, preferences, selectedId) !== preferences : false;
 	useLayoutEffect(() => {
-		if (!selectedId || lane === undefined) return;
+		if (!heldOpen || !selectedId) return;
 		setPreferences((current) => keepDecisionCardOpen(latestModel.current, current, selectedId));
-	}, [selectedId, lane]);
+	}, [heldOpen, selectedId]);
 
 	const folded = useMemo(() => resolveDecisionFolds(model, preferences, selectedId), [model, preferences, selectedId]);
 	const toggle = useCallback((key: string) => {

@@ -226,6 +226,26 @@ describe("DecisionsBoard", () => {
 		expect(screen.getByRole("button", { name: /^Question need/ })).toBeInTheDocument();
 	});
 
+	it("keeps a selected Done call's stream open after the stream's last open call finishes and the panel closes", () => {
+		const epic = { projectId: "shop", projectName: "Shop", streamSessionId: "epic", streamName: "Checkout" };
+		const before = [
+			...calls,
+			call({ id: "kept", ...epic, state: "done", stateLabel: "Done", chosenLabel: "Ship", outcome: "Shipped", outcomeAt: "2026-11-18T11:00:00Z" }),
+			call({ id: "other", ...epic }),
+		];
+		const after = before.map((item) => item.id === "other"
+			? { ...item, state: "done" as const, stateLabel: "Done", chosenLabel: "Ship", outcome: "Shipped", answeredAt: "2026-11-18T11:30:00Z", outcomeAt: "2026-11-18T11:45:00Z" }
+			: item);
+		const view = render(<DecisionsBoard model={buildDecisionBoard(before)} now={NOW} onSelect={vi.fn()} selectedId="kept" />);
+		// The other call finishes: the selected call and its state do not change, but its stream now has nothing open.
+		view.rerender(<DecisionsBoard model={buildDecisionBoard(after)} now={NOW} onSelect={vi.fn()} selectedId="kept" />);
+		expect(screen.getByRole("button", { name: /^Question kept/ })).toHaveAttribute("aria-current", "true");
+		// Closing the panel leaves the stream open, so focus can return to the card.
+		view.rerender(<DecisionsBoard model={buildDecisionBoard(after)} now={NOW} onSelect={vi.fn()} />);
+		expect(screen.getByRole("button", { name: /^Question kept/ })).toBeInTheDocument();
+		expect(within(screen.getByRole("group", { name: "Checkout" })).getByRole("button", { name: /Checkout/ })).toHaveAttribute("aria-expanded", "true");
+	});
+
 	describe("done cap", () => {
 		const finished = [1, 2, 3, 4, 5].map((minute) => call({
 			id: `fin${minute}`, projectId: "cloud", projectName: "skyvern-cloud", state: "done", outcome: "Shipped", outcomeAt: `2026-11-18T11:0${minute}:00Z`,
@@ -254,15 +274,35 @@ describe("DecisionsBoard", () => {
 			expect(screen.getByRole("button", { name: /^Question fin1/ })).toHaveAttribute("aria-current", "true");
 		});
 
-		it("reopens the cell when the selection moves to another card past the cap in the same row", async () => {
+		it("always shows the selected Done card, also when the cell is cut back or the selection moves within the row", async () => {
 			const view = render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} selectedId="fin1" />);
 			const select = (id: string) => view.rerender(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} selectedId={id} />);
+			// The newest three, plus the selected one from past the cap.
+			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin1"]);
+			expect(screen.getByRole("button", { name: "1 more" })).toBeInTheDocument();
 			select("fin2");
-			expect(screen.getByRole("button", { name: /^Question fin2/ })).toHaveAttribute("aria-current", "true");
+			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin2"]);
+			await userEvent.click(screen.getByRole("button", { name: "1 more" }));
+			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin2", "fin1"]);
 			await userEvent.click(screen.getByRole("button", { name: "Show fewer" }));
-			expect(screen.queryByRole("button", { name: /^Question fin2/ })).not.toBeInTheDocument();
+			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin2"]);
 			select("fin1");
 			expect(screen.getByRole("button", { name: /^Question fin1/ })).toHaveAttribute("aria-current", "true");
+			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin1"]);
+		});
+
+		it("keeps focus on a selected Done card that a newer one pushes past the cap", () => {
+			const view = render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} selectedId="fin3" />);
+			act(() => screen.getByRole("button", { name: /^Question fin3/ }).focus());
+			// Another call in the same row finishes and becomes the newest Done card.
+			const pushed = many.map((item) => item.id === "wide"
+				? { ...item, state: "done" as const, stateLabel: "Done", chosenLabel: "Ship", outcome: "Shipped", answeredAt: "2026-11-18T11:50:00Z", outcomeAt: "2026-11-18T11:55:00Z" }
+				: item);
+			view.rerender(<DecisionsBoard model={buildDecisionBoard(pushed)} now={NOW} onSelect={vi.fn()} selectedId="fin3" />);
+			const card = screen.getByRole("button", { name: /^Question fin3/ });
+			expect(card).toHaveFocus();
+			expect(card).toHaveAttribute("aria-current", "true");
+			expect(screen.queryByRole("button", { name: /^Question fin2/ })).not.toBeInTheDocument();
 		});
 
 		it("keeps arrow keys to the cards on screen", async () => {

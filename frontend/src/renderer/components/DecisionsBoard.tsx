@@ -16,7 +16,7 @@ import {
 	type DecisionStreamRow,
 } from "../lib/decision-board";
 import { decisionSecondaryText, decisionStatusText } from "../lib/decision-card-text";
-import { DECISION_DONE_SHOWN, decisionBandFoldKey, decisionRowFoldKey, visibleDecisionTopology } from "../lib/decision-folds";
+import { cappedDoneCards, DECISION_DONE_SHOWN, decisionBandFoldKey, decisionRowFoldKey, visibleDecisionTopology } from "../lib/decision-folds";
 import type { DecisionSyncStatus } from "../lib/decision-sync";
 import { cn } from "../lib/utils";
 import { DecisionStateDot, decisionStateLabel } from "./DecisionStateLabel";
@@ -71,7 +71,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds }
 	const { t } = useTranslation();
 	const hintId = useId();
 
-	// A row's Done cell shows its newest cards; the rest open on request, or when one of them is selected.
+	// A row's Done cell shows its newest cards and the selected one; the rest open on request.
 	const [expandedDone, setExpandedDone] = useState<ReadonlySet<string>>(() => new Set());
 	const toggleDone = (key: string) => setExpandedDone((current) => {
 		const next = new Set(current);
@@ -79,23 +79,9 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds }
 		else next.add(key);
 		return next;
 	});
-	const selectedPastCap = useMemo(() => {
-		const at = selectedId ? model.cardById.get(selectedId) : undefined;
-		if (!at || at.card.lane !== "done") return undefined;
-		const row = model.topology.find((item) => item.bandKey === at.bandKey && item.rowKey === at.rowKey);
-		return row && row.lanes.done.indexOf(at.card.id) >= DECISION_DONE_SHOWN ? decisionRowFoldKey(at.bandKey, at.rowKey) : undefined;
-	}, [model, selectedId]);
-	// Follows the selection as well as its row: moving between two cards past
-	// the cap in one row keeps the same row key, and must still reopen a cell
-	// the person cut back with Show fewer.
-	useEffect(() => {
-		if (!selectedPastCap) return;
-		setExpandedDone((current) => (current.has(selectedPastCap) ? current : new Set(current).add(selectedPastCap)));
-	}, [selectedPastCap, selectedId]);
-
 	// Roving focus: one card is the board's tab stop; arrows move it.
 	const gridRef = useRef<HTMLDivElement>(null);
-	const visible = useMemo(() => visibleDecisionTopology(model, folds.folded, expandedDone), [model, folds.folded, expandedDone]);
+	const visible = useMemo(() => visibleDecisionTopology(model, folds.folded, expandedDone, selectedId), [model, folds.folded, expandedDone, selectedId]);
 	const visibleIds = useMemo(() => new Set(visible.flatMap((row) => DECISION_LANES.flatMap((lane) => row.lanes[lane]))), [visible]);
 	const [focusId, setFocusId] = useState<string | undefined>(undefined);
 	const tabStop = focusId && visibleIds.has(focusId) ? focusId : initialDecisionFocusId(visible, selectedId);
@@ -284,7 +270,7 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
 				if (!open) return <LaneCount key={lane} lane={lane} count={row.counts[lane]} testId="decision-fold-count" className="py-2 leading-4" />;
 				const cards = row.lanes[lane];
 				const capped = lane === "done" && cards.length > DECISION_DONE_SHOWN;
-				const shown = capped && !allDone ? cards.slice(0, DECISION_DONE_SHOWN) : cards;
+				const shown = capped && !allDone ? cappedDoneCards(cards, (card) => card.id, selectedId) : cards;
 				return (
 					<ul
 						key={lane}
@@ -296,10 +282,10 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
 								<DecisionCard card={card} selected={card.id === selectedId} tabStop={card.id === tabStop} onSelect={onSelect} now={now} />
 							</li>
 						))}
-						{capped ? (
+						{capped && (allDone || shown.length < cards.length) ? (
 							<li>
 								<Button aria-expanded={allDone} size="xs" variant="quiet" onClick={() => onToggleDone(foldKey)}>
-									{allDone ? t("decisions.showFewer") : t("decisions.showMore", { count: cards.length - DECISION_DONE_SHOWN })}
+									{allDone ? t("decisions.showFewer") : t("decisions.showMore", { count: cards.length - shown.length })}
 								</Button>
 							</li>
 						) : null}

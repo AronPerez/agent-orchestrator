@@ -147,4 +147,11 @@ describe("visibleDecisionTopology", () => {
 		const expanded = cloudRow(visibleDecisionTopology(many, new Set(), new Set([wide])));
 		expect(expanded.lanes.done).toEqual(["d5", "d4", "d3", "d2", "d1"]);
 	});
+
+	it("always keeps the selected Done card, in its place, even past the cap", () => {
+		const row = (selectedId: string) => visibleDecisionTopology(many, new Set(), new Set(), selectedId).find((item) => item.bandKey === "cloud")!;
+		expect(row("d1").lanes.done).toEqual(["d5", "d4", "d3", "d1"]);
+		expect(row("d2").lanes.done).toEqual(["d5", "d4", "d3", "d2"]);
+		expect(row("d4").lanes.done).toEqual(["d5", "d4", "d3"]);
+	});
 });

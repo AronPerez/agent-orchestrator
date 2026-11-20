@@ -105,19 +105,29 @@ export function writeDecisionFolds(preferences: DecisionFoldPreferences): void {
 }
 
 /**
+ * The cards of one Done cell that are drawn while it is cut back: its newest
+ * few, and the selected card wherever it sits, so the selection is never
+ * hidden behind the cap. Works on cards or on their ids.
+ */
+export function cappedDoneCards<Card>(cards: readonly Card[], idOf: (card: Card) => string, selectedId: string | undefined): Card[] {
+	return cards.filter((card, index) => index < DECISION_DONE_SHOWN || idOf(card) === selectedId);
+}
+
+/**
  * The cards a person can reach right now, for arrow-key movement: folded
- * projects and streams are left out, and a Done cell is cut to its newest
- * cards unless its row key is in `expandedDone`.
+ * projects and streams are left out, and a Done cell is cut back as it is
+ * drawn unless its row key is in `expandedDone`.
  */
 export function visibleDecisionTopology(
 	model: DecisionBoardModel,
 	folded: ReadonlySet<string>,
 	expandedDone: ReadonlySet<string>,
+	selectedId?: string,
 ): DecisionTopologyRow[] {
 	return model.topology
 		.filter((row) => !folded.has(decisionBandFoldKey(row.bandKey)) && !folded.has(decisionRowFoldKey(row.bandKey, row.rowKey)))
 		.map((row) => {
 			if (row.lanes.done.length <= DECISION_DONE_SHOWN || expandedDone.has(decisionRowFoldKey(row.bandKey, row.rowKey))) return row;
-			return { ...row, lanes: { ...row.lanes, done: row.lanes.done.slice(0, DECISION_DONE_SHOWN) } };
+			return { ...row, lanes: { ...row.lanes, done: cappedDoneCards(row.lanes.done, (id) => id, selectedId) } };
 		});
 }
