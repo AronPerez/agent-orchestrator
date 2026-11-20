@@ -111,8 +111,10 @@ export function RemoteHostsSettings({ titleHidden }: { titleHidden?: boolean }) 
 		setRemoveBusy(true);
 		setRemoveError("");
 		try {
-			if (status === "authenticated" && confirmingRemoval.hostId && cloudBaseUrl) await deleteAccountRemoteHost(cloudBaseUrl, confirmingRemoval.hostId);
+			// Removing it here first stops its decision sync, or refuses and keeps
+			// everything; only then does the account directory forget it.
 			await aoBridge.remotes.remove(confirmingRemoval.url);
+			if (status === "authenticated" && confirmingRemoval.hostId && cloudBaseUrl) await deleteAccountRemoteHost(cloudBaseUrl, confirmingRemoval.hostId);
 			if (confirmingRemoval.hostId) await disconnectHost(confirmingRemoval.hostId);
 			await load();
 			setConfirmingRemoval(null);

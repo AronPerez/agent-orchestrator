@@ -578,6 +578,13 @@ export function registerRemotesIpc(
 				// Only account-imported credentials are directory-managed. A machine
 				// paired here with its original password remains a local pairing.
 				if (entry.hostId && entry.accountUserId === account && !current.has(entry.hostId) && holdsAccountToken(entry)) {
+					// A host that still syncs decisions stays until that stops;
+					// the next directory sync tries again.
+					try {
+						await stopDecisionSync(entry.hostId);
+					} catch {
+						continue;
+					}
 					await disconnect(entry.url);
 					await hideAndRetire(entry, account);
 				}

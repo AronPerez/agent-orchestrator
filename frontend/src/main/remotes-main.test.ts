@@ -480,6 +480,32 @@ describe("registerRemotesIpc", () => {
 		expect(closed).toHaveBeenCalledOnce();
 	});
 
+	it("keeps a pruned import until its decision sync stops", async () => {
+		const file = await tempFile();
+		await writeFile(file, JSON.stringify({ remotes: [] }));
+		let listing = cloudListing({ hostId: "h_cloud", label: "Cloud", url: "https://cloud.example" });
+		let daemonStatus = 500;
+		const deletes: string[] = [];
+		const ipc = fakeIpc();
+		registerRemotes(ipc.ipcMain, {
+			file, registry: new RemoteRegistry(async () => { throw new Error("unused"); }),
+			requireAccount: signedIn, getAccountId: async () => "user-a",
+			cloudRequest: (...args) => listing(...args),
+			localDaemonRequest: async (method, path) => {
+				if (method === "DELETE") deletes.push(path);
+				return { status: daemonStatus, body: "{}" };
+			},
+		});
+		await ipc.invoke("remotes:syncAccountHosts", "user-a");
+		listing = cloudListing();
+		await ipc.invoke("remotes:syncAccountHosts", "user-a");
+		expect((await ipc.invoke("remotes:list") as { hostId: string }[]).map((host) => host.hostId)).toEqual(["h_cloud"]);
+		daemonStatus = 204;
+		await ipc.invoke("remotes:syncAccountHosts", "user-a");
+		await expect(ipc.invoke("remotes:list")).resolves.toEqual([]);
+		expect(deletes).toEqual(["/api/v1/decision-peers/h_cloud", "/api/v1/decision-peers/h_cloud"]);
+	});
+
 	it("imports only the signed-in account's hosts and prunes removed imports", async () => {
 		const file = await tempFile();
 		await writeFile(file, JSON.stringify({ remotes: [
