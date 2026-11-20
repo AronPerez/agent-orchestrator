@@ -57,7 +57,7 @@ export function DecisionCallActions({
 	// with the bell and outlives this panel: until a read started after the
 	// failure succeeds, sending again could deliver the answer twice.
 	const view = detailView(call.id);
-	const hold = useDecisionAnswerHold(LOCAL_HOST, call.id, view);
+	const hold = useDecisionAnswerHold(call.id, view);
 	const unconfirmed = hold !== undefined;
 	// A standing decision is closed by the person without naming an answer: it has none.
 	const outcomeFor = call.state === "decided" ? undefined : call.standingEntryId;

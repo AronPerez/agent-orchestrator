@@ -205,6 +205,56 @@ describe("shared lost-answer guard", () => {
 	});
 });
 
+describe("lost answers across synced copies", () => {
+	it("holds the local copy after an answer to the remote copy was lost, until the remote source settles it", async () => {
+		connectedHostsMock.mockReturnValue(["remote-a"]);
+		let localCalls: ReturnType<typeof decisionCall>[] = [];
+		let remoteReads: "ok" | "fail" = "ok";
+		let remoteCalls = [decisionCall("dec_1", "2026-11-18T10:00:00Z")];
+		const local = {
+			GET: vi.fn().mockImplementation(() => Promise.resolve({ data: { calls: localCalls } })),
+			POST: vi.fn().mockResolvedValue({ data: decisionCall("dec_1", "2026-11-18T10:00:00Z") }),
+		};
+		const remote = {
+			GET: vi.fn().mockImplementation(() => remoteReads === "fail"
+				? Promise.reject(new TypeError("network down"))
+				: Promise.resolve({ data: { calls: remoteCalls } })),
+			POST: vi.fn().mockImplementation(() => {
+				remoteCalls = [];
+				remoteReads = "fail";
+				return Promise.reject(new TypeError("response lost"));
+			}),
+		};
+		clients.set("local", local);
+		clients.set("remote-a", remote);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { result } = renderHook(() => useDecisionInbox(true), { wrapper: wrapper(queryClient) });
+		await waitFor(() => expect(result.current.entries.map((e) => e.sourceHostId)).toEqual(["remote-a"]));
+
+		act(() => result.current.answer(result.current.entries[0], 1));
+		await waitFor(() => expect(result.current.held.get("remote-a:dec_1")).toBe("unconfirmed"));
+
+		// Sync brings the call to this computer; the bell now shows the local copy.
+		localCalls = [decisionCall("dec_1", "2026-11-18T10:00:00Z")];
+		act(() => result.current.retry());
+		await waitFor(() => expect(result.current.entries.map((e) => e.sourceHostId)).toEqual(["local"]));
+		expect(result.current.held.get("local:dec_1")).toBe("unconfirmed");
+		act(() => result.current.answer(result.current.entries[0], 1));
+		expect(local.POST).not.toHaveBeenCalled();
+
+		// The remote source shows the answer recorded; the local copy is released once sync shows it too.
+		remoteReads = "ok";
+		act(() => result.current.retry());
+		await waitFor(() => expect(remote.GET.mock.calls.length).toBeGreaterThan(2));
+		expect(result.current.held.get("local:dec_1")).toBe("unconfirmed");
+		localCalls = [];
+		act(() => result.current.retry());
+		await waitFor(() => expect(result.current.entries).toHaveLength(0));
+		expect(local.POST).not.toHaveBeenCalled();
+		expect(remote.POST).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("decision page hooks", () => {
 	it("keeps the bell's needs-you key on the shared host branch", () => {
 		expect(decisionInboxQueryKey("remote-a")).toEqual(decisionKeys.needsYou("remote-a"));
