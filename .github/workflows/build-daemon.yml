@@ -12,7 +12,13 @@ on:
     paths:
       - "frontend/scripts/build-daemon.mjs"
       - "frontend/scripts/go-version.mjs"
+      - "frontend/package.json"
       - "backend/cmd/**"
+      # The packages whose variables build-daemon.mjs sets with -X. Renaming one
+      # still compiles; the linker silently ignores the stale target.
+      - "backend/internal/cli/**"
+      - "backend/internal/mcpserver/**"
+      - "backend/internal/daemonmeta/**"
       - "backend/go.mod"
       - ".github/workflows/build-daemon.yml"
 
@@ -55,7 +61,7 @@ jobs:
             fi
           done
 
-      - name: Check ao version and client id are stamped
+      - name: Check ao version
         working-directory: frontend
         run: |
           expected=$(node -p 'require("./package.json").version')
@@ -65,7 +71,38 @@ jobs:
             echo "::error::ao version reports '${actual%% *}', expected '$expected' (version stamping lost from build-daemon.mjs)"
             exit 1
           fi
-          if ! grep -q client_CI_BUILD_DAEMON_PROBE daemon/ao; then
-            echo "::error::VITE_WORKOS_CLIENT_ID was not stamped into ao (defaultWorkOSClientID ldflag lost)"
-            exit 1
-          fi
+
+      # Read each -X variable's effective value from the binaries. A byte search
+      # is not enough: Go records the whole -ldflags string in build info, so
+      # the stamped text is present even when a misspelled or renamed -X target
+      # was silently ignored by the linker.
+      - name: Check every -X variable took effect
+        working-directory: backend
+        run: |
+          pkg=github.com/aoagents/agent-orchestrator/backend/internal
+          version=$(node -p 'require("../frontend/package.json").version')
+          head=$(git rev-parse HEAD)
+          go build -o "$RUNNER_TEMP/stampcheck" ./cmd/stampcheck
+          values=$("$RUNNER_TEMP/stampcheck" ../frontend/daemon/ao \
+            "$pkg/cli.Version" "$pkg/cli.Commit" "$pkg/cli.Date" \
+            "$pkg/cli.defaultWorkOSClientID" "$pkg/daemonmeta.buildStamp")
+          values+=$'\n'$("$RUNNER_TEMP/stampcheck" ../frontend/daemon/ao-mcp "$pkg/mcpserver.Version")
+          echo "$values"
+          value() { sed -n "s|^$pkg/$1=||p" <<<"$values"; }
+          fail=0
+          # expect <var> <want>: fail when the variable is empty or differs.
+          expect() {
+            got=$(value "$1")
+            if [ -z "$got" ] || [ "$got" != "$2" ]; then
+              echo "::error::$1 is '$got', want '$2'; check its -X target in build-daemon.mjs"
+              fail=1
+            fi
+          }
+          expect cli.Version "$version"
+          commit=$(value cli.Commit)
+          expect cli.Commit "${head:0:${#commit}}"     # a prefix of HEAD
+          expect cli.Date "$(value cli.Date)"          # set at all
+          expect cli.defaultWorkOSClientID client_CI_BUILD_DAEMON_PROBE
+          expect daemonmeta.buildStamp "$head"         # clean CI checkout: no -dirty
+          expect mcpserver.Version "$version"
+          exit "$fail"
