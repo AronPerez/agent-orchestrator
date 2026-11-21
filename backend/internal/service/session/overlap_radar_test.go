@@ -183,6 +183,65 @@ func TestRunProjectOverlapNoticeRadarKeepsDescriptorBackoffAcrossRefreshes(t *te
 	}
 }
 
+// A project that drops below two sessions loses its radar worker and gets a
+// new one when a second session returns. The new worker must keep the
+// descriptor backoff instead of retrying the watch at once.
+func TestRunProjectOverlapNoticeRadarKeepsDescriptorBackoffAcrossWorkerRestart(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	// No timer-driven scans: sessions change only while the radar is idle.
+	svc.overlapRadarPollInterval = time.Hour
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	svc.overlapRadarBackoffBase = 800 * time.Millisecond
+	svc.overlapRadarBackoffMax = 800 * time.Millisecond
+	attempts := make(chan time.Time, 16)
+	svc.overlapWatch = func(context.Context, ...string) (workspacewatch.Subscription, error) {
+		attempts <- time.Now()
+		return workspacewatch.Subscription{}, fmt.Errorf("create git metadata watcher: %w", syscall.EMFILE)
+	}
+	startOverlapRadar(t, svc)
+
+	var firstAttempt time.Time
+	select {
+	case firstAttempt = <-attempts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("radar did not attempt a watch")
+	}
+	waitForOverlapScan(t, store)
+
+	setTerminated := func(terminated bool) {
+		session := store.sessions["demo-b"]
+		session.IsTerminated = terminated
+		store.sessions["demo-b"] = session
+		svc.SignalProjectOverlapRadarSession("demo")
+		// Dropping below two clears the project's rows, and a new worker
+		// scans; either way the radar lists the project's notices.
+		waitForOverlapScan(t, store)
+	}
+	setTerminated(true)
+	setTerminated(false)
+
+	select {
+	case at := <-attempts:
+		t.Fatalf("the restarted worker retried the watch %v after descriptors ran out, inside the 800ms backoff", at.Sub(firstAttempt))
+	case <-time.After(150 * time.Millisecond):
+	}
+	select {
+	case at := <-attempts:
+		if gap := at.Sub(firstAttempt); gap < 750*time.Millisecond {
+			t.Fatalf("watch retried %v after the failure, want the 800ms backoff", gap)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watch was not retried after the backoff ended")
+	}
+}
+
 // When some roots cannot be watched for a reason other than running out of
 // descriptors, the roots that were watched keep reporting changes until the
 // backed-off rebuild.
