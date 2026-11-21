@@ -1,0 +1,71 @@
+name: Build daemon
+
+# Runs frontend/scripts/build-daemon.mjs, the script every desktop build
+# (npm run make/package/publish, npm run dev, the bootstrap scripts) depends on.
+# Nothing else in PR CI ran it, so a sync that left it referencing an undefined
+# variable (appVersion, after #297) shipped to develop and broke every desktop
+# build. `node --check` cannot catch that: it is a runtime ReferenceError.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "frontend/scripts/build-daemon.mjs"
+      - "frontend/scripts/go-version.mjs"
+      - "backend/cmd/**"
+      - "backend/go.mod"
+      - ".github/workflows/build-daemon.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-daemon-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build-daemon:
+    if: ${{ !github.event.pull_request.draft && (github.base_ref == 'main' || github.base_ref == 'develop') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run build-daemon.mjs
+        env:
+          VITE_WORKOS_CLIENT_ID: client_CI_BUILD_DAEMON_PROBE
+        run: node frontend/scripts/build-daemon.mjs
+
+      - name: Check the daemon and its helpers were built
+        working-directory: frontend/daemon
+        run: |
+          for bin in ao ao-chat-host ao-mcp; do
+            if [ ! -x "$bin" ]; then
+              echo "::error::build-daemon.mjs did not produce frontend/daemon/$bin"
+              exit 1
+            fi
+          done
+
+      - name: Check ao version and client id are stamped
+        working-directory: frontend
+        run: |
+          expected=$(node -p 'require("./package.json").version')
+          actual=$(./daemon/ao version)
+          echo "ao version: $actual"
+          if [ "${actual%% *}" != "$expected" ]; then
+            echo "::error::ao version reports '${actual%% *}', expected '$expected' (version stamping lost from build-daemon.mjs)"
+            exit 1
+          fi
+          if ! grep -q client_CI_BUILD_DAEMON_PROBE daemon/ao; then
+            echo "::error::VITE_WORKOS_CLIENT_ID was not stamped into ao (defaultWorkOSClientID ldflag lost)"
+            exit 1
+          fi

@@ -51,6 +51,30 @@ if (isWindowsDev) {
 	mkdirSync(outDir, { recursive: true });
 }
 
+// Stamp `ao version` so a packaged CLI names its build instead of "dev".
+// Kept verbatim from upstream so syncs merge cleanly. appVersion is also read by
+// the ao-mcp build below: dropping it here breaks every desktop build.
+const cliPackage = "github.com/aoagents/agent-orchestrator/backend/internal/cli";
+const appVersion = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8")).version;
+const ldflags = [
+	`-X ${cliPackage}.Version=${process.argv.includes("--dev") ? `${appVersion}-dev` : appVersion}`,
+	`-X ${cliPackage}.Date=${new Date().toISOString().replace(/\.\d+Z$/, "Z")}`,
+];
+const commit = spawnSync("git", ["rev-parse", "--short=12", "HEAD"], {
+	cwd: repoRoot,
+	encoding: "utf8",
+	windowsHide: true,
+});
+if (commit.status === 0 && commit.stdout.trim()) {
+	ldflags.push(`-X ${cliPackage}.Commit=${commit.stdout.trim()}`);
+}
+// `ao remote-host link` must sign in with the same WorkOS client as this
+// desktop build, or the machine lands in a different AO account.
+const workOSClientID = process.env.VITE_WORKOS_CLIENT_ID?.trim();
+if (workOSClientID) {
+	ldflags.push(`-X ${cliPackage}.defaultWorkOSClientID=${workOSClientID}`);
+}
+
 // Link-time build stamp. Go's own VCS stamping is silently absent when the build
 // runs inside a linked git worktree — even with -buildvcs=true, which exits 0 and
 // stamps nothing — and the app-bundled daemon shipped with no build identity for
@@ -67,8 +91,9 @@ const gitOutput = (args) => {
 const head = gitOutput(["rev-parse", "HEAD"]);
 const dirty = head && spawnSync("git", ["diff", "--quiet", "HEAD"], { cwd: repoRoot }).status !== 0;
 const buildStamp = head ? `${head}${dirty ? "-dirty" : ""}` : "";
+ldflags.push(`-X ${stampPkg}.buildStamp=${buildStamp}`);
 
-const result = spawnSync("go", ["build", "-ldflags", `-X ${stampPkg}.buildStamp=${buildStamp}`, "-o", buildOutPath, "./cmd/ao"], {
+const result = spawnSync("go", ["build", "-ldflags", ldflags.join(" "), "-o", buildOutPath, "./cmd/ao"], {
 	cwd: backendRoot,
 	stdio: "inherit",
 	windowsHide: true,
