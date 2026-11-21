@@ -405,6 +405,10 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 	// of file descriptors. Each such attempt briefly takes the daemon's last
 	// free descriptors, so rebuilds back off instead of retrying every delay.
 	exhaustedWatches := 0
+	// watchBlockedUntil is the end of the current descriptor backoff. It
+	// survives refreshes: session and config changes rebuild the worker loop,
+	// and must not retry a watch that just ran out of descriptors.
+	var watchBlockedUntil time.Time
 	for {
 		paths, pathErr := s.ProjectOverlapWatchPaths(ctx, projectID)
 		if pathErr != nil {
@@ -413,7 +417,13 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 		watchCtx, cancelWatch := context.WithCancel(ctx)
 		subscription := workspacewatch.Subscription{}
 		watchFailed := pathErr != nil
-		if !watchFailed && len(paths) > 0 {
+		switch {
+		case watchFailed || len(paths) == 0:
+			// Nothing to watch.
+		case time.Now().Before(watchBlockedUntil):
+			// Still backing off: rely on the poll until the rebuild timer.
+			watchFailed = true
+		default:
 			var watchErr error
 			subscription, watchErr = s.overlapWatch(watchCtx, paths...)
 			partialErr := errors.Join(subscription.RootErrors...)
@@ -429,6 +439,7 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 			}
 			if workspacewatch.DescriptorsExhausted(watchErr) || workspacewatch.DescriptorsExhausted(partialErr) {
 				exhaustedWatches++
+				watchBlockedUntil = time.Now().Add(s.projectOverlapRadarRebuildBackoff(exhaustedWatches))
 				// A partial watch left behind when descriptors ran out would hold
 				// the ones the rest of the daemon needs through the whole
 				// backoff. Release it now; the poll covers every root.
@@ -436,9 +447,10 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 				subscription = workspacewatch.Subscription{}
 			} else {
 				exhaustedWatches = 0
+				watchBlockedUntil = time.Time{}
 			}
 		}
-		rebuildAt := time.Now().Add(s.projectOverlapRadarRebuildBackoff(exhaustedWatches))
+		rebuildAt := watchBlockedUntil
 		// Install the watcher before the authoritative scan so an edit in the
 		// setup gap always leaves a later edge.
 		state := s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
