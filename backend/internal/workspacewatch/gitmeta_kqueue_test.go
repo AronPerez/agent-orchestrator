@@ -1,4 +1,10 @@
-//go:build unix
+//go:build darwin || dragonfly || freebsd || netbsd || openbsd
+
+// kqueue only: it costs a descriptor per entry of each watched directory, so
+// a lowered RLIMIT_NOFILE can admit one worktree and refuse the next. inotify
+// uses one descriptor for the whole watcher, so this cannot happen on Linux;
+// TestWatchGitMetadataReleasesWatchedRootsWhenAnAddRunsOutOfDescriptors covers
+// the cleanup on every platform.
 
 package workspacewatch
 
@@ -44,7 +50,7 @@ func TestWatchGitMetadataReleasesWatchedRootsWhenDescriptorsRunOut(t *testing.T)
 	}
 	restore := limit
 	// Room for the first worktree's watch, not the second's.
-	limit.Cur = uint64(baseline + cost + 2)
+	setRlimitCur(&limit.Cur, baseline+cost+2)
 	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &limit); err != nil {
 		t.Skipf("lower descriptor limit: %v", err)
 	}
@@ -72,4 +78,10 @@ func TestWatchGitMetadataReleasesWatchedRootsWhenDescriptorsRunOut(t *testing.T)
 	if after, _ := openDescriptors(t); after > baseline {
 		t.Fatalf("descriptors after the failed watch = %d, want the %d baseline", after, baseline)
 	}
+}
+
+// setRlimitCur sets an Rlimit field, which is uint64 on Darwin and int64 on
+// some BSDs.
+func setRlimitCur[T ~int64 | ~uint64](cur *T, value int) {
+	*cur = T(value)
 }

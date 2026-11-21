@@ -7,9 +7,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // newCommittedRepo creates a repository with files spread over dirs
@@ -299,5 +302,53 @@ func TestWatchGitMetadataReleasesReopenedIndexOnCancel(t *testing.T) {
 	}
 	if after, _ := openDescriptors(t); after > baseline {
 		t.Fatalf("descriptors after 20 cancelled watches = %d, want at most the %d baseline", after, baseline)
+	}
+}
+
+// When one root's Add runs out of descriptors, every root already watched is
+// released and the error is returned, on every platform. The kqueue-only test
+// TestWatchGitMetadataReleasesWatchedRootsWhenDescriptorsRunOut produces the
+// same failure with a real descriptor limit.
+func TestWatchGitMetadataReleasesWatchedRootsWhenAnAddRunsOutOfDescriptors(t *testing.T) {
+	first := newCommittedRepo(t, 1, 1)
+	second := newCommittedRepo(t, 1, 1)
+	secondGitDir, err := resolveGitDir(context.Background(), second)
+	if err != nil {
+		t.Fatalf("resolve git dir: %v", err)
+	}
+	realAdd := addGitMetadataDir
+	t.Cleanup(func() { addGitMetadataDir = realAdd })
+	var added []string
+	addGitMetadataDir = func(watcher *fsnotify.Watcher, gitDir string) error {
+		if gitDir == secondGitDir {
+			return fmt.Errorf("add %s: %w", gitDir, syscall.EMFILE)
+		}
+		added = append(added, gitDir)
+		return realAdd(watcher, gitDir)
+	}
+
+	baseline, countable := openDescriptors(t)
+	subscription, err := WatchGitMetadata(context.Background(), first, second)
+	if err == nil {
+		t.Fatalf("WatchGitMetadata kept a partial watch (RootErrors %v) after descriptors ran out", subscription.RootErrors)
+	}
+	if !DescriptorsExhausted(err) || !strings.Contains(err.Error(), second) {
+		t.Fatalf("error = %v, want descriptor exhaustion on the second root", err)
+	}
+	if len(added) != 1 {
+		t.Fatalf("roots watched before the failure = %v, want the first root", added)
+	}
+	if !countable {
+		return
+	}
+	// Some backends release the watcher's own descriptor after Close returns.
+	deadline := time.Now().Add(5 * time.Second)
+	after, _ := openDescriptors(t)
+	for after > baseline && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		after, _ = openDescriptors(t)
+	}
+	if after > baseline {
+		t.Fatalf("descriptors after the failed watch = %d, want the %d baseline", after, baseline)
 	}
 }

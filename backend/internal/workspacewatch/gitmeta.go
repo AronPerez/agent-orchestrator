@@ -19,6 +19,12 @@ import (
 // commit, stash and merge.
 var gitMetadataFiles = []string{"HEAD", "index"}
 
+// addGitMetadataDir registers one Git directory with the watcher. Tests
+// replace it to make a single root fail on any platform.
+var addGitMetadataDir = func(watcher *fsnotify.Watcher, gitDir string) error {
+	return watcher.Add(gitDir)
+}
+
 // WatchGitMetadata reports changes to each root's Git HEAD and index, and
 // nothing else. It watches each root's Git directory (for a linked worktree,
 // .git/worktrees/<name>), so its cost is one descriptor per entry of that
@@ -50,7 +56,7 @@ func WatchGitMetadata(ctx context.Context, roots ...string) (Subscription, error
 			if _, seen := gitDirs[gitDir]; seen {
 				continue
 			}
-			if err = watcher.Add(gitDir); err != nil {
+			if err = addGitMetadataDir(watcher, gitDir); err != nil {
 				// A failed Add can leave part of the directory registered.
 				_ = watcher.Remove(gitDir)
 			}
