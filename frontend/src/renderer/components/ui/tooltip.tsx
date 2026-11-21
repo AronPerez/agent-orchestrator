@@ -36,17 +36,38 @@ function useShortcutKeys(id: AppShortcutId | undefined): readonly string[] | und
 	return binding ? shortcutBindingKeys(binding, isMac) : undefined;
 }
 
+/**
+ * Radix dismisses a tooltip on Escape by calling `event.preventDefault()` and
+ * then closing it, straight after `onEscapeKeyDown` returns. Swallow that one
+ * call, so the tooltip still closes but the key reaches the page unclaimed.
+ * The real method is back for every later handler.
+ */
+function leaveEscapeUnclaimed(event: KeyboardEvent) {
+	event.preventDefault = () => {
+		delete (event as { preventDefault?: unknown }).preventDefault;
+	};
+}
+
 function TooltipContent({
 	className,
 	sideOffset = 0,
 	children,
 	hideArrow = false,
 	shortcut,
+	passEscape = false,
+	onEscapeKeyDown,
 	...props
 }: React.ComponentProps<typeof TooltipPrimitive.Content> & {
 	hideArrow?: boolean;
 	/** Command whose keybinding is shown beside the label as muted glyphs (⌘ K), like the Cmd+K palette. */
 	shortcut?: AppShortcutId;
+	/**
+	 * Close on Escape without claiming the key. A showing tooltip hears Escape
+	 * for the whole document, hover included, and Radix marks it handled; a
+	 * panel, page or field that skips handled keys then needs a second press.
+	 * Set this for a tooltip inside a surface that has its own Escape.
+	 */
+	passEscape?: boolean;
 }) {
 	const keys = useShortcutKeys(shortcut);
 	return (
@@ -54,6 +75,10 @@ function TooltipContent({
 			<TooltipPrimitive.Content
 				data-slot="tooltip-content"
 				sideOffset={sideOffset}
+				onEscapeKeyDown={(event) => {
+					onEscapeKeyDown?.(event);
+					if (passEscape && !event.defaultPrevented) leaveEscapeUnclaimed(event);
+				}}
 				className={cn(
 					"pointer-events-none z-50 w-fit origin-(--radix-tooltip-content-transform-origin) animate-in rounded-md bg-overlay px-3 py-1.5 text-xs text-wrap text-popover-foreground shadow-(--shadow-popover) fade-in-0 zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
 					keys && "flex items-center gap-2.5",

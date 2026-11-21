@@ -129,7 +129,6 @@ describe("default shortcuts", () => {
 	// [id, chord] pairs a user can press on macOS. ⌘⇧[ reports key "{" with
 	// code BracketLeft, so those chords carry the physical code like Electron does.
 	it.each([
-		["find", chord({ key: "f", meta: true })],
 		["find-in-chat", chord({ key: "f", meta: true })],
 		["add-selection-to-chat", chord({ key: "l", meta: true })],
 		["new-session", chord({ key: "n", meta: true })],
@@ -215,7 +214,6 @@ describe("default shortcuts", () => {
 					binding.alt,
 				].join("|");
 				const previous = seen.get(signature);
-				if (id === "find-in-chat" && previous === "find") continue;
 				expect(previous, `${id} collides with ${previous}`).toBeUndefined();
 				seen.set(signature, id);
 			}

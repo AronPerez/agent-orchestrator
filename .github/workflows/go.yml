@@ -16,6 +16,15 @@ on:
 permissions:
   contents: read
 
+env:
+  # -race stays on for our code, but not for modernc.org's machine-translated
+  # SQLite and libc. Instrumenting every memory access in them made every
+  # SQLite-backed test several times slower (the slowest migration test took
+  # 128s with it, 9s without), and catching races in our own Go code doesn't
+  # depend on it. From upstream #7533, which this fork's workflow never took:
+  # without it the store suite outgrew its 40-minute race budget.
+  GOFLAGS: -gcflags=modernc.org/...=-race=false
+
 concurrency:
   group: go-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.ref) }}
   # Coalesce pending main runs, but let the active run finish for a main signal.
@@ -239,6 +248,9 @@ jobs:
 
       - name: Test Windows PowerShell installers
         run: go test -race -count=1 -v -run '^TestRunInstallScriptPowerShell' ./internal/adapters/systemexec/
+
+      - name: Test Mastra native history and Windows lock liveness
+        run: go test -race -count=1 -timeout=10m ./internal/adapters/agent/mastracode
 
       - name: Test native Goose identity
         run: go test -race -count=1 -timeout=10m ./internal/adapters/agent/binaryutil ./internal/adapters/agent/goose

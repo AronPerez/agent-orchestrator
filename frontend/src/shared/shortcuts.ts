@@ -50,7 +50,6 @@ export function artifactZoomAction(chord: Pick<ShortcutChord, "alt" | "code" | "
 
 export type AppShortcutId =
 	| "find-in-chat"
-	| "find"
 	| "add-selection-to-chat"
 	| "new-session"
 	| "new-shell-terminal"
@@ -114,8 +113,7 @@ export function isSplitPaneShortcut(id: AppShortcutId): boolean {
 // The user-facing shortcut catalog. Bindings live exclusively in
 // defaultShortcutBindings so runtime matching and displayed labels cannot drift.
 export const APP_SHORTCUTS: readonly ShortcutDefinition[] = [
-	{ id: "find", label: "Find", category: "General" },
-	{ id: "find-in-chat", label: "Find in chat", category: "Session" },
+	{ id: "find-in-chat", label: "Find in chat or board", category: "Session" },
 	{ id: "add-selection-to-chat", label: "Add selection to chat", category: "Session" },
 	{ id: "new-session", label: "New session", category: "General" },
 	{ id: "command-palette", label: "Open command palette", category: "General" },
@@ -164,8 +162,6 @@ const binding = (
 export function defaultShortcutBindings(id: AppShortcutId, isMac: boolean): readonly ShortcutBinding[] {
 	const primary = isMac ? { meta: true } : { ctrl: true };
 	switch (id) {
-		case "find":
-			return [binding("f", primary)];
 		case "find-in-chat":
 			return [binding("f", primary)];
 		case "add-selection-to-chat":

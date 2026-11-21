@@ -433,7 +433,7 @@ func (c *commandContext) sourceDaemonHostID(ctx context.Context, sessionID strin
 	if launchHostID == "" {
 		return "", errors.New("source session launch host identity is unavailable; retry from the session that started this command")
 	}
-	base, err := c.localDaemonBase()
+	base, err := c.localDaemonBase(ctx)
 	if err != nil {
 		return "", fmt.Errorf("source session daemon is unavailable: %w", err)
 	}
@@ -535,7 +535,7 @@ func (c *commandContext) requireRemoteCoordinationCapability(ctx context.Context
 	return fmt.Errorf("destination does not support %s; upgrade Orchestrator on that machine before using this cross-machine operation", capability)
 }
 func (c *commandContext) localDaemonHostID(ctx context.Context) string {
-	base, err := c.localDaemonBase()
+	base, err := c.localDaemonBase(ctx)
 	if err == nil {
 		if identity, probeErr := c.probeSavedHostIdentity(ctx, base); probeErr == nil {
 			return identity.HostID

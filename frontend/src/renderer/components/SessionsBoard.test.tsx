@@ -1,5 +1,4 @@
 import { getSessionStatusView } from "../lib/session-presentation";
-import { useKeybindingsStore } from "../stores/keybindings-store";
 import { toKanbanColumn } from "@aoagents/product-ui";
 import { appI18n } from "../i18n";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -1995,7 +1994,7 @@ describe("SessionsBoard", () => {
 		]);
 	});
 
-	it("uses the shared minimal scrollbar styling for every Kanban lane", () => {
+	it("hides the scrollbar on every Kanban lane", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				workspaceWithSessions([
@@ -2018,7 +2017,7 @@ describe("SessionsBoard", () => {
 			.flatMap((column) => Array.from(column.querySelectorAll<HTMLElement>(".overflow-y-auto")));
 		expect(laneScrollers).toHaveLength(4);
 		for (const scroller of laneScrollers) {
-			expect(scroller).toHaveClass("board-scrollbar", "overflow-y-auto");
+			expect(scroller).toHaveClass("scrollbar-none", "overflow-y-auto");
 		}
 	});
 
@@ -2376,6 +2375,192 @@ describe("SessionsBoard artifacts", () => {
 	});
 });
 
+describe("SessionsBoard search", () => {
+	function searchableBoard() {
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				workspaceWithSessions([
+					boardSession({ id: "ao-12", title: "Fix login redirect", status: "working", branch: "ao/login-fix" }),
+					boardSession({
+						id: "ao-13",
+						title: "Theme picker",
+						status: "review_pending",
+						prs: [{ url: "https://github.com/example/radic/pull/812", number: 812, state: "open", ci: "passing", review: "pending" } as WorkspaceSession["prs"][number]],
+					}),
+					boardSession({ id: "ao-14", title: "Board search", status: "mergeable" }),
+					terminatedSession(),
+				]),
+			],
+			isError: false,
+			isSuccess: true,
+		});
+	}
+
+	const searchField = () => screen.getByRole("searchbox", { name: "Search through board" });
+
+	async function search(query: string) {
+		await userEvent.type(searchField(), query);
+	}
+
+	it("narrows the cards in place by title, session id, branch and PR number", async () => {
+		searchableBoard();
+		renderBoard("p1");
+		expect(screen.getAllByTestId("board-session-card")).toHaveLength(3);
+
+		await search("login");
+		await waitFor(() => expect(screen.getAllByTestId("board-session-card")).toHaveLength(1));
+		const lane = screen.getByText("Fix login redirect").closest('[data-testid="board-column"]') as HTMLElement;
+		expect(lane).toHaveAttribute("data-column", toKanbanColumn(undefined, "working"));
+		// Lanes stay, with counts for what is shown; the archive stays reachable.
+		expect(screen.getAllByTestId("board-column")).toHaveLength(4);
+		expect(screen.getByRole("button", { name: /^Archived sessions, 1$/ })).toBeInTheDocument();
+
+		const field = searchField();
+		for (const [query, title] of [["ao-14", "Board search"], ["#812", "Theme picker"], ["ao/login-fix", "Fix login redirect"]] as const) {
+			await userEvent.clear(field);
+			await userEvent.type(field, query);
+			await waitFor(() => expect(screen.getAllByTestId("board-session-card")).toHaveLength(1));
+			expect(screen.getByText(title)).toBeInTheDocument();
+		}
+	});
+
+	// Fork: the search also matches the card's project and its rendered status,
+	// as the find bar it replaced did (#201).
+	it("also matches the project name and the status text a card shows", async () => {
+		searchableBoard();
+		renderBoard("p1");
+
+		await search("radic");
+		await waitFor(() => expect(screen.getAllByTestId("board-session-card")).toHaveLength(3));
+
+		await userEvent.clear(searchField());
+		await search("ready");
+		await waitFor(() => expect(screen.getAllByTestId("board-session-card")).toHaveLength(1));
+		expect(screen.getByText("Board search")).toBeInTheDocument();
+	});
+
+	it.each<[string, Partial<WorkspaceSession>, string]>([
+		["en", {}, "Idle"],
+		["en", { displayStatus: "Awaiting PR" }, "Awaiting PR"],
+		["en", { displayStatus: "Mergeable" }, "Mergeable"],
+		["en", { displayStatus: "Fixing CI failures" }, "Fixing CI failures"],
+		["de", { displayStatus: "Awaiting review" }, "Wartet auf Review"],
+		["en", { displayStatus: "Awaiting PR", provisionState: "failed" }, "Start failed"],
+		["en", { provisionState: "provisioning" }, "Starting Claude Code…"],
+		["en", { activeAgentSwitch: activeAgentSwitch("s-status") }, "Switching to Codex"],
+		["en", { displayStatus: "Working", provisionState: "failed", statusReadiness: "checking" }, "Checking…"],
+		["en", { displayStatus: "Working", statusReadiness: "unavailable" }, "Unable to verify"],
+	])("matches the rendered status and legacy fallback in %s: %j", async (language, overrides, label) => {
+		await appI18n.changeLanguage(language);
+		workspaceQueryMock.mockReturnValue({
+			data: [workspaceWithSessions([
+				boardSession({ id: "s-status", title: "matching worker", status: "idle", ...overrides }),
+				boardSession({ id: "s-other", title: "unrelated worker", status: "working" }),
+			])],
+			isError: false,
+			isSuccess: true,
+		});
+		try {
+			renderBoard("p1");
+			const field = screen.getByRole("searchbox");
+			for (const query of [label, getSessionStatusView("idle", appI18n.t).label]) {
+				await userEvent.clear(field);
+				await userEvent.type(field, query);
+				await waitFor(() => expect(screen.getAllByTestId("board-session-card")).toHaveLength(1));
+				expect(screen.getByTestId("session-status")).toHaveTextContent(label);
+				expect(screen.getByText("matching worker")).toBeInTheDocument();
+				expect(screen.queryByText("unrelated worker")).not.toBeInTheDocument();
+			}
+		} finally {
+			await appI18n.changeLanguage("en");
+		}
+	});
+
+	it("shows a no-match state whose Clear search restores the board", async () => {
+		searchableBoard();
+		renderBoard("p1");
+
+		await search("nothing-like-this");
+		expect(await screen.findByText("No sessions match “nothing-like-this”")).toBeInTheDocument();
+		expect(screen.queryAllByTestId("board-session-card")).toHaveLength(0);
+
+		await userEvent.click(screen.getByRole("button", { name: "Clear search" }));
+		await waitFor(() => expect(screen.getAllByTestId("board-session-card")).toHaveLength(3));
+		expect(screen.queryByTestId("board-search-empty")).not.toBeInTheDocument();
+		await waitFor(() => expect(searchField()).toHaveFocus());
+	});
+
+	it("keeps the field on screen, unfocused, before any search", () => {
+		searchableBoard();
+		renderBoard("p1");
+
+		expect(searchField()).toHaveAttribute("placeholder", "Search through board");
+		expect(searchField()).not.toHaveFocus();
+	});
+
+	it("focuses the field on Cmd/Ctrl+F", async () => {
+		searchableBoard();
+		renderBoard("p1");
+		const mac = isMacPlatform();
+		// jsdom lays nothing out; the board only claims the chord for a field on screen.
+		Object.defineProperty(searchField(), "getClientRects", { configurable: true, value: () => [{ top: 0, bottom: 30 }] });
+
+		fireEvent.keyDown(window, { key: "f", code: "KeyF", metaKey: mac, ctrlKey: !mac });
+		await waitFor(() => expect(searchField()).toHaveFocus());
+
+		// Another text field keeps the chord for its own editing.
+		const other = document.createElement("textarea");
+		document.body.append(other);
+		other.focus();
+		fireEvent.keyDown(other, { key: "f", code: "KeyF", metaKey: mac, ctrlKey: !mac });
+		expect(other).toHaveFocus();
+		other.remove();
+	});
+
+	it("clears on Escape", async () => {
+		searchableBoard();
+		renderBoard("p1");
+
+		await search("theme");
+		await waitFor(() => expect(screen.getAllByTestId("board-session-card")).toHaveLength(1));
+		await userEvent.keyboard("{Escape}");
+		await waitFor(() => expect(screen.getAllByTestId("board-session-card")).toHaveLength(3));
+		expect(searchField()).toHaveValue("");
+		expect(searchField()).toHaveFocus();
+		await userEvent.keyboard("{Escape}");
+		expect(searchField()).not.toHaveFocus();
+	});
+
+	it("starts each project's board unfiltered", async () => {
+		const [p1] = twoProjectsWithArchives();
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				{ ...p1, sessions: [boardSession({ id: "ao-12", title: "Fix login redirect", status: "working" })] },
+				{ id: "p2", name: "other", path: "/tmp/other", kind: "single_repo", sessions: [boardSession({ id: "ao-20", title: "Other work", status: "working", workspaceId: "p2", workspaceName: "other" })] },
+			],
+			isError: false,
+			isSuccess: true,
+		});
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const view = renderBoardWithClient(queryClient, "p1");
+
+		await search("nothing-like-this");
+		await screen.findByTestId("board-search-empty");
+
+		view.rerender(
+			<QueryClientProvider client={queryClient}>
+				<TooltipProvider>
+					<SessionsBoard projectId="p2" />
+					<ArchiveModalHost />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+		await waitFor(() => expect(screen.getAllByTestId("board-session-card")).toHaveLength(1));
+		expect(screen.getByText("Other work")).toBeInTheDocument();
+		expect(searchField()).toHaveValue("");
+	});
+});
+
 /** p1 ("radic") and p2 ("other"), each with one archived worker. */
 function twoProjectsWithArchives(): WorkspaceSummary[] {
 	return [
@@ -2458,242 +2643,3 @@ function terminatedSession(overrides: Partial<WorkspaceSession> = {}): Workspace
 		...overrides,
 	};
 }
-
-describe("SessionsBoard find bar", () => {
-	beforeEach(() => {
-		useKeybindingsStore.setState({ overrides: {} });
-		workspaceQueryMock.mockReturnValue({
-			data: [
-				workspaceWithSessions([
-					boardSession({ id: "s-alpha", title: "alpha worker", status: "working" }),
-					boardSession({ id: "s-beta", title: "beta worker", status: "working" }),
-					terminatedSession({ id: "s-alpha-old", title: "alpha archived" }),
-					terminatedSession({ id: "s-beta-old", title: "beta archived" }),
-				]),
-			],
-			isError: false,
-			isSuccess: true,
-		});
-	});
-
-	async function openFindBar() {
-		await userEvent.keyboard("{Control>}f{/Control}");
-		return screen.findByTestId("board-find-bar");
-	}
-
-	it("focuses the input and selects the query when find is pressed again", async () => {
-		renderBoard("p1");
-		const input = within(await openFindBar()).getByRole("textbox") as HTMLInputElement;
-		expect(input).toHaveFocus();
-		await userEvent.type(input, "alpha");
-		await openFindBar();
-		expect(input.selectionStart).toBe(0);
-		expect(input.selectionEnd).toBe(5);
-	});
-
-	it.each([
-		["ALPHA", "1/2"],
-		["alwr", "1/2"],
-		["ao/s-alpha", "1/2"],
-		["radic", "2/2"],
-		["terminated", "0/2"],
-		["#42", "0/2"],
-		["42", "0/2"],
-		["   ", "2/2"],
-	])("matches titles, branches, projects, statuses and PRs with palette scoring: %s", async (query, count) => {
-		renderBoard("p1");
-		const findBar = await openFindBar();
-		await userEvent.type(within(findBar).getByRole("textbox"), query);
-		expect(within(findBar).getByText(count)).toBeInTheDocument();
-	});
-
-	it.each(["ontend", "345"])("matches substrings inside branch names and PR numbers: %s", async (query) => {
-		workspaceQueryMock.mockReturnValue({
-			data: [workspaceWithSessions([
-				boardSession({
-					id: "s-match",
-					title: "Fix cache",
-					status: "working",
-					branch: "ao/feature-frontend",
-					prs: [{ ...terminatedSession().prs[0], number: 12345 }],
-				}),
-				boardSession({ id: "s-other", title: "Unrelated worker", status: "working" }),
-			])],
-			isError: false,
-			isSuccess: true,
-		});
-		renderBoard("p1");
-		const findBar = await openFindBar();
-		await userEvent.type(within(findBar).getByRole("textbox"), query);
-		expect(findBar).toHaveTextContent("1/2");
-		expect(screen.getByText("Fix cache")).toBeInTheDocument();
-		expect(screen.queryByText("Unrelated worker")).not.toBeInTheDocument();
-	});
-
-	it.each<[string, Partial<WorkspaceSession>, string]>([
-		["en", {}, "Idle"],
-		["en", { displayStatus: "Awaiting PR" }, "Awaiting PR"],
-		["en", { displayStatus: "Mergeable" }, "Mergeable"],
-		["en", { displayStatus: "Fixing CI failures" }, "Fixing CI failures"],
-		["de", { displayStatus: "Awaiting review" }, "Wartet auf Review"],
-		["en", { displayStatus: "Awaiting PR", provisionState: "failed" }, "Start failed"],
-		["en", { provisionState: "provisioning" }, "Starting Claude Code…"],
-		["en", { activeAgentSwitch: activeAgentSwitch("s-status") }, "Switching to Codex"],
-		["en", { displayStatus: "Working", provisionState: "failed", statusReadiness: "checking" }, "Checking…"],
-		["en", { displayStatus: "Working", statusReadiness: "unavailable" }, "Unable to verify"],
-	])("matches the rendered status and legacy fallback in %s: %j", async (language, overrides, label) => {
-		await appI18n.changeLanguage(language);
-		workspaceQueryMock.mockReturnValue({
-			data: [workspaceWithSessions([
-				boardSession({ id: "s-status", title: "matching worker", status: "idle", ...overrides }),
-				boardSession({ id: "s-other", title: "unrelated worker", status: "working" }),
-			])],
-			isError: false,
-			isSuccess: true,
-		});
-		try {
-			renderBoard("p1");
-			const findBar = await openFindBar();
-			const input = within(findBar).getByRole("textbox");
-			for (const query of [label, getSessionStatusView("idle", appI18n.t).label]) {
-				await userEvent.clear(input);
-				await userEvent.type(input, query);
-				expect(findBar).toHaveTextContent("1/2");
-				expect(screen.getByTestId("session-status")).toHaveTextContent(label);
-				expect(screen.getByText("matching worker")).toBeInTheDocument();
-				expect(screen.queryByText("unrelated worker")).not.toBeInTheDocument();
-			}
-		} finally {
-			await appI18n.changeLanguage("en");
-		}
-	});
-
-	it("clears on close, returns focus to the board, and reopens without a stale query", async () => {
-		renderBoard("p1");
-		const findBar = await openFindBar();
-		await userEvent.type(within(findBar).getByRole("textbox"), "alpha");
-		await userEvent.click(within(findBar).getByRole("button", { name: "Close find" }));
-		expect(screen.queryByTestId("board-find-bar")).not.toBeInTheDocument();
-		expect(screen.getByText("beta worker")).toBeInTheDocument();
-		expect(screen.getByTestId("board")).toHaveFocus();
-		expect(within(await openFindBar()).getByRole("textbox")).toHaveValue("");
-	});
-
-	it("uses live shortcut overrides and honors a disabled binding", async () => {
-		renderBoard("p1");
-		useKeybindingsStore.setState({ overrides: { find: [{ key: "f", ctrl: true, shift: true, meta: false, alt: false }] } });
-		await userEvent.keyboard("{Control>}f{/Control}");
-		expect(screen.queryByTestId("board-find-bar")).not.toBeInTheDocument();
-		await userEvent.keyboard("{Control>}{Shift>}f{/Shift}{/Control}");
-		expect(screen.getByTestId("board-find-bar")).toBeInTheDocument();
-		await userEvent.keyboard("{Escape}");
-		useKeybindingsStore.setState({ overrides: { find: [] } });
-		await userEvent.keyboard("{Control>}f{/Control}");
-		expect(screen.queryByTestId("board-find-bar")).not.toBeInTheDocument();
-	});
-
-	it.each(["browser-panel", "xterm", "terminal-surface"])("leaves find and Escape to a focused %s", async (className) => {
-		renderBoard("p1");
-		const surface = document.createElement("div");
-		surface.className = className;
-		const button = document.createElement("button");
-		surface.appendChild(button);
-		document.body.appendChild(surface);
-		try {
-			button.focus();
-			expect(fireEvent.keyDown(button, { key: "f", ctrlKey: true })).toBe(true);
-			expect(screen.queryByTestId("board-find-bar")).not.toBeInTheDocument();
-			screen.getByTestId("board").focus();
-			await openFindBar();
-			button.focus();
-			expect(fireEvent.keyDown(button, { key: "Escape" })).toBe(true);
-			expect(screen.getByTestId("board-find-bar")).toBeInTheDocument();
-		} finally {
-			surface.remove();
-		}
-	});
-
-	it.each(["input", "textarea", "contenteditable"])("does not steal find from another %s", (kind) => {
-		renderBoard("p1");
-		const editor = document.createElement(kind === "contenteditable" ? "div" : kind);
-		if (kind === "contenteditable") editor.setAttribute("contenteditable", "true");
-		document.body.appendChild(editor);
-		try {
-			editor.focus();
-			expect(fireEvent.keyDown(editor, { key: "f", ctrlKey: true })).toBe(true);
-			expect(screen.queryByTestId("board-find-bar")).not.toBeInTheDocument();
-		} finally {
-			editor.remove();
-		}
-	});
-
-	it("ignores find while the global Settings page covers the board", async () => {
-		renderBoard("p1");
-		useUiStore.setState({ settingsModal: { scope: "global" } });
-		await userEvent.keyboard("{Control>}f{/Control}");
-		expect(screen.queryByTestId("board-find-bar")).not.toBeInTheDocument();
-	});
-
-	it("clears find when the board's project changes", async () => {
-		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		const view = renderBoardWithClient(queryClient, "p1");
-		await userEvent.type(within(await openFindBar()).getByRole("textbox"), "alpha");
-		view.rerender(
-			<QueryClientProvider client={queryClient}>
-				<TooltipProvider><SessionsBoard /></TooltipProvider>
-			</QueryClientProvider>,
-		);
-		expect(screen.queryByTestId("board-find-bar")).not.toBeInTheDocument();
-		expect(screen.getByText("beta worker")).toBeInTheDocument();
-	});
-
-	it("narrows the lanes and counts matches against the whole board", async () => {
-		renderBoard("p1");
-
-		const findBar = await openFindBar();
-		await userEvent.type(within(findBar).getByRole("textbox"), "alpha");
-
-		expect(screen.getByText("alpha worker")).toBeInTheDocument();
-		expect(screen.queryByText("beta worker")).not.toBeInTheDocument();
-		expect(findBar).toHaveTextContent("1/2");
-	});
-
-
-
-	it("shows an empty state when nothing matches", async () => {
-		renderBoard("p1");
-
-		const findBar = await openFindBar();
-		await userEvent.type(within(findBar).getByRole("textbox"), "zzzz");
-
-		expect(screen.getByText("No sessions match")).toBeInTheDocument();
-		expect(within(findBar).getByText("0/2")).toBeInTheDocument();
-	});
-
-	it("restores the unfiltered board on Escape", async () => {
-		renderBoard("p1");
-
-		const findBar = await openFindBar();
-		await userEvent.type(within(findBar).getByRole("textbox"), "alpha");
-		await userEvent.keyboard("{Escape}");
-
-		expect(screen.queryByTestId("board-find-bar")).not.toBeInTheDocument();
-		expect(screen.getByText("alpha worker")).toBeInTheDocument();
-		expect(screen.getByText("beta worker")).toBeInTheDocument();
-	});
-
-	it("ignores the shortcut while a dialog or the command palette is open", async () => {
-		renderBoard("p1");
-		const palette = document.createElement("div");
-		palette.setAttribute("role", "dialog");
-		palette.setAttribute("data-state", "open");
-		document.body.appendChild(palette);
-
-		try {
-			await userEvent.keyboard("{Control>}f{/Control}");
-			expect(screen.queryByTestId("board-find-bar")).not.toBeInTheDocument();
-		} finally {
-			palette.remove();
-		}
-	});
-});

@@ -40,6 +40,11 @@ type InputLease interface {
 // mode-aware caller cannot dispatch through stale TUI/Chat state.
 type MessageWriter func(context.Context, domain.SessionRecord, string) error
 
+// MessageInputChecker runs under the input lease at the actual paste boundary.
+type MessageInputChecker interface {
+	ValidateSessionMessageInput(context.Context, domain.SessionRecord, string) error
+}
+
 // Outcome reports what a guarded write did. Anything other than Sent means the
 // message did NOT reach the pane; callers that record delivery must not stamp
 // a suppressed write as delivered.
@@ -521,6 +526,17 @@ func (g *Guard) sendAdmittedCheckedWithWriter(ctx context.Context, id domain.Ses
 			return SuppressedUnknown, fmt.Errorf("guard %s: pre-write check: %w", id, err)
 		}
 	}
+	g.leaseMu.RLock()
+	checker, guarded := g.lease.(MessageInputChecker)
+	g.leaseMu.RUnlock()
+	if guarded {
+		if err := checker.ValidateSessionMessageInput(ctx, rec, msg); err != nil {
+			if errors.Is(err, ports.ErrTerminalMessageNotReady) {
+				return SuppressedAwaitingUser, nil
+			}
+			return SuppressedUnknown, fmt.Errorf("guard %s: terminal input: %w", id, err)
+		}
+	}
 	// Composer-occupancy check runs last, under the held input lease and on the
 	// just-read record: an unsent human draft here must not be concatenated with
 	// the delivered message (#5711). It refuses only on a positively proven draft.
@@ -540,6 +556,13 @@ func (g *Guard) sendAdmittedCheckedWithWriter(ctx context.Context, id domain.Ses
 	// gone: never let that turn into a write.
 	if err := ctx.Err(); err != nil {
 		return SuppressedUnknown, fmt.Errorf("guard %s: %w", id, err)
+	}
+	// Tau's Textual composer needs a complete paste event: raw chunked
+	// multiline text can submit mid-message and leave a remainder draft.
+	// Frame only admitted nonempty messages; Enter nudges stay unchanged.
+	// Chat-mode delivery carries text, not keystrokes, so it is never framed.
+	if rec.Harness == domain.HarnessTau && msg != "" && domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
+		msg = "\x1b[200~" + msg + "\x1b[201~"
 	}
 	if writer == nil {
 		writer = func(ctx context.Context, rec domain.SessionRecord, msg string) error {

@@ -423,9 +423,9 @@ func TestNudgeSessionReportsDefiniteMessengerRefusalAsUnsent(t *testing.T) {
 		t.Fatalf("sent=%v err=%v, want definite refusal", sent, err)
 	}
 
-	messenger.err = ports.ErrAgentDeliveryUnconfirmed
+	messenger.err = ports.ErrDeliveryUnconfirmed
 	sent, err = m.NudgeSession(context.Background(), rec.ID, "deadline-key", "wrap up and report")
-	if !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) || !sent {
+	if !errors.Is(err, ports.ErrDeliveryUnconfirmed) || !sent {
 		t.Fatalf("sent=%v err=%v, want ambiguous post-write delivery", sent, err)
 	}
 }

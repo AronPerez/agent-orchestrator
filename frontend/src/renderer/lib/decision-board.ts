@@ -59,6 +59,8 @@ export type DecisionStreamRow = {
 	machine?: string;
 	projectWide: boolean;
 	lanes: DecisionLaneCards;
+	/** Cards per lane, for the counts a folded row shows. */
+	counts: Record<DecisionLane, number>;
 	needsYouCount: number;
 };
 
@@ -199,6 +201,7 @@ export function buildDecisionBoard(calls: readonly DecisionCall[], servingHostId
 					origin: streamId ? call.hostId : undefined,
 					projectWide: !streamId,
 					lanes: emptyLanes(),
+					counts: emptyCounts(),
 					needsYouCount: 0,
 				},
 				label: { at: Number.NEGATIVE_INFINITY, id: "" },
@@ -224,6 +227,7 @@ export function buildDecisionBoard(calls: readonly DecisionCall[], servingHostId
 			sortAt: sortTimeOf(call, lane),
 		};
 		row.row.lanes[lane].push(card);
+		row.row.counts[lane] += 1;
 		band.band.counts[lane] += 1;
 		totals[lane] += 1;
 		if (lane === "needs_you") {

@@ -127,7 +127,7 @@ func (s *Service) ForkSwitchAgent(ctx context.Context, id domain.SessionID, req 
 }
 
 func (s *Service) runForkSwitch(ctx context.Context, st forkSwitchStore, sw domain.AgentSwitch, req domain.ProviderSwitchRequest) error {
-	switchErr := s.switchProvider(ctx, sw.SessionID, req)
+	switchErr := s.switchProvider(ctx, sw.SessionID, req, &domain.ProviderSwitchResult{})
 	sw.State, sw.ErrorCode = "completed", ""
 	if switchErr != nil {
 		s.log.Warn("legacy provider switch failed", "session", sw.SessionID, "error", switchErr)

@@ -766,14 +766,14 @@ func TestDaemonBaseLocalUsesRunFile(t *testing.T) {
 
 	c := &commandContext{deps: Deps{ProcessAlive: func(int) bool { return true }}.withDefaults()}
 
-	if _, err := c.daemonBase(); err == nil || !strings.Contains(err.Error(), "not running") {
+	if _, err := c.daemonBase(context.Background()); err == nil || !strings.Contains(err.Error(), "not running") {
 		t.Fatalf("err = %v, want 'not running' with no run-file", err)
 	}
 
 	if err := runfile.Write(runFile, runfile.Info{PID: 4242, Port: 3999, StartedAt: time.Unix(100, 0).UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	base, err := c.daemonBase()
+	base, err := c.daemonBase(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -782,7 +782,7 @@ func TestDaemonBaseLocalUsesRunFile(t *testing.T) {
 	}
 
 	dead := &commandContext{deps: Deps{ProcessAlive: func(int) bool { return false }}.withDefaults()}
-	if _, err := dead.daemonBase(); err == nil || !strings.Contains(err.Error(), "stale run-file") {
+	if _, err := dead.daemonBase(context.Background()); err == nil || !strings.Contains(err.Error(), "stale run-file") {
 		t.Fatalf("err = %v, want the stale run-file error", err)
 	}
 }
@@ -797,7 +797,7 @@ func TestDaemonBaseRemoteSkipsRunFile(t *testing.T) {
 		deps:   Deps{ProcessAlive: func(int) bool { t.Fatal("ProcessAlive must not be consulted for a remote"); return false }}.withDefaults(),
 		remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: "--url"},
 	}
-	base, err := c.daemonBase()
+	base, err := c.daemonBase(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

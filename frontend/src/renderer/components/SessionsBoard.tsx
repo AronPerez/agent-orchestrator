@@ -1,13 +1,7 @@
 import { SessionFleet } from "./SessionFleet";
-import { BoardFindBar } from "./BoardFindBar";
-import { matchScore } from "../lib/command-palette";
 import type { MessageKey } from "../i18n";
-import { isDialogOrMenuOpen } from "../lib/dom-selectors";
-import { matchesAppShortcut } from "../../shared/shortcuts";
-import { useKeybindingsStore } from "../stores/keybindings-store";
-import { isMacPlatform } from "../lib/platform";
 import { OrchestratorStartingChat } from "./chat/OrchestratorStartingChat";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -31,6 +25,7 @@ import {
 	hasConfiguredOrchestratorAgent,
 } from "../types/workspace";
 import { isArchivedSession } from "../lib/standalone-archive";
+import { boardSearchTokens, filterBoardSessions } from "../lib/board-search";
 import {
 	boardKanbanColumnOrder,
 	getKanbanColumnView,
@@ -38,7 +33,7 @@ import {
 	type KanbanColumnView,
 } from "../lib/session-presentation";
 import { useSessionMenuAvailable } from "../hooks/useAppMenuCommand";
-import { useSessionShortcut } from "../hooks/useAppShortcut";
+import { isSettingsPageOpen, useAppShortcut, useSessionShortcut } from "../hooks/useAppShortcut";
 import { useTerminateSession } from "../hooks/useTerminateSession";
 import { useCloudCp } from "../hooks/useCloudCp";
 import { useSessionParticipants } from "../hooks/useSessionParticipants";
@@ -50,6 +45,7 @@ import { ShareSessionDialog } from "./ShareSessionDialog";
 import { BoardWelcome, ProjectBoardEmpty } from "./BoardEmptyStates";
 import { ProjectImportOffer } from "./ProjectImportOffer";
 import { PageTopbar, PageTopbarTitle } from "./PageTopbar";
+import { ToolbarSearch } from "./PageToolbar";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { demoBoardSessions } from "../lib/demo-board-sessions";
@@ -78,6 +74,9 @@ import {
 } from "./SessionsBoardAdapters";
 import { projectOverlapForSession, projectOverlapScanState, useProjectOverlaps } from "../hooks/useProjectOverlaps";
 
+/** Focus here keeps Cmd/Ctrl+F for itself (its own find, or plain text editing). */
+const BOARD_FIND_YIELDS_TO = "[role='dialog'], input, textarea, [contenteditable='true'], [role='textbox'], .xterm, .terminal-surface, .monaco-editor, .cm-editor, iframe, webview, [data-chat-find-scope], [data-chat-find-surface]";
+
 type SessionsBoardProps = {
 	/** When set, the board shows only this project's sessions. */
 	projectId?: string;
@@ -94,20 +93,9 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const savedHost = hostId ? shell?.remoteHosts?.find((host) => host.hostId === hostId) : undefined;
 	const hostLabel = hostId ? labelForHost(hostId) ?? savedHost?.label ?? hostId : undefined;
 	const scopeKey = refKey({ host: hostId ?? LOCAL_HOST, id: projectId ?? "all" });
-	const [isFindOpen, setIsFindOpen] = useState(false);
 	const [view, setView] = useState<"board" | "fleet">("board");
-	const [findQuery, setFindQuery] = useState("");
-	const findInputRef = useRef<HTMLInputElement>(null);
 	const boardRef = useRef<HTMLDivElement>(null);
-	const findOriginRef = useRef<HTMLElement | null>(null);
-	const closeFind = useCallback(() => {
-		setIsFindOpen(false);
-		setFindQuery("");
-		(findOriginRef.current?.isConnected ? findOriginRef.current : boardRef.current)?.focus();
-	}, []);
 	useEffect(() => {
-		setIsFindOpen(false);
-		setFindQuery("");
 		setView("board");
 	}, [scopeKey]);
 	// Lanes follow the daemon's delivery order: building -> validating ->
@@ -191,21 +179,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	// The archive itself is the shell's modal; the board only shows its count.
 	const archivedCount = sessions.filter(isArchivedSession).length;
 	const searchableSessions = sessions.filter((candidate) => !isArchivedSession(candidate));
-	const normalizedFindQuery = findQuery.trim().toLowerCase();
-	const filteredSessions = normalizedFindQuery
-		? searchableSessions.filter((session) => {
-			const metadata = [
-				session.branch ?? "",
-				session.workspaceName,
-				getBoardSessionStatusLabel(toBoardSessionPresentation(session), (key, values) => t(key as MessageKey, values)),
-				getSessionStatusView(session.status, t).label,
-				...session.prs.flatMap((pr) => [`#${pr.number}`, String(pr.number)]),
-			];
-			return metadata.some((value) => value.toLowerCase().includes(normalizedFindQuery))
-				|| matchScore(findQuery, { title: session.title, keywords: metadata }) > 0;
-		})
-		: searchableSessions;
-	const activeSessions = filteredSessions;
+	const activeSessions = searchableSessions;
 	// Who is in each shared cloud session, read without joining any of them.
 	const participantsBySession = useSessionParticipants(activeSessions, !hostId);
 	const cloudBoard = !hostId && activeSessions.some((session) => Boolean(session.cloud));
@@ -242,6 +216,52 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const overlaps = useProjectOverlaps(collisionRadarProjectId, { hostId, liveSessions: overlapLiveSessions });
 	const collisionScanState = projectOverlapScanState(overlaps);
 	const collisionSessionNames = new Map((workspace?.sessions ?? []).map((session) => [session.id, session.title]));
+	// Search narrows the cards already loaded for this board; lanes and their
+	// order are the grid's, so a match stays where it was. Each board scope
+	// starts unfiltered (the local project route keeps this component mounted).
+	const [searchQuery, setSearchQuery] = useState("");
+	const [searchScope, setSearchScope] = useState(scopeKey);
+	if (searchScope !== scopeKey) {
+		setSearchScope(scopeKey);
+		setSearchQuery("");
+	}
+	// Typing narrows on a deferred render; clearing (or a new scope) restores
+	// the whole board at once instead of one render with the old query.
+	const deferredQuery = useDeferredValue(searchQuery);
+	const deferredSearchQuery = searchQuery === "" ? "" : deferredQuery;
+	const searchInputRef = useRef<HTMLInputElement>(null);
+	const searching = boardSearchTokens(deferredSearchQuery).length > 0;
+	// Fork: a search also matches the card's project name and the status text it
+	// renders, which the find bar this replaced matched (#201, 1e9f2733).
+	const visibleBoardSessions = filterBoardSessions(boardSessions, deferredSearchQuery, (session) => [
+		session.workspaceName,
+		getBoardSessionStatusLabel(toBoardSessionPresentation(session), (key, values) => t(key as MessageKey, values)),
+		getSessionStatusView(session.status, t).label,
+	]);
+	const searchMissed = searching && boardSessions.length > 0 && visibleBoardSessions.length === 0;
+	const clearSearch = () => {
+		setSearchQuery("");
+		// The button that cleared it goes away with the empty state.
+		requestAnimationFrame(() => searchInputRef.current?.focus());
+	};
+	// Cmd/Ctrl+F is find-in-chat's chord, claimed by whichever surface is in
+	// front. The board takes it while its field is on screen, unless a dialog,
+	// terminal, editor or another field has focus, or a chat on screen owns it.
+	const canFocusSearch = useCallback(() => {
+		const input = searchInputRef.current;
+		if (!input || input.getClientRects().length === 0 || isSettingsPageOpen() || useUiStore.getState().archiveModal) return false;
+		const focused = document.activeElement;
+		if (focused === input) return true;
+		if (focused instanceof Element && focused !== document.body) {
+			if (focused.closest(BOARD_FIND_YIELDS_TO)) return false;
+			if (boardRef.current?.contains(focused)) return true;
+		}
+		return !Array.from(document.querySelectorAll("[data-chat-find-surface]")).some((surface) => surface.getClientRects().length > 0);
+	}, []);
+	useAppShortcut("find-in-chat", () => {
+		searchInputRef.current?.focus();
+		searchInputRef.current?.select();
+	}, true, canFocusSearch);
 	const boardLabels = sessionsBoardLabels(t);
 	const presentation = useBoardPresentation({
 		projectId,
@@ -256,34 +276,6 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		? connected && remoteProjectQuery.isSuccess && Boolean(workspace) && liveSessions.length === 0
 		: presentation.showProjectEmpty;
 	const boardLoadFailed = !hostId && (presentation.workspaceStartupState === "error" || localWorkspaceQuery.isError);
-	const canFind = view === "board" && !presentation.showStartup && !showWelcome && !showProjectEmpty && !boardLoadFailed
-		&& (!hostId || Boolean(workspace)) && !(projectId && (isProvisioning || projectActions.isSpawning));
-	useEffect(() => {
-		if (!canFind) return;
-		const handleKeyDown = (event: KeyboardEvent) => {
-			if (event.defaultPrevented || event.isComposing || event.repeat || isDialogOrMenuOpen()
-				|| useUiStore.getState().settingsModal) return;
-			const target = event.target instanceof Element ? event.target : null;
-			if (target?.closest(".browser-panel, .xterm, .terminal-surface, [data-testid='session-terminal']")) return;
-			if (target !== findInputRef.current && target?.closest("input, textarea, [contenteditable]:not([contenteditable='false'])")) return;
-			if (isFindOpen && event.key === "Escape") {
-				event.preventDefault();
-				closeFind();
-				return;
-			}
-			if (!matchesAppShortcut("find", {
-				key: event.key, code: event.code, ctrl: event.ctrlKey, meta: event.metaKey, shift: event.shiftKey, alt: event.altKey,
-			}, isMacPlatform(), useKeybindingsStore.getState().overrides)) return;
-			event.preventDefault();
-			if (!isFindOpen) findOriginRef.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
-				? document.activeElement : boardRef.current;
-			setIsFindOpen(true);
-			findInputRef.current?.focus();
-			findInputRef.current?.select();
-		};
-		window.addEventListener("keydown", handleKeyDown);
-		return () => window.removeEventListener("keydown", handleKeyDown);
-	}, [canFind, closeFind, isFindOpen]);
 	const canShowFleet = Boolean(projectId && workspace && workspace.kind !== CLOUD_PROJECT_KIND);
 	// Memory and CPU monitoring is a developer tool: the light, the card chips
 	// and the window behind them only exist with Diagnostics on in Developer mode.
@@ -352,15 +344,25 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		});
 	};
 
+	const search = <ToolbarSearch persistent inputRef={searchInputRef} label={t("board.search")} query={searchQuery} onQueryChange={setSearchQuery} />;
 	const actions = projectId && (!hostId || connected) ? (
 		<>
 			<ProjectTerminationFeedback projectId={projectId} hostId={hostId} />
 			{memoryLight}
+			{search}
 			{guest ? null : <ProjectBoardActions actions={projectActions} placement="header" quiet={showProjectEmpty} cloud={workspace?.kind === CLOUD_PROJECT_KIND} />}
 		</>
 	) : hostOffline ? (
-		<HostOfflineStatus host={savedHost} label={hostLabel ?? ""} updatedAt={workspace ? remoteProjectQuery.dataUpdatedAt : undefined} />
-	) : memoryLight ?? undefined;
+		<>
+			{search}
+			<HostOfflineStatus host={savedHost} label={hostLabel ?? ""} updatedAt={workspace ? remoteProjectQuery.dataUpdatedAt : undefined} />
+		</>
+	) : (
+		<>
+			{memoryLight}
+			{search}
+		</>
+	);
 
 	if (projectId && (isProvisioning || projectActions.isSpawning || autoStartPending)) {
 		return <OrchestratorStartingChat
@@ -372,7 +374,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	}
 
 	return (
-		<div className="relative flex h-full min-h-0 flex-col bg-background text-foreground" data-testid="board" data-host-id={hostId} data-project-id={projectId} ref={boardRef} tabIndex={-1}>
+		<div className="relative flex h-full min-h-0 flex-col bg-background text-foreground" data-testid="board" ref={boardRef} data-host-id={hostId} data-project-id={projectId}>
 			<PageTopbar
 				lead={showWelcome ? undefined : (
 					<PageTopbarTitle
@@ -396,7 +398,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 			{canShowFleet ? (
 				<div className="flex gap-1 border-b border-border px-3 py-2" role="group" aria-label={t("fleet.view")}>
 					<Button variant={view === "board" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "board"} onClick={() => setView("board")}>{t("shell.board")}</Button>
-					<Button variant={view === "fleet" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "fleet"} onClick={() => { closeFind(); setView("fleet"); }}>{t("fleet.tab")}</Button>
+					<Button variant={view === "fleet" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "fleet"} onClick={() => setView("fleet")}>{t("fleet.tab")}</Button>
 				</div>
 			) : null}
 			{canShowFleet && view === "fleet" && workspace ? <>
@@ -404,7 +406,6 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 				<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} hostId={hostId} />
 			</> : <>
 			<div className={cn("relative min-h-0 flex-1 overflow-hidden", hostOffline && workspace && "opacity-75")} data-host-offline={hostOffline && workspace ? "" : undefined}>
-				{canFind && isFindOpen ? <BoardFindBar inputRef={findInputRef} matches={filteredSessions.length} onClose={closeFind} onQueryChange={setFindQuery} query={findQuery} total={searchableSessions.length} /> : null}
 				{projectId && !guest && health.state !== "ok" && (!hostId || connected && (health.state !== "missing" || hasConfiguredOrchestratorAgent(workspace))) ? (
 					<div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
 						<AlertTriangle className="size-icon-base shrink-0 text-warning" aria-hidden="true" />
@@ -453,8 +454,15 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 						actions={guest ? null : <ProjectBoardActions actions={projectActions} placement="empty" />}
 						offer={projectId && !hostId ? <ProjectImportOffer className="mt-8 w-full text-left" projectId={projectId} /> : null}
 					/>
-				) : findQuery.trim() && filteredSessions.length === 0 ? (
-					<p className="py-10 text-center text-xs text-muted-foreground">{t("board.find.noResults")}</p>
+				) : searchMissed ? (
+					<div className="flex h-full min-h-0 flex-col items-center justify-center gap-1 px-4 pb-empty-offset-y text-center" data-testid="board-search-empty">
+						<p className="text-control font-medium text-foreground" role="status">
+							{t("board.searchNoMatches", { query: deferredSearchQuery.trim() })}
+						</p>
+						<Button type="button" variant="quiet" size="sm" onClick={clearSearch}>
+							{t("board.searchClear")}
+						</Button>
+					</div>
 				) : (
 					<SessionsBoardGridView
 						columns={columns}
@@ -485,7 +493,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 								session={session}
 							/>
 						)}
-						sessions={boardSessions}
+						sessions={visibleBoardSessions}
 					/>
 				)}
 			</div>

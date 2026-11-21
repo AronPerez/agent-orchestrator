@@ -12,45 +12,6 @@ import { installFakeAgent } from "./support/fake-bridge";
 const columnCard = (column: string, id: string) =>
 	`[data-testid="board-column"][data-column="${column}"] [data-session-id="${id}"]`;
 
-for (const colorScheme of ["dark", "light"] as const) {
-	test(`renderer: Board find filters active lanes and archive opens separately, clearing on close (${colorScheme}) @T0 @BRD`, async ({ page }) => {
-		await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
-		await page.setViewportSize({ width: 800, height: 700 });
-		await installFakeAgent(page, { workers: [
-			{ id: "alpha", title: "Alpha worker with a long session title", status: "working" },
-			{ id: "beta", title: "Beta worker", status: "working" },
-			{ id: "alpha-old", title: "Alpha archived", status: "terminated" },
-		] });
-		await page.goto("/#/projects/fake-proj");
-		await expect(page.getByTestId("board")).toBeVisible();
-		await page.keyboard.press("ControlOrMeta+f");
-		const bar = page.getByRole("search", { name: "Filter sessions" });
-		const input = bar.getByRole("textbox");
-		await expect(input).toBeFocused();
-		await input.fill("alpha");
-		await expect(bar).toContainText("1/2");
-		await expect(page.getByRole("button", { name: "Beta worker", exact: true })).toHaveCount(0);
-		await page.getByRole("button", { name: /^Archived sessions, 1$/ }).click();
-		const archive = page.getByRole("dialog", { name: "Archived sessions" });
-		await expect(archive).toContainText("Alpha archived");
-		await page.keyboard.press("Escape");
-		await expect(archive).toBeHidden();
-		const boardBox = await page.getByTestId("board").boundingBox();
-		const barBox = await bar.boundingBox();
-		expect(barBox!.x).toBeGreaterThanOrEqual(boardBox!.x);
-		expect(barBox!.x + barBox!.width).toBeLessThanOrEqual(boardBox!.x + boardBox!.width);
-		await page.keyboard.press("Escape");
-		await expect(bar).toHaveCount(0);
-		await expect(page.getByRole("button", { name: "Beta worker", exact: true })).toBeVisible();
-		await page.keyboard.press("ControlOrMeta+f");
-		await expect(input).toHaveValue("");
-		await input.fill("zzzz");
-		await expect(page.getByText("No sessions match")).toBeVisible();
-		await bar.getByRole("button", { name: "Close find" }).click();
-		await expect(page.getByRole("button", { name: "Beta worker", exact: true })).toBeVisible();
-	});
-}
-
 // #2483 BRD-002.
 test("renderer: card moves columns when its status changes @T0 @BRD", async ({ page }) => {
 	await installFakeAgent(page, { workers: [{ id: "mover", title: "Wandering worker", status: "working" }] });
