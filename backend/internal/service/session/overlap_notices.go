@@ -411,8 +411,12 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 		watchFailed := pathErr != nil
 		// A watch attempt that runs out of descriptors briefly takes the
 		// daemon's last free ones, so after one the project backs off. The
-		// deadline survives refreshes and worker restarts.
-		watchBlockedUntil := s.projectOverlapRadarWatchBlockedUntil(projectID)
+		// deadline survives refreshes and worker restarts, and attempts are
+		// serialized: a replacement worker waits here until a retired one,
+		// which syncWorkers does not wait for, has recorded its outcome.
+		watchState := s.projectOverlapRadarWatchState(projectID)
+		watchState.attempt.Lock()
+		watchBlockedUntil := watchState.until
 		switch {
 		case watchFailed || len(paths) == 0:
 			// Nothing to watch.
@@ -434,7 +438,7 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 				s.logProjectOverlapNoticeError(ctx, "watch some collision radar workspaces", projectID, partialErr)
 			}
 			exhausted := workspacewatch.DescriptorsExhausted(watchErr) || workspacewatch.DescriptorsExhausted(partialErr)
-			watchBlockedUntil = s.recordProjectOverlapRadarWatch(projectID, exhausted)
+			watchBlockedUntil = watchState.record(exhausted, s.projectOverlapRadarRebuildBackoff)
 			if exhausted {
 				// A partial watch left behind when descriptors ran out would hold
 				// the ones the rest of the daemon needs through the whole
@@ -443,6 +447,7 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 				subscription = workspacewatch.Subscription{}
 			}
 		}
+		watchState.attempt.Unlock()
 		rebuildAt := watchBlockedUntil
 		// Install the watcher before the authoritative scan so an edit in the
 		// setup gap always leaves a later edge.
@@ -524,41 +529,45 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 	}
 }
 
-// projectOverlapRadarBackoff is one project's descriptor backoff: how many
+// projectOverlapRadarWatchState is one project's descriptor backoff: how many
 // watch attempts in a row ran out of file descriptors, and when the next may
 // run. It lives on the Service, not the worker, because a project that drops
 // below two sessions and comes back gets a new worker, and must not retry a
 // watch that just ran out of descriptors.
-type projectOverlapRadarBackoff struct {
+type projectOverlapRadarWatchState struct {
+	// attempt is held across a whole watch attempt (reading the deadline,
+	// watching, recording the outcome), so one project's attempts never
+	// overlap across worker restarts. It also guards the fields below.
+	attempt   sync.Mutex
 	exhausted int
 	until     time.Time
 }
 
-// projectOverlapRadarWatchBlockedUntil returns when the project's next watch
-// attempt may run; the zero time when it may run now.
-func (s *Service) projectOverlapRadarWatchBlockedUntil(projectID domain.ProjectID) time.Time {
-	s.overlapRadarBackoffMu.Lock()
-	defer s.overlapRadarBackoffMu.Unlock()
-	return s.overlapRadarBackoffs[projectID].until
+// record notes a watch attempt's outcome and returns when the next attempt
+// may run: the zero time after one that did not run out of descriptors.
+// The caller holds attempt.
+func (w *projectOverlapRadarWatchState) record(exhausted bool, backoff func(int) time.Duration) time.Time {
+	if !exhausted {
+		w.exhausted, w.until = 0, time.Time{}
+		return w.until
+	}
+	w.exhausted++
+	w.until = time.Now().Add(backoff(w.exhausted))
+	return w.until
 }
 
-// recordProjectOverlapRadarWatch records the outcome of a watch attempt and
-// returns when the next attempt may run.
-func (s *Service) recordProjectOverlapRadarWatch(projectID domain.ProjectID, exhausted bool) time.Time {
-	s.overlapRadarBackoffMu.Lock()
-	defer s.overlapRadarBackoffMu.Unlock()
-	if !exhausted {
-		delete(s.overlapRadarBackoffs, projectID)
-		return time.Time{}
+func (s *Service) projectOverlapRadarWatchState(projectID domain.ProjectID) *projectOverlapRadarWatchState {
+	s.overlapRadarWatchesMu.Lock()
+	defer s.overlapRadarWatchesMu.Unlock()
+	if s.overlapRadarWatches == nil {
+		s.overlapRadarWatches = make(map[domain.ProjectID]*projectOverlapRadarWatchState)
 	}
-	if s.overlapRadarBackoffs == nil {
-		s.overlapRadarBackoffs = make(map[domain.ProjectID]projectOverlapRadarBackoff)
+	state, ok := s.overlapRadarWatches[projectID]
+	if !ok {
+		state = &projectOverlapRadarWatchState{}
+		s.overlapRadarWatches[projectID] = state
 	}
-	backoff := s.overlapRadarBackoffs[projectID]
-	backoff.exhausted++
-	backoff.until = time.Now().Add(s.projectOverlapRadarRebuildBackoff(backoff.exhausted))
-	s.overlapRadarBackoffs[projectID] = backoff
-	return backoff.until
+	return state
 }
 
 // projectOverlapRadarRebuildBackoff is how long the radar waits before

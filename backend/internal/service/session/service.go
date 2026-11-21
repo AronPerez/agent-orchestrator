@@ -287,10 +287,11 @@ type Service struct {
 	// descriptors.
 	overlapRadarBackoffBase time.Duration
 	overlapRadarBackoffMax  time.Duration
-	// overlapRadarBackoffs keeps each project's descriptor backoff across
-	// radar worker restarts (a project dropping below two sessions and back).
-	overlapRadarBackoffMu sync.Mutex
-	overlapRadarBackoffs  map[domain.ProjectID]projectOverlapRadarBackoff
+	// overlapRadarWatches keeps each project's watch attempts serialized and
+	// its descriptor backoff across radar worker restarts (a project dropping
+	// below two sessions and back).
+	overlapRadarWatchesMu sync.Mutex
+	overlapRadarWatches   map[domain.ProjectID]*projectOverlapRadarWatchState
 
 	workspaceCache     *workspaceCache
 	workspaceManifests *workspaceManifestIndex

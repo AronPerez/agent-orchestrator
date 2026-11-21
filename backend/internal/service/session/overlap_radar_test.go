@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -234,6 +235,68 @@ func TestRunProjectOverlapNoticeRadarKeepsDescriptorBackoffAcrossWorkerRestart(t
 	setTerminated(false)
 	// The restarted worker's first attempt must wait out the backoff.
 	expectRetryAfterBackoff(t, attempts, firstAttempt, 800*time.Millisecond)
+}
+
+// syncWorkers does not wait for a retired worker. A replacement that starts
+// while the retired worker is still inside watch setup must wait for it to
+// record its outcome, not start a second watch with an empty deadline.
+func TestRunProjectOverlapNoticeRadarSerializesWatchAttemptsAcrossWorkerRestart(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	svc.overlapRadarPollInterval = time.Hour
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	svc.overlapRadarBackoffBase = 800 * time.Millisecond
+	svc.overlapRadarBackoffMax = 800 * time.Millisecond
+	entered := make(chan time.Time, 16)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	svc.overlapWatch = func(context.Context, ...string) (workspacewatch.Subscription, error) {
+		entered <- time.Now()
+		if calls.Add(1) == 1 {
+			<-release // setup is slow, and outlives its worker
+		}
+		return workspacewatch.Subscription{}, fmt.Errorf("create git metadata watcher: %w", syscall.EMFILE)
+	}
+	startOverlapRadar(t, svc)
+	// Registered after the radar's stop, so it runs first: a failing test
+	// must release the blocked setup or stopping the radar would hang.
+	var releaseOnce sync.Once
+	releaseSetup := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseSetup)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("radar did not attempt a watch")
+	}
+
+	setTerminated := func(terminated bool) {
+		session := store.sessions["demo-b"]
+		session.IsTerminated = terminated
+		store.sessions["demo-b"] = session
+		svc.SignalProjectOverlapRadarSession("demo")
+	}
+	// Retire the worker while its watch setup is blocked: dropping below two
+	// sessions clears the project's rows, which lists its notices.
+	setTerminated(true)
+	waitForOverlapScan(t, store)
+	// A replacement starts when the second session returns.
+	setTerminated(false)
+	select {
+	case at := <-entered:
+		t.Fatalf("the replacement worker started a watch at %v while the retired worker's setup was still running", at)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	released := time.Now()
+	releaseSetup()
+	// The retired worker records EMFILE; the replacement must honour it.
+	expectRetryAfterBackoff(t, entered, released, 800*time.Millisecond)
 }
 
 // When some roots cannot be watched for a reason other than running out of
