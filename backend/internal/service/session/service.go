@@ -279,6 +279,19 @@ type Service struct {
 	overlapWatch            func(context.Context, ...string) (workspacewatch.Subscription, error)
 	overlapNoticeRetryDelay time.Duration
 	overlapNoticeTimeout    time.Duration
+	// overlapRadarPollInterval paces the collision radar's full rescan, which
+	// catches edits that touch neither HEAD nor the index.
+	overlapRadarPollInterval time.Duration
+	// overlapRadarBackoffBase and overlapRadarBackoffMax bound how long the
+	// radar waits before rebuilding a watch that failed for lack of file
+	// descriptors.
+	overlapRadarBackoffBase time.Duration
+	overlapRadarBackoffMax  time.Duration
+	// overlapRadarWatches keeps each project's watch attempts serialized and
+	// its descriptor backoff across radar worker restarts (a project dropping
+	// below two sessions and back).
+	overlapRadarWatchesMu sync.Mutex
+	overlapRadarWatches   map[domain.ProjectID]*projectOverlapRadarWatchState
 
 	workspaceCache     *workspaceCache
 	workspaceManifests *workspaceManifestIndex
@@ -436,7 +449,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks, overlapNudger: d.OverlapNudger, overlapNoticeAttempts: map[projectOverlapNoticeKey]projectOverlapNoticeAttempt{}, overlapRadarPending: map[domain.ProjectID]bool{}, overlapRadarWake: make(chan struct{}, 1), overlapWatch: workspacewatch.WatchWithStatus, overlapNoticeRetryDelay: defaultProjectOverlapNoticeRetryDelay, overlapNoticeTimeout: defaultProjectOverlapNoticeTimeout}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks, overlapNudger: d.OverlapNudger, overlapNoticeAttempts: map[projectOverlapNoticeKey]projectOverlapNoticeAttempt{}, overlapRadarPending: map[domain.ProjectID]bool{}, overlapRadarWake: make(chan struct{}, 1), overlapWatch: workspacewatch.WatchGitMetadata, overlapNoticeRetryDelay: defaultProjectOverlapNoticeRetryDelay, overlapNoticeTimeout: defaultProjectOverlapNoticeTimeout}
 	s.terminalTitles, _ = d.Store.(terminalTitleSource)
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {

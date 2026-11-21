@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -4869,8 +4870,107 @@ func TestSessionsAPI_StreamWorkspaceChanges(t *testing.T) {
 	}
 }
 
+func overlapStreamGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.email=ao@example.com", "-c", "user.name=AO Test"}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// readOverlapStreamEvents forwards every event name the stream sends.
+func readOverlapStreamEvents(body io.Reader) <-chan string {
+	events := make(chan string, 16)
+	go func() {
+		defer close(events)
+		scanner := bufio.NewScanner(body)
+		for scanner.Scan() {
+			if name, ok := strings.CutPrefix(scanner.Text(), "event: "); ok {
+				events <- name
+			}
+		}
+	}()
+	return events
+}
+
+func openOverlapStream(t *testing.T, srv *httptest.Server) *http.Response {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/projects/demo/overlaps/events", nil)
+	if err != nil {
+		t.Fatalf("new overlap stream request: %v", err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET overlap stream: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET overlap stream = %d body=%s", resp.StatusCode, body)
+	}
+	return resp
+}
+
+// The stream polls for edits the Git metadata watch cannot see, and reports a
+// poll only when the overlaps changed.
+func TestSessionsAPI_StreamProjectOverlapChangesPollsForUnwatchedEdits(t *testing.T) {
+	controllers.SetProjectOverlapStreamPollIntervalForTest(t, 30*time.Millisecond)
+	svc := newFakeSessionService()
+	svc.projectOverlapPaths = []string{t.TempDir()} // not a Git worktree: poll only
+	svc.projectOverlaps = sessionsvc.ProjectOverlapResult{ProjectID: "demo"}
+	srv := newSessionTestServer(t, svc)
+	events := readOverlapStreamEvents(openOverlapStream(t, srv).Body)
+
+	waitForEvent := func(want string) {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case got, ok := <-events:
+				if !ok {
+					t.Fatalf("stream ended before %s", want)
+				}
+				if got == want {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s", want)
+			}
+		}
+	}
+	waitForEvent("ready")
+	// Polls of an unchanged result stay quiet.
+	deadline := time.After(200 * time.Millisecond)
+quiet:
+	for {
+		select {
+		case got := <-events:
+			if got == "overlaps_changed" {
+				t.Fatal("an unchanged poll reported overlaps_changed")
+			}
+		case <-deadline:
+			break quiet
+		}
+	}
+	svc.overlapMu.Lock()
+	svc.projectOverlaps = sessionsvc.ProjectOverlapResult{
+		ProjectID: "demo",
+		Overlaps:  []sessionsvc.ProjectOverlap{{SessionA: "demo-1", SessionB: "demo-2", Paths: []string{"README.md"}}},
+	}
+	svc.overlapMu.Unlock()
+	waitForEvent("overlaps_changed")
+}
+
 func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
 	workspace := t.TempDir()
+	overlapStreamGit(t, workspace, "init", "-q")
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write workspace file: %v", err)
+	}
+	overlapStreamGit(t, workspace, "add", "README.md")
+	overlapStreamGit(t, workspace, "commit", "-q", "-m", "initial")
 	svc := newFakeSessionService()
 	svc.projectOverlapPaths = []string{workspace}
 	svc.projectOverlaps = sessionsvc.ProjectOverlapResult{ProjectID: "demo"}
@@ -4909,9 +5009,12 @@ func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
 			}
 		}
 	}()
+	// The stream watches Git HEAD and the index, so a staged edit is reported
+	// at once.
 	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("changed\n"), 0o644); err != nil {
 		t.Fatalf("write workspace file: %v", err)
 	}
+	overlapStreamGit(t, workspace, "add", "README.md")
 	select {
 	case got := <-event:
 		if got != "event: overlaps_changed" {

@@ -512,7 +512,9 @@ func TestReconcileActiveProjectOverlapNoticesDetectsAndRetriesWithoutReader(t *t
 	}
 }
 
-func TestRunProjectOverlapNoticeRadarDetectsWorkspaceChangeWithoutReader(t *testing.T) {
+// The radar watches each worktree's Git HEAD and index, so a staged change is
+// delivered at once, without waiting for the poll.
+func TestRunProjectOverlapNoticeRadarDetectsStagedChangeWithoutReader(t *testing.T) {
 	first := newWorkspaceRepo(t)
 	second := newWorkspaceRepo(t)
 	writeWorkspaceFile(t, first, "shared.go", "first\n")
@@ -538,6 +540,7 @@ func TestRunProjectOverlapNoticeRadarDetectsWorkspaceChangeWithoutReader(t *test
 		t.Fatal("daemon-owned radar did not finish its initial scan")
 	}
 	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	runGit(t, second, "add", "shared.go")
 	for range 2 {
 		select {
 		case <-nudger.callCh:
@@ -1030,6 +1033,7 @@ func TestRunProjectOverlapNoticeRadarScopesWorkspaceEventsToProject(t *testing.T
 	betaReads := store.listCalls("beta")
 	alphaSecond := store.sessions["alpha-b"].Metadata.WorkspacePath
 	writeWorkspaceFile(t, alphaSecond, "shared.go", "second\n")
+	runGit(t, alphaSecond, "add", "shared.go")
 	for range 2 {
 		select {
 		case call := <-nudger.callCh:

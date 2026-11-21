@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1656,6 +1657,10 @@ type branchStateReconciler interface {
 	ReconcileSessionBranchState(ctx context.Context, id domain.SessionID) error
 }
 
+// projectOverlapStreamPollInterval paces the overlap stream's rescan for edits
+// that touch neither HEAD nor the index.
+var projectOverlapStreamPollInterval = 30 * time.Second
+
 func (c *SessionsController) streamProjectOverlapChanges(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{id}/overlaps/events")
@@ -1672,17 +1677,22 @@ func (c *SessionsController) streamProjectOverlapChanges(w http.ResponseWriter, 
 		envelope.WriteError(w, r, err)
 		return
 	}
+	// Watch only each worktree's Git HEAD and index: a full-tree watch costs a
+	// file descriptor per worktree file on macOS, and a project of many large
+	// worktrees exhausts the daemon. The poll below finds edits the metadata
+	// watch cannot see, and keeps the stream current if nothing can be watched.
 	var changes <-chan struct{}
 	if len(paths) > 0 {
-		changes, err = workspacewatch.Watch(r.Context(), paths...)
-		if err != nil {
-			envelope.WriteError(w, r, err)
-			return
+		subscription, watchErr := workspacewatch.WatchGitMetadata(r.Context(), paths...)
+		if watchErr != nil {
+			slog.WarnContext(r.Context(), "watch project overlap metadata; polling only", "project", projectID, "err", watchErr)
 		}
+		changes = subscription.Changes
 	}
 	// Install the watcher before the authoritative read so edits in the setup
 	// gap still produce a later invalidation edge.
-	if _, err := c.Svc.ProjectOverlaps(r.Context(), projectID); err != nil {
+	last, err := c.Svc.ProjectOverlaps(r.Context(), projectID)
+	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
 	}
@@ -1700,6 +1710,15 @@ func (c *SessionsController) streamProjectOverlapChanges(w http.ResponseWriter, 
 
 	keepAlive := time.NewTicker(15 * time.Second)
 	defer keepAlive.Stop()
+	poll := time.NewTicker(projectOverlapStreamPollInterval)
+	defer poll.Stop()
+	sendChanged := func() bool {
+		if _, err := fmt.Fprint(w, "event: overlaps_changed\ndata: {}\n\n"); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
 	for {
 		select {
 		case <-r.Context().Done():
@@ -1708,13 +1727,24 @@ func (c *SessionsController) streamProjectOverlapChanges(w http.ResponseWriter, 
 			if !ok {
 				return
 			}
-			if _, err := c.Svc.ProjectOverlaps(r.Context(), projectID); err != nil {
+			if last, err = c.Svc.ProjectOverlaps(r.Context(), projectID); err != nil {
 				return
 			}
-			if _, err := fmt.Fprint(w, "event: overlaps_changed\ndata: {}\n\n"); err != nil {
+			if !sendChanged() {
 				return
 			}
-			flusher.Flush()
+		case <-poll.C:
+			current, err := c.Svc.ProjectOverlaps(r.Context(), projectID)
+			if err != nil {
+				return
+			}
+			if reflect.DeepEqual(current, last) {
+				continue
+			}
+			last = current
+			if !sendChanged() {
+				return
+			}
 		case <-keepAlive.C:
 			if _, err := fmt.Fprint(w, "event: heartbeat\ndata: {}\n\n"); err != nil {
 				return

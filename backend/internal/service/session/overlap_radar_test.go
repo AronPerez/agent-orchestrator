@@ -1,0 +1,598 @@
+package session
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workspacewatch"
+)
+
+// startOverlapRadar runs the daemon-owned radar until the returned stop runs.
+func startOverlapRadar(t *testing.T, svc *Service) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+func waitForOverlapNudges(t *testing.T, nudger *recordingOverlapNudger, count int, why string) {
+	t.Helper()
+	for range count {
+		select {
+		case <-nudger.callCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal(why)
+		}
+	}
+}
+
+func waitForOverlapScan(t *testing.T, store *memoryOverlapNoticeStore) {
+	t.Helper()
+	select {
+	case <-store.listNoticeCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("radar did not finish its initial scan")
+	}
+}
+
+// An edit that is not staged touches neither HEAD nor the index, so only the
+// poll can find it.
+func TestRunProjectOverlapNoticeRadarFindsUnstagedOverlapByPoll(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	svc.overlapRadarPollInterval = 50 * time.Millisecond
+	stop := startOverlapRadar(t, svc)
+
+	waitForOverlapScan(t, store)
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	waitForOverlapNudges(t, nudger, 2, "the poll did not find an unstaged overlap")
+	stop()
+	if len(store.notices) != 2 {
+		t.Fatalf("notices = %+v, want both directions", store.notices)
+	}
+}
+
+// A watch that fails for lack of file descriptors must not be retried every
+// retry delay: each attempt takes the daemon's last free descriptors, and the
+// lock and database opens that land in that window fail. The poll keeps
+// finding overlaps while the watch is backed off.
+func TestRunProjectOverlapNoticeRadarBacksOffAfterDescriptorExhaustion(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	svc.overlapRadarPollInterval = 50 * time.Millisecond
+	svc.overlapRadarBackoffBase = 300 * time.Millisecond
+	svc.overlapRadarBackoffMax = 600 * time.Millisecond
+	attempts := make(chan time.Time, 8)
+	svc.overlapWatch = func(context.Context, ...string) (workspacewatch.Subscription, error) {
+		attempts <- time.Now()
+		return workspacewatch.Subscription{}, fmt.Errorf("create git metadata watcher: %w", syscall.EMFILE)
+	}
+	stop := startOverlapRadar(t, svc)
+
+	waitForOverlapScan(t, store)
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	waitForOverlapNudges(t, nudger, 2, "the poll did not find an overlap while the watch was backed off")
+
+	var times []time.Time
+	for len(times) < 3 {
+		select {
+		case at := <-attempts:
+			times = append(times, at)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("watch attempts = %d, want 3", len(times))
+		}
+	}
+	stop()
+	// Without backoff the radar retried every retry delay (10ms here).
+	if gap := times[1].Sub(times[0]); gap < 250*time.Millisecond {
+		t.Fatalf("second attempt came %v after the first, want the 300ms backoff", gap)
+	}
+	if gap := times[2].Sub(times[1]); gap < 550*time.Millisecond {
+		t.Fatalf("third attempt came %v after the second, want the doubled 600ms backoff", gap)
+	}
+}
+
+// Session and config changes refresh the radar worker. A burst of them during
+// the descriptor backoff must not retry the watch that ran out of
+// descriptors; the poll keeps reconciling until the backoff ends.
+func TestRunProjectOverlapNoticeRadarKeepsDescriptorBackoffAcrossRefreshes(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	svc.overlapRadarPollInterval = 30 * time.Millisecond
+	svc.overlapRadarBackoffBase = 500 * time.Millisecond
+	svc.overlapRadarBackoffMax = 500 * time.Millisecond
+	attempts := make(chan time.Time, 16)
+	svc.overlapWatch = func(context.Context, ...string) (workspacewatch.Subscription, error) {
+		attempts <- time.Now()
+		return workspacewatch.Subscription{}, fmt.Errorf("create git metadata watcher: %w", syscall.EMFILE)
+	}
+	startOverlapRadar(t, svc)
+
+	var firstAttempt time.Time
+	select {
+	case firstAttempt = <-attempts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("radar did not attempt a watch")
+	}
+	waitForOverlapScan(t, store)
+	reconcilesBefore := store.listCalls("demo")
+	// Refresh at least once, then until well inside the backoff. The initial
+	// scan may already have outlasted that window on a slow runner.
+	refreshUntil := firstAttempt.Add(400 * time.Millisecond)
+	for {
+		svc.SignalProjectOverlapRadar("demo")
+		if !time.Now().Before(refreshUntil) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Refreshes and the poll keep scanning while the watch is backed off.
+	for deadline := time.Now().Add(5 * time.Second); store.listCalls("demo") <= reconcilesBefore; {
+		if time.Now().After(deadline) {
+			t.Fatalf("no scan after %d while the watch was backed off: refreshes and the poll must keep scanning", reconcilesBefore)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	expectRetryAfterBackoff(t, attempts, firstAttempt, 500*time.Millisecond)
+}
+
+// expectRetryAfterBackoff waits for the next watch attempt and fails if it
+// came before the backoff that started at failed ended. An attempt already
+// queued is judged by when it ran, so a slow test is not mistaken for an
+// early retry.
+func expectRetryAfterBackoff(t *testing.T, attempts <-chan time.Time, failed time.Time, backoff time.Duration) {
+	t.Helper()
+	select {
+	case at := <-attempts:
+		// Timers may fire a little early relative to the recorded failure.
+		if gap := at.Sub(failed); gap < backoff-50*time.Millisecond {
+			t.Fatalf("watch retried %v after descriptors ran out, inside the %v backoff", gap, backoff)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watch was not retried after the backoff ended")
+	}
+}
+
+// A project that drops below two sessions loses its radar worker and gets a
+// new one when a second session returns. The new worker must keep the
+// descriptor backoff instead of retrying the watch at once.
+func TestRunProjectOverlapNoticeRadarKeepsDescriptorBackoffAcrossWorkerRestart(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	// No timer-driven scans: sessions change only while the radar is idle.
+	svc.overlapRadarPollInterval = time.Hour
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	svc.overlapRadarBackoffBase = 800 * time.Millisecond
+	svc.overlapRadarBackoffMax = 800 * time.Millisecond
+	attempts := make(chan time.Time, 16)
+	svc.overlapWatch = func(context.Context, ...string) (workspacewatch.Subscription, error) {
+		attempts <- time.Now()
+		return workspacewatch.Subscription{}, fmt.Errorf("create git metadata watcher: %w", syscall.EMFILE)
+	}
+	startOverlapRadar(t, svc)
+
+	var firstAttempt time.Time
+	select {
+	case firstAttempt = <-attempts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("radar did not attempt a watch")
+	}
+	waitForOverlapScan(t, store)
+
+	setTerminated := func(terminated bool) {
+		session := store.sessions["demo-b"]
+		session.IsTerminated = terminated
+		store.sessions["demo-b"] = session
+		svc.SignalProjectOverlapRadarSession("demo")
+		// Dropping below two clears the project's rows, and a new worker
+		// scans; either way the radar lists the project's notices.
+		waitForOverlapScan(t, store)
+	}
+	setTerminated(true)
+	setTerminated(false)
+	// The restarted worker's first attempt must wait out the backoff.
+	expectRetryAfterBackoff(t, attempts, firstAttempt, 800*time.Millisecond)
+}
+
+// syncWorkers does not wait for a retired worker. A replacement that starts
+// while the retired worker is still inside watch setup must wait for it to
+// record its outcome, not start a second watch with an empty deadline.
+func TestRunProjectOverlapNoticeRadarSerializesWatchAttemptsAcrossWorkerRestart(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	svc.overlapRadarPollInterval = time.Hour
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	svc.overlapRadarBackoffBase = 800 * time.Millisecond
+	svc.overlapRadarBackoffMax = 800 * time.Millisecond
+	entered := make(chan time.Time, 16)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	svc.overlapWatch = func(context.Context, ...string) (workspacewatch.Subscription, error) {
+		entered <- time.Now()
+		if calls.Add(1) == 1 {
+			<-release // setup is slow, and outlives its worker
+		}
+		return workspacewatch.Subscription{}, fmt.Errorf("create git metadata watcher: %w", syscall.EMFILE)
+	}
+	startOverlapRadar(t, svc)
+	// Registered after the radar's stop, so it runs first: a failing test
+	// must release the blocked setup or stopping the radar would hang.
+	var releaseOnce sync.Once
+	releaseSetup := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseSetup)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("radar did not attempt a watch")
+	}
+
+	setTerminated := func(terminated bool) {
+		session := store.sessions["demo-b"]
+		session.IsTerminated = terminated
+		store.sessions["demo-b"] = session
+		svc.SignalProjectOverlapRadarSession("demo")
+	}
+	// Retire the worker while its watch setup is blocked: dropping below two
+	// sessions clears the project's rows, which lists its notices.
+	setTerminated(true)
+	waitForOverlapScan(t, store)
+	// A replacement starts when the second session returns.
+	setTerminated(false)
+	select {
+	case at := <-entered:
+		t.Fatalf("the replacement worker started a watch at %v while the retired worker's setup was still running", at)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	released := time.Now()
+	releaseSetup()
+	// The retired worker records EMFILE; the replacement must honour it.
+	expectRetryAfterBackoff(t, entered, released, 800*time.Millisecond)
+}
+
+// When some roots cannot be watched for a reason other than running out of
+// descriptors, the roots that were watched keep reporting changes until the
+// backed-off rebuild.
+func TestRunProjectOverlapNoticeRadarKeepsWatchedRootsOnPartialFailure(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	// Other failures are rebuilt after the retry delay; keep it out of reach so
+	// only the kept watch can deliver.
+	svc.overlapNoticeRetryDelay = time.Minute
+	var (
+		mu      sync.Mutex
+		watches int
+	)
+	svc.overlapWatch = func(ctx context.Context, paths ...string) (workspacewatch.Subscription, error) {
+		mu.Lock()
+		watches++
+		mu.Unlock()
+		subscription, err := workspacewatch.WatchGitMetadata(ctx, paths...)
+		subscription.RootErrors = append(subscription.RootErrors, fmt.Errorf("watch git metadata for another worktree: %w", fs.ErrPermission))
+		return subscription, err
+	}
+	stop := startOverlapRadar(t, svc)
+
+	waitForOverlapScan(t, store)
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	runGit(t, second, "add", "shared.go")
+	// The poll runs every 30s by default, so only the kept watch can deliver.
+	waitForOverlapNudges(t, nudger, 2, "the watched roots stopped reporting after a partial watch failure")
+	stop()
+	mu.Lock()
+	defer mu.Unlock()
+	if watches != 1 {
+		t.Fatalf("watch attempts = %d, want 1 within the retry delay", watches)
+	}
+}
+
+// Changes from the roots that are watched must not postpone rewatching a root
+// that failed: with one root failing and another staging changes faster than
+// the retry delay, the failed root was never rewatched and stayed poll-only.
+func TestRunProjectOverlapNoticeRadarRewatchesFailedRootWhileOthersKeepChanging(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	svc.overlapNoticeRetryDelay = 300 * time.Millisecond
+	rewatched := make(chan struct{})
+	var (
+		mu      sync.Mutex
+		watches int
+	)
+	svc.overlapWatch = func(ctx context.Context, paths ...string) (workspacewatch.Subscription, error) {
+		mu.Lock()
+		watches++
+		attempt := watches
+		mu.Unlock()
+		if attempt > 1 {
+			close(rewatched)
+			return workspacewatch.WatchGitMetadata(ctx, paths...)
+		}
+		// Watch only the first worktree; the second "failed".
+		subscription, err := workspacewatch.WatchGitMetadata(ctx, first)
+		subscription.RootErrors = append(subscription.RootErrors, fmt.Errorf("watch git metadata for %s: %w", second, fs.ErrPermission))
+		return subscription, err
+	}
+	startOverlapRadar(t, svc)
+	waitForOverlapScan(t, store)
+
+	// Stage a change in the watched worktree every 50ms.
+	staging := make(chan struct{})
+	stagingDone := make(chan struct{})
+	go func() {
+		defer close(stagingDone)
+		for i := 0; ; i++ {
+			select {
+			case <-staging:
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+			name := fmt.Sprintf("churn-%03d.md", i)
+			if os.WriteFile(filepath.Join(first, name), []byte("x\n"), 0o644) == nil {
+				_ = exec.Command("git", "-C", first, "add", name).Run()
+			}
+		}
+	}()
+	defer func() {
+		close(staging)
+		<-stagingDone
+	}()
+
+	select {
+	case <-rewatched:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the failed root was not rewatched while the watched root kept changing")
+	}
+}
+
+// A partial watch reported with descriptor exhaustion is released at once,
+// not held through the backoff; the poll keeps finding overlaps.
+func TestRunProjectOverlapNoticeRadarReleasesPartialWatchWhenDescriptorsRunOut(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	svc.overlapRadarPollInterval = 50 * time.Millisecond
+	svc.overlapRadarBackoffBase = time.Minute
+	released := make(chan struct{})
+	var (
+		mu      sync.Mutex
+		watches int
+	)
+	svc.overlapWatch = func(ctx context.Context, paths ...string) (workspacewatch.Subscription, error) {
+		mu.Lock()
+		watches++
+		mu.Unlock()
+		subscription, err := workspacewatch.WatchGitMetadata(ctx, paths...)
+		subscription.RootErrors = append(subscription.RootErrors, fmt.Errorf("watch git metadata for another worktree: %w", syscall.EMFILE))
+		go func() {
+			<-ctx.Done()
+			close(released)
+		}()
+		return subscription, err
+	}
+	stop := startOverlapRadar(t, svc)
+
+	select {
+	case <-released:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the radar held a partial watch after descriptors ran out")
+	}
+	waitForOverlapScan(t, store)
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	waitForOverlapNudges(t, nudger, 2, "the poll did not find an overlap after the partial watch was released")
+	stop()
+	mu.Lock()
+	defer mu.Unlock()
+	if watches != 1 {
+		t.Fatalf("watch attempts = %d, want 1 within the backoff", watches)
+	}
+}
+
+// openDescriptorCount counts this process's open file descriptors.
+func openDescriptorCount(t *testing.T) (int, bool) {
+	t.Helper()
+	dir, err := os.Open("/dev/fd")
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = dir.Close() }()
+	names, err := dir.Readdirnames(-1)
+	if err != nil {
+		return 0, false
+	}
+	return len(names), true
+}
+
+// settledDescriptorCount is the smallest of a few samples, so the pipes of a
+// Git command that happens to be running do not count.
+func settledDescriptorCount(t *testing.T) int {
+	t.Helper()
+	least := -1
+	for range 5 {
+		if count, _ := openDescriptorCount(t); least < 0 || count < least {
+			least = count
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return least
+}
+
+// TestRunProjectOverlapNoticeRadarDescriptorsStayFlatAcrossManyReconciles is
+// the regression test for a daemon that ran out of file descriptors: the radar
+// held one descriptor per file of every worktree in a project, so a project of
+// 25 worktrees of 18,000 files each could never fit, and every retry took the
+// rest. The radar must hold a few descriptors per worktree, independent of the
+// files in it, and the count must not grow across reconcile cycles.
+func TestRunProjectOverlapNoticeRadarDescriptorsStayFlatAcrossManyReconciles(t *testing.T) {
+	const (
+		worktrees = 8
+		files     = 300
+		cycles    = 25
+	)
+	if _, ok := openDescriptorCount(t); !ok {
+		t.Skip("descriptor counting is unavailable on this platform")
+	}
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	repos := make([]string, 0, worktrees)
+	for i := range worktrees {
+		repo := newWorkspaceRepo(t)
+		for f := range files {
+			writeWorkspaceFile(t, repo, fmt.Sprintf("pkg/dir-%02d/file-%03d.go", f%15, f), "package dir\n")
+		}
+		runGit(t, repo, "add", ".")
+		runGit(t, repo, "commit", "-q", "-m", "fill")
+		id := domain.SessionID(fmt.Sprintf("demo-%02d", i))
+		store.sessions[id] = overlapSession(id, repo)
+		repos = append(repos, repo)
+	}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	// Drive every reconcile through the metadata watch instead of the poll, so
+	// each sample is taken while no Git command is running.
+	svc.overlapRadarPollInterval = time.Hour
+	baseline := settledDescriptorCount(t)
+	stop := startOverlapRadar(t, svc)
+
+	waitForReconciles := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for store.listCalls("demo") < want {
+			if time.Now().After(deadline) {
+				t.Fatalf("radar ran %d reconciles, want %d", store.listCalls("demo"), want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	reconcileAfterStaging := func(cycle int) {
+		t.Helper()
+		before := store.listCalls("demo")
+		repo := repos[cycle%worktrees]
+		writeWorkspaceFile(t, repo, fmt.Sprintf("notes/cycle-%02d.md", cycle), "x\n")
+		runGit(t, repo, "add", ".")
+		waitForReconciles(before + 1)
+	}
+	// One staged change can raise more than one metadata edge, and a second
+	// reconcile's Git commands would be counted. Sample once none has started
+	// for a while.
+	idleDescriptorCount := func() int {
+		t.Helper()
+		for {
+			seen := store.listCalls("demo")
+			time.Sleep(150 * time.Millisecond)
+			if store.listCalls("demo") == seen {
+				return settledDescriptorCount(t)
+			}
+		}
+	}
+	waitForReconciles(1)
+	reconcileAfterStaging(0)
+	early := idleDescriptorCount()
+	if held, limit := early-baseline, worktrees*25; held > limit {
+		t.Fatalf("radar over %d worktrees of %d files holds %d descriptors, want at most %d", worktrees, files, held, limit)
+	}
+	for cycle := 1; cycle <= cycles; cycle++ {
+		reconcileAfterStaging(cycle)
+	}
+	late := idleDescriptorCount()
+	if late > early+3 {
+		t.Fatalf("descriptors grew from %d to %d across %d reconciles", early, late, store.listCalls("demo"))
+	}
+	stop()
+	// The watch closes asynchronously after the radar returns.
+	deadline := time.Now().Add(5 * time.Second)
+	after := settledDescriptorCount(t)
+	for after > baseline && time.Now().Before(deadline) {
+		after = settledDescriptorCount(t)
+	}
+	if after > baseline {
+		t.Fatalf("descriptors after the radar stopped = %d, want the %d baseline", after, baseline)
+	}
+}
+
+func TestProjectOverlapRadarRebuildBackoff(t *testing.T) {
+	svc := &Service{}
+	for exhausted, want := range []time.Duration{0, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute} {
+		if got := svc.projectOverlapRadarRebuildBackoff(exhausted); got != want {
+			t.Fatalf("backoff after %d exhausted attempts = %v, want %v", exhausted, got, want)
+		}
+	}
+}
