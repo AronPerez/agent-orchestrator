@@ -29,7 +29,8 @@ var gitMetadataFiles = []string{"HEAD", "index"}
 //
 // All roots share one watcher. A root whose Git directory cannot be found or
 // watched is reported in RootErrors and through Degraded while the others stay
-// watched; WatchGitMetadata fails only when no root could be watched.
+// watched; WatchGitMetadata fails when no root could be watched, and when any
+// root failed for lack of file descriptors, releasing every root it watched.
 func WatchGitMetadata(ctx context.Context, roots ...string) (Subscription, error) {
 	uniqueRoots, err := uniqueWatchRoots(roots)
 	if err != nil {
@@ -45,17 +46,26 @@ func WatchGitMetadata(ctx context.Context, roots ...string) (Subscription, error
 	var rootErrors []error
 	for _, root := range uniqueRoots {
 		gitDir, err := resolveGitDir(ctx, root)
+		if err == nil {
+			if _, seen := gitDirs[gitDir]; seen {
+				continue
+			}
+			if err = watcher.Add(gitDir); err != nil {
+				// A failed Add can leave part of the directory registered.
+				_ = watcher.Remove(gitDir)
+			}
+		}
 		if err != nil {
-			rootErrors = append(rootErrors, fmt.Errorf("watch git metadata for %s: %w", root, err))
-			continue
-		}
-		if _, seen := gitDirs[gitDir]; seen {
-			continue
-		}
-		if err := watcher.Add(gitDir); err != nil {
-			// A failed Add can leave part of the directory registered.
-			_ = watcher.Remove(gitDir)
-			rootErrors = append(rootErrors, fmt.Errorf("watch git metadata for %s: %w", root, err))
+			rootErr := fmt.Errorf("watch git metadata for %s: %w", root, err)
+			if DescriptorsExhausted(err) {
+				// Keeping the roots already watched would hold descriptors the
+				// rest of the daemon (SQLite, locks, the Git commands of the
+				// caller's poll) needs while there are none to spare. Release
+				// them all and let the caller poll and back off.
+				closeGitMetadataWatcher(watcher, gitDirs)
+				return Subscription{}, errors.Join(append(rootErrors, rootErr)...)
+			}
+			rootErrors = append(rootErrors, rootErr)
 			continue
 		}
 		gitDirs[gitDir] = struct{}{}

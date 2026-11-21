@@ -429,6 +429,11 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 			}
 			if workspacewatch.DescriptorsExhausted(watchErr) || workspacewatch.DescriptorsExhausted(partialErr) {
 				exhaustedWatches++
+				// A partial watch left behind when descriptors ran out would hold
+				// the ones the rest of the daemon needs through the whole
+				// backoff. Release it now; the poll covers every root.
+				cancelWatch()
+				subscription = workspacewatch.Subscription{}
 			} else {
 				exhaustedWatches = 0
 			}
