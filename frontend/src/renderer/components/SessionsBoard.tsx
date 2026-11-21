@@ -500,7 +500,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 
 			{hasArchive ? (
 				// Even 4px gap to the divider and the panel's bottom and left edges; the
-				// 30px button puts its text on the same line as the sidebar's Sign in.
+				// 30px button puts its text on the same line as the sidebar footer's Settings row.
 				<div className="flex shrink-0 items-center border-t border-border p-1">
 					<Button
 						aria-haspopup="dialog"

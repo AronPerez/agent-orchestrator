@@ -9,6 +9,7 @@ import { useSoundNotificationsStore } from "../../stores/sound-notifications-sto
 import { useUiStore, type ChatSendKeyMode } from "../../stores/ui-store";
 import { useTelemetryPolicyStore } from "../../stores/telemetry-policy-store";
 import { useAnalyticsOptOutStore } from "../../stores/analytics-opt-out-store";
+import { AccountSettingsSection } from "./AccountSettingsSection";
 import { CliLinkSettings } from "./CliLinkSettingsRow";
 import { CliShadowSettingsRow } from "./CliShadowSettingsRow";
 import { openChromeAgentsSettings } from "./BrowserChromeSection";
@@ -399,6 +400,7 @@ export function GeneralSettingsSection({
 
 	return (
 		<>
+			<AccountSettingsSection />
 			{/* Appearance */}
 			<SettingsSection title={t("settings.appearance")} titleHidden={titleHidden} grouped>
 				<SettingsRow label={t("settings.theme")}>

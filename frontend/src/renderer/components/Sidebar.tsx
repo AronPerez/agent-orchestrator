@@ -1,6 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useProjectAvatars } from "../hooks/useProjectAvatars";
-import { paidPlanBadge, useCloudBilling } from "../hooks/useCloudBilling";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import {
@@ -29,8 +28,6 @@ import {
 	Package,
 	Gauge,
 	FolderTree,
-	LogIn,
-	LogOut,
 	MoreVertical,
 	PanelLeft,
 	Pin,
@@ -41,7 +38,6 @@ import {
 	Smartphone,
 	Trash2,
 	TriangleAlert,
-	User,
 	ArrowLeft,
 } from "@/components/app-icons";
 import {
@@ -101,8 +97,6 @@ import { formatTimeCompact, formatTimeTerse } from "../lib/format-time";
 import { useTerminateSession } from "../hooks/useTerminateSession";
 import { useResizable } from "../hooks/useResizable";
 import { useLatestCallback, useStableArray } from "../hooks/useStable";
-import { useCloudLocalAuth } from "../hooks/useCloudLocalAuth";
-import { useLocalSignInDialogStore } from "../stores/local-signin-dialog-store";
 import { useShellMaybe } from "../lib/shell-context";
 import { useUpdateStatus } from "../hooks/useUpdateStatus";
 import { useInstalledBuildPrompt } from "../hooks/useInstalledBuildPrompt";
@@ -169,7 +163,6 @@ import { CreateProjectFlow, type CloneProjectInput, type CreateProjectInput } fr
 import { ResizeHandle } from "./ResizeHandle";
 import { NAV_ROW_HIGHLIGHT_HOST_CLASS, NavRowHighlight } from "./NavRowHighlight";
 import { isLinuxPlatform, isMacPlatform } from "../lib/platform";
-import { useCloudSession } from "../lib/cloud-session";
 import type { RemoteHost } from "../hooks/useRemoteHosts";
 import { sessionNavigateTarget } from "../lib/navigate-to-session";
 import { sessionUiKey } from "../lib/hosts";
@@ -207,7 +200,7 @@ const FOOTER_NAV_BUTTON_CLASS = cn(
 	"flex h-9 w-full items-center text-left transition-none",
 );
 
-/** Update rows above the account row; collapses away when nothing is pending. */
+/** Update rows above the footer's bottom row; collapses away when nothing is pending. */
 const FOOTER_UPDATES_CLASS = "flex flex-col gap-0.5 pt-2 empty:hidden";
 
 /** The footer's bottom row, under any update rows. */
@@ -1419,10 +1412,11 @@ export const Sidebar = memo(function Sidebar({
 			</>
 			)}
 
-			{/* Footer: update rows on top, then one row with the account on the
-			    left and the Mobile menu (Connect mobile, Stay Awake) and Settings
-			    as icons. No divider. Bottom spacing stays inside the footer so
-			    there is no empty strip beneath it. */}
+			{/* Footer: update rows on top, then one row with the labelled Settings
+			    row on the left and the Mobile menu (Connect mobile, Stay Awake) as
+			    an icon; the collapsed rail shows Mobile and Settings icons. Signing
+			    in lives in Settings › General › Account. No divider. Bottom spacing
+			    stays inside the footer so there is no empty strip beneath it. */}
 			<SidebarFooter
 				className="relative mt-auto gap-0 overflow-hidden px-2 !pb-2 !pt-0 transition-[padding] duration-200 ease-linear group-data-[collapsible=icon]:min-h-20 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:overflow-visible group-data-[collapsible=icon]:px-1.5 group-data-[collapsible=icon]:!pb-2 group-data-[collapsible=icon]:!pt-1.5"
 			>
@@ -1475,7 +1469,7 @@ export const Sidebar = memo(function Sidebar({
 							tabIndex={isCollapsed ? -1 : 0}
 						/>
 					</div>
-					<FooterAccountRow
+					<FooterBottomRow
 						onConnectMobile={() => selection.goConnectMobile()}
 						onOpenSettings={() => selection.goGlobalSettings()}
 						tabIndex={isCollapsed ? -1 : 0}
@@ -1490,8 +1484,6 @@ export const Sidebar = memo(function Sidebar({
 						status={updateStatus}
 						tabIndex={isCollapsed ? 0 : -1}
 					/>
-					<CloudSignInRailButton tabIndex={isCollapsed ? 0 : -1} />
-					<CloudAccountRailButton tabIndex={isCollapsed ? 0 : -1} />
 					<Tooltip>
 						<TooltipTrigger asChild>
 							<Pressable
@@ -3203,71 +3195,11 @@ const SessionActions = memo(function SessionActions({
 	);
 });
 
-// AO account sign-in is shared by Cloud execution and remote hosts.
-function CloudSignInRow({ tabIndex }: { tabIndex: number }) {
-	const { t } = useTranslation();
-	const { configured, status, signIn } = useCloudSession();
-	// Dev + loopback CP: open the local email/password dialog instead of WorkOS.
-	const { available: localAuthAvailable } = useCloudLocalAuth();
-	const openLocalSignIn = useLocalSignInDialogStore((s) => s.openDialog);
-	const onSignIn = () => (localAuthAvailable ? openLocalSignIn() : signIn());
-	if (!configured || status !== "unauthenticated") return null;
-
-	return (
-		<Pressable
-			aria-label={t("shell.signIn")}
-			className={FOOTER_NAV_BUTTON_CLASS}
-			onClick={onSignIn}
-			tabIndex={tabIndex}
-			type="button"
-		>
-			<NavRowHighlight />
-			<span className="relative z-[1] flex min-w-0 flex-1 items-center gap-2 [&_svg]:size-icon-md [&_svg]:shrink-0">
-				<LogIn aria-hidden="true" />
-				<span className="truncate tracking-tight">{t("shell.signIn")}</span>
-			</span>
-		</Pressable>
-	);
-}
-
-// Icon-rail variant for the collapsed sidebar.
-function CloudSignInRailButton({ tabIndex }: { tabIndex: number }) {
-	const { t } = useTranslation();
-	const { configured, status, signIn } = useCloudSession();
-	// Dev + loopback CP: open the local email/password dialog instead of WorkOS.
-	const { available: localAuthAvailable } = useCloudLocalAuth();
-	const openLocalSignIn = useLocalSignInDialogStore((s) => s.openDialog);
-	const onSignIn = () => (localAuthAvailable ? openLocalSignIn() : signIn());
-	if (!configured || status !== "unauthenticated") return null;
-
-	return (
-		<Tooltip>
-			<TooltipTrigger asChild>
-				<Pressable
-					aria-label={t("shell.signIn")}
-					className={FOOTER_RAIL_BUTTON_CLASS}
-					onClick={onSignIn}
-					tabIndex={tabIndex}
-					type="button"
-				>
-					<NavRowHighlight />
-					<span className="relative z-[1] grid place-items-center [&_svg]:size-icon-base">
-						<LogIn aria-hidden="true" />
-					</span>
-				</Pressable>
-			</TooltipTrigger>
-			<TooltipContent side="right">{t("shell.signIn")}</TooltipContent>
-		</Tooltip>
-	);
-}
-
 /**
- * The footer's bottom row: the account on the left, then the Mobile menu and
- * Settings as icons. Without AO Cloud the left side is the labelled
- * Settings row instead, so Settings never shows twice. While the cloud session
- * is still loading the left side stays empty and the icons hold their place.
+ * The footer's bottom row: the labelled Settings row, then the Mobile menu as
+ * an icon. Signing in and the account live in Settings › General › Account.
  */
-function FooterAccountRow({
+function FooterBottomRow({
 	onConnectMobile,
 	onOpenSettings,
 	tabIndex,
@@ -3277,52 +3209,25 @@ function FooterAccountRow({
 	tabIndex: number;
 }) {
 	const { t } = useTranslation();
-	const { configured } = useCloudSession();
 
 	return (
 		<div className={FOOTER_BOTTOM_ROW_CLASS}>
 			<div className="flex min-w-0 flex-1">
-				{configured ? (
-					<>
-						<CloudSignInRow tabIndex={tabIndex} />
-						<CloudAccountRow tabIndex={tabIndex} />
-					</>
-				) : (
-					<Pressable
-						aria-label={t("shell.settings")}
-						className={FOOTER_NAV_BUTTON_CLASS}
-						onClick={onOpenSettings}
-						tabIndex={tabIndex}
-						type="button"
-					>
-						<NavRowHighlight />
-						<span className="relative z-[1] flex min-w-0 flex-1 items-center gap-2 [&_svg]:size-icon-md [&_svg]:shrink-0">
-							<Settings aria-hidden="true" />
-							<span className="truncate tracking-tight">{t("shell.settings")}</span>
-						</span>
-					</Pressable>
-				)}
+				<Pressable
+					aria-label={t("shell.settings")}
+					className={FOOTER_NAV_BUTTON_CLASS}
+					onClick={onOpenSettings}
+					tabIndex={tabIndex}
+					type="button"
+				>
+					<NavRowHighlight />
+					<span className="relative z-[1] flex min-w-0 flex-1 items-center gap-2 [&_svg]:size-icon-md [&_svg]:shrink-0">
+						<Settings aria-hidden="true" />
+						<span className="truncate tracking-tight">{t("shell.settings")}</span>
+					</span>
+				</Pressable>
 			</div>
 			<FooterMobileMenu onConnectMobile={onConnectMobile} tabIndex={tabIndex} />
-			{configured ? (
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<Pressable
-							aria-label={t("shell.settings")}
-							className={FOOTER_ICON_BUTTON_CLASS}
-							onClick={onOpenSettings}
-							tabIndex={tabIndex}
-							type="button"
-						>
-							<NavRowHighlight />
-							<span className="relative z-[1] grid place-items-center">
-								<Settings aria-hidden="true" />
-							</span>
-						</Pressable>
-					</TooltipTrigger>
-					<TooltipContent shortcut="open-settings">{t("shell.settings")}</TooltipContent>
-				</Tooltip>
-			) : null}
 		</div>
 	);
 }
@@ -3400,171 +3305,6 @@ function FooterMobileMenu({ onConnectMobile, tabIndex }: { onConnectMobile: () =
 				<DropdownMenuSeparator />
 				<AwakeMenuItem stay={stay} />
 			</DropdownMenuContent>
-		</DropdownMenu>
-	);
-}
-
-/**
- * The signed-in account's menu; shared by the footer row and the icon rail.
- * The header carries the full name, email and plan, which the one-line footer
- * row leaves out so nothing there has to truncate.
- */
-function CloudAccountMenuContent({ side }: { side: "top" | "right" }) {
-	const { t } = useTranslation();
-	const { session, signOut } = useCloudSession();
-	// The plan badge is self-serve billing only; a contract org has no plan to show.
-	const billing = useCloudBilling();
-	const plan = billing.offering.selfServeBilling ? paidPlanBadge(billing.data) : null;
-	const name = accountName(session?.user);
-	const email = session?.user.email;
-	return (
-		<DropdownMenuContent side={side} align={side === "top" ? "start" : "end"} sideOffset={8} collisionPadding={8} className="w-56">
-			<div className="flex items-center gap-2.5 px-2 py-1.5">
-				<AccountAvatar size="lg" user={session?.user} />
-				<div className="flex min-w-0 flex-1 flex-col leading-tight">
-					<span className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground">
-						<span className="break-words">{name}</span>
-						{plan ? (
-							<span className="shrink-0 rounded-full bg-[var(--color-status-working)] px-1.5 text-[length:var(--font-size-xs)] font-medium leading-4 text-white">
-								{plan}
-							</span>
-						) : null}
-					</span>
-					{email && email !== name ? (
-						<span className="break-all text-[length:var(--font-size-xs)] text-muted-foreground">{email}</span>
-					) : null}
-				</div>
-			</div>
-			<DropdownMenuSeparator />
-			<DropdownMenuItem onSelect={() => void signOut()} variant="destructive">
-				<LogOut aria-hidden="true" />
-				{t("shell.signOut")}
-			</DropdownMenuItem>
-		</DropdownMenuContent>
-	);
-}
-
-// CloudAccountRow: avatar and name for an existing cloud session (the
-// signed-in state), opening the account menu. One line, no email: the email
-// and plan live in the menu header. At the narrowest sidebar the name truncates.
-// The sign-in entry point is CloudSignInRow.
-function CloudAccountRow({ tabIndex }: { tabIndex: number }) {
-	const { t } = useTranslation();
-	const { configured, session, status } = useCloudSession();
-	if (!configured || status !== "authenticated") return null;
-	const email = session?.user.email;
-
-	return (
-		<DropdownMenu>
-			<DropdownMenuTrigger asChild>
-				<Pressable
-					aria-label={t("shell.signedInAs", {
-						email: email ?? "Orchestrator Cloud",
-					})}
-					className={cn(NAV_ROW_HIGHLIGHT_HOST_CLASS, "flex h-9 w-full min-w-0 items-center rounded-lg px-1.5 text-left")}
-					tabIndex={tabIndex}
-					title={email}
-					type="button"
-				>
-					<NavRowHighlight />
-					<span className="relative z-[1] flex min-w-0 flex-1 items-center gap-2">
-						<AccountAvatar size="lg" user={session?.user} />
-						<span className="min-w-0 truncate text-sm font-medium tracking-tight text-foreground">
-							{accountShortName(session?.user)}
-						</span>
-					</span>
-				</Pressable>
-			</DropdownMenuTrigger>
-			<CloudAccountMenuContent side="top" />
-		</DropdownMenu>
-	);
-}
-
-/** The name for the one-line footer row: the display name, else the email's local part. */
-function accountShortName(user: { displayName?: string; email?: string } | undefined): string {
-	const display = user?.displayName?.trim();
-	if (display && display !== user?.email) return display;
-	const local = user?.email?.split("@")[0];
-	return local || "Orchestrator Cloud";
-}
-
-/** The signed-in person's name, falling back to their email. */
-function accountName(user: { displayName?: string; email?: string } | undefined): string {
-	const display = user?.displayName?.trim();
-	if (display && display !== user?.email) return display;
-	return user?.email ?? "Orchestrator Cloud";
-}
-
-/** The profile picture from the sign-in provider, or the person's initials. */
-function AccountAvatar({
-	size = "md",
-	user,
-}: {
-	size?: "md" | "lg";
-	user: { displayName?: string; email?: string; avatarUrl?: string } | undefined;
-}) {
-	const [broken, setBroken] = useState(false);
-	const sizeClass = size === "lg" ? "size-6" : "size-icon-md";
-	if (user?.avatarUrl && !broken) {
-		return (
-			<img
-				src={user.avatarUrl}
-				alt=""
-				aria-hidden="true"
-				referrerPolicy="no-referrer"
-				className={cn(sizeClass, "shrink-0 rounded-full object-cover")}
-				onError={() => setBroken(true)}
-			/>
-		);
-	}
-	const source = accountName(user);
-	const initials = source.includes("@")
-		? source.charAt(0).toUpperCase()
-		: source.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part.charAt(0).toUpperCase()).join("");
-	if (!initials) {
-		return size === "lg" ? (
-			<span aria-hidden="true" className="grid size-6 shrink-0 place-items-center rounded-full bg-[var(--color-bg-tertiary)] text-settings-label [&_svg]:size-icon-md">
-				<User />
-			</span>
-		) : <User aria-hidden="true" />;
-	}
-	return (
-		<span aria-hidden="true" className={cn(sizeClass, "grid shrink-0 place-items-center rounded-full bg-[var(--color-bg-tertiary)] text-[length:var(--font-size-xs)] font-medium leading-none text-settings-label")}>
-			{initials}
-		</span>
-	);
-}
-
-// Icon-rail variant for collapsed sidebar.
-function CloudAccountRailButton({ tabIndex }: { tabIndex: number }) {
-	const { t } = useTranslation();
-	const { configured, session, status } = useCloudSession();
-	if (!configured || status !== "authenticated") return null;
-	const label = t("shell.signedInAs", {
-		email: session?.user.email ?? "Orchestrator Cloud",
-	});
-
-	return (
-		<DropdownMenu>
-			<Tooltip>
-				<TooltipTrigger asChild>
-					<DropdownMenuTrigger asChild>
-						<Pressable
-							aria-label={label}
-							className={FOOTER_RAIL_BUTTON_CLASS}
-							tabIndex={tabIndex}
-							type="button"
-						>
-							<NavRowHighlight />
-							<span className="relative z-[1] grid place-items-center [&_svg]:size-icon-base">
-								<AccountAvatar user={session?.user} />
-							</span>
-						</Pressable>
-					</DropdownMenuTrigger>
-				</TooltipTrigger>
-				<TooltipContent side="right">{label}</TooltipContent>
-			</Tooltip>
-			<CloudAccountMenuContent side="right" />
 		</DropdownMenu>
 	);
 }
