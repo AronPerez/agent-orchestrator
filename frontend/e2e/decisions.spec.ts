@@ -192,9 +192,13 @@ test("decisions: keyboard alone moves between cards, opens one and closes it", a
 	await expect(page.getByRole("button", { name: /^In flight/ })).toBeFocused();
 	await page.keyboard.press("Enter");
 	await expect(page).toHaveURL(/call=dec_c/);
+	// Arrowing on shows the next card's details. They pass Escape on, so one press still closes the call.
+	await page.keyboard.press("ArrowLeft");
+	await expect(page.locator("[data-slot='tooltip-content']").filter({ hasText: "question" })).toBeVisible();
 	await page.keyboard.press("Escape");
 	await expect(page).not.toHaveURL(/call=/);
 	await expect(page.getByRole("complementary", { name: "Decision" })).toHaveCount(0);
+	await expect(page.locator("[data-slot='tooltip-content']")).toHaveCount(0);
 });
 
 test("decisions: a failed board load explains itself and recovers on retry", async ({ page }) => {
@@ -280,4 +284,36 @@ test("decisions: a call another machine owns says where it waits, and the footer
 	Object.assign(remote, { delivery: "sent", deliveredToName: "worker far" });
 	await emitDecision(page, "dec_far");
 	await expect(card).toContainText("Sent to worker far");
+});
+
+test("decisions: streams fold to their counts, folds survive a reload, and Done shows its newest three", async ({ page }) => {
+	const done = (n: number) => call(`dec_done${n}`, `Finished ${n}`, {
+		state: "done", stateLabel: "Done", chosenLabel: "Ship it", outcome: `Shipped ${n}`, answeredAt: iso((n + 1) * hour), outcomeAt: iso(n * hour),
+	});
+	const ledger = new Ledger([
+		call("dec_a", "Stream question", { streamSessionId: "epic", streamName: "Checkout epic" }),
+		call("dec_b", "Project question"),
+		...[1, 2, 3, 4, 5].map(done),
+	]);
+	await openDecisions(page, ledger);
+
+	const toggle = page.getByRole("group", { name: "Checkout epic" }).getByRole("button", { name: /Checkout epic/ });
+	await expect(toggle).toHaveAttribute("aria-expanded", "true");
+	await toggle.click();
+	await expect(toggle).toHaveAttribute("aria-expanded", "false");
+	await expect(page.getByRole("button", { name: /^Stream question/ })).toHaveCount(0);
+	await expect(page.getByRole("group", { name: "Checkout epic" }).getByTestId("decision-fold-count").first()).toHaveText("1");
+
+	await page.reload();
+	await expect(page.getByRole("button", { name: /^Project question/ })).toBeVisible();
+	await expect(page.getByRole("group", { name: "Checkout epic" }).getByRole("button", { name: /Checkout epic/ })).toHaveAttribute("aria-expanded", "false");
+
+	await expect(page.getByRole("button", { name: /^Finished/ })).toHaveCount(3);
+	await page.getByRole("button", { name: "2 more" }).click();
+	await expect(page.getByRole("button", { name: /^Finished/ })).toHaveCount(5);
+
+	await page.getByRole("button", { name: "Collapse all" }).click();
+	await expect(page.locator("[data-decision-card]")).toHaveCount(0);
+	await page.getByRole("button", { name: "Expand all" }).click();
+	await expect(page.getByRole("button", { name: /^Stream question/ })).toBeVisible();
 });

@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useMinuteClock } from "@aoagents/product-ui";
-import { ListChecks } from "@/components/app-icons";
+import { ChevronsDownUp, ChevronsUpDown, ListChecks } from "@/components/app-icons";
+import { useDecisionFolds } from "../hooks/useDecisionFolds";
 import { useDecisionBoard, useDecisionSearch } from "../hooks/useDecisionInbox";
 import { apiErrorRequestId } from "../lib/api-client";
 import { buildDecisionBoard, DECISION_LANES } from "../lib/decision-board";
@@ -11,12 +12,13 @@ import { DecisionCallPanel } from "./DecisionCallPanel";
 import { DecisionSearchResults } from "./DecisionSearchResults";
 import { DecisionSyncFooter } from "./DecisionSyncFooter";
 import { decisionSyncKey, fetchDecisionSyncStatus } from "../lib/decision-sync";
-import { DecisionsBoard } from "./DecisionsBoard";
+import { DECISION_GRID_CLASS, DecisionsBoard } from "./DecisionsBoard";
 import { ToolbarSearch } from "./PageToolbar";
 import { PageTopbar, PageTopbarTitle } from "./PageTopbar";
 import { Button } from "./ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "./ui/resizable";
 import { Skeleton } from "./ui/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 export type DecisionsViewProps = {
 	/** The selected call from `?call=`. */
@@ -41,12 +43,24 @@ function LoadError({ error, fallback, onRetry, className }: { error: unknown; fa
 	);
 }
 
+function FoldAllButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Button type="button" size="icon-sm" variant="quiet" aria-label={label} onClick={onClick}>{children}</Button>
+			</TooltipTrigger>
+			<TooltipContent side="bottom">{label}</TooltipContent>
+		</Tooltip>
+	);
+}
+
 export function DecisionsView({ callId, query }: DecisionsViewProps) {
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const board = useDecisionBoard();
 	const now = useMinuteClock();
 	const model = useMemo(() => buildDecisionBoard(board.data?.calls ?? [], board.data?.servingHostId), [board.data]);
+	const folds = useDecisionFolds(model, callId);
 	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
 	const search = useDecisionSearch(words);
@@ -84,6 +98,7 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 		}
 	}, [callId, navigate, words]);
 
+	const boardShown = !words && Boolean(board.data && board.data.calls.length > 0);
 	let body;
 	if (words) {
 		if (search.data && search.data.length > 0) {
@@ -121,7 +136,7 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 						{t("decisions.nothingNeedsYou")}
 					</p>
 				) : null}
-				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} />
+				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
 			</>
 		);
 	} else if (board.data && !board.isError) {
@@ -152,7 +167,18 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 			</p>
 			<PageTopbar
 				lead={<PageTopbarTitle as="h1" icon={<ListChecks className="size-icon-md" aria-hidden="true" />}>{t("decisions.title")}</PageTopbarTitle>}
-				actions={<ToolbarSearch label={t("decisions.search")} query={draft} onQueryChange={setDraft} />}
+				actions={(
+					<>
+						{/* Folding applies to the board, so the controls leave with it during a search. */}
+						{boardShown ? (
+							<>
+								<FoldAllButton label={t("decisions.expandAll")} onClick={() => folds.setAll(false)}><ChevronsUpDown aria-hidden="true" className="size-icon-sm" /></FoldAllButton>
+								<FoldAllButton label={t("decisions.collapseAll")} onClick={() => folds.setAll(true)}><ChevronsDownUp aria-hidden="true" className="size-icon-sm" /></FoldAllButton>
+							</>
+						) : null}
+						<ToolbarSearch label={t("decisions.search")} query={draft} onQueryChange={setDraft} />
+					</>
+				)}
 			/>
 			<ResizablePanelGroup className="min-h-0 flex-1">
 				<ResizablePanel id="decisions-board" minSize="30%">
@@ -185,7 +211,7 @@ const SKELETON_LANES = DECISION_LANES.filter((lane) => lane !== "decided");
 function DecisionsBoardSkeleton({ label }: { label: string }) {
 	return (
 		<div role="status" aria-label={label} className="@container">
-			<div className="grid grid-cols-[repeat(3,minmax(11rem,1fr))] @3xl:grid-cols-[minmax(7rem,10rem)_repeat(3,minmax(11rem,1fr))]">
+			<div className={DECISION_GRID_CLASS[3]}>
 				<div className="hidden border-b border-border @3xl:block" />
 				{SKELETON_LANES.map((lane) => (
 					<div key={lane} className="border-b border-l border-border px-2.5 py-2"><Skeleton className="h-3 w-20" /></div>
@@ -194,8 +220,8 @@ function DecisionsBoardSkeleton({ label }: { label: string }) {
 					<div key={row} className="contents">
 						<div className="hidden border-b border-border px-3 py-2 @3xl:block"><Skeleton className="h-3 w-16" /></div>
 						{SKELETON_LANES.map((lane) => (
-							<div key={lane} className="min-h-14 border-b border-l border-border p-1.5">
-								{row === 0 ? <Skeleton className="h-11 w-full rounded-md" /> : null}
+							<div key={lane} className="min-h-10 border-b border-l border-border p-1.5">
+								{row === 0 ? <Skeleton className="h-6 w-full rounded-md" /> : null}
 							</div>
 						))}
 					</div>
