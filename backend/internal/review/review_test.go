@@ -3318,7 +3318,16 @@ func TestListRestartKeepsStoppedChatHistoryOutOfActiveReviewers(t *testing.T) {
 	running := domain.Review{ID: "running-aider", SessionID: "mer-1", Harness: domain.ReviewerAider, ReviewerHandleID: "aider-pane", ReviewerActivityState: domain.ActivityActive}
 	worker := liveWorker()
 	worker.ReviewerHarness = domain.ReviewerCodex
-	eng := newEngineForTest(&fakeStore{review: &selected, reviews: map[domain.ReviewerHarness]domain.Review{domain.ReviewerCodex: selected, domain.ReviewerClaudeCode: other, domain.ReviewerAider: running}}, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{}, &fakeLauncher{})
+	// The Aider reviewer is mid-pass. The idle Claude Chat reviewer is not the
+	// session's reviewer and has no pass, so List retires it (a pass-only
+	// override, #6891): it is no longer a retained controller to inspect.
+	store := &fakeStore{
+		review:  &selected,
+		reviews: map[domain.ReviewerHarness]domain.Review{domain.ReviewerCodex: selected, domain.ReviewerClaudeCode: other, domain.ReviewerAider: running},
+		runs:    []domain.ReviewRun{{ID: "run-aider", ReviewID: running.ID, SessionID: worker.ID, Harness: domain.ReviewerAider, Status: domain.ReviewRunRunning}},
+	}
+	// The Aider pane is live, so the run lifecycle keeps its pass running.
+	eng := newEngineForTest(store, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{}, &fakeLauncher{alive: true})
 	got, err := eng.List(context.Background(), worker.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -3326,8 +3335,11 @@ func TestListRestartKeepsStoppedChatHistoryOutOfActiveReviewers(t *testing.T) {
 	if len(got.ActiveReviewers) != 1 || got.ActiveReviewers[0].ReviewID != running.ID {
 		t.Fatalf("active reviewers = %+v, want the running reviewer instead of stopped Chat history", got.ActiveReviewers)
 	}
-	if len(got.ChatReviewerIDs) != 2 || got.ChatReviewerIDs[0] != selected.ID || got.ChatReviewerIDs[1] != other.ID {
-		t.Fatalf("Chat controllers = %+v, want both retained surfaces checked for restart safety", got.ChatReviewerIDs)
+	if len(got.ChatReviewerIDs) != 1 || got.ChatReviewerIDs[0] != selected.ID {
+		t.Fatalf("Chat controllers = %+v, want the retained (selected) Chat surface checked for restart safety", got.ChatReviewerIDs)
+	}
+	if !store.reviews[domain.ReviewerClaudeCode].IsArchived {
+		t.Fatalf("idle override Chat reviewer = %+v, want it retired once it has no pass", store.reviews[domain.ReviewerClaudeCode])
 	}
 }
 
