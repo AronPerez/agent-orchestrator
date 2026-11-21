@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/signal"
 	"strings"
 )
 
@@ -11,12 +12,18 @@ import (
 var ErrCommandUsage = errors.New("chat-host requires <session> <data-dir> <workdir> [acp|unreal <fingerprint>] -- <provider> [args...]")
 
 // RunCommand serves both the packaged host executable and the CLI fallback.
+// A shutdown signal cancels the host's context so Run takes its orderly path:
+// it stops the provider tree and clears the launch records. Without this the
+// default signal action would end the host with its records still fencing the
+// session until the next reboot.
 func RunCommand(ctx context.Context, args []string) error {
 	cfg, err := commandConfig(args)
 	if err != nil {
 		return err
 	}
 	cfg.Env = os.Environ()
+	ctx, stop := signal.NotifyContext(ctx, hostShutdownSignals...)
+	defer stop()
 	return Run(ctx, cfg)
 }
 

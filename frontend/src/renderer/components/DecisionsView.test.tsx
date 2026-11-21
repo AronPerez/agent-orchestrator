@@ -71,6 +71,7 @@ const boardFetches = () => getMock.mock.calls.filter(([path]) => path === "/api/
 beforeEach(() => {
 	getMock.mockReset();
 	navigateMock.mockReset();
+	window.localStorage.clear();
 });
 
 describe("DecisionsView", () => {
@@ -114,6 +115,26 @@ describe("DecisionsView", () => {
 		renderView(<DecisionsView />);
 		expect(await screen.findByRole("status", { name: "Nothing needs you" })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: /^Question dec_prog/ })).toBeInTheDocument();
+	});
+
+	it("folds and opens every project and stream from the top bar", async () => {
+		answer(board([call({ id: "dec_1" }), call({ id: "dec_2", projectId: "cloud", projectName: "skyvern-cloud", streamSessionId: "nango", streamName: "Nango" })]));
+		renderView(<DecisionsView />);
+		expect(await screen.findByRole("button", { name: /^Question dec_1/ })).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+		expect(screen.queryByRole("button", { name: /^Question dec_/ })).not.toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /Shop/ })).toHaveAttribute("aria-expanded", "false");
+		expect(screen.getByRole("button", { name: /skyvern-cloud/ })).toHaveAttribute("aria-expanded", "false");
+		await userEvent.click(screen.getByRole("button", { name: "Expand all" }));
+		expect(screen.getByRole("button", { name: /^Question dec_1/ })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /^Question dec_2/ })).toBeInTheDocument();
+	});
+
+	it("offers no fold controls while searching or before any decision exists", async () => {
+		answer(board([]));
+		renderView(<DecisionsView />);
+		expect(await screen.findByText(/ao decision raise/)).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Collapse all" })).not.toBeInTheDocument();
 	});
 
 	it("opens a card as the selected call in the URL and marks the selected one", async () => {
@@ -285,6 +306,40 @@ describe("DecisionsView", () => {
 			const card = await screen.findByRole("button", { name: /^Question dec_1/ });
 			card.focus();
 			await userEvent.keyboard("{Escape}");
+			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: {} });
+		});
+
+		it("leaves Escape to the search field while a hovered card's details are showing", async () => {
+			const selected = call({ id: "dec_1" });
+			answer(board([selected]), { dec_1: selected });
+			renderView(<DecisionsView callId="dec_1" />);
+			const card = await screen.findByRole("button", { name: /^Question dec_1/ });
+			await userEvent.click(screen.getByRole("button", { name: "Search all decisions" }));
+			expect(screen.getByRole("searchbox", { name: "Search all decisions" })).toHaveFocus();
+			await userEvent.hover(card);
+			expect(await screen.findByRole("tooltip")).toHaveTextContent("Question dec_1");
+			navigateMock.mockClear();
+
+			await userEvent.keyboard("{Escape}");
+			// The search field takes its first Escape; the open call stays open.
+			expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+			expect(navigateMock).not.toHaveBeenCalled();
+			expect(screen.getByRole("complementary", { name: "Decision" })).toBeInTheDocument();
+		});
+
+		it("closes the panel with one Escape from inside it while another card's details are showing", async () => {
+			const selected = call({ id: "dec_1" });
+			answer(board([selected, call({ id: "dec_2" })]), { dec_1: selected });
+			renderView(<DecisionsView callId="dec_1" />);
+			const other = await screen.findByRole("button", { name: /^Question dec_2/ });
+			const close = await screen.findByRole("button", { name: "Close decision" });
+			act(() => close.focus());
+			await userEvent.hover(other);
+			expect(await screen.findByRole("tooltip")).toHaveTextContent("Question dec_2");
+			navigateMock.mockClear();
+
+			await userEvent.keyboard("{Escape}");
+			expect(navigateMock).toHaveBeenCalledTimes(1);
 			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: {} });
 		});
 
