@@ -162,13 +162,22 @@ func TestRunProjectOverlapNoticeRadarKeepsDescriptorBackoffAcrossRefreshes(t *te
 	}
 	waitForOverlapScan(t, store)
 	reconcilesBefore := store.listCalls("demo")
-	// Refresh until well inside the backoff, however slow the runner is.
-	for refreshUntil := firstAttempt.Add(400 * time.Millisecond); time.Now().Before(refreshUntil); {
+	// Refresh at least once, then until well inside the backoff. The initial
+	// scan may already have outlasted that window on a slow runner.
+	refreshUntil := firstAttempt.Add(400 * time.Millisecond)
+	for {
 		svc.SignalProjectOverlapRadar("demo")
+		if !time.Now().Before(refreshUntil) {
+			break
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if got := store.listCalls("demo"); got <= reconcilesBefore {
-		t.Fatalf("reconciles during the backoff = %d, want more than %d: refreshes and the poll must keep scanning", got, reconcilesBefore)
+	// Refreshes and the poll keep scanning while the watch is backed off.
+	for deadline := time.Now().Add(5 * time.Second); store.listCalls("demo") <= reconcilesBefore; {
+		if time.Now().After(deadline) {
+			t.Fatalf("no scan after %d while the watch was backed off: refreshes and the poll must keep scanning", reconcilesBefore)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	expectRetryAfterBackoff(t, attempts, firstAttempt, 500*time.Millisecond)
 }
