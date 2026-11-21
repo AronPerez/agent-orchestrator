@@ -23,6 +23,11 @@ const (
 	launchReadySuffix  = ".ready.json"
 )
 
+// clearLaunchIntentRetryDelays bounds how long a host keeps retrying the
+// ownership lock before it leaves its launch records behind. A record left
+// behind fails closed, so the retry only narrows that window.
+var clearLaunchIntentRetryDelays = []time.Duration{50 * time.Millisecond, 250 * time.Millisecond, time.Second}
+
 type launchIntent struct {
 	Token     string `json:"token"`
 	ParentPID int    `json:"parentPid"`
@@ -225,12 +230,31 @@ func readLaunchJSON(path string, out any) error {
 }
 
 func clearLaunchIntent(dataDir, sessionID, token string) {
-	ownershipLock, err := acquireHostOwnershipMutationLock(dataDir, sessionID)
-	if err != nil {
-		return
+	_ = clearLaunchIntentWith(
+		dataDir, sessionID, token,
+		acquireHostOwnershipMutationLock, clearLaunchIntentRetryDelays,
+	)
+}
+
+// clearLaunchIntentWith retries a failed ownership lock (for example a
+// transient EMFILE) before giving up. Giving up leaves the records in place,
+// which keeps the session fenced rather than guessing.
+func clearLaunchIntentWith(
+	dataDir, sessionID, token string,
+	acquire func(string, string) (hostOwnershipMutationLock, error),
+	delays []time.Duration,
+) error {
+	for attempt := 0; ; attempt++ {
+		ownershipLock, err := acquire(dataDir, sessionID)
+		if err == nil {
+			clearLaunchIntentUnlocked(dataDir, sessionID, token)
+			return ownershipLock.Release()
+		}
+		if attempt >= len(delays) {
+			return err
+		}
+		time.Sleep(delays[attempt])
 	}
-	defer func() { _ = ownershipLock.Release() }()
-	clearLaunchIntentUnlocked(dataDir, sessionID, token)
 }
 
 func clearLaunchIntentUnlocked(dataDir, sessionID, token string) {

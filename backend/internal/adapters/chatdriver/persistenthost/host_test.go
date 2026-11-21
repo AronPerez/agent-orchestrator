@@ -20,26 +20,12 @@ import (
 
 func TestMain(m *testing.M) {
 	if len(os.Args) >= 6 && os.Args[1] == "chat-host" {
-		protocol := ProtocolRaw
-		fingerprint := ""
-		separator := 5
-		if len(os.Args) > 5 && os.Args[5] == string(ProtocolACP) {
-			protocol = ProtocolACP
-			if len(os.Args) > 6 {
-				fingerprint = os.Args[6]
-			}
-			separator = 7
-		}
-		if len(os.Args) <= separator || os.Args[separator] != "--" {
-			os.Exit(2)
-		}
-		err := Run(context.Background(), Config{
-			SessionID: os.Args[2], DataDir: os.Args[3], Workdir: os.Args[4],
-			Env: os.Environ(), Argv: os.Args[separator+1:], Protocol: protocol,
-			OwnershipFingerprint: fingerprint,
-		})
-		if err != nil {
+		// Host through the real entrypoint so tests cover its signal handling.
+		if err := RunCommand(context.Background(), os.Args[2:]); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
+			if errors.Is(err, ErrCommandUsage) {
+				os.Exit(2)
+			}
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -1603,5 +1589,56 @@ func TestShutdownStaleDescriptorPreservesUnpublishedReplacement(t *testing.T) {
 	}
 	if _, err := readLaunchReady(dataDir, sessionID, token); err != nil {
 		t.Fatalf("stale descriptor cleanup removed replacement readiness: %v", err)
+	}
+}
+
+func TestClearLaunchIntentRetriesOwnershipLock(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		failures    int
+		wantCleared bool
+	}{
+		{name: "transient lock failure", failures: 2, wantCleared: true},
+		{name: "persistent lock failure", failures: 100, wantCleared: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			sessionID := "clear-retry"
+			token, err := reserveLaunchIntent(dataDir, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+			if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()); err != nil {
+				t.Fatal(err)
+			}
+			attempts := 0
+			lockErr := errors.New("too many open files")
+			acquire := func(dataDir, sessionID string) (hostOwnershipMutationLock, error) {
+				attempts++
+				if attempts <= tt.failures {
+					return nil, lockErr
+				}
+				return acquireHostOwnershipMutationLock(dataDir, sessionID)
+			}
+
+			err = clearLaunchIntentWith(dataDir, sessionID, token, acquire, []time.Duration{0, 0, 0})
+			_, readyErr := readLaunchReady(dataDir, sessionID, token)
+			if tt.wantCleared {
+				if err != nil || attempts != 3 {
+					t.Fatalf("clear error = %v after %d attempts, want success on attempt 3", err, attempts)
+				}
+				if !errors.Is(readyErr, os.ErrNotExist) {
+					t.Fatalf("readiness remains after retried clear: %v", readyErr)
+				}
+				return
+			}
+			if !errors.Is(err, lockErr) || attempts != 4 {
+				t.Fatalf("clear error = %v after %d attempts, want the lock error after 4", err, attempts)
+			}
+			if readyErr != nil {
+				t.Fatalf("clear without the ownership lock removed readiness: %v", readyErr)
+			}
+		})
 	}
 }

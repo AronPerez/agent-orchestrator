@@ -168,3 +168,110 @@ func TestShutdownQuickSignalsSooner(t *testing.T) {
 		})
 	}
 }
+
+// startFencedHost starts a real detached host, as recovery sees it in
+// production: it holds launch readiness for its whole life.
+func startFencedHost(t *testing.T, sessionID string) (Config, *Transport, Descriptor, int) {
+	t.Helper()
+	cfg := Config{
+		SessionID: sessionID, DataDir: t.TempDir(), Workdir: t.TempDir(),
+		Env:  append(os.Environ(), "AO_CHAT_HOST_PROVIDER_HELPER=1"),
+		Argv: []string{os.Args[0], "-test.run=TestProviderHelper"},
+	}
+	transport, err := ConnectOrStart(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := readDescriptor(cfg.DataDir, cfg.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerPID := requestProviderPID(t, transport, 1, "pid")
+	t.Cleanup(func() {
+		_ = transport.Stdin.Close()
+		_ = syscall.Kill(-providerPID, syscall.SIGKILL)
+		_ = syscall.Kill(d.PID, syscall.SIGKILL)
+	})
+	return cfg, transport, d, providerPID
+}
+
+func waitUntil(t *testing.T, what string, done func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for !done() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func processGroupGone(pgid int) bool {
+	return errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH)
+}
+
+func launchRecords(t *testing.T, cfg Config) []string {
+	t.Helper()
+	dir, err := hostDir(cfg.DataDir, cfg.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, launchIntentPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return matches
+}
+
+func TestHostSIGTERMRunsOrderlyTeardown(t *testing.T) {
+	cfg, _, d, providerPID := startFencedHost(t, "sigterm-host")
+	if len(launchRecords(t, cfg)) == 0 {
+		t.Fatal("running host holds no launch records")
+	}
+
+	if err := syscall.Kill(d.PID, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "chat host exit", func() bool { return processalive.Exited(d.PID) })
+
+	if !processGroupGone(providerPID) {
+		t.Fatalf("provider group %d survived SIGTERM to its host", providerPID)
+	}
+	if left := launchRecords(t, cfg); len(left) != 0 {
+		t.Fatalf("SIGTERM left launch records behind: %v", left)
+	}
+	next, err := ConnectOrStart(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ConnectOrStart after orderly SIGTERM teardown: %v", err)
+	}
+	t.Cleanup(func() { _ = next.Stdin.Close() })
+	nextProvider := requestProviderPID(t, next, 2, "pid")
+	t.Cleanup(func() { _ = syscall.Kill(-nextProvider, syscall.SIGKILL) })
+	if err := Shutdown(context.Background(), cfg.DataDir, cfg.SessionID); err != nil {
+		t.Fatalf("Shutdown of the replacement host: %v", err)
+	}
+}
+
+// A hard kill skips orderly teardown. No process scan can prove that every
+// process the provider started is gone (a detached system shell can leave the
+// host's session, hide its environment and work outside the worktree), so the
+// session stays fenced until reboot even when the provider group is empty.
+func TestKilledHostStaysFencedEvenWhenProviderGroupIsGone(t *testing.T) {
+	cfg, transport, d, providerPID := startFencedHost(t, "sigkill-host")
+
+	if err := syscall.Kill(d.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "chat host exit", func() bool { return processalive.Exited(d.PID) })
+	_ = transport.Stdin.Close()
+	waitUntil(t, "provider group exit", func() bool { return processGroupGone(providerPID) })
+
+	_, err := ConnectOrStart(context.Background(), cfg)
+	if !errors.Is(err, ErrOwnershipInconclusive) ||
+		!strings.Contains(err.Error(), "exited on the current boot without proving provider-tree cleanup") {
+		t.Fatalf("ConnectOrStart error = %v, want the hard-killed host to stay fenced", err)
+	}
+	if len(launchRecords(t, cfg)) == 0 {
+		t.Fatal("refused recovery removed the launch records")
+	}
+}
