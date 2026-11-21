@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 )
 
@@ -29,20 +30,32 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: stampcheck <binary> <package-path.Var>...")
 		os.Exit(2)
 	}
-	img, err := openImage(os.Args[1])
-	if err != nil {
+	if err := run(os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "stampcheck:", err)
 		os.Exit(1)
 	}
-	defer img.close()
-	for _, name := range os.Args[2:] {
+}
+
+func run(path string, names []string) (err error) {
+	img, err := openImage(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := img.close(); err == nil {
+			err = cerr
+		}
+	}()
+	for _, name := range names {
 		value, err := img.readString(name)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "stampcheck:", err)
-			os.Exit(1)
+			return err
 		}
-		fmt.Printf("%s=%s\n", name, value)
+		if _, err := fmt.Printf("%s=%s\n", name, value); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // section is one loaded region of the binary's address space.
@@ -72,12 +85,12 @@ func openImage(path string) (*image, error) {
 
 func elfImage(f *elf.File) (*image, error) {
 	if f.Class != elf.ELFCLASS64 {
-		f.Close()
+		_ = f.Close()
 		return nil, errors.New("only 64-bit binaries are supported")
 	}
 	syms, err := f.Symbols()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("read symbols: %w", err)
 	}
 	img := &image{order: f.ByteOrder, symbols: map[string]uint64{}, close: f.Close}
@@ -95,11 +108,11 @@ func elfImage(f *elf.File) (*image, error) {
 
 func machoImage(f *macho.File) (*image, error) {
 	if f.Magic != macho.Magic64 {
-		f.Close()
+		_ = f.Close()
 		return nil, errors.New("only 64-bit binaries are supported")
 	}
 	if f.Symtab == nil {
-		f.Close()
+		_ = f.Close()
 		return nil, errors.New("binary has no symbol table (built with -s?)")
 	}
 	img := &image{order: f.ByteOrder, symbols: map[string]uint64{}, close: f.Close}
@@ -124,7 +137,11 @@ func (img *image) read(addr, n uint64) ([]byte, error) {
 		if s.zero {
 			return buf, nil
 		}
-		if _, err := s.readAt(buf, int64(addr-s.addr)); err != nil {
+		off := addr - s.addr
+		if off > math.MaxInt64 {
+			return nil, fmt.Errorf("address %#x: section offset overflows int64", addr)
+		}
+		if _, err := s.readAt(buf, int64(off)); err != nil {
 			return nil, err
 		}
 		return buf, nil
