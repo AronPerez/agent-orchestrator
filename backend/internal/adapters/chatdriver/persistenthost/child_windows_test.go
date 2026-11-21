@@ -299,3 +299,6 @@ func TestExtendedLengthPathMatchesOS(t *testing.T) {
 		}
 	}
 }
+
+// startStderrHolder is Unix-only: Windows tests never request one.
+func startStderrHolder(string) {}

@@ -171,11 +171,11 @@ func TestShutdownQuickSignalsSooner(t *testing.T) {
 
 // startFencedHost starts a real detached host, as recovery sees it in
 // production: it holds launch readiness for its whole life.
-func startFencedHost(t *testing.T, sessionID string) (Config, *Transport, Descriptor, int) {
+func startFencedHost(t *testing.T, sessionID string, extraEnv ...string) (Config, *Transport, Descriptor, int) {
 	t.Helper()
 	cfg := Config{
 		SessionID: sessionID, DataDir: t.TempDir(), Workdir: t.TempDir(),
-		Env:  append(os.Environ(), "AO_CHAT_HOST_PROVIDER_HELPER=1"),
+		Env:  append(append(os.Environ(), "AO_CHAT_HOST_PROVIDER_HELPER=1"), extraEnv...),
 		Argv: []string{os.Args[0], "-test.run=TestProviderHelper"},
 	}
 	transport, err := ConnectOrStart(context.Background(), cfg)
@@ -273,5 +273,53 @@ func TestKilledHostStaysFencedEvenWhenProviderGroupIsGone(t *testing.T) {
 	}
 	if len(launchRecords(t, cfg)) == 0 {
 		t.Fatal("refused recovery removed the launch records")
+	}
+}
+
+// startStderrHolder runs, from the provider helper, a child in a process group
+// of its own that keeps the provider's stderr open after the provider exits,
+// so the host's final child.Wait blocks on its stderr copy.
+func startStderrHolder(pidFile string) {
+	holder := exec.Command("sleep", "30") //nolint:gosec // Fixed test helper command.
+	holder.Stderr = os.Stderr
+	holder.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := holder.Start(); err != nil {
+		os.Exit(3)
+	}
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(holder.Process.Pid)), 0o600); err != nil {
+		os.Exit(3)
+	}
+}
+
+func TestSecondSignalEndsHostStuckInTeardown(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "holder.pid")
+	cfg, _, d, _ := startFencedHost(t, "stuck-teardown", "AO_CHAT_HOST_STDERR_HOLDER_PID_FILE="+pidFile)
+	var holderPID int
+	waitUntil(t, "stderr holder start", func() bool {
+		b, _ := os.ReadFile(pidFile) //nolint:gosec // Test-owned temporary path.
+		holderPID, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+		return holderPID > 0
+	})
+	t.Cleanup(func() { _ = syscall.Kill(holderPID, syscall.SIGKILL) })
+
+	if err := syscall.Kill(d.PID, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	// Teardown stops the provider group, then waits on the stderr copy the
+	// holder keeps open.
+	time.Sleep(2 * time.Second)
+	if processalive.Exited(d.PID) {
+		t.Fatal("host finished teardown; the stderr holder did not reproduce a stuck teardown")
+	}
+
+	if err := syscall.Kill(d.PID, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "stuck chat host exit after a second signal", func() bool { return processalive.Exited(d.PID) })
+	if len(launchRecords(t, cfg)) == 0 {
+		t.Fatal("abrupt exit after a second signal cleared the launch records")
+	}
+	if _, err := ConnectOrStart(context.Background(), cfg); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("ConnectOrStart error = %v, want the unfinished teardown to keep the fence", err)
 	}
 }
