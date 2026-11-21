@@ -444,15 +444,23 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 		state := s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
 		coverageUncertain := watchFailed || state.coverageUncertain
 
-		var retryTimer, pollTimer *time.Timer
-		var retryC, pollC <-chan time.Time
+		var retryTimer, pollTimer, rebuildTimer *time.Timer
+		var retryC, pollC, rebuildC <-chan time.Time
 		needsRebuild := func() bool { return coverageUncertain || state.coverageUncertain }
-		armRetry := func() {
-			delay := s.projectOverlapNoticeRetryDelay()
-			if !state.retry && needsRebuild() {
-				delay = max(delay, time.Until(rebuildAt))
+		// The rebuild deadline is independent of the other timers: changes
+		// from the roots that are watched, and polls, must not postpone the
+		// rewatch of a root that failed. Once armed it only fires or is
+		// stopped with the watch.
+		armRebuild := func() {
+			if rebuildC != nil || !needsRebuild() {
+				return
 			}
-			retryTimer, retryC = s.resetProjectOverlapNoticeTimerAfter(retryTimer, needsRebuild() || state.retry, delay)
+			delay := max(s.projectOverlapNoticeRetryDelay(), time.Until(rebuildAt))
+			rebuildTimer, rebuildC = s.resetProjectOverlapNoticeTimerAfter(rebuildTimer, true, delay)
+		}
+		armRetry := func() {
+			retryTimer, retryC = s.resetProjectOverlapNoticeTimerAfter(retryTimer, state.retry, s.projectOverlapNoticeRetryDelay())
+			armRebuild()
 		}
 		armPoll := func() {
 			pollTimer, pollC = s.resetProjectOverlapNoticeTimerAfter(pollTimer, true, s.projectOverlapRadarPollInterval())
@@ -460,6 +468,7 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 		stopTimers := func() {
 			s.stopProjectOverlapNoticeTimer(retryTimer)
 			s.stopProjectOverlapNoticeTimer(pollTimer)
+			s.stopProjectOverlapNoticeTimer(rebuildTimer)
 		}
 		armRetry()
 		armPoll()
@@ -479,7 +488,7 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 				if !ok {
 					subscription.Changes = nil
 					coverageUncertain = true
-					armRetry()
+					armRebuild()
 					continue
 				}
 				state = s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
@@ -490,17 +499,19 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 					continue
 				}
 				coverageUncertain = true
-				armRetry()
+				armRebuild()
 			case <-pollC:
 				state = s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
 				armRetry()
 				armPoll()
-			case <-retryC:
-				if needsRebuild() && !time.Now().Before(rebuildAt) {
+			case <-rebuildC:
+				rebuildTimer, rebuildC = nil, nil
+				if needsRebuild() {
 					cancelWatch()
 					stopTimers()
 					break waitForProjectChange
 				}
+			case <-retryC:
 				state = s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
 				armRetry()
 			}

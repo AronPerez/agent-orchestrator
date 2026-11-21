@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
@@ -169,6 +171,70 @@ func TestRunProjectOverlapNoticeRadarKeepsWatchedRootsOnPartialFailure(t *testin
 	defer mu.Unlock()
 	if watches != 1 {
 		t.Fatalf("watch attempts = %d, want 1 within the retry delay", watches)
+	}
+}
+
+// Changes from the roots that are watched must not postpone rewatching a root
+// that failed: with one root failing and another staging changes faster than
+// the retry delay, the failed root was never rewatched and stayed poll-only.
+func TestRunProjectOverlapNoticeRadarRewatchesFailedRootWhileOthersKeepChanging(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	svc.overlapNoticeRetryDelay = 300 * time.Millisecond
+	rewatched := make(chan struct{})
+	var (
+		mu      sync.Mutex
+		watches int
+	)
+	svc.overlapWatch = func(ctx context.Context, paths ...string) (workspacewatch.Subscription, error) {
+		mu.Lock()
+		watches++
+		attempt := watches
+		mu.Unlock()
+		if attempt > 1 {
+			close(rewatched)
+			return workspacewatch.WatchGitMetadata(ctx, paths...)
+		}
+		// Watch only the first worktree; the second "failed".
+		subscription, err := workspacewatch.WatchGitMetadata(ctx, first)
+		subscription.RootErrors = append(subscription.RootErrors, fmt.Errorf("watch git metadata for %s: %w", second, fs.ErrPermission))
+		return subscription, err
+	}
+	startOverlapRadar(t, svc)
+	waitForOverlapScan(t, store)
+
+	// Stage a change in the watched worktree every 50ms.
+	staging := make(chan struct{})
+	stagingDone := make(chan struct{})
+	go func() {
+		defer close(stagingDone)
+		for i := 0; ; i++ {
+			select {
+			case <-staging:
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+			name := fmt.Sprintf("churn-%03d.md", i)
+			if os.WriteFile(filepath.Join(first, name), []byte("x\n"), 0o644) == nil {
+				_ = exec.Command("git", "-C", first, "add", name).Run()
+			}
+		}
+	}()
+	defer func() {
+		close(staging)
+		<-stagingDone
+	}()
+
+	select {
+	case <-rewatched:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the failed root was not rewatched while the watched root kept changing")
 	}
 }
 
