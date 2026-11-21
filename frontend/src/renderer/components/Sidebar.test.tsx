@@ -706,76 +706,31 @@ describe("Sidebar", () => {
 		});
 	});
 
-	it("shows the cloud sign-in entry point while signed out", () => {
+	// Signing in and the account live in Settings › General › Account; the
+	// footer keeps only Settings and the Mobile menu in every account state.
+	it.each([
+		{ state: "signed out", status: "unauthenticated" as const, cloudEnabled: true, initialOpen: true },
+		{ state: "signed out", status: "unauthenticated" as const, cloudEnabled: true, initialOpen: false },
+		{ state: "signed out without Cloud execution", status: "unauthenticated" as const, cloudEnabled: false, initialOpen: true },
+		{ state: "signed in", status: "authenticated" as const, cloudEnabled: true, initialOpen: true },
+		{ state: "signed in", status: "authenticated" as const, cloudEnabled: true, initialOpen: false },
+		{ state: "signed in without Cloud execution", status: "authenticated" as const, cloudEnabled: false, initialOpen: true },
+	])("keeps sign-in and the account out of the footer while $state (open: $initialOpen)", ({ status, cloudEnabled, initialOpen }) => {
+		cloudGateState.cloudEnabled = cloudEnabled;
 		cloudSessionState.configured = true;
-		renderSidebar();
+		cloudSessionState.status = status;
+		cloudSessionState.session = status === "authenticated" ? { user: { email: "ada@example.com", displayName: "Ada Park" } } : null;
+		renderSidebar({ initialOpen });
 
-		const signInControls = screen.getAllByLabelText("Sign in");
-		expect(signInControls).toHaveLength(2);
-		const activeControl = signInControls.find((control) => control.tabIndex === 0);
-		expect(activeControl).toBeDefined();
-		fireEvent.click(activeControl!);
-		expect(cloudSessionState.signIn).toHaveBeenCalledOnce();
-	});
-
-	it("keeps cloud account controls visible while signed in", () => {
-		cloudSessionState.configured = true;
-		cloudSessionState.status = "authenticated";
-		cloudSessionState.session = { user: { email: "user@example.com" } };
-		renderSidebar();
-
-		expect(screen.getAllByLabelText("Signed in as user@example.com")).toHaveLength(2);
-	});
-
-	it("shows only the name in the footer row and the email in the account menu", async () => {
-		const user = userEvent.setup();
-		cloudSessionState.configured = true;
-		cloudSessionState.status = "authenticated";
-		cloudSessionState.session = { user: { email: "ada@example.com", displayName: "Ada Park" } };
-		renderSidebar();
-
-		const account = screen.getAllByLabelText("Signed in as ada@example.com").find((el) => el.tabIndex === 0)!;
-		expect(account).toHaveTextContent("Ada Park");
-		expect(account).not.toHaveTextContent("ada@example.com");
-
-		await user.click(account);
-		const menu = await screen.findByRole("menu");
-		expect(within(menu).getByText("Ada Park")).toBeVisible();
-		expect(within(menu).getByText("ada@example.com")).toBeVisible();
-		await user.click(within(menu).getByRole("menuitem", { name: "Sign out" }));
-		expect(cloudSessionState.signOut).toHaveBeenCalledOnce();
-	});
-
-	it("opens the account menu from the collapsed rail avatar instead of signing out", async () => {
-		const user = userEvent.setup();
-		cloudSessionState.configured = true;
-		cloudSessionState.status = "authenticated";
-		cloudSessionState.session = { user: { email: "user@example.com" } };
-		renderSidebar({ initialOpen: false });
-
-		const railAvatar = screen.getAllByLabelText("Signed in as user@example.com").find((el) => el.tabIndex === 0)!;
-		await user.click(railAvatar);
-
+		const footer = document.querySelector('[data-sidebar="footer"]') as HTMLElement;
+		expect(within(footer).queryByLabelText("Sign in")).toBeNull();
+		expect(within(footer).queryByLabelText(/^Signed in as/)).toBeNull();
+		expect(within(footer).queryByText("Ada Park")).toBeNull();
+		// One expanded and one rail Settings control, never a third beside an account row.
+		expect(footer.querySelectorAll('button[aria-label="Settings"]')).toHaveLength(2);
+		expect(within(footer).getByTestId("footer-mobile-menu")).toBeInTheDocument();
+		expect(cloudSessionState.signIn).not.toHaveBeenCalled();
 		expect(cloudSessionState.signOut).not.toHaveBeenCalled();
-		expect(await screen.findByRole("menuitem", { name: "Sign out" })).toBeVisible();
-	});
-
-	it("keeps AO account controls visible for remote hosts when Cloud execution is off", () => {
-		cloudGateState.cloudEnabled = false;
-		cloudSessionState.configured = true;
-		cloudSessionState.status = "authenticated";
-		cloudSessionState.session = { user: { email: "user@example.com" } };
-		renderSidebar();
-
-		expect(screen.getAllByLabelText("Signed in as user@example.com")).toHaveLength(2);
-	});
-
-	it("shows AO sign-in for remote hosts when Cloud execution is off", () => {
-		cloudGateState.cloudEnabled = false;
-		cloudSessionState.configured = true;
-		renderSidebar();
-
-		expect(screen.getAllByLabelText("Sign in")).toHaveLength(2);
 	});
 
 	it("shows the Artifacts row under Automations with a count of every listed artifact, archived sessions' included", async () => {

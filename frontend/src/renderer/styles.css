@@ -6939,7 +6939,7 @@ html:not([data-window-translucent="true"]) .onboarding-preview-stage {
 	color: var(--color-foreground);
 }
 
-/* Keep a nav-row menu trigger (sidebar footer account and Mobile) lit while its
+/* Keep a nav-row menu trigger (the sidebar footer's Mobile menu) lit while its
    menu is open. Keyed on aria-expanded, not data-state: a Tooltip wrapped around
    the trigger overwrites data-state with its own value. aria-haspopup keeps
    collapsible rows, which also set aria-expanded, out of it. */
