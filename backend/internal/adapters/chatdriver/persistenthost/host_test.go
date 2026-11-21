@@ -41,6 +41,9 @@ func TestProviderHelper(t *testing.T) {
 		runACPProviderHelper()
 		return
 	}
+	if pidFile := os.Getenv("AO_CHAT_HOST_STDERR_HOLDER_PID_FILE"); pidFile != "" {
+		startStderrHolder(pidFile)
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		var frame struct {

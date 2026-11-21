@@ -24,6 +24,11 @@ func RunCommand(ctx context.Context, args []string) error {
 	cfg.Env = os.Environ()
 	ctx, stop := signal.NotifyContext(ctx, hostShutdownSignals...)
 	defer stop()
+	// Only the first signal starts orderly teardown. Restore default handling
+	// then, so a further signal still ends a host whose teardown is stuck (for
+	// example on a child that holds the provider's stderr). That abrupt exit
+	// skips the deferred clear, so the session stays fenced.
+	context.AfterFunc(ctx, stop)
 	return Run(ctx, cfg)
 }
 
