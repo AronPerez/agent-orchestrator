@@ -22,6 +22,13 @@ const (
 	maxProjectOverlapNoticePath           = 240
 	defaultProjectOverlapNoticeRetryDelay = 15 * time.Second
 	defaultProjectOverlapNoticeTimeout    = 30 * time.Second
+	// defaultProjectOverlapRadarPollInterval paces the full rescan that finds
+	// edits the Git metadata watch cannot see.
+	defaultProjectOverlapRadarPollInterval = 30 * time.Second
+	// A watch that failed for lack of file descriptors is rebuilt after one
+	// minute, then two, then four, then every five.
+	defaultProjectOverlapRadarBackoffBase = time.Minute
+	defaultProjectOverlapRadarBackoffMax  = 5 * time.Minute
 )
 
 type projectOverlapNoticeStore interface {
@@ -81,8 +88,7 @@ type projectOverlapRadarSignal struct {
 }
 
 // ReconcileActiveProjectOverlapNotices detects and retries notices without an
-// overlap reader. RunProjectOverlapNoticeRadar invokes it only for workspace or
-// session events; collision detection does not poll worktrees on a timer.
+// overlap reader, once for every active project.
 func (s *Service) ReconcileActiveProjectOverlapNotices(ctx context.Context) error {
 	if _, ok := s.store.(projectOverlapNoticeStore); !ok || s.overlapNudger == nil {
 		return nil
@@ -389,7 +395,16 @@ func (s *Service) reconcileProjectOverlapNoticesLockedByProject(ctx context.Cont
 	return s.reconcileProjectOverlapNoticesLocked(ctx, store, emptyProjectOverlapResult(projectID))
 }
 
+// runProjectOverlapNoticeRadar keeps one project's collision notices current.
+// It watches only each worktree's Git HEAD and index, which costs a few file
+// descriptors per worktree; watching every file cost one descriptor per file
+// and a project with many large worktrees exhausted the daemon. Edits that
+// touch neither file are found by a full rescan every poll interval.
 func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID domain.ProjectID, refresh <-chan struct{}) {
+	// exhaustedWatches counts consecutive watch attempts that failed for lack
+	// of file descriptors. Each such attempt briefly takes the daemon's last
+	// free descriptors, so rebuilds back off instead of retrying every delay.
+	exhaustedWatches := 0
 	for {
 		paths, pathErr := s.ProjectOverlapWatchPaths(ctx, projectID)
 		if pathErr != nil {
@@ -401,56 +416,118 @@ func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID do
 		if !watchFailed && len(paths) > 0 {
 			var watchErr error
 			subscription, watchErr = s.overlapWatch(watchCtx, paths...)
-			if watchErr != nil {
+			partialErr := errors.Join(subscription.RootErrors...)
+			switch {
+			case watchErr != nil:
 				watchFailed = true
 				s.logProjectOverlapNoticeError(ctx, "watch collision radar workspaces", projectID, watchErr)
+			case partialErr != nil:
+				// The roots that were watched stay watched; the poll covers the
+				// rest until the rebuild.
+				watchFailed = true
+				s.logProjectOverlapNoticeError(ctx, "watch some collision radar workspaces", projectID, partialErr)
+			}
+			if workspacewatch.DescriptorsExhausted(watchErr) || workspacewatch.DescriptorsExhausted(partialErr) {
+				exhaustedWatches++
+			} else {
+				exhaustedWatches = 0
 			}
 		}
+		rebuildAt := time.Now().Add(s.projectOverlapRadarRebuildBackoff(exhaustedWatches))
 		// Install the watcher before the authoritative scan so an edit in the
 		// setup gap always leaves a later edge.
 		state := s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
 		coverageUncertain := watchFailed || state.coverageUncertain
-		retryNeeded := coverageUncertain || state.retry
-		retryTimer, retryC := s.resetProjectOverlapNoticeTimer(nil, retryNeeded)
+
+		var retryTimer, pollTimer *time.Timer
+		var retryC, pollC <-chan time.Time
+		needsRebuild := func() bool { return coverageUncertain || state.coverageUncertain }
+		armRetry := func() {
+			delay := s.projectOverlapNoticeRetryDelay()
+			if !state.retry && needsRebuild() {
+				delay = max(delay, time.Until(rebuildAt))
+			}
+			retryTimer, retryC = s.resetProjectOverlapNoticeTimerAfter(retryTimer, needsRebuild() || state.retry, delay)
+		}
+		armPoll := func() {
+			pollTimer, pollC = s.resetProjectOverlapNoticeTimerAfter(pollTimer, true, s.projectOverlapRadarPollInterval())
+		}
+		stopTimers := func() {
+			s.stopProjectOverlapNoticeTimer(retryTimer)
+			s.stopProjectOverlapNoticeTimer(pollTimer)
+		}
+		armRetry()
+		armPoll()
 
 	waitForProjectChange:
 		for {
 			select {
 			case <-ctx.Done():
 				cancelWatch()
-				s.stopProjectOverlapNoticeTimer(retryTimer)
+				stopTimers()
 				return
 			case <-refresh:
 				cancelWatch()
-				s.stopProjectOverlapNoticeTimer(retryTimer)
+				stopTimers()
 				break waitForProjectChange
 			case _, ok := <-subscription.Changes:
 				if !ok {
 					subscription.Changes = nil
 					coverageUncertain = true
-					retryTimer, retryC = s.resetProjectOverlapNoticeTimer(retryTimer, true)
+					armRetry()
 					continue
 				}
 				state = s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
-				retryTimer, retryC = s.resetProjectOverlapNoticeTimer(retryTimer, coverageUncertain || state.coverageUncertain || state.retry)
+				armRetry()
 			case _, ok := <-subscription.Degraded:
 				if !ok {
 					subscription.Degraded = nil
 					continue
 				}
 				coverageUncertain = true
-				retryTimer, retryC = s.resetProjectOverlapNoticeTimer(retryTimer, true)
+				armRetry()
+			case <-pollC:
+				state = s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
+				armRetry()
+				armPoll()
 			case <-retryC:
-				if coverageUncertain || state.coverageUncertain || watchFailed {
+				if needsRebuild() && !time.Now().Before(rebuildAt) {
 					cancelWatch()
-					s.stopProjectOverlapNoticeTimer(retryTimer)
+					stopTimers()
 					break waitForProjectChange
 				}
 				state = s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
-				retryTimer, retryC = s.resetProjectOverlapNoticeTimer(retryTimer, state.coverageUncertain || state.retry)
+				armRetry()
 			}
 		}
 	}
+}
+
+// projectOverlapRadarRebuildBackoff is how long the radar waits before
+// rebuilding a watch after exhausted consecutive attempts failed for lack of
+// file descriptors: nothing for none, then the base delay doubling to the cap.
+func (s *Service) projectOverlapRadarRebuildBackoff(exhausted int) time.Duration {
+	if exhausted <= 0 {
+		return 0
+	}
+	delay, limit := s.overlapRadarBackoffBase, s.overlapRadarBackoffMax
+	if delay <= 0 {
+		delay = defaultProjectOverlapRadarBackoffBase
+	}
+	if limit <= 0 {
+		limit = defaultProjectOverlapRadarBackoffMax
+	}
+	for i := 1; i < exhausted && delay < limit; i++ {
+		delay *= 2
+	}
+	return min(delay, limit)
+}
+
+func (s *Service) projectOverlapRadarPollInterval() time.Duration {
+	if s.overlapRadarPollInterval <= 0 {
+		return defaultProjectOverlapRadarPollInterval
+	}
+	return s.overlapRadarPollInterval
 }
 
 func (s *Service) reconcileProjectOverlapNoticeRadar(ctx context.Context, projectID domain.ProjectID) projectOverlapNoticeReconcileState {
@@ -478,12 +555,12 @@ func (s *Service) projectOverlapNoticeTimeout() time.Duration {
 	return s.overlapNoticeTimeout
 }
 
-func (s *Service) resetProjectOverlapNoticeTimer(timer *time.Timer, enabled bool) (*time.Timer, <-chan time.Time) {
+func (s *Service) resetProjectOverlapNoticeTimerAfter(timer *time.Timer, enabled bool, delay time.Duration) (*time.Timer, <-chan time.Time) {
 	s.stopProjectOverlapNoticeTimer(timer)
 	if !enabled {
 		return nil, nil
 	}
-	timer = time.NewTimer(s.projectOverlapNoticeRetryDelay())
+	timer = time.NewTimer(delay)
 	return timer, timer.C
 }
 

@@ -7,6 +7,7 @@ package workspacewatch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -137,36 +139,46 @@ func (l *dirWatchLimiter) warn(ctx context.Context, stage string) {
 type Subscription struct {
 	Changes  <-chan struct{}
 	Degraded <-chan struct{}
+	// RootErrors says why each root that could not be watched at all failed.
+	// The subscription still covers every other root, and Degraded has
+	// already been signalled. Empty when every root is watched.
+	RootErrors []error
+}
+
+// DescriptorsExhausted reports whether err comes from the process or the
+// system running out of file descriptors (EMFILE or ENFILE). Retrying such a
+// watch at once only takes the last free descriptors from every other part of
+// the daemon, so callers should back off.
+func DescriptorsExhausted(err error) bool {
+	return err != nil && (errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE))
 }
 
 // Watch subscribes to relevant changes below the workspace roots until ctx is
-// cancelled. Existing callers only need invalidation edges; consumers that
-// must recover from partial coverage use WatchWithStatus.
+// cancelled. Existing callers only need invalidation edges and cannot see
+// partial coverage, so Watch fails, and releases every watch it opened, when
+// any root cannot be watched. Consumers that recover from partial coverage
+// use WatchWithStatus.
 func Watch(ctx context.Context, roots ...string) (<-chan struct{}, error) {
-	subscription, err := WatchWithStatus(ctx, roots...)
+	subscription, err := watchRoots(ctx, roots, true)
 	return subscription.Changes, err
 }
 
 // WatchWithStatus is Watch plus a degraded-coverage stream. Both returned
 // channels close when the context is cancelled or every underlying watcher
-// stops.
+// stops. A root that cannot be watched does not tear down the others: it is
+// reported in RootErrors and through Degraded, and WatchWithStatus fails only
+// when no root could be watched.
 func WatchWithStatus(ctx context.Context, roots ...string) (Subscription, error) {
-	if len(roots) == 0 {
-		return Subscription{}, fmt.Errorf("at least one workspace path is required")
-	}
+	return watchRoots(ctx, roots, false)
+}
 
-	unique := make(map[string]struct{}, len(roots))
-	uniqueRoots := make([]string, 0, len(roots))
-	for _, root := range roots {
-		cleanRoot, err := filepath.Abs(root)
-		if err != nil {
-			return Subscription{}, fmt.Errorf("resolve workspace path: %w", err)
-		}
-		if _, seen := unique[cleanRoot]; seen {
-			continue
-		}
-		unique[cleanRoot] = struct{}{}
-		uniqueRoots = append(uniqueRoots, cleanRoot)
+// watchRoots watches every root. strict fails the whole watch, releasing the
+// roots already watched, as soon as one root fails; otherwise failed roots are
+// reported in RootErrors and the rest stay watched.
+func watchRoots(ctx context.Context, roots []string, strict bool) (Subscription, error) {
+	uniqueRoots, err := uniqueWatchRoots(roots)
+	if err != nil {
+		return Subscription{}, err
 	}
 	if len(uniqueRoots) == 1 {
 		return watchRoot(ctx, uniqueRoots[0], nil)
@@ -174,16 +186,28 @@ func WatchWithStatus(ctx context.Context, roots ...string) (Subscription, error)
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	sources := make([]Subscription, 0, len(uniqueRoots))
+	var rootErrors []error
 	for _, cleanRoot := range uniqueRoots {
 		source, err := watchRoot(watchCtx, cleanRoot, nil)
 		if err != nil {
-			cancel()
-			return Subscription{}, err
+			if strict {
+				cancel()
+				return Subscription{}, err
+			}
+			rootErrors = append(rootErrors, fmt.Errorf("watch %s: %w", cleanRoot, err))
+			continue
 		}
 		sources = append(sources, source)
 	}
+	if len(sources) == 0 {
+		cancel()
+		return Subscription{}, errors.Join(rootErrors...)
+	}
 	changes := make(chan struct{}, 1)
 	degraded := make(chan struct{}, 1)
+	if len(rootErrors) > 0 {
+		degraded <- struct{}{}
+	}
 	var group sync.WaitGroup
 	group.Add(len(sources))
 	for _, source := range sources {
@@ -220,7 +244,28 @@ func WatchWithStatus(ctx context.Context, roots ...string) (Subscription, error)
 		close(changes)
 		close(degraded)
 	}()
-	return Subscription{Changes: changes, Degraded: degraded}, nil
+	return Subscription{Changes: changes, Degraded: degraded, RootErrors: rootErrors}, nil
+}
+
+// uniqueWatchRoots resolves roots to absolute paths, dropping duplicates.
+func uniqueWatchRoots(roots []string) ([]string, error) {
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("at least one workspace path is required")
+	}
+	unique := make(map[string]struct{}, len(roots))
+	uniqueRoots := make([]string, 0, len(roots))
+	for _, root := range roots {
+		cleanRoot, err := filepath.Abs(root)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace path: %w", err)
+		}
+		if _, seen := unique[cleanRoot]; seen {
+			continue
+		}
+		unique[cleanRoot] = struct{}{}
+		uniqueRoots = append(uniqueRoots, cleanRoot)
+	}
+	return uniqueRoots, nil
 }
 
 // WatchSkipping is Watch for one root, leaving out the entries skip names:
