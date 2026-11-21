@@ -26,6 +26,7 @@ import { reviewRouteForSession } from "./reviewView";
 import { isCloudHost } from "./cloud/mapping";
 import { MachineIdentity } from "./MachineIdentity";
 import type { MachineAppearance } from "./machineAppearance";
+import type { MachineFreshness } from "./machineFreshness";
 
 export const WorkerListRow = memo(
 	function WorkerListRow({
@@ -34,6 +35,7 @@ export const WorkerListRow = memo(
 	rowKey,
 	projectName,
 	machine,
+	unreachable = false,
 	isRenaming,
 	activeSwipeId,
 	nowBucket,
@@ -55,7 +57,12 @@ export const WorkerListRow = memo(
 	hostId?: string;
 	rowKey?: string;
 	projectName?: string;
-	machine?: { name: string; appearance: MachineAppearance };
+	machine?: { name: string; appearance: MachineAppearance; freshness?: MachineFreshness };
+	/**
+	 * The row's machine can't be reached, so what it shows is the last thing
+	 * heard. Dimmed rather than hidden: the rows are still worth reading.
+	 */
+	unreachable?: boolean;
 	isRenaming: boolean;
 	activeSwipeId?: string;
 	/**
@@ -221,7 +228,7 @@ export const WorkerListRow = memo(
 			rowStyle={[styles.row, treeDepth !== undefined && { paddingLeft: space.lg + treeDepth * space.lg }]}
 			// No gesture hint: a screen reader reaches pin, rename and archive as
 			// the row's actions, and announces that it has them.
-			accessibilityLabel={`${row.title}. ${visual.label}. ${row.project}.`}
+			accessibilityLabel={`${row.title}. ${visual.label}. ${row.project}.${unreachable ? " Last known; its machine can't be reached." : ""}`}
 			additionalAccessibilityAction={onTreeToggle ? {
 				name: "toggleBranch",
 				label: `${treeExpanded ? "Collapse" : "Expand"} branch`,
@@ -243,6 +250,7 @@ export const WorkerListRow = memo(
 					prsTone={prs?.tone}
 					harness={session.harness}
 					machine={machine}
+					unreachable={unreachable}
 					isRenaming
 					renameTitle={renameTitle}
 					renameSaving={renameSaving}
@@ -264,6 +272,7 @@ export const WorkerListRow = memo(
 					prsTone={prs?.tone}
 					harness={session.harness}
 					machine={machine}
+					unreachable={unreachable}
 					styles={styles}
 					t={t}
 					treeDepth={treeDepth}
@@ -283,6 +292,8 @@ export const WorkerListRow = memo(
 		prev.hostId === next.hostId &&
 		prev.machine?.name === next.machine?.name &&
 		prev.machine?.appearance.symbol === next.machine?.appearance.symbol &&
+		prev.machine?.freshness === next.machine?.freshness &&
+		prev.unreachable === next.unreachable &&
 		prev.isRenaming === next.isRenaming &&
 		prev.activeSwipeId === next.activeSwipeId &&
 			prev.treeDepth === next.treeDepth &&
@@ -303,6 +314,7 @@ function WorkerRowContents({
 	prsTone,
 	harness,
 	machine,
+	unreachable = false,
 	isRenaming = false,
 	renameTitle = "",
 	renameSaving = false,
@@ -321,7 +333,8 @@ function WorkerRowContents({
 	details: string;
 	prsTone?: Parameters<typeof toneColor>[1];
 	harness: DashboardSession["harness"];
-	machine?: { name: string; appearance: MachineAppearance };
+	machine?: { name: string; appearance: MachineAppearance; freshness?: MachineFreshness };
+	unreachable?: boolean;
 	isRenaming?: boolean;
 	renameTitle?: string;
 	renameSaving?: boolean;
@@ -336,7 +349,7 @@ function WorkerRowContents({
 }) {
 	return (
 		<>
-			<View style={styles.eyebrow}>
+			<View style={[styles.eyebrow, unreachable && styles.lastKnown]}>
 				<AgentLogo harness={harness} size={14} />
 				<Text style={styles.project} numberOfLines={1}>
 					{row.project}
@@ -404,17 +417,17 @@ function WorkerRowContents({
 					</Text>
 				</View>
 			) : (
-				<Text style={styles.title} numberOfLines={1}>{row.title}</Text>
+				<Text style={[styles.title, unreachable && styles.lastKnown]} numberOfLines={1}>{row.title}</Text>
 			)}
 
 			{details || machine ? (
-				<View style={styles.metadata}>
+				<View style={[styles.metadata, unreachable && styles.lastKnown]}>
 					{details ? (
 						<Text style={[styles.details, prsTone && { color: toneColor(t, prsTone) }]} numberOfLines={1}>
 							{details}
 						</Text>
 					) : <View style={styles.metadataSpacer} />}
-					{machine ? <MachineIdentity testID="worker-machine-identity" name={machine.name} appearance={machine.appearance} style={styles.machineIdentity} /> : null}
+					{machine ? <MachineIdentity testID="worker-machine-identity" name={machine.name} appearance={machine.appearance} freshness={machine.freshness} style={styles.machineIdentity} /> : null}
 				</View>
 			) : null}
 		</>
@@ -462,6 +475,9 @@ const makeStyles = (t: Theme) =>
 		treeTitle: { minWidth: 0, flexDirection: "row", alignItems: "center", gap: space.xs },
 		treeDisclosure: { width: iconSize.md, minHeight: iconSize.md, alignItems: "center", justifyContent: "center" },
 		title: { fontFamily: "DMSans_600SemiBold", flexShrink: 1, color: t.textPrimary, fontSize: 16, lineHeight: 21, fontWeight: "600", letterSpacing: -0.15 },
+		// A row whose machine can't be reached shows the last thing heard, so it
+		// must not read as live: the spinner and status stay, at a lower voice.
+		lastKnown: { opacity: 0.5 },
 		metadata: { minWidth: 0, flexDirection: "row", alignItems: "center", gap: space.sm },
 		metadataSpacer: { flex: 1 },
 		details: { flex: 1, minWidth: 0, color: t.textTertiary, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, fontFamily: t.fontMono },

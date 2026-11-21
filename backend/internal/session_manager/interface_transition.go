@@ -1101,7 +1101,7 @@ func (m *Manager) preflightInterfaceTarget(
 	if err := m.preflightLaunchAuth(ctx, agent, rec, env); err != nil {
 		return err
 	}
-	return m.preflightTerminalLaunch(ctx, agent, rec, project, transition.NativeConversationID)
+	return m.preflightTerminalLaunch(ctx, agent, rec, project, transition.NativeConversationID, env)
 }
 
 // preflightLaunchAuth refuses a target whose login the provider reports as
@@ -1131,6 +1131,7 @@ func (m *Manager) preflightTerminalLaunch(
 	rec domain.SessionRecord,
 	project domain.ProjectRecord,
 	nativeConversationID string,
+	env map[string]string,
 ) error {
 	systemPrompt, err := m.buildSystemPrompt(ctx, rec.Kind, rec.ProjectID, rec.ID, rec.RequestedOutput, false)
 	if err != nil {
@@ -1141,10 +1142,11 @@ func (m *Manager) preflightTerminalLaunch(
 	var cmd []string
 	if nativeConversationID == "" {
 		cmd, _, _, err = freshLaunchArgv(ctx, agent, rec.ID, rec.Metadata.WorkspacePath,
-			rec.Metadata, systemPrompt, "", config, rec.Kind, m.dataDir, true, "", nil)
+			rec.Metadata, systemPrompt, "", config, rec.Kind, m.dataDir, true, "", env)
 	} else {
 		var resumable bool
 		cmd, resumable, err = agent.GetRestoreCommand(ctx, ports.RestoreConfig{
+			Env: env,
 			Session: ports.SessionRef{
 				ID: string(rec.ID), WorkspacePath: rec.Metadata.WorkspacePath,
 				Metadata: map[string]string{ports.MetadataKeyAgentSessionID: nativeConversationID},
@@ -1186,17 +1188,13 @@ func (m *Manager) prepareSourceHandoff(
 		if rec.Activity.State == domain.ActivityExited {
 			return nil
 		}
-		interrupter, ok := m.runtime.(runtimeInterrupter)
-		if !ok {
-			return fmt.Errorf("runtime cannot interrupt a live terminal controller")
-		}
 		// Explicit Stop now is authoritative even when the durable activity row
 		// says idle: approval screens can be user-blocked while that row is idle.
 		// Sending the interrupt is what makes “Cancel request and switch” true.
-		if err := interrupter.Interrupt(ctx, handle); err != nil {
+		if err := m.interruptTerminal(ctx, rec); err != nil {
 			return err
 		}
-		// Let the provider observe Ctrl-C and begin flushing its native history
+		// Let the provider observe cancellation and begin flushing its native history
 		// before an already-idle activity row can end the loop immediately.
 		initialSettle := time.NewTimer(m.interfaceTransition.pollInterval)
 		select {
@@ -1206,7 +1204,7 @@ func (m *Manager) prepareSourceHandoff(
 		case <-initialSettle.C:
 		}
 		// Give the provider a short, bounded window to flush its native transcript
-		// after Ctrl-C. The subsequent Destroy is still authoritative, so a stale
+		// after cancellation. The subsequent Destroy is still authoritative, so a stale
 		// activity hook cannot turn "stop now" into an unbounded drain.
 		deadline := time.NewTimer(interfaceInterruptSettle)
 		defer deadline.Stop()
@@ -1322,7 +1320,7 @@ func (m *Manager) prepareSourceHandoff(
 		if !surfaceProofAvailable && unverifiedIdle && detector != nil && inputQuiet {
 			// Compatibility path for terminal activity adapters that have not yet
 			// adopted the richer surface observation capability.
-			if output, outputErr := m.runtime.GetOutput(probeCtx, handle, interfaceTransitionOutputLines); outputErr == nil {
+			if output, outputErr := m.terminalActivityOutput(probeCtx, detector, handle, interfaceTransitionOutputLines); outputErr == nil {
 				now = time.Now()
 				state, authoritative := detector.DetectTerminalActivity(output)
 				idleProven = authoritative && state == domain.ActivityIdle
@@ -1375,6 +1373,22 @@ func (m *Manager) prepareSourceHandoff(
 		case <-ticker.C:
 		}
 	}
+}
+
+// terminalActivityOutput reads the screen a terminal activity detector expects.
+// A detector that requires rendered activity tells a dim native placeholder
+// from a typed draft by its styling, which plain output drops, so it reads the
+// rendered screen whenever the runtime can provide it.
+func (m *Manager) terminalActivityOutput(ctx context.Context, detector ports.TerminalActivityDetector, handle ports.RuntimeHandle, lines int) (string, error) {
+	if rendered, ok := detector.(interface{ RequiresRenderedActivity() bool }); ok && rendered.RequiresRenderedActivity() {
+		if styled, ok := m.runtime.(ports.StyledTerminalOutputReader); ok {
+			output, err := styled.GetStyledOutput(ctx, handle, lines)
+			if !errors.Is(err, ports.ErrStyledTerminalOutputUnavailable) {
+				return output, err
+			}
+		}
+	}
+	return m.runtime.GetOutput(ctx, handle, lines)
 }
 
 // tuiIdleAfterInput proves that the idle fact was written after every terminal

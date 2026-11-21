@@ -52,6 +52,8 @@ export function PeopleField({
 	invalid,
 	className,
 	inputRef: externalInputRef,
+	commitOnBlur = true,
+	locked,
 }: {
 	orgId: string;
 	value: Recipient[];
@@ -75,6 +77,13 @@ export function PeopleField({
 	className?: string;
 	/** The text input, for a caller that moves focus back to the field. */
 	inputRef?: RefObject<HTMLInputElement | null>;
+	/**
+	 * Leaving the field picks a typed email. Off where a pick acts at once (an
+	 * artifact link shares on Enter), so a click elsewhere never shares.
+	 */
+	commitOnBlur?: boolean;
+	/** Keys (recipientKey) of picks that can't be removed right now, such as one whose invitation is on its way. */
+	locked?: ReadonlySet<string>;
 }) {
 	const { t } = useTranslation();
 	const listId = useId();
@@ -239,7 +248,7 @@ export function PeopleField({
 			return;
 		}
 		if (event.key === "Backspace" && text === "" && value.length > 0) {
-			onChange(value.slice(0, -1));
+			if (!locked?.has(recipientKey(value[value.length - 1]!))) onChange(value.slice(0, -1));
 			return;
 		}
 		if (event.key === "Escape" && open) {
@@ -293,6 +302,7 @@ export function PeopleField({
 									size="none"
 									className="size-4 rounded-xs [&_svg]:size-2.5"
 									aria-label={t("teams.field.remove", { name: recipient.kind === "team" ? recipient.name : recipient.name || recipient.email })}
+									disabled={locked?.has(recipientKey(recipient))}
 									onClick={() => onChange(value.filter((other) => recipientKey(other) !== recipientKey(recipient)))}
 								>
 									<X aria-hidden="true" />
@@ -315,7 +325,7 @@ export function PeopleField({
 							onBlur={() => {
 								window.clearTimeout(blurCloseTimer.current);
 								blurCloseTimer.current = window.setTimeout(() => setOpen(false), 120);
-								commitTyped();
+								if (commitOnBlur) commitTyped();
 							}}
 							onKeyDown={onKeyDown}
 							placeholder={value.length === 0 ? placeholder : ""}

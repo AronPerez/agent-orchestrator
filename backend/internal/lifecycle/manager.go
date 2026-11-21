@@ -320,6 +320,9 @@ type Manager struct {
 	// adapter via WithUrgentNudgeGate; the default answers false, so an unknown
 	// harness never takes an urgent write while waiting_input.
 	urgentNudgeWaitingInputSafe func(domain.AgentHarness) bool
+	// reviewNoticeMu serializes "review done" deliveries so the submit path,
+	// a PR observation, and the sweep can never send the same notice twice.
+	reviewNoticeMu sync.Mutex
 }
 
 // New builds a Lifecycle Manager over the session store it writes and the messenger it uses for agent nudges.
@@ -384,7 +387,7 @@ func coordinationNudgeSent(outcome sessionguard.Outcome, err error) bool {
 	// DeliveryUnconfirmed is the one messenger error that follows a pane
 	// write. Other errors are definite refusals or pre-write failures and must
 	// remain retryable by the contract coordinator.
-	return err == nil || errors.Is(err, ports.ErrAgentDeliveryUnconfirmed)
+	return err == nil || errors.Is(err, ports.ErrDeliveryUnconfirmed)
 }
 
 // SetCompletionTerminator wires merge completion to the same teardown path as

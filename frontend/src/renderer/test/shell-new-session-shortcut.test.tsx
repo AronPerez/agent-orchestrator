@@ -243,7 +243,7 @@ vi.mock("../hooks/useRemoteHosts", async (importOriginal) => {
 vi.mock("../lib/cloud-session", () => ({
 	useCloudSession: () => ({ status: shellMocks.state.accountStatus, session: shellMocks.state.accountStatus === "authenticated" ? { user: { id: shellMocks.state.accountUserId } } : null }),
 }));
-vi.mock("../hooks/useSettings", () => ({ useSettings: () => ({ settings: { cloudControlPlaneUrl: "" } }) }));
+vi.mock("../hooks/useSettings", () => ({ useSettings: () => ({ settings: { cloudControlPlaneUrl: "" } }), useSettingsPolling: () => undefined }));
 
 vi.mock("../hooks/useDaemonStatus", () => ({
 	useDaemonStatus: () => shellMocks.state.daemonStatus,
@@ -312,6 +312,7 @@ vi.mock("../components/DaemonStartupLoader", () => ({
 vi.mock("../components/CommandPalette", () => ({ CommandPalette: () => null }));
 vi.mock("../components/OrchestratorReplacementDialog", () => ({ OrchestratorReplacementDialog: () => null }));
 vi.mock("../components/OpenShareLinkDialog", () => ({ ShareLinkHost: () => null }));
+vi.mock("../components/SharedArtifactLinkHost", () => ({ SharedArtifactLinkHost: () => null }));
 vi.mock("../components/TitlebarNav", async () => {
 	const { sidebarIsVisible, useUiStore: useStore } = await vi.importActual<
 		typeof import("../stores/ui-store")
@@ -354,6 +355,10 @@ vi.mock("../lib/shell-context", () => ({
 		return children;
 	},
 }));
+// First-run onboarding and the guided tour after it load their own queries;
+// this harness has no query provider and doesn't exercise them.
+vi.mock("../components/onboarding/FirstRunOnboarding", () => ({ FirstRunOnboarding: () => null }));
+vi.mock("../components/onboarding/GuidedTour", () => ({ GuidedTour: () => null }));
 vi.mock("../components/ui/sidebar", () => ({
 	SidebarProvider: ({ children, open }: PropsWithChildren<{ open?: boolean }>) => (
 		<div data-open={open ? "true" : "false"} data-testid="sidebar-provider">

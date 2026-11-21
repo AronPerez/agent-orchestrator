@@ -20,3 +20,6 @@ func (s *Store) InsertRawTrackerIntakeHandledForTest(ctx context.Context, projec
 		ProjectID: projectID, IssueID: issueID, SessionID: sessionID, RecordedAt: at,
 	})
 }
+
+// TerminalActivityStatus is what settling a turn writes over its running rows.
+var TerminalActivityStatus = terminalActivityStatus

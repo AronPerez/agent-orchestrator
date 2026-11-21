@@ -82,7 +82,7 @@ func TestHermesEveryGuardedWriteRequiresCurrentEmptyComposer(t *testing.T) {
 	messenger := newSessionMessenger(store, runtime, nil, lineAgentResolver{})
 	if err := messenger.Send(ctx, rec.ID, "yes"); err == nil {
 		t.Fatal("answered native decision using stale durable idle")
-	} else if errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
+	} else if errors.Is(err, ports.ErrDeliveryUnconfirmed) {
 		t.Fatalf("pre-write refusal marked ambiguous: %v", err)
 	}
 	if err := messenger.Send(ctx, rec.ID, "task"); err == nil {
@@ -139,8 +139,8 @@ func TestHermesAdmissionKeepsPendingAfterAmbiguousSendError(t *testing.T) {
 	messenger := newSessionMessenger(store, runtime, nil, lineAgentResolver{})
 	if err := messenger.Send(ctx, rec.ID, "first"); err == nil {
 		t.Fatal("write failure ignored")
-	} else if !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
-		t.Fatalf("post-write error = %v, want ErrAgentDeliveryUnconfirmed", err)
+	} else if !errors.Is(err, ports.ErrDeliveryUnconfirmed) {
+		t.Fatalf("post-write error = %v, want ErrDeliveryUnconfirmed", err)
 	}
 	// The write may have landed: an unchanged frame must not admit a retry.
 	runtime.sendErr = nil
@@ -180,8 +180,8 @@ func TestRuntimeMessengerMarksGenericRuntimeErrorAmbiguous(t *testing.T) {
 	}
 	runtime := &lineInputRuntime{sendErr: errors.New("runtime acknowledged after applying input")}
 	err = newSessionMessenger(store, runtime, nil).Send(ctx, rec.ID, "first")
-	if !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
-		t.Fatalf("generic runtime error = %v, want ErrAgentDeliveryUnconfirmed", err)
+	if !errors.Is(err, ports.ErrDeliveryUnconfirmed) {
+		t.Fatalf("generic runtime error = %v, want ErrDeliveryUnconfirmed", err)
 	}
 }
 
@@ -228,7 +228,7 @@ func TestHermesAdmissionRecoversAfterEchoTimeout(t *testing.T) {
 	idle := "────────────────────────────────────────\n❯ \n────────────────────────────────────────"
 	runtime := &lineInputRuntime{screen: idle, holdScreen: true}
 	messenger := newSessionMessenger(store, runtime, nil, lineAgentResolver{})
-	if err := messenger.Send(ctx, rec.ID, "first"); err == nil || !strings.Contains(err.Error(), "native echo unconfirmed") || !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
+	if err := messenger.Send(ctx, rec.ID, "first"); err == nil || !strings.Contains(err.Error(), "native echo unconfirmed") || !errors.Is(err, ports.ErrDeliveryUnconfirmed) {
 		t.Fatalf("submission with no observed echo did not time out: %v", err)
 	}
 	if len(runtime.messages) != 1 {

@@ -8830,6 +8830,21 @@ paths:
         schema:
           description: Opaque cursor returned by the previous page. Requires limit.
           type: string
+      - description: Keep sessions owning a pull request in this state. The list is
+          then ordered by when each session's newest such PR reached the state, and
+          the response echoes prState and carries total.
+        in: query
+        name: prState
+        schema:
+          description: Keep sessions owning a pull request in this state. The list
+            is then ordered by when each session's newest such PR reached the state,
+            and the response echoes prState and carries total.
+          enum:
+          - open
+          - draft
+          - merged
+          - closed
+          type: string
       responses:
         "200":
           content:
@@ -16801,6 +16816,62 @@ paths:
       summary: Rename a standalone shell terminal tab
       tags:
       - shellTerminals
+  /api/v1/shell-terminals/{handleId}/reopen:
+    post:
+      operationId: reopenShellTerminal
+      parameters:
+      - description: Shell terminal runtime handle identifier.
+        in: path
+        name: handleId
+        required: true
+        schema:
+          description: Shell terminal runtime handle identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReopenShellTerminalRequest'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShellTerminalEnvelope'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Replace an ended shell terminal with a fresh shell in the same tab
+      tags:
+      - shellTerminals
   /api/v1/side-chats/launch/claim:
     post:
       operationId: claimSideChatLaunch
@@ -23575,10 +23646,13 @@ components:
           - deepseek-harness
           - openhands
           - command-code
+          - mastra-code
           - docker-agent
           - memcode
           - hermes
           - stakpak
+          - open-interpreter
+          - tau
           - fake
           type: string
         approvalMode:
@@ -24379,10 +24453,13 @@ components:
           - deepseek-harness
           - openhands
           - command-code
+          - mastra-code
           - docker-agent
           - memcode
           - hermes
           - stakpak
+          - open-interpreter
+          - tau
           - cloudflared
           - cua-driver
           type: string
@@ -24406,6 +24483,14 @@ components:
         detail:
           description: The installer's latest output line.
           type: string
+        downloadAttempt:
+          description: Current installer download attempt, before it runs.
+          minimum: 1
+          type: integer
+        downloadAttempts:
+          description: Maximum installer download attempts.
+          minimum: 1
+          type: integer
         percent:
           description: Progress through the current phase, present only when the installer's
             output states sizes or counts.
@@ -24421,6 +24506,10 @@ components:
           - downloading
           - installing
           type: string
+        retryInSeconds:
+          description: Seconds until the next installer download attempt.
+          minimum: 1
+          type: integer
       type: object
     InvokeCueRequest:
       properties:
@@ -24885,10 +24974,23 @@ components:
           $ref: '#/components/schemas/SessionArchiveSummary'
         nextCursor:
           type: string
+        prState:
+          enum:
+          - open
+          - draft
+          - merged
+          - closed
+          type: string
         sessions:
           items:
             $ref: '#/components/schemas/ControllersSessionView'
           type: array
+        total:
+          type:
+          - "null"
+          - integer
+        version:
+          type: string
       required:
       - sessions
       type: object
@@ -26013,6 +26115,8 @@ components:
           type: string
         fastMode:
           type: boolean
+        force:
+          type: boolean
         idempotencyKey:
           type: string
         message:
@@ -26036,10 +26140,22 @@ components:
       type: object
     ProviderSwitchResponse:
       properties:
+        cancelledQueuedMessages:
+          type: integer
+        failedPendingApprovals:
+          type: boolean
         message:
           $ref: '#/components/schemas/SendConversationMessageResponse'
+        settingsUpdated:
+          type: boolean
         status:
           type: string
+        stoppedTurn:
+          type: boolean
+        warnings:
+          items:
+            type: string
+          type: array
       required:
       - status
       type: object
@@ -26334,6 +26450,23 @@ components:
       required:
       - level
       - text
+      type: object
+    ReopenShellTerminalRequest:
+      properties:
+        cols:
+          description: Initial terminal columns, as for opening a shell terminal.
+          type: integer
+        resumeAgent:
+          description: 'Also resume the agent that was running in this terminal: the
+            same conversation when it is known, otherwise its conversation picker.
+            Nothing the old shell ran is replayed.'
+          type: boolean
+        rows:
+          description: Initial terminal rows. See cols.
+          type: integer
+        shell:
+          description: Shell to launch, as for opening a shell terminal.
+          type: string
       type: object
     ReorderQueuedConversationTurnsRequest:
       properties:
@@ -26713,6 +26846,22 @@ components:
           - auto
           type: string
         verdict:
+          type: string
+        workerNotice:
+          enum:
+          - ""
+          - pending
+          - sent
+          - failed
+          type: string
+        workerNoticeAttemptedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        workerNoticeAttempts:
+          type: integer
+        workerNoticeError:
           type: string
       required:
       - id
@@ -27971,6 +28120,8 @@ components:
           type: string
         messageId:
           type: string
+        namedForQuery:
+          type: boolean
         projectId:
           type: string
         projectName:
@@ -28469,9 +28620,20 @@ components:
         createdAt:
           format: date-time
           type: string
+        endedAt:
+          description: When the shell's process was found gone. Present only for an
+            ended shell, which can be reopened or closed but not attached.
+          format: date-time
+          type:
+          - "null"
+          - string
         handleId:
           type: string
         projectId:
+          type: string
+        resumeHarness:
+          description: For an ended shell, the coding agent that was running in it,
+            which reopening with resumeAgent resumes.
           type: string
         sessionId:
           type: string
@@ -28606,6 +28768,13 @@ components:
         manualLabel:
           type: boolean
         model:
+          type: string
+        openingStartedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        openingTurnId:
           type: string
         recreateRequired:
           type: boolean
@@ -28819,12 +28988,18 @@ components:
           type: array
         dispatchAttempt:
           type: integer
+        effort:
+          type: string
+        model:
+          type: string
         providerTurnId:
           type: string
         referenceContexts:
           items:
             type: string
           type: array
+        settingsFrozen:
+          type: boolean
         turn:
           $ref: '#/components/schemas/SideTurn'
       required:
@@ -29015,10 +29190,13 @@ components:
           - deepseek-harness
           - openhands
           - command-code
+          - mastra-code
           - docker-agent
           - memcode
           - hermes
           - stakpak
+          - open-interpreter
+          - tau
           type: string
         issueId:
           type: string
@@ -29671,6 +29849,10 @@ components:
           description: Return 409 instead of reusing when every open PR head is already
             being reviewed or already has a review.
           type: boolean
+        requesterSessionId:
+          description: Agent session that requested the pass and should receive its
+            final outcome.
+          type: string
         rerun:
           description: Start a fresh pass for already-reviewed current heads; a different
             reviewer may run alongside one that is still running. A person's rerun

@@ -55,7 +55,7 @@ func (m *unconfirmedDecisionMessenger) DeliverAsPerson(ctx context.Context, id d
 		return err
 	}
 	if id == m.unconfirmed {
-		return fmt.Errorf("confirmation lost after write: %w", ports.ErrAgentDeliveryUnconfirmed)
+		return fmt.Errorf("confirmation lost after write: %w", ports.ErrDeliveryUnconfirmed)
 	}
 	return nil
 }

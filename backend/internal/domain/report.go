@@ -149,8 +149,13 @@ const (
 	MaxReportTextCharacters = 1000
 	// ReportBatchFallback is the fixed informational-report fallback deadline.
 	ReportBatchFallback = time.Hour
-	// ReportSettlementWindow is the fixed window opened by a done report.
+	// ReportSettlementWindow is the upper bound a done report waits for other
+	// workers of its project before its batch is delivered.
 	ReportSettlementWindow = 5 * time.Minute
+	// ReportEarlyFlushDebounce delays an early done-batch flush after the
+	// newest done report or worker stop, so completions within seconds of each
+	// other still land in one batch.
+	ReportEarlyFlushDebounce = 15 * time.Second
 )
 
 // ReportState is an optional worker-originated coordination claim.
@@ -209,6 +214,8 @@ const (
 	ReportPending      ReportDeliveryState = "pending"
 	ReportClaimed      ReportDeliveryState = "claimed"
 	ReportAcknowledged ReportDeliveryState = "acknowledged"
+	ReportFailed       ReportDeliveryState = "failed"
+	ReportAbandoned    ReportDeliveryState = "abandoned"
 )
 
 // ReportVerificationState is the observed outcome of project-owned verify
@@ -317,6 +324,10 @@ func (r ReportRecord) Validate() error {
 		}
 	case ReportAcknowledged:
 		if r.ClaimToken == "" || r.ClaimedAt.IsZero() || r.AcknowledgedAt.IsZero() {
+			return ErrInvalidReport
+		}
+	case ReportFailed, ReportAbandoned:
+		if r.ClaimToken != "" || !r.ClaimedAt.IsZero() || !r.AcknowledgedAt.IsZero() {
 			return ErrInvalidReport
 		}
 	default:
