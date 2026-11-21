@@ -161,22 +161,28 @@ func TestRunProjectOverlapNoticeRadarKeepsDescriptorBackoffAcrossRefreshes(t *te
 	}
 	waitForOverlapScan(t, store)
 	reconcilesBefore := store.listCalls("demo")
-	for range 18 {
+	// Refresh until well inside the backoff, however slow the runner is.
+	for refreshUntil := firstAttempt.Add(400 * time.Millisecond); time.Now().Before(refreshUntil); {
 		svc.SignalProjectOverlapRadar("demo")
 		time.Sleep(20 * time.Millisecond)
-	}
-	select {
-	case at := <-attempts:
-		t.Fatalf("refresh retried the watch %v after descriptors ran out, inside the 500ms backoff", at.Sub(firstAttempt))
-	default:
 	}
 	if got := store.listCalls("demo"); got <= reconcilesBefore {
 		t.Fatalf("reconciles during the backoff = %d, want more than %d: refreshes and the poll must keep scanning", got, reconcilesBefore)
 	}
+	expectRetryAfterBackoff(t, attempts, firstAttempt, 500*time.Millisecond)
+}
+
+// expectRetryAfterBackoff waits for the next watch attempt and fails if it
+// came before the backoff that started at failed ended. An attempt already
+// queued is judged by when it ran, so a slow test is not mistaken for an
+// early retry.
+func expectRetryAfterBackoff(t *testing.T, attempts <-chan time.Time, failed time.Time, backoff time.Duration) {
+	t.Helper()
 	select {
 	case at := <-attempts:
-		if gap := at.Sub(firstAttempt); gap < 450*time.Millisecond {
-			t.Fatalf("watch retried %v after the failure, want the 500ms backoff", gap)
+		// Timers may fire a little early relative to the recorded failure.
+		if gap := at.Sub(failed); gap < backoff-50*time.Millisecond {
+			t.Fatalf("watch retried %v after descriptors ran out, inside the %v backoff", gap, backoff)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the watch was not retried after the backoff ended")
@@ -226,20 +232,8 @@ func TestRunProjectOverlapNoticeRadarKeepsDescriptorBackoffAcrossWorkerRestart(t
 	}
 	setTerminated(true)
 	setTerminated(false)
-
-	select {
-	case at := <-attempts:
-		t.Fatalf("the restarted worker retried the watch %v after descriptors ran out, inside the 800ms backoff", at.Sub(firstAttempt))
-	case <-time.After(150 * time.Millisecond):
-	}
-	select {
-	case at := <-attempts:
-		if gap := at.Sub(firstAttempt); gap < 750*time.Millisecond {
-			t.Fatalf("watch retried %v after the failure, want the 800ms backoff", gap)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the watch was not retried after the backoff ended")
-	}
+	// The restarted worker's first attempt must wait out the backoff.
+	expectRetryAfterBackoff(t, attempts, firstAttempt, 800*time.Millisecond)
 }
 
 // When some roots cannot be watched for a reason other than running out of
