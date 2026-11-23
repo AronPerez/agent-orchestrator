@@ -105,8 +105,10 @@ jobs:
               echo "::error::Tag $tag points at $sha, which is not on develop. Fork releases are cut from develop only."
               exit 1
             fi
+            # Fails fast on a PUBLISHED release. This job's read-only token cannot
+            # see drafts; the publish job checks for those before creating one.
             if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              echo "::error::A release for $tag already exists. Delete the draft first if you mean to rebuild it."
+              echo "::error::A published release for $tag already exists. Cut the next -fork.N instead."
               exit 1
             fi
           fi
@@ -586,6 +588,22 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       PREVIOUS_TAG: ${{ needs.prepare.outputs.previous-tag }}
     steps:
+      # Only this job can see drafts (write access), so it makes the final check:
+      # a re-pushed tag, such as one re-created as a signed tag, must never add a
+      # second draft next to the first (RELEASING.md, "Re-signing an existing tag").
+      - name: Refuse a tag that already has a release or draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="$(gh api "repos/$GH_REPO/releases?per_page=100" --paginate \
+            --jq '.[] | [.tag_name, (if .draft then "draft" else "published" end), .html_url] | @tsv' \
+            | awk -F '\t' -v tag="$TAG" '$1 == tag')"
+          if [[ -n "$existing" ]]; then
+            echo "::error::$TAG already has a release or draft, so no new draft was created. Keep or delete it, or cut the next -fork.N (RELEASING.md)."
+            printf '%s\n' "$existing"
+            exit 1
+          fi
+          echo "No release or draft uses $TAG yet."
       - uses: actions/download-artifact@v4
         with:
           name: fork-release-${{ needs.prepare.outputs.version }}

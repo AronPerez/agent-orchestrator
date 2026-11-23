@@ -9,6 +9,8 @@ updater follows **only** this fork's releases.
 - A tag push builds everything and creates a **draft**. A person reviews the
   draft and publishes it. The workflow never publishes, pushes tags, or edits
   or deletes a release.
+- Release tags are **signed** and pushed by the maintainer only. Agents and
+  automation never create or push release tags.
 
 ## Versions and tags
 
@@ -101,9 +103,49 @@ gh secret list -R AronPerez/agent-orchestrator
 | `VITE_WORKOS_CLIENT_ID` | The WorkOS client ID the app already ships (`frontend/src/main/cloud-auth.ts`). It is a public OAuth client ID, not a secret. |
 | `VITE_AO_TEAMS` | Unset gives stable builds no Teams; `on` or `off` forces it. |
 
+## One-time setup: signing your release tags
+
+Every release tag is signed (`git tag -s`), so GitHub shows it as **Verified**.
+SSH signing is simplest if you already push over SSH; GPG works too. In both
+cases the tag's email (`git config user.email`) must be a verified email on
+your GitHub account.
+
+**SSH key** (replace the path with your own public key):
+
+```sh
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global tag.gpgSign true
+# Let `git tag -v` check your own SSH signatures locally.
+git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
+echo "$(git config user.email) $(cat ~/.ssh/id_ed25519.pub)" >> ~/.ssh/allowed_signers
+# Register the same key on GitHub as a SIGNING key (separate from its
+# authentication entry). gh needs the admin:ssh_signing_key scope once.
+gh auth refresh -s admin:ssh_signing_key
+gh ssh-key add ~/.ssh/id_ed25519.pub --type signing --title "release tag signing"
+```
+
+**GPG key:**
+
+```sh
+gpg --full-generate-key                  # use your GitHub-verified email
+gpg --list-secret-keys --keyid-format=long   # copy the key id after the slash on the "sec" line
+git config --global user.signingkey <KEYID>
+git config --global tag.gpgSign true
+# Register the public key on GitHub. gh needs the write:gpg_key scope once.
+gpg --armor --export <KEYID> > release-signing-key.asc
+gh auth refresh -s write:gpg_key
+gh gpg-key add release-signing-key.asc --title "release tag signing"
+rm release-signing-key.asc
+```
+
+On GitHub, **Settings → SSH and GPG keys** should now list the key under
+**Signing keys** (SSH) or **GPG keys**.
+
 ## Cutting a release
 
-Only a maintainer pushes release tags.
+Only the maintainer pushes release tags, and always as signed tags. Agents may
+prepare everything up to step 3 and report that it is ready, but never tag.
 
 1. **Check `develop`.** CI is green and the changes you want are merged.
 2. **Pick the version.** Base = `jq -r .version frontend/package.json` on
@@ -118,17 +160,20 @@ Only a maintainer pushes release tags.
 
    Before the Apple secrets exist, add `-f skip-mac-signing=true`. That builds
    macOS unsigned, and only a dry run may do so.
-4. **Tag and push:**
+4. **Sign the tag and push it** (maintainer only):
 
    ```sh
    git fetch origin develop
-   git tag -a v0.15.3-fork.1 origin/develop -m "Orchestrator v0.15.3-fork.1"
-   git push origin v0.15.3-fork.1
+   git tag -s v0.15.3-fork.1 origin/develop -m "Orchestrator v0.15.3-fork.1"
+   git tag -v v0.15.3-fork.1                    # must report a good signature
+   git push origin refs/tags/v0.15.3-fork.1
    ```
 
    The workflow checks the version, that the commit is on `develop`, and that
-   no release exists for the tag yet. It then builds, signs and notarizes, and
-   creates a **draft** release.
+   no published release uses the tag. It then builds, signs and notarizes the
+   apps. Just before creating the **draft** release it checks again, this time
+   for drafts too, and stops if any release or draft already uses the tag. The
+   tag's page on GitHub shows **Verified**.
 5. **Review the draft** on the Releases page:
    - Assets: four macOS zips (versioned and stable-named) and two dmgs, the Linux AppImage (versioned and
      stable-named), its `.blockmap`, `.deb`, `.rpm`, `ao-host-linux-x64.tar.gz`,
@@ -145,6 +190,38 @@ Only a maintainer pushes release tags.
 **Redoing a release.** If a draft is wrong, delete the draft
 (`gh release delete <tag>`) and fix `develop`. Then cut the **next** number
 (`-fork.N+1`) instead of moving a tag that may already have been fetched.
+
+### Re-signing an existing tag
+
+To replace an unsigned tag with a signed one **on the same commit**, for
+example one pushed before tags were signed, follow these steps. The existing
+draft stays valid, because its assets were built from that same commit.
+
+1. **Let the tag's release run finish** and create its draft. Re-tagging
+   earlier is also safe: the new run waits behind the current one.
+2. **Re-create the tag, signed, on the same commit**, and check it before
+   pushing:
+
+   ```sh
+   git fetch origin --tags
+   commit="$(git rev-parse 'v0.15.3-fork.1^{commit}')"
+   git tag -s -f v0.15.3-fork.1 "$commit" -m "Orchestrator v0.15.3-fork.1"
+   git tag -v v0.15.3-fork.1                       # good signature
+   git rev-parse 'v0.15.3-fork.1^{commit}'         # must still print $commit
+   git push -f origin refs/tags/v0.15.3-fork.1
+   ```
+
+3. **Cancel the run the push starts.** It would only rebuild the same commit.
+   If you miss it, it stops before creating a second draft, because the
+   release already has one.
+
+   ```sh
+   gh run list -R AronPerez/agent-orchestrator -w fork-release.yml -e push -L 2
+   gh run cancel <id of the new run> -R AronPerez/agent-orchestrator
+   ```
+
+4. **Check and publish.** The tag's page shows **Verified**. Then publish the
+   original draft (step 6 above).
 
 ## Release assets
 
@@ -233,5 +310,7 @@ spctl --assess -vv "/Applications/Agent Orchestrator.app"   # expect: source=Not
 | `Missing repository secrets for macOS signing: …` | Add the named secrets (above). Only a dry run may use `skip-mac-signing`. |
 | `Version base X.Y.Z does not match frontend/package.json` | Tag `v<package.json version>-fork.N`. |
 | `… is not on develop` | Tag a commit on `origin/develop`. |
-| `A release for <tag> already exists` | Delete the draft, or cut the next `-fork.N`. |
+| `A published release for <tag> already exists` | Cut the next `-fork.N`. |
+| `<tag> already has a release or draft, so no new draft was created` | Expected after a re-pushed tag (for example, re-signed): keep the existing draft. To rebuild on purpose, delete that draft first. |
+| The tag shows **Unverified** on GitHub | Add the signing key to your GitHub account (signing key, not only authentication key) and sign with a GitHub-verified email; see "Signing your release tags". |
 | Notarization step fails | Check that the API key has the Developer role and that `APPLE_API_ISSUER` is the Issuer ID, not the Key ID. |
