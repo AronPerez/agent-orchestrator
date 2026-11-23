@@ -32,13 +32,21 @@ export function AccountSettingsSection() {
 function SignedOutRow() {
 	const { t } = useTranslation();
 	const { signIn } = useCloudSession();
-	// Dev + loopback control plane: the local email/password dialog instead of WorkOS.
-	const { available: localAuthAvailable } = useCloudLocalAuth();
+	// Dev + loopback control plane: the local email/password dialog instead of
+	// WorkOS. Sign in waits for that answer, so an early click never opens the
+	// wrong flow (the answer arrives over IPC after this page mounts).
+	const { available: localAuthAvailable, checked } = useCloudLocalAuth();
 	const openLocalSignIn = useLocalSignInDialogStore((s) => s.openDialog);
 
 	return (
 		<SettingsRow label={t("settings.account.cloud")} description={t("settings.account.signedOutHint")}>
-			<Button onClick={() => (localAuthAvailable ? openLocalSignIn() : signIn())} size="sm" type="button" variant="secondary">
+			<Button
+				disabled={!checked}
+				onClick={() => (localAuthAvailable ? openLocalSignIn() : signIn())}
+				size="sm"
+				type="button"
+				variant="secondary"
+			>
 				{t("settings.account.signIn")}
 			</Button>
 		</SettingsRow>

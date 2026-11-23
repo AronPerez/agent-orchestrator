@@ -12,12 +12,13 @@ const mocks = vi.hoisted(() => ({
 		signOut: vi.fn().mockResolvedValue(undefined),
 	},
 	localAuthAvailable: false,
+	localAuthChecked: true,
 	openDialog: vi.fn(),
 	billing: { offering: { selfServeBilling: false }, data: undefined as unknown },
 }));
 
 vi.mock("../../lib/cloud-session", () => ({ useCloudSession: () => mocks.session }));
-vi.mock("../../hooks/useCloudLocalAuth", () => ({ useCloudLocalAuth: () => ({ available: mocks.localAuthAvailable }) }));
+vi.mock("../../hooks/useCloudLocalAuth", () => ({ useCloudLocalAuth: () => ({ available: mocks.localAuthAvailable, checked: mocks.localAuthChecked }) }));
 vi.mock("../../stores/local-signin-dialog-store", () => ({
 	useLocalSignInDialogStore: (select: (state: { openDialog: () => void }) => unknown) => select({ openDialog: mocks.openDialog }),
 }));
@@ -33,6 +34,7 @@ beforeEach(() => {
 	mocks.session.signIn.mockReset();
 	mocks.session.signOut.mockReset().mockResolvedValue(undefined);
 	mocks.localAuthAvailable = false;
+	mocks.localAuthChecked = true;
 	mocks.openDialog.mockReset();
 	mocks.billing = { offering: { selfServeBilling: false }, data: undefined };
 });
@@ -53,6 +55,26 @@ describe("AccountSettingsSection", () => {
 		mocks.localAuthAvailable = true;
 		render(<AccountSettingsSection />);
 
+		await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+		expect(mocks.openDialog).toHaveBeenCalledOnce();
+		expect(mocks.session.signIn).not.toHaveBeenCalled();
+	});
+
+	it("keeps Sign in disabled until the local sign-in check answers", async () => {
+		mocks.localAuthChecked = false;
+		mocks.localAuthAvailable = false;
+		const { rerender } = render(<AccountSettingsSection />);
+
+		const button = screen.getByRole("button", { name: "Sign in" });
+		expect(button).toBeDisabled();
+		await userEvent.click(button);
+		expect(mocks.session.signIn).not.toHaveBeenCalled();
+		expect(mocks.openDialog).not.toHaveBeenCalled();
+
+		// The answer arrives: a loopback control plane in a dev build.
+		mocks.localAuthChecked = true;
+		mocks.localAuthAvailable = true;
+		rerender(<AccountSettingsSection />);
 		await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
 		expect(mocks.openDialog).toHaveBeenCalledOnce();
 		expect(mocks.session.signIn).not.toHaveBeenCalled();

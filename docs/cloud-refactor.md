@@ -90,7 +90,7 @@ model to those DTOs.
 | SCM/reviews | Multi-PR summaries; current-head checks; reviews/comments; mergeability and stale-head guards | SCM observer, PR/review services, inspector tests |
 | Daemon/CLI | Loopback listener remains unauthenticated; CLI stays a thin HTTP client; errors retain codes/request IDs | HTTP, API spec, CLI and daemon tests |
 | Desktop UI | Board, sidebar, inspector, composer, chat, files, terminal and native shell retain current appearance and behavior | renderer Vitest and Playwright suites |
-| WorkOS | Tokens remain in Electron main; renderer receives account identity only; sign-in never gates local AO | Cloud auth, preload, hook and sidebar tests |
+| WorkOS | Tokens remain in Electron main; renderer receives account identity only; sign-in never gates local AO | Cloud auth, preload, hook and account settings tests |
 
 ## Import rules
 
