@@ -295,14 +295,15 @@ describe("DecisionsBoard", () => {
 		const many = [...calls, ...finished];
 		const doneCards = () => screen.getAllByRole("button").filter((button) => /^Question fin/.test(button.textContent ?? "")).map((button) => button.getAttribute("data-decision-card"));
 
-		it("shows a row's three newest Done cards, then the rest on request", async () => {
-			render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} />);
+		it("shows a row's three newest Done cards, and opens the archive at that stream for the rest", async () => {
+			const onShowDone = vi.fn();
+			render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} onShowDone={onShowDone} />);
 			expect(doneCards()).toEqual(["fin5", "fin4", "fin3"]);
 			const more = screen.getByRole("button", { name: "2 more" });
-			expect(more).toHaveAttribute("aria-expanded", "false");
+			expect(more).toHaveAttribute("aria-haspopup", "dialog");
 			await userEvent.click(more);
-			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin2", "fin1"]);
-			await userEvent.click(screen.getByRole("button", { name: "Show fewer" }));
+			expect(onShowDone).toHaveBeenCalledWith({ project: "cloud", stream: "@project" });
+			// The board itself does not grow.
 			expect(doneCards()).toEqual(["fin5", "fin4", "fin3"]);
 		});
 
@@ -316,21 +317,18 @@ describe("DecisionsBoard", () => {
 			expect(screen.getByRole("button", { name: /^Question fin1/ })).toHaveAttribute("aria-current", "true");
 		});
 
-		it("always shows the selected Done card, also when the cell is cut back or the selection moves within the row", async () => {
-			const view = render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} selectedId="fin1" />);
-			const select = (id: string) => view.rerender(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} selectedId={id} />);
-			// The newest three, plus the selected one from past the cap.
+		it("always shows the selected Done card, also when the selection moves within the row", () => {
+			const onShowDone = vi.fn();
+			const view = render(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} onShowDone={onShowDone} selectedId="fin1" />);
+			const select = (id: string) => view.rerender(<DecisionsBoard model={buildDecisionBoard(many)} now={NOW} onSelect={vi.fn()} onShowDone={onShowDone} selectedId={id} />);
+			// The newest three, plus the selected one from past the cap; the count is what is still out of sight.
 			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin1"]);
 			expect(screen.getByRole("button", { name: "1 more" })).toBeInTheDocument();
 			select("fin2");
 			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin2"]);
-			await userEvent.click(screen.getByRole("button", { name: "1 more" }));
-			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin2", "fin1"]);
-			await userEvent.click(screen.getByRole("button", { name: "Show fewer" }));
-			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin2"]);
-			select("fin1");
-			expect(screen.getByRole("button", { name: /^Question fin1/ })).toHaveAttribute("aria-current", "true");
-			expect(doneCards()).toEqual(["fin5", "fin4", "fin3", "fin1"]);
+			select("fin4");
+			expect(doneCards()).toEqual(["fin5", "fin4", "fin3"]);
+			expect(screen.getByRole("button", { name: "2 more" })).toBeInTheDocument();
 		});
 
 		it("keeps focus on a selected Done card that a newer one pushes past the cap", () => {

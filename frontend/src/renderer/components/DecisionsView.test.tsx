@@ -483,6 +483,54 @@ describe("DecisionsView", () => {
 		});
 	});
 
+	describe("done archive", () => {
+		const nango = { projectId: "cloud", projectName: "skyvern-cloud", streamSessionId: "nango", streamName: "Nango" };
+		const finished = (id: string, minute: number, extra: Partial<DecisionCall> = {}) => call({
+			id, state: "done", stateLabel: "Done", chosenLabel: "Ship", outcome: `Shipped ${id}`, outcomeAt: `2026-11-18T11:0${minute}:00Z`, ...extra,
+		});
+		const ledger = () => board([
+			call({ id: "dec_open", ...nango }),
+			...[1, 2, 3, 4, 5].map((minute) => finished(`fin_${minute}`, minute, nango)),
+			finished("shop_done", 9),
+		]);
+
+		it("opens from a stream's Done cell, narrowed to that stream, and widens to every stream", async () => {
+			answer(ledger());
+			renderView(<DecisionsView />);
+			await userEvent.click(await screen.findByRole("button", { name: "2 more" }));
+			const dialog = await screen.findByRole("dialog", { name: "Done decisions" });
+			const cards = () => within(within(dialog).getByRole("grid", { name: "Done decisions" })).getAllByRole("gridcell");
+			expect(cards()).toHaveLength(5);
+			expect(within(dialog).getByRole("combobox", { name: "Search done decisions" })).toHaveFocus();
+			await userEvent.click(within(dialog).getByRole("button", { name: "Showing skyvern-cloud: Nango. Show every done decision" }));
+			expect(cards()).toHaveLength(6);
+		});
+
+		it("opens the chosen decision beside the board and closes", async () => {
+			answer(ledger());
+			renderView(<DecisionsView project="cloud" />);
+			await userEvent.click(await screen.findByRole("button", { name: "2 more" }));
+			const dialog = await screen.findByRole("dialog", { name: "Done decisions" });
+			await userEvent.click(within(dialog).getByRole("button", { name: /^Question fin_1/ }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: { call: "fin_1", project: "cloud" } });
+			await waitFor(() => expect(screen.queryByRole("dialog", { name: "Done decisions" })).not.toBeInTheDocument());
+		});
+
+		it("starts each opening from its own stream and an empty search", async () => {
+			answer(ledger());
+			renderView(<DecisionsView />);
+			await userEvent.click(await screen.findByRole("button", { name: "2 more" }));
+			const field = () => screen.getByRole("combobox", { name: "Search done decisions" });
+			await userEvent.type(field(), "fin_2");
+			expect(within(screen.getByRole("grid", { name: "Done decisions" })).getAllByRole("gridcell")).toHaveLength(1);
+			await userEvent.keyboard("{Escape}");
+			await waitFor(() => expect(screen.queryByRole("dialog", { name: "Done decisions" })).not.toBeInTheDocument());
+			await userEvent.click(screen.getByRole("button", { name: "2 more" }));
+			expect(field()).toHaveValue("");
+			expect(within(screen.getByRole("grid", { name: "Done decisions" })).getAllByRole("gridcell")).toHaveLength(5);
+		});
+	});
+
 	it("opens a card as the selected call in the URL and marks the selected one", async () => {
 		answer(board([call({ id: "dec_1" }), call({ id: "dec_2", raisedAt: "2026-11-18T10:00:00Z" })]));
 		renderView(<DecisionsView callId="dec_2" />);

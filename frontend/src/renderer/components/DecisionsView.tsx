@@ -8,12 +8,14 @@ import { ChevronsDownUp, ChevronsUpDown, FolderTree, ListChecks } from "@/compon
 import { useDecisionFolds } from "../hooks/useDecisionFolds";
 import { useDecisionBoard, useDecisionSearch } from "../hooks/useDecisionInbox";
 import { apiErrorRequestId } from "../lib/api-client";
+import { decisionArchiveEntries, type DecisionArchiveScope } from "../lib/decision-archive";
 import { buildDecisionBoard, DECISION_LANES } from "../lib/decision-board";
 import { decisionRowFoldKey } from "../lib/decision-folds";
 import { closeDecisionTab, DECISION_TABS_MAX, keepDecisionTab, readDecisionTabs, writeDecisionTabs } from "../lib/decision-tabs";
 import { decisionScopeTree, readDecisionListHidden, resolveDecisionScope, scopeDecisionBoard, writeDecisionListHidden, type DecisionScope } from "../lib/decision-scope";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { cn } from "../lib/utils";
+import { DecisionArchiveModal } from "./DecisionArchiveModal";
 import { DecisionCallPanel } from "./DecisionCallPanel";
 import { DecisionDraftScope } from "./DecisionDraftScope";
 import { DecisionPanelSlot, useDecisionPanelHosts } from "./DecisionPanelHosts";
@@ -113,6 +115,11 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 		return next;
 	}), []);
 	const [closing, setClosing] = useState<string | undefined>(undefined);
+	// The archive of done decisions, opened from a stream's Done cell. Each
+	// request has its own number, so it starts from its own stream and an empty search.
+	const [archive, setArchive] = useState<{ request: number; scope: DecisionArchiveScope; open: boolean } | undefined>(undefined);
+	const archiveEntries = useMemo(() => decisionArchiveEntries(model), [model]);
+	const showDone = useCallback((next: DecisionArchiveScope) => setArchive((current) => ({ request: (current?.request ?? 0) + 1, scope: next, open: true })), []);
 	const discarded = useRef<string | undefined>(undefined);
 	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
@@ -242,7 +249,7 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 						{t("decisions.nothingNeedsYou")}
 					</p>
 				) : null}
-				<DecisionsBoard model={scopedModel} soloBand={scope.project !== undefined} keptIds={keptIds} onKeep={keepOpen} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
+				<DecisionsBoard model={scopedModel} soloBand={scope.project !== undefined} keptIds={keptIds} onKeep={keepOpen} onShowDone={showDone} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
 			</>
 		);
 	} else if (board.data && !board.isError) {
@@ -360,6 +367,16 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 					id,
 				);
 			})}
+			{archive ? (
+				<DecisionArchiveModal
+					key={archive.request}
+					open={archive.open}
+					entries={archiveEntries}
+					scope={archive.scope}
+					onOpen={selectCall}
+					onOpenChange={(open) => setArchive((current) => (current ? { ...current, open } : current))}
+				/>
+			) : null}
 			<ConfirmDialog
 				open={closing !== undefined}
 				title={t("decisions.tabs.discardTitle")}

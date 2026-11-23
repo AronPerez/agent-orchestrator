@@ -16,7 +16,8 @@ import {
 	type DecisionStreamRow,
 } from "../lib/decision-board";
 import { decisionSecondaryText, decisionStatusText } from "../lib/decision-card-text";
-import { cappedDoneCards, DECISION_DONE_SHOWN, decisionBandFoldKey, decisionRowFoldKey, visibleDecisionTopology } from "../lib/decision-folds";
+import type { DecisionArchiveScope } from "../lib/decision-archive";
+import { cappedDoneCards, decisionBandFoldKey, decisionRowFoldKey, visibleDecisionTopology } from "../lib/decision-folds";
 import type { DecisionSyncStatus } from "../lib/decision-sync";
 import { cn } from "../lib/utils";
 import { DecisionStateDot, decisionStateLabel } from "./DecisionStateLabel";
@@ -49,6 +50,11 @@ export type DecisionsBoardProps = {
 	keptIds?: ReadonlySet<string>;
 	/** Keep a call open as a tab: a double-click on its card, or Shift and Enter. */
 	onKeep?: (callId: string) => void;
+	/**
+	 * Open the archive of done decisions at one stream. A Done cell draws its
+	 * newest cards (and the selected one) and offers the rest through this.
+	 */
+	onShowDone?: (scope: DecisionArchiveScope) => void;
 };
 
 // Narrow pane: the state columns alone, each project's and stream's name as a
@@ -77,7 +83,7 @@ function countsText(counts: Record<DecisionLane, number>, t: TFunction): string 
  * streams both fold to their counts. Cards are the only individually bordered
  * objects; everything else shares hairlines.
  */
-export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: pageFolds, soloBand = false, keptIds, onKeep }: DecisionsBoardProps) {
+export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: pageFolds, soloBand = false, keptIds, onKeep, onShowDone }: DecisionsBoardProps) {
 	const { t } = useTranslation();
 	const hintId = useId();
 	const folds = useMemo(() => {
@@ -86,17 +92,9 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: 
 		return { ...pageFolds, folded: new Set([...pageFolds.folded].filter((key) => !bandKeys.has(key))) };
 	}, [model.bands, pageFolds, soloBand]);
 
-	// A row's Done cell shows its newest cards and the selected one; the rest open on request.
-	const [expandedDone, setExpandedDone] = useState<ReadonlySet<string>>(() => new Set());
-	const toggleDone = (key: string) => setExpandedDone((current) => {
-		const next = new Set(current);
-		if (next.has(key)) next.delete(key);
-		else next.add(key);
-		return next;
-	});
 	// Roving focus: one card is the board's tab stop; arrows move it.
 	const gridRef = useRef<HTMLDivElement>(null);
-	const visible = useMemo(() => visibleDecisionTopology(model, folds.folded, expandedDone, selectedId), [model, folds.folded, expandedDone, selectedId]);
+	const visible = useMemo(() => visibleDecisionTopology(model, folds.folded, selectedId), [model, folds.folded, selectedId]);
 	const visibleIds = useMemo(() => new Set(visible.flatMap((row) => DECISION_LANES.flatMap((lane) => row.lanes[lane]))), [visible]);
 	const [focusId, setFocusId] = useState<string | undefined>(undefined);
 	const tabStop = focusId && visibleIds.has(focusId) ? focusId : initialDecisionFocusId(visible, selectedId);
@@ -182,8 +180,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: 
 						solo={soloBand}
 						folds={folds}
 						lanes={model.lanes}
-						expandedDone={expandedDone}
-						onToggleDone={toggleDone}
+						onShowDone={onShowDone}
 						selectedId={selectedId}
 						tabStop={tabStop}
 						onSelect={onSelect}
@@ -201,8 +198,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: 
 type RowShared = {
 	lanes: readonly DecisionLane[];
 	folds: DecisionFolds;
-	expandedDone: ReadonlySet<string>;
-	onToggleDone: (key: string) => void;
+	onShowDone?: (scope: DecisionArchiveScope) => void;
 	selectedId?: string;
 	tabStop?: string;
 	onSelect: (callId: string) => void;
@@ -270,14 +266,13 @@ function DecisionBand({ band, solo, ...shared }: { band: DecisionProjectBand; so
 	);
 }
 
-function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, selectedId, tabStop, onSelect, keptIds, onKeep, now }: { bandKey: string; row: DecisionStreamRow } & RowShared) {
+function DecisionRow({ bandKey, row, lanes, folds, onShowDone, selectedId, tabStop, onSelect, keptIds, onKeep, now }: { bandKey: string; row: DecisionStreamRow } & RowShared) {
 	const { t } = useTranslation();
 	const name = row.projectWide
 		? t("decisions.projectWide")
 		: [row.name ?? "", row.machine].filter(Boolean).join(" · ");
 	const foldKey = decisionRowFoldKey(bandKey, row.key);
 	const open = !folds.folded.has(foldKey);
-	const allDone = expandedDone.has(foldKey);
 	return (
 		<div role="group" aria-label={name} className="contents">
 			<Pressable
@@ -293,8 +288,7 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
 			{lanes.map((lane) => {
 				if (!open) return <LaneCount key={lane} lane={lane} count={row.counts[lane]} testId="decision-fold-count" className="py-2 leading-4" />;
 				const cards = row.lanes[lane];
-				const capped = lane === "done" && cards.length > DECISION_DONE_SHOWN;
-				const shown = capped && !allDone ? cappedDoneCards(cards, (card) => card.id, selectedId) : cards;
+				const shown = lane === "done" ? cappedDoneCards(cards, (card) => card.id, selectedId) : cards;
 				return (
 					<ul
 						key={lane}
@@ -306,10 +300,10 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
 								<DecisionCard card={card} selected={card.id === selectedId} kept={keptIds?.has(card.id) ?? false} tabStop={card.id === tabStop} onSelect={onSelect} onKeep={onKeep} now={now} />
 							</li>
 						))}
-						{capped && (allDone || shown.length < cards.length) ? (
+						{onShowDone && shown.length < cards.length ? (
 							<li>
-								<Button aria-expanded={allDone} size="xs" variant="quiet" onClick={() => onToggleDone(foldKey)}>
-									{allDone ? t("decisions.showFewer") : t("decisions.showMore", { count: cards.length - shown.length })}
+								<Button aria-haspopup="dialog" size="xs" variant="quiet" onClick={() => onShowDone({ project: bandKey, stream: row.key })}>
+									{t("decisions.showMore", { count: cards.length - shown.length })}
 								</Button>
 							</li>
 						) : null}

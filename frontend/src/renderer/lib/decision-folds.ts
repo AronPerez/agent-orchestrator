@@ -11,7 +11,7 @@ export type DecisionFoldPreferences = Readonly<Record<string, boolean>>;
 
 export const DECISION_FOLD_STORAGE_KEY = "ao.decisions.fold-state.v1";
 
-/** A stream's Done cell shows this many of its newest cards until it is expanded. */
+/** A stream's Done cell shows this many of its newest cards; the archive holds the rest. */
 export const DECISION_DONE_SHOWN = 3;
 
 // JSON keys keep arbitrary project and stream ids unambiguous.
@@ -109,9 +109,9 @@ export const readDecisionFolds = (): DecisionFoldPreferences => readFoldPreferen
 export const writeDecisionFolds = (preferences: DecisionFoldPreferences): void => writeFoldPreferences(DECISION_FOLD_STORAGE_KEY, preferences);
 
 /**
- * The cards of one Done cell that are drawn while it is cut back: its newest
- * few, and the selected card wherever it sits, so the selection is never
- * hidden behind the cap. Works on cards or on their ids.
+ * The cards of one Done cell that are drawn on the board: its newest few, and
+ * the selected card wherever it sits, so the selection is never hidden behind
+ * the cap. The rest are in the archive. Works on cards or on their ids.
  */
 export function cappedDoneCards<Card>(cards: readonly Card[], idOf: (card: Card) => string, selectedId: string | undefined): Card[] {
 	return cards.filter((card, index) => index < DECISION_DONE_SHOWN || idOf(card) === selectedId);
@@ -119,19 +119,16 @@ export function cappedDoneCards<Card>(cards: readonly Card[], idOf: (card: Card)
 
 /**
  * The cards a person can reach right now, for arrow-key movement: folded
- * projects and streams are left out, and a Done cell is cut back as it is
- * drawn unless its row key is in `expandedDone`.
+ * projects and streams are left out, and a Done cell is cut back as it is drawn.
  */
 export function visibleDecisionTopology(
 	model: DecisionBoardModel,
 	folded: ReadonlySet<string>,
-	expandedDone: ReadonlySet<string>,
 	selectedId?: string,
 ): DecisionTopologyRow[] {
 	return model.topology
 		.filter((row) => !folded.has(decisionBandFoldKey(row.bandKey)) && !folded.has(decisionRowFoldKey(row.bandKey, row.rowKey)))
-		.map((row) => {
-			if (row.lanes.done.length <= DECISION_DONE_SHOWN || expandedDone.has(decisionRowFoldKey(row.bandKey, row.rowKey))) return row;
-			return { ...row, lanes: { ...row.lanes, done: cappedDoneCards(row.lanes.done, (id) => id, selectedId) } };
-		});
+		.map((row) => (row.lanes.done.length <= DECISION_DONE_SHOWN
+			? row
+			: { ...row, lanes: { ...row.lanes, done: cappedDoneCards(row.lanes.done, (id) => id, selectedId) } }));
 }
