@@ -127,7 +127,9 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 		archiveChosen.current = undefined;
 		setArchive((current) => ({ request: (current?.request ?? 0) + 1, scope: next, open: true }));
 	}, []);
-	const discarded = useRef<string | undefined>(undefined);
+	// The tab the discard prompt was raised for, and whether it closed, for where focus goes afterwards.
+	const prompted = useRef<{ id: string; discarded: boolean } | undefined>(undefined);
+	const searchField = useRef<HTMLInputElement>(null);
 	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
 	const search = useDecisionSearch(words);
@@ -187,10 +189,15 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 	const selectTab = useCallback((id: string | undefined) => {
 		void navigate({ to: "/decisions", search: { ...(callId ? { call: callId } : {}), ...(words ? { q: words } : {}), ...scopeSearch, ...(id ? { tab: id } : {}) } });
 	}, [callId, navigate, scopeSearch, words]);
-	// When the last tab closes the strip goes with it; focus then returns to that decision's card.
+	// When the last tab closes the strip goes with it; focus then returns to that decision where
+	// the page shows it: its card on the board, or its row in a search. Failing that, to the
+	// board's tab stop, the first search result, or the search field, so it never falls off the page.
 	const refocusCard = useRef<string | undefined>(undefined);
-	const focusBoardCard = useCallback((id: string) => {
-		(document.querySelector<HTMLElement>(`[data-decision-card="${CSS.escape(id)}"]`) ?? document.querySelector<HTMLElement>("[data-decision-card][tabindex='0']"))?.focus();
+	const focusDecision = useCallback((id: string) => {
+		const own = CSS.escape(id);
+		(document.querySelector<HTMLElement>(`[data-decision-card="${own}"], [data-decision-result="${own}"]`)
+			?? document.querySelector<HTMLElement>("[data-decision-card][tabindex='0'], [data-decision-result]")
+			?? searchField.current)?.focus();
 	}, []);
 	const closeTab = useCallback((id: string) => {
 		setClosing(undefined);
@@ -210,12 +217,14 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 		if (kept.length > 0) refocusCard.current = undefined;
 		else if (!activeTab) {
 			refocusCard.current = undefined;
-			focusBoardCard(id);
+			focusDecision(id);
 		}
-	}, [activeTab, focusBoardCard, kept]);
+	}, [activeTab, focusDecision, kept]);
 	const requestCloseTab = useCallback((id: string) => {
-		if (drafts.has(id)) setClosing(id);
-		else closeTab(id);
+		if (drafts.has(id)) {
+			prompted.current = { id, discarded: false };
+			setClosing(id);
+		} else closeTab(id);
 	}, [closeTab, drafts]);
 	// The chosen scope in words, for the chip that stands in for the list while it is not showing.
 	const scopeLabel = useMemo(() => {
@@ -307,7 +316,7 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 								<TopbarIconButton label={t("decisions.collapseAll")} onClick={() => folds.setAll(true)}><ChevronsDownUp aria-hidden="true" className="size-icon-sm" /></TopbarIconButton>
 							</>
 						) : null}
-						<ToolbarSearch label={t("decisions.search")} query={draft} onQueryChange={setDraft} />
+						<ToolbarSearch label={t("decisions.search")} query={draft} onQueryChange={setDraft} inputRef={searchField} />
 					</>
 				)}
 			/>
@@ -399,7 +408,7 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 						event.preventDefault();
 						const opener = archiveOpener.current;
 						if (opener?.isConnected) opener.focus();
-						else focusBoardCard(archiveChosen.current ?? callId ?? "");
+						else focusDecision(archiveChosen.current ?? callId ?? "");
 					}}
 				/>
 			) : null}
@@ -412,20 +421,23 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 				initialFocus="cancel"
 				onConfirm={() => {
 					if (!closing) return;
-					discarded.current = closing;
+					if (prompted.current) prompted.current.discarded = true;
 					closeTab(closing);
 				}}
 				onOpenChange={(open) => { if (!open) setClosing(undefined); }}
-				// After a discard the button that opened this is gone with its tab, so focus is placed
-				// by hand: on the strip if tabs remain, else on the decision's card.
+				// The dialog has no trigger of its own to return to, so focus is placed by hand. Kept:
+				// back on the tab that was asked about. Discarded: that tab is gone, so on the strip
+				// if tabs remain, else on the decision where the page shows it.
 				onCloseAutoFocus={(event) => {
-					const id = discarded.current;
-					if (id === undefined) return;
-					discarded.current = undefined;
+					const asked = prompted.current;
+					if (!asked) return;
+					prompted.current = undefined;
 					event.preventDefault();
-					const stripTab = document.querySelector<HTMLElement>("[role='tablist'] [role='tab'][tabindex='0']");
+					const stripTab = document.querySelector<HTMLElement>(asked.discarded
+						? "[role='tablist'] [role='tab'][tabindex='0']"
+						: `[role='tablist'] [data-decision-tab="${CSS.escape(asked.id)}"]`);
 					if (stripTab) stripTab.focus();
-					else focusBoardCard(id);
+					else focusDecision(asked.id);
 				}}
 			/>
 		</div>
