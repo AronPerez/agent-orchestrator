@@ -130,6 +130,9 @@ gh ssh-key add ~/.ssh/id_ed25519.pub --type signing --title "release tag signing
 ```sh
 gpg --full-generate-key                  # use your GitHub-verified email
 gpg --list-secret-keys --keyid-format=long   # copy the key id after the slash on the "sec" line
+# Select OpenPGP explicitly: a gpg.format of ssh left from SSH signing would
+# make git read the key id below as an SSH key path, and git tag -s would fail.
+git config --global gpg.format openpgp
 git config --global user.signingkey <KEYID>
 git config --global tag.gpgSign true
 # Register the public key on GitHub. gh needs the write:gpg_key scope once.
