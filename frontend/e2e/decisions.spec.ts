@@ -557,3 +557,47 @@ test("decisions: closing the done archive returns focus to its button, or to the
 	await expect(more).toHaveCount(0);
 	await expect(page.getByRole("button", { name: /^Epic done 4/ })).toBeFocused();
 });
+
+test("decisions: cancelling the discard prompt returns focus to that tab, and the last tab closed over a search hands focus to its result", async ({ page }) => {
+	const ledger = new Ledger([
+		call("dec_a", "Auth retries", { raisedAt: iso(5 * hour) }),
+		call("dec_b", "Billing limits", { raisedAt: iso(2 * hour) }),
+	]);
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openDecisions(page, ledger);
+	const strip = page.getByRole("tablist", { name: "Board and open decisions" });
+	const panel = page.getByRole("complementary", { name: "Decision" });
+	const confirm = page.getByRole("dialog", { name: "Close this decision?" });
+	const tab = strip.getByRole("tab", { name: "Billing limits" });
+
+	// A kept decision with unsent text: closing it asks first.
+	await page.getByRole("button", { name: /^Billing limits/ }).focus();
+	await page.keyboard.press("Shift+Enter");
+	await tab.click();
+	await panel.getByRole("textbox", { name: "Note for the session" }).fill("not sent yet");
+
+	// Backing out, by Escape or by Cancel, puts focus on the tab that was asked about.
+	await tab.focus();
+	await page.keyboard.press("Delete");
+	await expect(confirm).toBeVisible();
+	await page.keyboard.press("Escape");
+	await expect(confirm).toHaveCount(0);
+	await expect(tab).toBeFocused();
+	await page.getByRole("button", { name: "Close Billing limits" }).click();
+	await confirm.getByRole("button", { name: "Cancel" }).click();
+	await expect(confirm).toHaveCount(0);
+	await expect(tab).toBeFocused();
+	await expect(panel.getByRole("textbox", { name: "Note for the session" })).toHaveValue("not sent yet");
+
+	// Search results take the board's place. Closing the last tab over them lands on that decision's result.
+	await page.getByRole("searchbox", { name: "Search all decisions" }).or(page.getByRole("button", { name: "Search all decisions" })).click();
+	await page.getByRole("searchbox", { name: "Search all decisions" }).fill("limits");
+	await expect(page).toHaveURL(/q=limits/);
+	const result = page.getByRole("list", { name: "Search results" }).getByRole("button", { name: /Billing limits/ });
+	await expect(result).toBeVisible();
+	await tab.focus();
+	await page.keyboard.press("Delete");
+	await confirm.getByRole("button", { name: "Close and discard" }).click();
+	await expect(strip).toHaveCount(0);
+	await expect(result).toBeFocused();
+});

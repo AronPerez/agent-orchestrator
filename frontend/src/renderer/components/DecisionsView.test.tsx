@@ -462,6 +462,25 @@ describe("DecisionsView", () => {
 			await waitFor(() => expect(card).toHaveFocus());
 		});
 
+		it("returns focus to the tab when closing it is cancelled, from its button or the keyboard", async () => {
+			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_1", "dec_2"]));
+			answer(board([one, two]), details);
+			render(view({ tab: "dec_2" }));
+			await userEvent.type(await screen.findByRole("textbox", { name: "Note for the session" }), "not sent yet");
+			const tab = within(strip()).getByRole("tab", { name: "Question dec_2" });
+
+			await userEvent.click(screen.getByRole("button", { name: "Close Question dec_2" }));
+			await userEvent.click(within(await screen.findByRole("dialog", { name: "Close this decision?" })).getByRole("button", { name: "Cancel" }));
+			await waitFor(() => expect(tab).toHaveFocus());
+
+			await userEvent.keyboard("{Delete}");
+			await screen.findByRole("dialog", { name: "Close this decision?" });
+			await userEvent.keyboard("{Escape}");
+			expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+			await waitFor(() => expect(tab).toHaveFocus());
+			expect(kept()).toEqual(["dec_1", "dec_2"]);
+		});
+
 		it("keeps focus on the strip when a tab closes and others remain", async () => {
 			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_1", "dec_2"]));
 			answer(board([one, two]), details);
@@ -657,6 +676,37 @@ describe("DecisionsView", () => {
 			renderView(<DecisionsView query="auth" />);
 			await userEvent.click(await screen.findByRole("button", { name: /Auth: old done/ }));
 			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: { call: "dec_ancient", q: "auth" } });
+		});
+
+		describe("when the last tab closes over a search", () => {
+			const keptCall = call({ id: "dec_board" });
+			async function closeLastTab(results: DecisionCall[]) {
+				window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify([keptCall.id]));
+				answerSearch({ auth: results });
+				renderView(<DecisionsView query="auth" />);
+				const tab = await screen.findByRole("tab", { name: "Question dec_board" });
+				if (results.length > 0) await screen.findByRole("list", { name: "Search results" });
+				else await screen.findByText("No decisions match “auth”");
+				act(() => tab.focus());
+				await userEvent.keyboard("{Delete}");
+				expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+			}
+			const result = (id: string) => document.querySelector(`[data-decision-result="${id}"]`);
+
+			it("returns focus to that decision's result", async () => {
+				await closeLastTab([...closedHistory, keptCall]);
+				await waitFor(() => expect(result("dec_board")).toHaveFocus());
+			});
+
+			it("returns focus to the first result when that decision is not among them", async () => {
+				await closeLastTab(closedHistory);
+				await waitFor(() => expect(result("dec_dismissed")).toHaveFocus());
+			});
+
+			it("returns focus to the search field when nothing matches", async () => {
+				await closeLastTab([]);
+				await waitFor(() => expect(screen.getByRole("searchbox", { name: "Search all decisions" })).toHaveFocus());
+			});
 		});
 
 		it("says when nothing matches and clears the search back to the board", async () => {
