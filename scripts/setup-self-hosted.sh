@@ -118,8 +118,12 @@ PY
 else
 	command -v curl >/dev/null || { printf '%s\n' 'curl is required.' >&2; exit 1; }
 	metadata="$stage/release.json"
-	release_api='https://api.github.com/repos/OrchestratorInc/agent-orchestrator/releases/latest'
-	"$nightly" && release_api='https://api.github.com/repos/OrchestratorInc/agent-orchestrator/releases?per_page=100'
+	# This fork installs its own releases, never upstream's; AO_RELEASE_REPO
+	# (owner/repo) overrides. The fork publishes no nightlies.
+	release_repo="${AO_RELEASE_REPO:-AronPerez/agent-orchestrator}"
+	[[ "$release_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { printf 'Invalid AO_RELEASE_REPO: %s\n' "$release_repo" >&2; exit 2; }
+	release_api="https://api.github.com/repos/$release_repo/releases/latest"
+	"$nightly" && release_api="https://api.github.com/repos/$release_repo/releases?per_page=100"
 	curl -fsSL --retry 3 "$release_api" -o "$metadata"
 	asset_info="$(python3 - "$metadata" "$asset" "$nightly" <<'PY'
 import json, re, sys

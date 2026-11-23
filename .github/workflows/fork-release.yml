@@ -304,6 +304,8 @@ jobs:
           mkdir -p dist-release dist-signing
           # Versioned zip: what latest-mac.yml points the updater at.
           cp "$ZIP" "dist-release/Orchestrator-darwin-$ARCH-$VERSION.zip"
+          # Stable-named zip: what `ao start` and setup-self-hosted.sh download.
+          cp "$ZIP" "dist-release/agent-orchestrator-darwin-$ARCH.zip"
           # Stable-named dmg: the first-install download.
           cp "$DMG" "dist-release/agent-orchestrator-darwin-$ARCH.dmg"
           # Signing record the publish job checks: only Developer ID builds publish.
@@ -357,6 +359,14 @@ jobs:
       - name: Stamp version
         run: |
           node -e "const fs=require('fs'); const p=require('./package.json'); p.version=process.env.VERSION; fs.writeFileSync('./package.json', JSON.stringify(p,null,'\t')+'\n');"
+      # Electron 44's V8 headers break Ubuntu 22.04's GCC 11 when node-gyp
+      # rebuilds better-sqlite3 and need clang 15+ for std::source_location
+      # (upstream build-artifacts.yml does the same). Only C++ changes; C builds
+      # such as tmux keep GCC, and the 22.04 glibc baseline stays.
+      - name: Use clang++-15 for native modules
+        run: |
+          command -v clang++-15
+          echo "CXX=clang++-15" >> "$GITHUB_ENV"
       - name: Build desktop packages
         env:
           AO_RELEASE_REPO: ${{ github.repository }}
@@ -530,6 +540,8 @@ jobs:
             "Orchestrator-darwin-x64-$VERSION.zip"
             agent-orchestrator-darwin-arm64.dmg
             agent-orchestrator-darwin-x64.dmg
+            agent-orchestrator-darwin-arm64.zip
+            agent-orchestrator-darwin-x64.zip
             "Orchestrator-$VERSION.AppImage"
             "Orchestrator-$VERSION.AppImage.blockmap"
             agent-orchestrator-linux-x64.AppImage

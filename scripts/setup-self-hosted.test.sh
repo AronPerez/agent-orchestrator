@@ -111,6 +111,8 @@ PY
 					expected=stable
 					[[ "$fixture" == stable ]] || expected=new
 					grep -Fxq "https://example.test/$expected" "$tmp/$fixture.urls"
+					# Fork installs read the fork's releases, never upstream's.
+					grep -q '^https://api.github.com/repos/AronPerez/agent-orchestrator/releases' "$tmp/$fixture.urls"
 					;;
 				*)
 					[[ "$result" != 0 && ! -e "$tmp/host-$fixture/current" ]]

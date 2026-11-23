@@ -130,7 +130,7 @@ Only a maintainer pushes release tags.
    no release exists for the tag yet. It then builds, signs and notarizes, and
    creates a **draft** release.
 5. **Review the draft** on the Releases page:
-   - Assets: two macOS zips and two dmgs, the Linux AppImage (versioned and
+   - Assets: four macOS zips (versioned and stable-named) and two dmgs, the Linux AppImage (versioned and
      stable-named), its `.blockmap`, `.deb`, `.rpm`, `ao-host-linux-x64.tar.gz`,
      `ao-host-linux-arm64.tar.gz`, `latest-mac.yml`, `latest-linux.yml` and
      `SHA256SUMS`.
@@ -152,6 +152,7 @@ Only a maintainer pushes release tags.
 |---|---|
 | `agent-orchestrator-darwin-arm64.dmg`, `agent-orchestrator-darwin-x64.dmg` | macOS first install (Apple silicon, Intel) |
 | `Orchestrator-darwin-{arm64,x64}-<version>.zip` | macOS in-app updates (read through `latest-mac.yml`) |
+| `agent-orchestrator-darwin-{arm64,x64}.zip` | `ao start` and `setup-self-hosted.sh` on macOS |
 | `agent-orchestrator-linux-x64.AppImage` | Linux desktop, any distro |
 | `Orchestrator-<version>.AppImage` (+ `.blockmap`) | Linux in-app updates (read through `latest-linux.yml`) |
 | `agent-orchestrator-linux-x64.deb`, `agent-orchestrator-linux-x64.rpm` | Debian/Ubuntu, Fedora/RHEL/openSUSE |
@@ -214,6 +215,9 @@ spctl --assess -vv "/Applications/Agent Orchestrator.app"   # expect: source=Not
   (`AO_RELEASE_REPO`). The workflow fails if the baked repo is anything else.
 - Stable reads the fork's latest published release and its
   `latest-mac.yml` or `latest-linux.yml`. Drafts are invisible until published.
+- `ao start` and `scripts/setup-self-hosted.sh` download from this fork's
+  releases (`setup-self-hosted.sh` honors `AO_RELEASE_REPO=owner/repo`). Before
+  this, a bare `setup-self-hosted.sh` installed upstream's latest host build.
 - The minimum-version check reads
   [`desktop-version-floor.json`](desktop-version-floor.json) from this fork's
   `develop`, so upstream cannot force-quit fork installs. Set `latest` to
