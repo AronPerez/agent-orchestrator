@@ -16,6 +16,7 @@ vi.mock("./PageTopbar", () => ({
 
 import { useDecisionBoard } from "../hooks/useDecisionInbox";
 import { TooltipProvider } from "./ui/tooltip";
+import { DECISION_FOLD_STORAGE_KEY, decisionRowFoldKey } from "../lib/decision-folds";
 import { DecisionsView } from "./DecisionsView";
 
 function call(overrides: Partial<DecisionCall> & { id: string }): DecisionCall {
@@ -123,8 +124,9 @@ describe("DecisionsView", () => {
 		expect(await screen.findByRole("button", { name: /^Question dec_1/ })).toBeInTheDocument();
 		await userEvent.click(screen.getByRole("button", { name: "Collapse all" }));
 		expect(screen.queryByRole("button", { name: /^Question dec_/ })).not.toBeInTheDocument();
-		expect(screen.getByRole("button", { name: /Shop/ })).toHaveAttribute("aria-expanded", "false");
-		expect(screen.getByRole("button", { name: /skyvern-cloud/ })).toHaveAttribute("aria-expanded", "false");
+		const onBoard = within(screen.getByRole("group", { name: "Decisions board" }));
+		expect(onBoard.getByRole("button", { name: /Shop/ })).toHaveAttribute("aria-expanded", "false");
+		expect(onBoard.getByRole("button", { name: /skyvern-cloud/ })).toHaveAttribute("aria-expanded", "false");
 		await userEvent.click(screen.getByRole("button", { name: "Expand all" }));
 		expect(screen.getByRole("button", { name: /^Question dec_1/ })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: /^Question dec_2/ })).toBeInTheDocument();
@@ -135,6 +137,92 @@ describe("DecisionsView", () => {
 		renderView(<DecisionsView />);
 		expect(await screen.findByText(/ao decision raise/)).toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Collapse all" })).not.toBeInTheDocument();
+	});
+
+	describe("project and stream list", () => {
+		const cloud = { projectId: "cloud", projectName: "skyvern-cloud" };
+		const ledger = () => board([
+			call({ id: "dec_shop" }),
+			call({ id: "dec_wide", ...cloud }),
+			call({ id: "dec_nango", ...cloud, streamSessionId: "nango", streamName: "Nango" }),
+			call({ id: "dec_done", ...cloud, streamSessionId: "nango", streamName: "Nango", state: "done", outcome: "Shipped", outcomeAt: "2026-11-18T11:00:00Z" }),
+		]);
+		const states = () => within(screen.getByRole("list", { name: "Decision states" })).getAllByRole("listitem").map((cell) => cell.textContent);
+
+		it("sits beside the board and narrows it to the project in the URL, counts included", async () => {
+			answer(ledger());
+			renderView(<DecisionsView project="cloud" />);
+			expect(await screen.findByRole("button", { name: /^Question dec_wide/ })).toBeInTheDocument();
+			expect(screen.getByRole("treeitem", { name: /^skyvern-cloud/ })).toHaveAttribute("aria-selected", "true");
+			expect(screen.queryByRole("button", { name: /^Question dec_shop/ })).not.toBeInTheDocument();
+			expect(states()).toEqual(["Needs you2", "In progress0", "Done1Last 7 days"]);
+			// The list names the project, so the board leaves its header out.
+			expect(within(screen.getByRole("group", { name: "Decisions board" })).queryByRole("button", { name: /skyvern-cloud/ })).not.toBeInTheDocument();
+		});
+
+		it("narrows to one stream", async () => {
+			answer(ledger());
+			renderView(<DecisionsView project="cloud" stream="h_a:nango" />);
+			expect(await screen.findByRole("button", { name: /^Question dec_nango/ })).toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: /^Question dec_wide/ })).not.toBeInTheDocument();
+			expect(screen.getByRole("treeitem", { name: /^Nango/ })).toHaveAttribute("aria-selected", "true");
+			expect(states()).toEqual(["Needs you1", "In progress0", "Done1Last 7 days"]);
+		});
+
+		it("shows every project for a scope that is no longer on the board", async () => {
+			answer(ledger());
+			renderView(<DecisionsView project="gone" />);
+			expect(await screen.findByRole("button", { name: /^Question dec_shop/ })).toBeInTheDocument();
+			expect(screen.getByRole("treeitem", { name: /^All projects/ })).toHaveAttribute("aria-selected", "true");
+		});
+
+		it("writes the chosen row to the URL, keeps the open call, and opens a chosen stream's row", async () => {
+			answer(ledger(), { dec_shop: call({ id: "dec_shop" }) });
+			// The Nango row was folded on an earlier visit.
+			window.localStorage.setItem(DECISION_FOLD_STORAGE_KEY, JSON.stringify({ [decisionRowFoldKey("cloud", "h_a:nango")]: true }));
+			const view = renderView(<DecisionsView callId="dec_shop" />);
+			await screen.findByRole("button", { name: /^Question dec_shop/ });
+			await userEvent.click(screen.getByRole("treeitem", { name: /^skyvern-cloud/ }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: { call: "dec_shop", project: "cloud" } });
+			await userEvent.click(screen.getByRole("treeitem", { name: /^Nango/ }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: { call: "dec_shop", project: "cloud", stream: "h_a:nango" } });
+			view.rerender(<QueryClientProvider client={clientOf(view)}><TooltipProvider><DecisionsView callId="dec_shop" project="cloud" stream="h_a:nango" /></TooltipProvider></QueryClientProvider>);
+			expect(await screen.findByRole("button", { name: /^Question dec_nango/ })).toBeInTheDocument();
+			await userEvent.click(screen.getByRole("treeitem", { name: /^All projects/ }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: { call: "dec_shop" } });
+		});
+
+		it("keeps the scope when a card is opened or closed", async () => {
+			answer(ledger(), { dec_wide: call({ id: "dec_wide", ...cloud }) });
+			const view = renderView(<DecisionsView project="cloud" />);
+			await userEvent.click(await screen.findByRole("button", { name: /^Question dec_wide/ }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: { call: "dec_wide", project: "cloud" } });
+			view.rerender(<QueryClientProvider client={clientOf(view)}><TooltipProvider><DecisionsView callId="dec_wide" project="cloud" /></TooltipProvider></QueryClientProvider>);
+			await userEvent.click(await screen.findByRole("button", { name: "Close decision" }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: { project: "cloud" } });
+		});
+
+		it("hides from its top-bar button and stays hidden on the next visit", async () => {
+			answer(ledger());
+			const first = renderView(<DecisionsView />);
+			await screen.findByRole("tree", { name: "Projects and streams" });
+			await userEvent.click(screen.getByRole("button", { name: "Hide project list" }));
+			expect(screen.queryByRole("tree", { name: "Projects and streams" })).not.toBeInTheDocument();
+			first.unmount();
+			renderView(<DecisionsView />);
+			await screen.findByRole("button", { name: /^Question dec_shop/ });
+			expect(screen.queryByRole("tree", { name: "Projects and streams" })).not.toBeInTheDocument();
+			await userEvent.click(screen.getByRole("button", { name: "Show project list" }));
+			expect(screen.getByRole("tree", { name: "Projects and streams" })).toBeInTheDocument();
+		});
+
+		it("leaves with the board during a search, and is not offered before any decision exists", async () => {
+			answer(ledger());
+			renderView(<DecisionsView query="auth" project="cloud" />);
+			await waitFor(() => expect(getMock).toHaveBeenCalled());
+			expect(screen.queryByRole("tree", { name: "Projects and streams" })).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: "Hide project list" })).not.toBeInTheDocument();
+		});
 	});
 
 	it("opens a card as the selected call in the URL and marks the selected one", async () => {

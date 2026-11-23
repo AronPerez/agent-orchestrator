@@ -1,8 +1,14 @@
-/** Search params of the Decisions page: `/decisions?call=<id>&q=<words>`. */
-export type DecisionsSearch = { call?: string; q?: string };
+/**
+ * Search params of the Decisions page:
+ * `/decisions?call=<id>&q=<words>&project=<band key>&stream=<row key>`.
+ * `project` and `stream` narrow the board to what was chosen in the list beside it.
+ */
+export type DecisionsSearch = { call?: string; q?: string; project?: string; stream?: string };
 
 export const DECISIONS_CALL_MAX = 200;
 export const DECISIONS_QUERY_MAX = 500;
+/** A project id, or a machine id and a session id; far below this in practice. */
+export const DECISIONS_SCOPE_MAX = 400;
 
 // A call id is one opaque path-safe segment, e.g. dec_6f1c…; nothing that could
 // change the detail request's path or carry its own query.
@@ -31,6 +37,14 @@ export function validateDecisionsSearch(search: Record<string, unknown>): Decisi
 	if (call && isDecisionCallId(call)) result.call = call;
 	const q = boundedText(search.q, DECISIONS_QUERY_MAX);
 	if (q) result.q = q;
+	// The scope is only ever compared with keys on the board, never sent to the
+	// daemon, so any bounded text is safe. A stream means nothing without its project.
+	const project = boundedText(search.project, DECISIONS_SCOPE_MAX);
+	if (project) {
+		result.project = project;
+		const stream = boundedText(search.stream, DECISIONS_SCOPE_MAX);
+		if (stream) result.stream = stream;
+	}
 	return result;
 }
 

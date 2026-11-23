@@ -88,21 +88,25 @@ export function keepDecisionCardOpen(model: DecisionBoardModel, preferences: Dec
 	return next;
 }
 
-export function readDecisionFolds(): DecisionFoldPreferences {
+/** Read saved fold choices from local storage; damaged or missing storage reads as none. */
+export function readFoldPreferences(storageKey: string): DecisionFoldPreferences {
 	try {
-		return parseFleetCollapsePreferences(window.localStorage.getItem(DECISION_FOLD_STORAGE_KEY));
+		return parseFleetCollapsePreferences(window.localStorage.getItem(storageKey));
 	} catch {
 		return {};
 	}
 }
 
-export function writeDecisionFolds(preferences: DecisionFoldPreferences): void {
+export function writeFoldPreferences(storageKey: string, preferences: DecisionFoldPreferences): void {
 	try {
-		window.localStorage.setItem(DECISION_FOLD_STORAGE_KEY, JSON.stringify(limitFleetCollapsePreferences(preferences)));
+		window.localStorage.setItem(storageKey, JSON.stringify(limitFleetCollapsePreferences(preferences)));
 	} catch {
-		// A full or unavailable store must never make the board unusable.
+		// A full or unavailable store must never make the page unusable.
 	}
 }
+
+export const readDecisionFolds = (): DecisionFoldPreferences => readFoldPreferences(DECISION_FOLD_STORAGE_KEY);
+export const writeDecisionFolds = (preferences: DecisionFoldPreferences): void => writeFoldPreferences(DECISION_FOLD_STORAGE_KEY, preferences);
 
 /**
  * The cards of one Done cell that are drawn while it is cut back: its newest

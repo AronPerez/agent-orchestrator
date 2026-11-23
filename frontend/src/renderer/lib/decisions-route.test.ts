@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DECISIONS_CALL_MAX, DECISIONS_QUERY_MAX, formatDecisionCount, validateDecisionsSearch } from "./decisions-route";
+import { DECISIONS_CALL_MAX, DECISIONS_QUERY_MAX, DECISIONS_SCOPE_MAX, formatDecisionCount, validateDecisionsSearch } from "./decisions-route";
 
 describe("validateDecisionsSearch", () => {
 	it("keeps a selected call and search words", () => {
@@ -26,6 +26,22 @@ describe("validateDecisionsSearch", () => {
 	it("keeps numeric-looking search words the router parsed as numbers", () => {
 		expect(validateDecisionsSearch({ q: 2026 })).toEqual({ q: "2026" });
 		expect(validateDecisionsSearch({ call: 42 })).toEqual({});
+	});
+});
+
+describe("validateDecisionsSearch scope", () => {
+	it("keeps a chosen project, and a stream only together with its project", () => {
+		expect(validateDecisionsSearch({ project: "cloud" })).toEqual({ project: "cloud" });
+		expect(validateDecisionsSearch({ project: "cloud", stream: "h_a:nango" })).toEqual({ project: "cloud", stream: "h_a:nango" });
+		expect(validateDecisionsSearch({ stream: "h_a:nango" })).toEqual({});
+		expect(validateDecisionsSearch({ project: "@no-project", stream: "@project", call: "dec_1" })).toEqual({ project: "@no-project", stream: "@project", call: "dec_1" });
+	});
+
+	it("keeps a project id the router parsed as a number, and drops oversized or non-text values", () => {
+		expect(validateDecisionsSearch({ project: 42 })).toEqual({ project: "42" });
+		expect(validateDecisionsSearch({ project: "p".repeat(DECISIONS_SCOPE_MAX + 1) })).toEqual({});
+		expect(validateDecisionsSearch({ project: "cloud", stream: ["x"] })).toEqual({ project: "cloud" });
+		expect(validateDecisionsSearch({ project: { id: "cloud" } })).toEqual({});
 	});
 });
 
