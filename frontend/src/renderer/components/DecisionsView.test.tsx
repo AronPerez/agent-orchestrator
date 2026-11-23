@@ -516,6 +516,29 @@ describe("DecisionsView", () => {
 			await waitFor(() => expect(screen.queryByRole("dialog", { name: "Done decisions" })).not.toBeInTheDocument());
 		});
 
+		it("widens the board when the chosen decision lies outside what it is narrowed to", async () => {
+			answer(ledger());
+			renderView(<DecisionsView project="cloud" stream="h_a:nango" />);
+			await userEvent.click(await screen.findByRole("button", { name: "2 more" }));
+			const dialog = await screen.findByRole("dialog", { name: "Done decisions" });
+			await userEvent.click(within(dialog).getByRole("button", { name: /Show every done decision$/ }));
+			await userEvent.click(within(dialog).getByRole("button", { name: /^Question shop_done/ }));
+			// The board would not hold that card while narrowed to the Nango stream, so it shows every project.
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: { call: "shop_done" } });
+		});
+
+		it("returns focus to the button that opened it when it closes", async () => {
+			answer(ledger());
+			renderView(<DecisionsView />);
+			const opener = await screen.findByRole("button", { name: "2 more" });
+			act(() => opener.focus());
+			await userEvent.keyboard("{Enter}");
+			expect(await screen.findByRole("combobox", { name: "Search done decisions" })).toHaveFocus();
+			await userEvent.keyboard("{Escape}");
+			await waitFor(() => expect(screen.queryByRole("dialog", { name: "Done decisions" })).not.toBeInTheDocument());
+			await waitFor(() => expect(opener).toHaveFocus());
+		});
+
 		it("starts each opening from its own stream and an empty search", async () => {
 			answer(ledger());
 			renderView(<DecisionsView />);

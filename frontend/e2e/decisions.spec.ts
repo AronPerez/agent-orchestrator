@@ -527,3 +527,33 @@ test("decisions: the done archive moves one selection through its grid as laid o
 	await expect(archive).toHaveCount(0);
 	await expect(page.getByRole("complementary", { name: "Decision" }).getByRole("heading", { level: 2 })).toHaveText("Project done");
 });
+
+test("decisions: closing the done archive returns focus to its button, or to the chosen card when that button is gone", async ({ page }) => {
+	const epic = { streamSessionId: "epic", streamName: "Checkout epic" };
+	const done = (n: number) => call(`epic_${n}`, `Epic done ${n}`, {
+		state: "done", stateLabel: "Done", chosenLabel: "Ship it", outcome: `Outcome ${n}`, answeredAt: iso((n + 1) * hour), outcomeAt: iso(n * hour), ...epic,
+	});
+	// Four done: three on the board and one behind "1 more".
+	const ledger = new Ledger([call("dec_open", "Open question", epic), ...[1, 2, 3, 4].map(done)]);
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openDecisions(page, ledger);
+	const more = page.getByRole("button", { name: "1 more" });
+	const archive = page.getByRole("dialog", { name: "Done decisions" });
+
+	await more.focus();
+	await page.keyboard.press("Enter");
+	await expect(archive.getByRole("combobox", { name: "Search done decisions" })).toBeFocused();
+	await page.keyboard.press("Escape");
+	await expect(archive).toHaveCount(0);
+	await expect(more).toBeFocused();
+
+	// Choosing the one that was out of sight puts it on the board, so nothing is left behind "more".
+	await page.keyboard.press("Enter");
+	await page.keyboard.press("End");
+	await expect(archive.locator("[role='gridcell'][aria-selected='true']")).toContainText("Epic done 4");
+	await page.keyboard.press("Enter");
+	await expect(archive).toHaveCount(0);
+	await expect(page).toHaveURL(/call=epic_4/);
+	await expect(more).toHaveCount(0);
+	await expect(page.getByRole("button", { name: /^Epic done 4/ })).toBeFocused();
+});

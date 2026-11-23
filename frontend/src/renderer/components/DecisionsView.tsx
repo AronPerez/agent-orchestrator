@@ -119,7 +119,14 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 	// request has its own number, so it starts from its own stream and an empty search.
 	const [archive, setArchive] = useState<{ request: number; scope: DecisionArchiveScope; open: boolean } | undefined>(undefined);
 	const archiveEntries = useMemo(() => decisionArchiveEntries(model), [model]);
-	const showDone = useCallback((next: DecisionArchiveScope) => setArchive((current) => ({ request: (current?.request ?? 0) + 1, scope: next, open: true })), []);
+	// What opened the archive, and what was chosen in it, for where focus goes when it closes.
+	const archiveOpener = useRef<HTMLElement | null>(null);
+	const archiveChosen = useRef<string | undefined>(undefined);
+	const showDone = useCallback((next: DecisionArchiveScope) => {
+		archiveOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		archiveChosen.current = undefined;
+		setArchive((current) => ({ request: (current?.request ?? 0) + 1, scope: next, open: true }));
+	}, []);
 	const discarded = useRef<string | undefined>(undefined);
 	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
@@ -148,6 +155,16 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 	const selectCall = useCallback((id: string) => {
 		void navigate({ to: "/decisions", search: { call: id, ...(words ? { q: words } : {}), ...scopeSearch } });
 	}, [navigate, scopeSearch, words]);
+	// A decision chosen in the archive opens beside the board. The archive can be widened past
+	// the stream it opened at, so the choice may lie outside what the board is narrowed to; the
+	// board then shows every project, so the chosen card is on it.
+	const openFromArchive = useCallback((id: string) => {
+		archiveChosen.current = id;
+		const at = model.cardById.get(id);
+		const inScope = !at || scope.project === undefined || (at.bandKey === scope.project && (scope.stream === undefined || at.rowKey === scope.stream));
+		if (inScope) selectCall(id);
+		else void navigate({ to: "/decisions", search: { call: id, ...(words ? { q: words } : {}) } });
+	}, [model, navigate, scope.project, scope.stream, selectCall, words]);
 	const chooseScope = useCallback((next: DecisionScope) => {
 		// Choosing a stream shows its cards, even if its row was folded.
 		if (next.project !== undefined && next.stream !== undefined) folds.open(decisionRowFoldKey(next.project, next.stream));
@@ -373,8 +390,17 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 					open={archive.open}
 					entries={archiveEntries}
 					scope={archive.scope}
-					onOpen={selectCall}
+					onOpen={openFromArchive}
 					onOpenChange={(open) => setArchive((current) => (current ? { ...current, open } : current))}
+					// The dialog has no trigger of its own to return to. Focus goes back to the button
+					// that opened it, or to the chosen decision's card when that button is gone, as it is
+					// when the chosen card is the one that was out of sight.
+					onCloseAutoFocus={(event) => {
+						event.preventDefault();
+						const opener = archiveOpener.current;
+						if (opener?.isConnected) opener.focus();
+						else focusBoardCard(archiveChosen.current ?? callId ?? "");
+					}}
 				/>
 			) : null}
 			<ConfirmDialog

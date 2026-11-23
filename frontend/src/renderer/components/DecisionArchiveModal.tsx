@@ -40,7 +40,11 @@ export function DecisionArchiveModal({ open, onOpenChange, entries, scope, onOpe
 	const cellId = (entry: DecisionArchiveEntry) => `${baseId}-card-${entry.card.id}`;
 	const [query, setQuery] = useState("");
 	const [narrowed, setNarrowed] = useState(true);
-	const [activeIndex, setActiveIndex] = useState(0);
+	// One selection, held by decision: another one finishing while the archive is
+	// open is inserted ahead of it and must not hand the selection, and Enter, to
+	// whichever card took its place. By position only until a card is chosen,
+	// and again once the held decision is gone, so it stays where it was.
+	const [activeState, setActiveState] = useState<{ id?: string; index: number }>({ index: 0 });
 
 	const projectName = (entry: DecisionArchiveEntry) => entry.projectName ?? t("decisions.noProject");
 	const streamName = (entry: DecisionArchiveEntry) => entry.projectWide
@@ -51,7 +55,22 @@ export function DecisionArchiveModal({ open, onOpenChange, entries, scope, onOpe
 	const activeScope = narrowed ? scope : undefined;
 	// Searched as read: the title, the pick, the outcome and where it belongs. The board holds a week of Done at most, so this is cheap per render.
 	const results = filterDecisionArchive(entries, activeScope, query, (entry) => [entry.card.title, chosenText(entry), outcomeText(entry), projectName(entry), streamName(entry)].join(" "));
-	const active = results[Math.min(activeIndex, results.length - 1)];
+	const heldIndex = activeState.id === undefined ? -1 : results.findIndex((entry) => entry.card.id === activeState.id);
+	const activeIndex = heldIndex >= 0 ? heldIndex : Math.min(activeState.index, results.length - 1);
+	const active = activeIndex >= 0 ? results[activeIndex] : undefined;
+	if (heldIndex >= 0 && heldIndex !== activeState.index) {
+		// The held decision moved (a newer one came in ahead of it): remember where
+		// it is now, so that is the place the selection keeps if it later goes.
+		setActiveState({ id: activeState.id, index: heldIndex });
+	} else if (heldIndex < 0 && activeState.id !== undefined && !entries.some((entry) => entry.card.id === activeState.id)) {
+		// It left the archive altogether (not merely hidden by the search): the
+		// card now in its place becomes the held one.
+		setActiveState(active ? { id: active.card.id, index: activeIndex } : { index: activeState.index });
+	}
+	const select = (index: number) => {
+		const entry = results[index];
+		if (entry) setActiveState({ id: entry.card.id, index });
+	};
 	// The scope in words, from any entry of that stream.
 	const scopeEntry = scope ? entries.find((entry) => entry.projectKey === scope.project && entry.streamKey === scope.stream) : undefined;
 
@@ -71,8 +90,8 @@ export function DecisionArchiveModal({ open, onOpenChange, entries, scope, onOpe
 		onOpen(entry.card.id);
 	};
 	const move = (key: GridNavigationKey) => {
-		if (results.length === 0) return;
-		const at = Math.min(activeIndex, results.length - 1);
+		if (activeIndex < 0) return;
+		const at = activeIndex;
 		const columns = measureGridColumns(gridRef.current);
 		// Only a page key needs the rows' laid-out heights.
 		const pageRows = key === "PageUp" || key === "PageDown"
@@ -81,11 +100,12 @@ export function DecisionArchiveModal({ open, onOpenChange, entries, scope, onOpe
 		const target = gridNavigationTarget(key, at, results.length, columns, pageRows);
 		if (target < 0 || target === at) return;
 		scrollToActive.current = true;
-		setActiveIndex(target);
+		select(target);
 	};
 	const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
 		if (event.nativeEvent.isComposing || event.defaultPrevented) return;
-		if (isGridNavigationKey(event.key) && !event.altKey && !event.ctrlKey && !event.metaKey) {
+		// Modified arrows and Home/End, Shift included, stay the field's text editing.
+		if (isGridNavigationKey(event.key) && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
 			event.preventDefault();
 			move(event.key);
 		} else if (event.key === "Enter" && active && (event.target as HTMLElement) === inputRef.current) {
@@ -99,7 +119,7 @@ export function DecisionArchiveModal({ open, onOpenChange, entries, scope, onOpe
 		if (event.movementX === 0 && event.movementY === 0) return;
 		const id = (event.target as HTMLElement).closest<HTMLElement>("[data-decision-archive]")?.dataset.decisionArchive;
 		const index = results.findIndex((entry) => entry.card.id === id);
-		if (index >= 0 && index !== activeIndex) setActiveIndex(index);
+		if (index >= 0 && index !== activeIndex) select(index);
 	};
 
 	return (
@@ -132,7 +152,7 @@ export function DecisionArchiveModal({ open, onOpenChange, entries, scope, onOpe
 						onChange={(event) => {
 							setQuery(event.target.value);
 							// A new search starts at its first result.
-							setActiveIndex(0);
+							setActiveState({ index: 0 });
 							scrollToActive.current = true;
 						}}
 						placeholder={t("decisions.archive.search")}
@@ -157,7 +177,7 @@ export function DecisionArchiveModal({ open, onOpenChange, entries, scope, onOpe
 								removeLabel={t("decisions.archive.showAll", { scope: `${projectName(scopeEntry)}: ${streamName(scopeEntry)}` })}
 								onRemove={() => {
 									setNarrowed(false);
-									setActiveIndex(0);
+									setActiveState({ index: 0 });
 									inputRef.current?.focus();
 								}}
 							/>
