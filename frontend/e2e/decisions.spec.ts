@@ -437,12 +437,14 @@ test("decisions: overflowing tabs stay reachable, a hidden list still names its 
 	const calls = Array.from({ length: 12 }, (_, index) => call(`dec_${index + 1}`, `Question number ${index + 1}`, index % 2 ? cloud : {}));
 	const ledger = new Ledger(calls);
 	await page.setViewportSize({ width: 1000, height: 800 });
-	await openDecisions(page, ledger, "/#/decisions", (target) => target.addInitScript((ids) => {
-		// Twelve decisions kept open, seeded once so later reloads keep what the test did.
-		if (window.sessionStorage.getItem("e2e-tabs-seeded")) return;
-		window.sessionStorage.setItem("e2e-tabs-seeded", "1");
-		window.localStorage.setItem("ao.decisions.open-tabs.v1", JSON.stringify(ids));
-	}, calls.map((item) => item.id)));
+	await openDecisions(page, ledger, "/#/decisions", async (target) => {
+		await target.addInitScript((ids) => {
+			// Twelve decisions kept open, seeded once so later reloads keep what the test did.
+			if (window.sessionStorage.getItem("e2e-tabs-seeded")) return;
+			window.sessionStorage.setItem("e2e-tabs-seeded", "1");
+			window.localStorage.setItem("ao.decisions.open-tabs.v1", JSON.stringify(ids));
+		}, calls.map((item) => item.id));
+	});
 	const strip = page.getByRole("tablist", { name: "Board and open decisions" });
 	const tab = (n: number) => strip.getByRole("tab", { name: `Question number ${n}`, exact: true });
 	await expect(strip.getByRole("tab")).toHaveCount(13);
