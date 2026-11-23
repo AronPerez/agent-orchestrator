@@ -1,0 +1,602 @@
+name: Fork release
+
+# Builds this fork's macOS and Linux release and, for a pushed tag, creates a
+# DRAFT GitHub Release that a human reviews and publishes. See RELEASING.md.
+#
+#   tag push vX.Y.Z-fork.N   build, sign, notarize, then create a draft release
+#   workflow_dispatch        dry run: the same build, run artifacts only, no
+#                            release. `skip-mac-signing` (dry runs only) builds
+#                            macOS unsigned when the Apple secrets are absent.
+#
+# This is the one workflow release-workflows.test.ts lets create a release, and
+# only as a draft on the tag that triggered it. It never pushes tags, never
+# publishes, and never edits or deletes a release.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+-fork.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or SHA to build"
+        type: string
+        required: true
+        default: develop
+      version:
+        description: "Version to stamp, X.Y.Z-fork.N (X.Y.Z must equal frontend/package.json)"
+        type: string
+        required: true
+      skip-mac-signing:
+        description: "DRY RUN ONLY: build macOS unsigned (never publishable)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORK_REPO: AronPerez/agent-orchestrator
+  VITE_AO_TEAMS: ${{ vars.VITE_AO_TEAMS }}
+
+jobs:
+  prepare:
+    name: Resolve release
+    # Never run on upstream or on a fork of this fork.
+    if: github.repository == 'AronPerez/agent-orchestrator'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      sign-mac: ${{ steps.resolve.outputs.sign-mac }}
+      previous-tag: ${{ steps.resolve.outputs.previous-tag }}
+      workos-client-id: ${{ steps.workos.outputs.client-id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history and branches, for the "tag is on develop" check.
+          fetch-depth: 0
+      - name: Resolve version, commit and mode
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          SKIP_MAC_SIGNING: ${{ inputs.skip-mac-signing }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" == "push" ]]; then
+            tag="$REF_NAME"
+            version="${tag#v}"
+            sha="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+            publish=true
+            sign_mac=true
+          else
+            tag=""
+            version="$INPUT_VERSION"
+            sha="$(git rev-parse --verify --quiet "origin/$INPUT_REF^{commit}" || git rev-parse --verify "$INPUT_REF^{commit}")"
+            publish=false
+            if [[ "$SKIP_MAC_SIGNING" == "true" ]]; then sign_mac=false; else sign_mac=true; fi
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-fork\.[1-9][0-9]*$ ]]; then
+            echo "::error::Version '$version' is not X.Y.Z-fork.N (N >= 1)."
+            exit 1
+          fi
+          base="${version%%-fork.*}"
+          package_version="$(git show "$sha:frontend/package.json" | jq -r '.version')"
+          if [[ "$base" != "$package_version" ]]; then
+            echo "::error::Version base $base does not match frontend/package.json $package_version at $sha. Tag v$package_version-fork.N instead."
+            exit 1
+          fi
+
+          if [[ "$publish" == "true" ]]; then
+            if ! git merge-base --is-ancestor "$sha" origin/develop; then
+              echo "::error::Tag $tag points at $sha, which is not on develop. Fork releases are cut from develop only."
+              exit 1
+            fi
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::A release for $tag already exists. Delete the draft first if you mean to rebuild it."
+              exit 1
+            fi
+          fi
+
+          # Release notes start after the newest PUBLISHED fork release below this one.
+          previous="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-fork\.[0-9]+$' \
+            | { cat; echo "v$version"; } | sort -V | uniq \
+            | grep -B1 -Fx "v$version" | grep -vFx "v$version" || true)"
+
+          {
+            echo "version=$version"
+            echo "sha=$sha"
+            echo "tag=$tag"
+            echo "publish=$publish"
+            echo "sign-mac=$sign_mac"
+            echo "previous-tag=$previous"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Fork release"
+            echo "- version: \`$version\` at \`$sha\`"
+            echo "- mode: $([[ "$publish" == true ]] && echo "draft release for $tag" || echo "dry run (no release)")"
+            echo "- macOS signing: $sign_mac"
+            echo "- notes start after: ${previous:-<first fork release>}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Require Apple signing secrets
+        if: steps.resolve.outputs.sign-mac == 'true'
+        shell: bash
+        env:
+          HAS_CSC_LINK: ${{ secrets.CSC_LINK != '' }}
+          HAS_CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD != '' }}
+          HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+          HAS_APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 != '' }}
+          HAS_APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID != '' }}
+          HAS_APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER != '' }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER; do
+            has="HAS_$name"
+            [[ "${!has}" == "true" ]] || missing+=("$name")
+          done
+          if ((${#missing[@]})); then
+            echo "::error::Missing repository secrets for macOS signing: ${missing[*]}. See RELEASING.md, 'Apple signing secrets'. A release is never built unsigned; only a workflow_dispatch dry run may set skip-mac-signing."
+            exit 1
+          fi
+          echo "All six Apple signing secrets are set."
+      - name: Resolve WorkOS client
+        id: workos
+        shell: bash
+        env:
+          VAR_CLIENT_ID: ${{ vars.VITE_WORKOS_CLIENT_ID }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # A public OAuth client id, not a secret. Without the repository
+          # variable, use the default the app already ships, so the daemon's
+          # `ao remote-host link` signs in with the same client as the app.
+          id="$VAR_CLIENT_ID"
+          if [[ -z "$id" ]]; then
+            id="$(git show "$SHA:frontend/src/main/cloud-auth.ts" | sed -n 's/^const DEFAULT_WORKOS_CLIENT_ID = "\(client_[A-Za-z0-9]*\)";$/\1/p')"
+          fi
+          [[ "$id" =~ ^client_[A-Za-z0-9]+$ ]] || { echo "::error::Could not resolve a WorkOS client id."; exit 1; }
+          echo "client-id=$id" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SIGN_MAC: ${{ needs.prepare.outputs.sign-mac }}
+      VITE_WORKOS_CLIENT_ID: ${{ needs.prepare.outputs.workos-client-id }}
+    defaults:
+      run:
+        working-directory: frontend
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            packages/product-ui/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - run: npm ci
+      - name: Install product UI dependencies
+        run: npm ci
+        working-directory: packages/product-ui
+      - name: Stamp version
+        run: |
+          node -e "const fs=require('fs'); const p=require('./package.json'); p.version=process.env.VERSION; fs.writeFileSync('./package.json', JSON.stringify(p,null,'\t')+'\n');"
+      - name: Set up Developer ID signing and notarization
+        if: env.SIGN_MAC == 'true'
+        uses: ./.github/actions/macos-signing-setup
+        with:
+          csc-link: ${{ secrets.CSC_LINK }}
+          csc-key-password: ${{ secrets.CSC_KEY_PASSWORD }}
+          apple-api-key-base64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          apple-api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
+          apple-api-issuer: ${{ secrets.APPLE_API_ISSUER }}
+          apple-signing-identity: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      - name: Build
+        env:
+          AO_RELEASE_REPO: ${{ github.repository }}
+          AO_PUBLISHED_BUILD: "1"
+        run: npm run make
+      - name: Verify baked update feed repo
+        run: |
+          set -euo pipefail
+          owner="$(sed -n 's/^owner:[[:space:]]*//p' app-update.yml)"
+          repo="$(sed -n 's/^repo:[[:space:]]*//p' app-update.yml)"
+          echo "baked feed: $owner/$repo"
+          [[ "$owner/$repo" == "$FORK_REPO" ]] || { echo "::error::app-update.yml bakes $owner/$repo, expected $FORK_REPO"; exit 1; }
+      - name: Locate build output
+        id: out
+        run: |
+          set -euo pipefail
+          app="$(find out -maxdepth 2 -type d -name '*.app' -path "*-darwin-${{ matrix.arch }}/*" | head -n1)"
+          zip="$(find out/make/zip/darwin -name '*.zip' | head -n1)"
+          dmg="$(find out/make -maxdepth 1 -name '*.dmg' | head -n1)"
+          for f in "$app" "$zip" "$dmg"; do [[ -n "$f" && -e "$f" ]] || { echo "::error::missing build output (app=$app zip=$zip dmg=$dmg)"; exit 1; }; done
+          { echo "app=$app"; echo "zip=$zip"; echo "dmg=$dmg"; } >> "$GITHUB_OUTPUT"
+      - name: Smoke-test bundled daemon
+        env:
+          APP: ${{ steps.out.outputs.app }}
+        run: |
+          set -euo pipefail
+          actual="$("$APP/Contents/Resources/daemon/ao" version | awk '{print $1}')"
+          [[ "$actual" == "$VERSION" ]] || { echo "::error::bundled ao reports $actual, expected $VERSION"; exit 1; }
+      - name: Verify Developer ID signature and notarization
+        if: env.SIGN_MAC == 'true'
+        env:
+          APP: ${{ steps.out.outputs.app }}
+          DMG: ${{ steps.out.outputs.dmg }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### macOS ${{ matrix.arch }} signing"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          details="$(codesign -dv --verbose=4 "$APP" 2>&1)"
+          [[ "$details" == *$'\n'"Authority=Developer ID Application:"* ]] \
+            || { echo "::error::$APP is not signed with a Developer ID Application certificate"; exit 1; }
+          app_assessment="$(spctl --assess --type execute -vvv "$APP" 2>&1)"
+          echo "$app_assessment" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ "$app_assessment" == *"source=Notarized Developer ID"* ]] \
+            || { echo "::error::Gatekeeper does not report $APP as Notarized Developer ID"; exit 1; }
+          xcrun stapler validate "$APP" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          xcrun stapler validate "$DMG" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          dmg_assessment="$(spctl --assess --type open --context context:primary-signature -vvv "$DMG" 2>&1)"
+          echo "$dmg_assessment" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ "$dmg_assessment" == *"source=Notarized Developer ID"* ]] \
+            || { echo "::error::Gatekeeper does not report $DMG as Notarized Developer ID"; exit 1; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      # Submission names, statuses and ids only; the API key itself never prints.
+      - name: Report notarization submissions
+        if: env.SIGN_MAC == 'true'
+        run: |
+          set -euo pipefail
+          history="$(xcrun notarytool history --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" --output-format json)"
+          {
+            echo "### Notarization submissions (newest first)"
+            echo '```'
+            jq -r '.history[:4][] | "\(.createdDate)  \(.status)  \(.name)  \(.id)"' <<<"$history"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Collect release files
+        env:
+          APP: ${{ steps.out.outputs.app }}
+          ZIP: ${{ steps.out.outputs.zip }}
+          DMG: ${{ steps.out.outputs.dmg }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release dist-signing
+          # Versioned zip: what latest-mac.yml points the updater at.
+          cp "$ZIP" "dist-release/Orchestrator-darwin-$ARCH-$VERSION.zip"
+          # Stable-named dmg: the first-install download.
+          cp "$DMG" "dist-release/agent-orchestrator-darwin-$ARCH.dmg"
+          # Signing record the publish job checks: only Developer ID builds publish.
+          if [[ "$SIGN_MAC" == "true" ]]; then echo developer-id; else echo unsigned-dry-run; fi > "dist-signing/mac-$ARCH.txt"
+          ls -l dist-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-mac-${{ matrix.arch }}
+          path: frontend/dist-release/*
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signing-mac-${{ matrix.arch }}
+          path: frontend/dist-signing/*
+          retention-days: 7
+          if-no-files-found: error
+
+  linux-x64:
+    name: Linux x64
+    needs: prepare
+    # Oldest supported glibc baseline, so the bundle also runs on Ubuntu 22.04.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VITE_WORKOS_CLIENT_ID: ${{ needs.prepare.outputs.workos-client-id }}
+    defaults:
+      run:
+        working-directory: frontend
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            packages/product-ui/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - run: npm ci
+      - name: Install product UI dependencies
+        run: npm ci
+        working-directory: packages/product-ui
+      - name: Stamp version
+        run: |
+          node -e "const fs=require('fs'); const p=require('./package.json'); p.version=process.env.VERSION; fs.writeFileSync('./package.json', JSON.stringify(p,null,'\t')+'\n');"
+      - name: Build desktop packages
+        env:
+          AO_RELEASE_REPO: ${{ github.repository }}
+          AO_PUBLISHED_BUILD: "1"
+        run: npm run make
+      - name: Verify baked update feed repo
+        run: |
+          set -euo pipefail
+          owner="$(sed -n 's/^owner:[[:space:]]*//p' app-update.yml)"
+          repo="$(sed -n 's/^repo:[[:space:]]*//p' app-update.yml)"
+          echo "baked feed: $owner/$repo"
+          [[ "$owner/$repo" == "$FORK_REPO" ]] || { echo "::error::app-update.yml bakes $owner/$repo, expected $FORK_REPO"; exit 1; }
+      # premake already built the daemon, tmux and ACP runtime for this host.
+      - name: Build headless host package
+        run: npm run build:host
+      - name: Smoke-test headless host package
+        run: |
+          set -euo pipefail
+          check="$RUNNER_TEMP/host-check"
+          mkdir -p "$check"
+          tar -xzf dist-host/ao-host-linux-x64.tar.gz -C "$check"
+          resources="$check/resources"
+          info="$(file "$resources/daemon/ao")"
+          [[ "$info" == *"x86-64"* ]] || { echo "::error::daemon is not an x86-64 binary"; exit 1; }
+          actual="$("$resources/daemon/ao" version | awk '{print $1}')"
+          [[ "$actual" == "$VERSION" ]] || { echo "::error::ao reports $actual, expected $VERSION"; exit 1; }
+          "$resources/daemon/ao" remote-host --help >/dev/null
+          "$resources/acp-runtime/node/bin/node" --version
+          "$resources/tmux/bin/tmux" -V
+      - name: Collect release files
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          pick() { local found; found="$(find out/make -name "$1" | head -n1)"; [[ -n "$found" ]] || { echo "::error::no $1 output" >&2; exit 1; }; printf '%s' "$found"; }
+          appimage="$(pick '*.AppImage')"
+          # Versioned AppImage: what latest-linux.yml points the updater at.
+          cp "$appimage" "dist-release/Orchestrator-$VERSION.AppImage"
+          # Stable names for first-install links.
+          cp "$appimage" dist-release/agent-orchestrator-linux-x64.AppImage
+          cp "$(pick '*.deb')" dist-release/agent-orchestrator-linux-x64.deb
+          cp "$(pick '*.rpm')" dist-release/agent-orchestrator-linux-x64.rpm
+          cp dist-host/ao-host-linux-x64.tar.gz dist-release/
+          ls -l dist-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x64
+          path: frontend/dist-release/*
+          retention-days: 7
+          if-no-files-found: error
+
+  linux-arm64-host:
+    name: Linux arm64 host package
+    needs: prepare
+    # Native, not cross-built: tmux compiles from source and Node is per-arch.
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VITE_WORKOS_CLIENT_ID: ${{ needs.prepare.outputs.workos-client-id }}
+    defaults:
+      run:
+        working-directory: frontend
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential file pkg-config
+      # The headless host never runs Electron; skip its binary download.
+      - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      - name: Stamp version
+        run: |
+          node -e "const fs=require('fs'); const p=require('./package.json'); p.version=process.env.VERSION; fs.writeFileSync('./package.json', JSON.stringify(p,null,'\t')+'\n');"
+      - name: Build headless host package
+        run: |
+          npm run build:daemon
+          npm run build:tmux
+          npm run build:acp-runtime
+          npm run build:host
+      - name: Smoke-test headless host package
+        run: |
+          set -euo pipefail
+          check="$RUNNER_TEMP/host-check"
+          mkdir -p "$check"
+          tar -xzf dist-host/ao-host-linux-arm64.tar.gz -C "$check"
+          resources="$check/resources"
+          info="$(file "$resources/daemon/ao")"
+          [[ "$info" == *"ARM aarch64"* ]] || { echo "::error::daemon is not an arm64 binary"; exit 1; }
+          actual="$("$resources/daemon/ao" version | awk '{print $1}')"
+          [[ "$actual" == "$VERSION" ]] || { echo "::error::ao reports $actual, expected $VERSION"; exit 1; }
+          "$resources/daemon/ao" remote-host --help >/dev/null
+          "$resources/acp-runtime/node/bin/node" --version
+          "$resources/tmux/bin/tmux" -V
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-arm64-host
+          path: frontend/dist-host/ao-host-linux-arm64.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  assemble:
+    name: Feeds and checksums
+    needs: [prepare, macos, linux-x64, linux-arm64-host]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      mac-signed: ${{ steps.signing.outputs.mac-signed }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          # frontend depends on packages/product-ui through a file: link.
+          sparse-checkout: |
+            frontend
+            packages/product-ui
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # feed.mjs only needs app-builder-lib's pure-JS blockmap; no install scripts.
+      - name: Install feed tooling
+        run: npm ci --ignore-scripts
+        working-directory: frontend
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: signing-*
+          path: signing
+          merge-multiple: true
+      - name: Check macOS signing records
+        id: signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          signed=true
+          for arch in arm64 x64; do
+            record="$(cat "signing/mac-$arch.txt")"
+            echo "macOS $arch: $record"
+            [[ "$record" == "developer-id" ]] || signed=false
+          done
+          echo "mac-signed=$signed" >> "$GITHUB_OUTPUT"
+      - name: Generate update feeds
+        run: node frontend/scripts/feed.mjs dist "$VERSION" latest
+      - name: Check the asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            "Orchestrator-darwin-arm64-$VERSION.zip"
+            "Orchestrator-darwin-x64-$VERSION.zip"
+            agent-orchestrator-darwin-arm64.dmg
+            agent-orchestrator-darwin-x64.dmg
+            "Orchestrator-$VERSION.AppImage"
+            "Orchestrator-$VERSION.AppImage.blockmap"
+            agent-orchestrator-linux-x64.AppImage
+            agent-orchestrator-linux-x64.deb
+            agent-orchestrator-linux-x64.rpm
+            ao-host-linux-x64.tar.gz
+            ao-host-linux-arm64.tar.gz
+            latest-mac.yml
+            latest-linux.yml
+          )
+          diff <(printf '%s\n' "${expected[@]}" | sort) <(find dist -maxdepth 1 -type f -printf '%f\n' | sort) \
+            || { echo "::error::release asset set differs from the expected list (left: expected, right: built)"; exit 1; }
+          grep -q "^version: $VERSION$" dist/latest-mac.yml
+          grep -q "^version: $VERSION$" dist/latest-linux.yml
+      - name: Write SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS")
+          mv "$RUNNER_TEMP/SHA256SUMS" dist/SHA256SUMS
+          { echo '### SHA256SUMS'; echo '```'; cat dist/SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-${{ needs.prepare.outputs.version }}
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Create draft release
+    needs: [prepare, assemble]
+    # Tag pushes only, and only with both macOS builds Developer ID signed.
+    if: needs.prepare.outputs.publish == 'true' && needs.prepare.outputs.sign-mac == 'true' && needs.assemble.outputs.mac-signed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PREVIOUS_TAG: ${{ needs.prepare.outputs.previous-tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fork-release-${{ needs.prepare.outputs.version }}
+          path: dist
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+      - name: Create draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${VERSION%%-fork.*}"
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Fork release of Orchestrator, based on upstream ${base} plus this fork's changes on \`develop\`.
+
+          **Install** (details in [RELEASING.md](https://github.com/${GH_REPO}/blob/${TAG}/RELEASING.md#installing)):
+          - macOS: \`agent-orchestrator-darwin-arm64.dmg\` (Apple silicon) or \`agent-orchestrator-darwin-x64.dmg\` (Intel). Signed and notarized.
+          - Linux desktop (x64): \`agent-orchestrator-linux-x64.AppImage\` (self-updating), \`.deb\` or \`.rpm\`.
+          - Headless host: \`bootstrap-fork-host.sh --release ${TAG}\` installs \`ao-host-linux-{x64,arm64}.tar.gz\`.
+
+          Verify downloads with \`sha256sum --check --ignore-missing SHA256SUMS\`.
+          EOF
+          args=(--draft --verify-tag --title "Orchestrator ${TAG}" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes)
+          [[ -z "$PREVIOUS_TAG" ]] || args+=(--notes-start-tag "$PREVIOUS_TAG")
+          gh release create "$TAG" "${args[@]}" dist/*
+          echo "Draft release created for $TAG. A human reviews and publishes it (RELEASING.md)." >> "$GITHUB_STEP_SUMMARY"
