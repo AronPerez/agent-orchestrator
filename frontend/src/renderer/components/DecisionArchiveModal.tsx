@@ -42,8 +42,9 @@ export function DecisionArchiveModal({ open, onOpenChange, entries, scope, onOpe
 	const [narrowed, setNarrowed] = useState(true);
 	// One selection, held by decision: another one finishing while the archive is
 	// open is inserted ahead of it and must not hand the selection, and Enter, to
-	// whichever card took its place. By position only until a card is chosen,
-	// and again once the held decision is gone, so it stays where it was.
+	// whichever card took its place. That goes for the card highlighted without
+	// being chosen too: the first one, on opening and after a new search or scope.
+	// The place is kept so the selection stays where it was once its decision is gone.
 	const [activeState, setActiveState] = useState<{ id?: string; index: number }>({ index: 0 });
 
 	const projectName = (entry: DecisionArchiveEntry) => entry.projectName ?? t("decisions.noProject");
@@ -52,27 +53,35 @@ export function DecisionArchiveModal({ open, onOpenChange, entries, scope, onOpe
 		: [entry.streamName ?? "", entry.streamMachine].filter(Boolean).join(" · ");
 	const chosenText = (entry: DecisionArchiveEntry) => decisionSecondaryText(entry.card.secondary, t);
 	const outcomeText = (entry: DecisionArchiveEntry) => (entry.card.status.kind === "outcome" ? entry.card.status.text : "");
-	const activeScope = narrowed ? scope : undefined;
+	// The scope in words, from any entry of that stream. The last one seen is kept: when that
+	// stream's done decisions all leave the board, the chip still names it and still widens it.
+	const scopeFound = scope ? entries.find((entry) => entry.projectKey === scope.project && entry.streamKey === scope.stream) : undefined;
+	const [scopeSeen, setScopeSeen] = useState(scopeFound);
+	if (scopeFound && scopeFound !== scopeSeen) setScopeSeen(scopeFound);
+	const scopeEntry = scopeFound ?? scopeSeen;
+	// A stream with nothing to name it by is not narrowed to: there would be no chip to widen it.
+	const activeScope = narrowed && scopeEntry ? scope : undefined;
 	// Searched as read: the title, the pick, the outcome and where it belongs. The board holds a week of Done at most, so this is cheap per render.
 	const results = filterDecisionArchive(entries, activeScope, query, (entry) => [entry.card.title, chosenText(entry), outcomeText(entry), projectName(entry), streamName(entry)].join(" "));
 	const heldIndex = activeState.id === undefined ? -1 : results.findIndex((entry) => entry.card.id === activeState.id);
 	const activeIndex = heldIndex >= 0 ? heldIndex : Math.min(activeState.index, results.length - 1);
 	const active = activeIndex >= 0 ? results[activeIndex] : undefined;
-	if (heldIndex >= 0 && heldIndex !== activeState.index) {
+	if (heldIndex >= 0) {
 		// The held decision moved (a newer one came in ahead of it): remember where
 		// it is now, so that is the place the selection keeps if it later goes.
-		setActiveState({ id: activeState.id, index: heldIndex });
-	} else if (heldIndex < 0 && activeState.id !== undefined && !entries.some((entry) => entry.card.id === activeState.id)) {
-		// It left the archive altogether (not merely hidden by the search): the
-		// card now in its place becomes the held one.
-		setActiveState(active ? { id: active.card.id, index: activeIndex } : { index: activeState.index });
+		if (heldIndex !== activeState.index) setActiveState({ id: activeState.id, index: heldIndex });
+	} else if (active) {
+		// Nothing is held yet, or what was held is no longer among the results: the
+		// highlighted card is the held one from this render on.
+		setActiveState({ id: active.card.id, index: activeIndex });
+	} else if (activeState.id !== undefined) {
+		// Nothing to hold; the place is kept for when there is.
+		setActiveState({ index: activeState.index });
 	}
 	const select = (index: number) => {
 		const entry = results[index];
 		if (entry) setActiveState({ id: entry.card.id, index });
 	};
-	// The scope in words, from any entry of that stream.
-	const scopeEntry = scope ? entries.find((entry) => entry.projectKey === scope.project && entry.streamKey === scope.stream) : undefined;
 
 	const scrollerRef = useRef<HTMLDivElement>(null);
 	const gridRef = useRef<HTMLDivElement>(null);

@@ -119,6 +119,59 @@ describe("DecisionArchiveModal", () => {
 		expect(selected()).toEqual(["Question c"]);
 	});
 
+	it("holds the card highlighted from the start, and after a new search or a widened scope, when a newer one arrives", async () => {
+		const modal = (list: DecisionCall[]) => <TooltipProvider><DecisionArchiveModal open entries={entriesOf(list)} scope={{ project: "cloud", stream: "h_a:nango" }} onOpen={onOpen} onOpenChange={vi.fn()} /></TooltipProvider>;
+		const onOpen = vi.fn();
+		const selected = () => within(grid()).getAllByRole("gridcell").filter((cell) => cell.getAttribute("aria-selected") === "true").map((cell) => within(cell).getByRole("button").textContent?.match(/Question \w/)?.[0]);
+		const view = render(modal(calls));
+		// Nothing was chosen: the first card is the one Enter opens.
+		expect(selected()).toEqual(["Question b"]);
+		const newerInStream = call({ id: "e", ...nango, outcome: "Just finished", outcomeAt: "2026-11-18T11:30:00Z" });
+		view.rerender(modal([...calls, newerInStream]));
+		expect(titles()).toEqual(["Question e", "Question b", "Question c"]);
+		expect(selected()).toEqual(["Question b"]);
+		await userEvent.keyboard("{Enter}");
+		expect(onOpen).toHaveBeenLastCalledWith("b");
+
+		// A new search starts at its first result, and holds that one.
+		await userEvent.type(field(), "renamed");
+		expect(selected()).toEqual(["Question c"]);
+		const newerMatch = call({ id: "f", ...nango, outcome: "Renamed again", outcomeAt: "2026-11-18T11:40:00Z" });
+		view.rerender(modal([...calls, newerInStream, newerMatch]));
+		expect(titles()).toEqual(["Question f", "Question c"]);
+		expect(selected()).toEqual(["Question c"]);
+		await userEvent.clear(field());
+
+		// So does widening past the stream.
+		await userEvent.click(screen.getByRole("button", { name: /Show every done decision$/ }));
+		expect(selected()).toEqual(["Question f"]);
+		const newest = call({ id: "g", projectId: "shop", projectName: "Shop", outcome: "Newest of all", outcomeAt: "2026-11-18T11:50:00Z" });
+		view.rerender(modal([...calls, newerInStream, newerMatch, newest]));
+		expect(titles()[0]).toBe("Question g");
+		expect(selected()).toEqual(["Question f"]);
+		await userEvent.keyboard("{Enter}");
+		expect(onOpen).toHaveBeenLastCalledWith("f");
+	});
+
+	it("keeps the stream's chip, and the way to widen it, when that stream's last done decision leaves", async () => {
+		const modal = (list: DecisionCall[]) => <TooltipProvider><DecisionArchiveModal open entries={entriesOf(list)} scope={{ project: "cloud", stream: "h_a:nango" }} onOpen={vi.fn()} onOpenChange={vi.fn()} /></TooltipProvider>;
+		const view = render(modal(calls));
+		expect(titles()).toEqual(["Question b", "Question c"]);
+		// Both age out of the board while the archive is open.
+		view.rerender(modal(calls.filter((item) => item.streamSessionId !== "nango")));
+		expect(within(grid()).queryAllByRole("gridcell")).toHaveLength(0);
+		expect(screen.getByRole("status")).toHaveTextContent("No done decisions match");
+		await userEvent.click(screen.getByRole("button", { name: "Showing skyvern-cloud: Nango. Show every done decision" }));
+		expect(titles()).toEqual(["Question d", "Question a"]);
+		expect(screen.queryByRole("button", { name: /Show every done decision$/ })).not.toBeInTheDocument();
+	});
+
+	it("is not narrowed to a stream that has no done decision to name it by", () => {
+		renderModal({ scope: { project: "cloud", stream: "h_a:gone" } });
+		expect(titles()).toEqual(["Question d", "Question b", "Question c", "Question a"]);
+		expect(screen.queryByRole("button", { name: /Show every done decision$/ })).not.toBeInTheDocument();
+	});
+
 	it("leaves Shift with an arrow, Home or End to the search field's text", () => {
 		renderModal();
 		const selected = () => within(grid()).getAllByRole("gridcell").findIndex((cell) => cell.getAttribute("aria-selected") === "true");
