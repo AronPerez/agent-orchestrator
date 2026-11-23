@@ -1294,10 +1294,15 @@ function effectiveChannel(
   return settings.feature ? `pr${settings.feature.pr}` : settings.channel;
 }
 
+/** Prerelease identifier of this fork's stable releases (vX.Y.Z-fork.N). */
+const FORK_RELEASE_PRERELEASE = "fork";
+
 /** Identify the running build independently of a channel choice already saved by Settings. */
 function installedUpdateChannel(): string {
   const prerelease = semver.prerelease(app.getVersion())?.[0];
-  return typeof prerelease === "string" ? prerelease : "latest";
+  // A fork release (0.15.3-fork.1) is that fork's stable build, published as
+  // a non-prerelease GitHub release with latest*.yml, so it is home on "latest".
+  return typeof prerelease === "string" && prerelease !== FORK_RELEASE_PRERELEASE ? prerelease : "latest";
 }
 
 function isChannelTransition(settings: Pick<UpdateSettings, "channel" | "feature">): boolean {
