@@ -197,8 +197,20 @@ To replace an unsigned tag with a signed one **on the same commit**, for
 example one pushed before tags were signed, follow these steps. The existing
 draft stays valid, because its assets were built from that same commit.
 
+A tag push runs the workflow **as it was at the tagged commit**. The guard
+that refuses a second draft exists only in commits that contain it, so first
+check which case you are in:
+
+```sh
+commit="$(git rev-parse 'v0.15.3-fork.1^{commit}')"
+git show "$commit:.github/workflows/fork-release.yml" \
+  | grep -q 'Refuse a tag that already has a release or draft' \
+  && echo "guarded" || echo "PRE-GUARD: cancellation in step 3 is required"
+```
+
 1. **Let the tag's release run finish** and create its draft. Re-tagging
-   earlier is also safe: the new run waits behind the current one.
+   earlier is also safe: the new run waits behind the current one, which makes
+   cancelling it (step 3) easier.
 2. **Re-create the tag, signed, on the same commit**, and check it before
    pushing:
 
@@ -211,14 +223,24 @@ draft stays valid, because its assets were built from that same commit.
    git push -f origin refs/tags/v0.15.3-fork.1
    ```
 
-3. **Cancel the run the push starts.** It would only rebuild the same commit.
-   If you miss it, it stops before creating a second draft, because the
-   release already has one.
+3. **Cancel the run the push starts, and confirm it was cancelled.** It would
+   only rebuild the same commit. For a **pre-guard** tag (such as
+   `v0.15.3-fork.1`) this step is required: that commit's workflow cannot see
+   the existing draft, so a run that is not cancelled rebuilds everything and
+   creates a **second draft**. For a guarded tag, a missed run still rebuilds
+   but stops before creating a second draft.
 
    ```sh
-   gh run list -R AronPerez/agent-orchestrator -w fork-release.yml -e push -L 2
+   gh run list -R AronPerez/agent-orchestrator -w fork-release.yml -e push -L 3
    gh run cancel <id of the new run> -R AronPerez/agent-orchestrator
+   gh run view <id of the new run> -R AronPerez/agent-orchestrator --json status,conclusion
+   # must show "status":"completed","conclusion":"cancelled"
    ```
+
+   If a second draft appears anyway, keep the one created first and delete the
+   other. Compare their creation times in
+   `gh api repos/AronPerez/agent-orchestrator/releases --jq '.[] | select(.tag_name=="v0.15.3-fork.1") | [.id, .draft, .created_at] | @tsv'`,
+   then run `gh api -X DELETE repos/AronPerez/agent-orchestrator/releases/<id of the newer draft>`.
 
 4. **Check and publish.** The tag's page shows **Verified**. Then publish the
    original draft (step 6 above).
@@ -311,6 +333,7 @@ spctl --assess -vv "/Applications/Agent Orchestrator.app"   # expect: source=Not
 | `Version base X.Y.Z does not match frontend/package.json` | Tag `v<package.json version>-fork.N`. |
 | `… is not on develop` | Tag a commit on `origin/develop`. |
 | `A published release for <tag> already exists` | Cut the next `-fork.N`. |
-| `<tag> already has a release or draft, so no new draft was created` | Expected after a re-pushed tag (for example, re-signed): keep the existing draft. To rebuild on purpose, delete that draft first. |
+| `<tag> already has a release or draft, so no new draft was created` | Expected after re-pushing a guarded tag (for example, re-signed): keep the existing draft. To rebuild on purpose, delete that draft first. |
+| Two drafts for one tag | A re-pushed **pre-guard** tag ran without the guard (see "Re-signing an existing tag", step 3). Keep the one created first and delete the other. |
 | The tag shows **Unverified** on GitHub | Add the signing key to your GitHub account (signing key, not only authentication key) and sign with a GitHub-verified email; see "Signing your release tags". |
 | Notarization step fails | Check that the API key has the Developer role and that `APPLE_API_ISSUER` is the Issuer ID, not the Key ID. |
