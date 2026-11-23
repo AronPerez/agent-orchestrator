@@ -14,6 +14,8 @@ export type DecisionFolds = {
 	/** Fold keys of the projects and streams folded right now. */
 	folded: ReadonlySet<string>;
 	toggle: (key: string) => void;
+	/** Open one project or stream and save that, as when it is chosen in the list beside the board. */
+	open: (key: string) => void;
 	setAll: (folded: boolean) => void;
 };
 
@@ -65,5 +67,8 @@ export function useDecisionFolds(model: DecisionBoardModel, selectedId?: string)
 	const setAll = useCallback((value: boolean) => {
 		setPreferences((current) => foldAllDecisions(latestModel.current, current, value));
 	}, []);
-	return useMemo(() => ({ folded, toggle, setAll }), [folded, toggle, setAll]);
+	const open = useCallback((key: string) => {
+		setPreferences((current) => rememberDecisionFold(current, key, false));
+	}, []);
+	return useMemo(() => ({ folded, toggle, open, setAll }), [folded, toggle, open, setAll]);
 }

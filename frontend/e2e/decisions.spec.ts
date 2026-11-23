@@ -317,3 +317,52 @@ test("decisions: streams fold to their counts, folds survive a reload, and Done 
 	await page.getByRole("button", { name: "Expand all" }).click();
 	await expect(page.getByRole("button", { name: /^Stream question/ })).toBeVisible();
 });
+
+test("decisions: the project and stream list narrows the board, survives a reload, and hides", async ({ page }) => {
+	const cloud = { projectId: "cloud", projectName: "skyvern-cloud" };
+	const ledger = new Ledger([
+		call("dec_shop", "Shop question"),
+		call("dec_wide", "Cloud question", cloud),
+		call("dec_epic", "Epic question", { ...cloud, streamSessionId: "epic", streamName: "Checkout epic" }),
+	]);
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openDecisions(page, ledger);
+	const list = page.getByRole("tree", { name: "Projects and streams" });
+	const states = page.getByRole("list", { name: "Decision states" });
+	await expect(list.getByRole("treeitem", { name: /^All projects/ })).toHaveAttribute("aria-selected", "true");
+	await expect(states.getByRole("listitem").first()).toHaveText(/Needs you\s*3/);
+
+	await list.getByRole("treeitem", { name: /^skyvern-cloud/ }).click();
+	await expect(page).toHaveURL(/project=cloud/);
+	await expect(page.getByRole("button", { name: /^Cloud question/ })).toBeVisible();
+	await expect(page.getByRole("button", { name: /^Shop question/ })).toHaveCount(0);
+	await expect(states.getByRole("listitem").first()).toHaveText(/Needs you\s*2/);
+
+	await list.getByRole("treeitem", { name: /^Checkout epic/ }).click();
+	await expect(page).toHaveURL(/stream=/);
+	await expect(page.getByRole("button", { name: /^Cloud question/ })).toHaveCount(0);
+
+	await page.reload();
+	await expect(page.getByRole("button", { name: /^Epic question/ })).toBeVisible();
+	await expect(list.getByRole("treeitem", { name: /^Checkout epic/ })).toHaveAttribute("aria-selected", "true");
+
+	// The keyboard alone goes back to every project.
+	await list.getByRole("treeitem", { name: /^Checkout epic/ }).focus();
+	await page.keyboard.press("Home");
+	await page.keyboard.press("Enter");
+	await expect(page).not.toHaveURL(/project=/);
+	await expect(page.getByRole("button", { name: /^Shop question/ })).toBeVisible();
+
+	await page.getByRole("button", { name: "Hide project list" }).click();
+	await expect(list).toHaveCount(0);
+	await page.reload();
+	await expect(page.getByRole("button", { name: /^Shop question/ })).toBeVisible();
+	await expect(list).toHaveCount(0);
+	await page.getByRole("button", { name: "Show project list" }).click();
+	await expect(list).toBeVisible();
+
+	// A pane too narrow for both keeps the board and drops the list.
+	await page.setViewportSize({ width: 620, height: 800 });
+	await expect(list).toBeHidden();
+	await expect(page.getByRole("button", { name: /^Shop question/ })).toBeVisible();
+});

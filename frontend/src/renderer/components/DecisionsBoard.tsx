@@ -39,6 +39,12 @@ export type DecisionsBoardProps = {
 	sync?: DecisionSyncStatus;
 	/** Which projects and streams are folded; the page owns it so its toolbar can fold everything. */
 	folds: DecisionFolds;
+	/**
+	 * The model holds one project chosen in the list beside the board. Its
+	 * header is left out, since the list already names it, and with no header
+	 * to fold it by, it is always open.
+	 */
+	soloBand?: boolean;
 };
 
 // Narrow pane: the state columns alone, each project's and stream's name as a
@@ -67,9 +73,14 @@ function countsText(counts: Record<DecisionLane, number>, t: TFunction): string 
  * streams both fold to their counts. Cards are the only individually bordered
  * objects; everything else shares hairlines.
  */
-export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds }: DecisionsBoardProps) {
+export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: pageFolds, soloBand = false }: DecisionsBoardProps) {
 	const { t } = useTranslation();
 	const hintId = useId();
+	const folds = useMemo(() => {
+		if (!soloBand) return pageFolds;
+		const bandKeys = new Set(model.bands.map((band) => decisionBandFoldKey(band.key)));
+		return { ...pageFolds, folded: new Set([...pageFolds.folded].filter((key) => !bandKeys.has(key))) };
+	}, [model.bands, pageFolds, soloBand]);
 
 	// A row's Done cell shows its newest cards and the selected one; the rest open on request.
 	const [expandedDone, setExpandedDone] = useState<ReadonlySet<string>>(() => new Set());
@@ -164,6 +175,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds }
 					<DecisionBand
 						key={band.key}
 						band={band}
+						solo={soloBand}
 						folds={folds}
 						lanes={model.lanes}
 						expandedDone={expandedDone}
@@ -213,34 +225,38 @@ function LaneCount({ lane, count, testId, className }: { lane: DecisionLane; cou
 	);
 }
 
-function DecisionBand({ band, ...shared }: { band: DecisionProjectBand } & RowShared) {
+function DecisionBand({ band, solo, ...shared }: { band: DecisionProjectBand; solo: boolean } & RowShared) {
 	const { t } = useTranslation();
 	const name = band.name ?? t("decisions.noProject");
 	const foldKey = decisionBandFoldKey(band.key);
 	const open = !shared.folds.folded.has(foldKey);
 	return (
 		<section aria-label={name} className="contents">
-			{/* Narrow: one full-width row with the counts at its end. From @3xl the counts sit in the state columns. */}
-			<Pressable
-				aria-expanded={open}
-				onClick={() => shared.folds.toggle(foldKey)}
-				className="col-span-full flex min-h-8 min-w-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 text-caption focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset @3xl:col-span-1"
-			>
-				<FoldChevron open={open} />
-				<span className="min-w-0 truncate font-medium text-foreground">{name}</span>
-				<span className="sr-only">{countsText(band.counts, t)}</span>
-				<span aria-hidden="true" className="ml-auto flex shrink-0 items-center gap-2.5 text-muted-foreground tabular-nums @3xl:hidden">
-					{DECISION_LANES.filter((lane) => band.counts[lane] > 0).map((lane) => (
-						<span key={lane} className={cn("inline-flex items-center gap-1", lane === "needs_you" && "font-medium text-status-needs-you")}>
-							<DecisionStateDot state={lane} />
-							{band.counts[lane]}
-						</span>
-					))}
-				</span>
-			</Pressable>
-			{shared.lanes.map((lane) => (
-				<LaneCount key={lane} lane={lane} count={band.counts[lane]} testId="decision-band-count" className="hidden items-center bg-muted/40 @3xl:flex" />
-			))}
+			{solo ? null : (
+				<>
+				{/* Narrow: one full-width row with the counts at its end. From @3xl the counts sit in the state columns. */}
+				<Pressable
+					aria-expanded={open}
+					onClick={() => shared.folds.toggle(foldKey)}
+					className="col-span-full flex min-h-8 min-w-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 text-caption focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset @3xl:col-span-1"
+				>
+					<FoldChevron open={open} />
+					<span className="min-w-0 truncate font-medium text-foreground">{name}</span>
+					<span className="sr-only">{countsText(band.counts, t)}</span>
+					<span aria-hidden="true" className="ml-auto flex shrink-0 items-center gap-2.5 text-muted-foreground tabular-nums @3xl:hidden">
+						{DECISION_LANES.filter((lane) => band.counts[lane] > 0).map((lane) => (
+							<span key={lane} className={cn("inline-flex items-center gap-1", lane === "needs_you" && "font-medium text-status-needs-you")}>
+								<DecisionStateDot state={lane} />
+								{band.counts[lane]}
+							</span>
+						))}
+					</span>
+				</Pressable>
+				{shared.lanes.map((lane) => (
+					<LaneCount key={lane} lane={lane} count={band.counts[lane]} testId="decision-band-count" className="hidden items-center bg-muted/40 @3xl:flex" />
+				))}
+				</>
+			)}
 			{open ? band.rows.map((row) => <DecisionRow key={row.key} bandKey={band.key} row={row} {...shared} />) : null}
 		</section>
 	);

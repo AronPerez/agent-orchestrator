@@ -3,12 +3,15 @@ import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useMinuteClock } from "@aoagents/product-ui";
-import { ChevronsDownUp, ChevronsUpDown, ListChecks } from "@/components/app-icons";
+import { ChevronsDownUp, ChevronsUpDown, FolderTree, ListChecks } from "@/components/app-icons";
 import { useDecisionFolds } from "../hooks/useDecisionFolds";
 import { useDecisionBoard, useDecisionSearch } from "../hooks/useDecisionInbox";
 import { apiErrorRequestId } from "../lib/api-client";
 import { buildDecisionBoard, DECISION_LANES } from "../lib/decision-board";
+import { decisionRowFoldKey } from "../lib/decision-folds";
+import { decisionScopeTree, readDecisionListHidden, resolveDecisionScope, scopeDecisionBoard, writeDecisionListHidden, type DecisionScope } from "../lib/decision-scope";
 import { DecisionCallPanel } from "./DecisionCallPanel";
+import { DecisionScopeList } from "./DecisionScopeList";
 import { DecisionSearchResults } from "./DecisionSearchResults";
 import { DecisionSyncFooter } from "./DecisionSyncFooter";
 import { decisionSyncKey, fetchDecisionSyncStatus } from "../lib/decision-sync";
@@ -25,6 +28,10 @@ export type DecisionsViewProps = {
 	callId?: string;
 	/** Search words from `?q=`. */
 	query?: string;
+	/** The project chosen in the list beside the board, from `?project=`. */
+	project?: string;
+	/** The stream of that project chosen in the list, from `?stream=`. */
+	stream?: string;
 };
 
 /** The Decisions page: this computer's ledger as a live swimlane board. */
@@ -43,7 +50,7 @@ function LoadError({ error, fallback, onRetry, className }: { error: unknown; fa
 	);
 }
 
-function FoldAllButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+function TopbarIconButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
 	return (
 		<Tooltip>
 			<TooltipTrigger asChild>
@@ -54,13 +61,25 @@ function FoldAllButton({ label, onClick, children }: { label: string; onClick: (
 	);
 }
 
-export function DecisionsView({ callId, query }: DecisionsViewProps) {
+export function DecisionsView({ callId, query, project, stream }: DecisionsViewProps) {
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const board = useDecisionBoard();
 	const now = useMinuteClock();
 	const model = useMemo(() => buildDecisionBoard(board.data?.calls ?? [], board.data?.servingHostId), [board.data]);
 	const folds = useDecisionFolds(model, callId);
+	// The list beside the board narrows it. The URL keeps what was chosen; the
+	// board honours as much of it as is still there.
+	const scope = useMemo(() => resolveDecisionScope(model, { project, stream }), [model, project, stream]);
+	const scopedModel = useMemo(() => scopeDecisionBoard(model, scope), [model, scope]);
+	const scopeTree = useMemo(() => decisionScopeTree(model), [model]);
+	const [listHidden, setListHidden] = useState(readDecisionListHidden);
+	const toggleList = () => setListHidden((hidden) => {
+		writeDecisionListHidden(!hidden);
+		return !hidden;
+	});
+	// Every navigation on this page carries the scope along.
+	const scopeSearch = useMemo(() => ({ ...(project ? { project } : {}), ...(project && stream ? { stream } : {}) }), [project, stream]);
 	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
 	const search = useDecisionSearch(words);
@@ -75,28 +94,36 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 		const next = draft.trim();
 		if (next === words) return;
 		const timer = setTimeout(() => {
-			void navigate({ to: "/decisions", search: { ...(callId ? { call: callId } : {}), ...(next ? { q: next } : {}) }, replace: true });
+			void navigate({ to: "/decisions", search: { ...(callId ? { call: callId } : {}), ...(next ? { q: next } : {}), ...scopeSearch }, replace: true });
 		}, SEARCH_DEBOUNCE_MS);
 		return () => clearTimeout(timer);
-	}, [callId, draft, navigate, words]);
+	}, [callId, draft, navigate, scopeSearch, words]);
 	const clearSearch = useCallback(() => {
 		setDraft("");
-		void navigate({ to: "/decisions", search: callId ? { call: callId } : {}, replace: true });
-	}, [callId, navigate]);
+		void navigate({ to: "/decisions", search: { ...(callId ? { call: callId } : {}), ...scopeSearch }, replace: true });
+	}, [callId, navigate, scopeSearch]);
 
 	const selectCall = useCallback((id: string) => {
-		void navigate({ to: "/decisions", search: { call: id, ...(words ? { q: words } : {}) } });
-	}, [navigate, words]);
+		void navigate({ to: "/decisions", search: { call: id, ...(words ? { q: words } : {}), ...scopeSearch } });
+	}, [navigate, scopeSearch, words]);
+	const chooseScope = useCallback((next: DecisionScope) => {
+		// Choosing a stream shows its cards, even if its row was folded.
+		if (next.project !== undefined && next.stream !== undefined) folds.open(decisionRowFoldKey(next.project, next.stream));
+		void navigate({
+			to: "/decisions",
+			search: { ...(callId ? { call: callId } : {}), ...(next.project !== undefined ? { project: next.project } : {}), ...(next.stream !== undefined ? { stream: next.stream } : {}) },
+		});
+	}, [callId, folds, navigate]);
 	const closeCall = useCallback(() => {
 		const closing = callId;
-		void navigate({ to: "/decisions", search: words ? { q: words } : {} });
+		void navigate({ to: "/decisions", search: { ...(words ? { q: words } : {}), ...scopeSearch } });
 		// Return focus to the card the panel was opened from, when it is still on the board.
 		if (closing) {
 			requestAnimationFrame(() => {
 				document.querySelector<HTMLElement>(`[data-decision-card="${CSS.escape(closing)}"], [data-decision-result="${CSS.escape(closing)}"]`)?.focus();
 			});
 		}
-	}, [callId, navigate, words]);
+	}, [callId, navigate, scopeSearch, words]);
 
 	const boardShown = !words && Boolean(board.data && board.data.calls.length > 0);
 	let body;
@@ -136,7 +163,7 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 						{t("decisions.nothingNeedsYou")}
 					</p>
 				) : null}
-				<DecisionsBoard model={model} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
+				<DecisionsBoard model={scopedModel} soloBand={scope.project !== undefined} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
 			</>
 		);
 	} else if (board.data && !board.isError) {
@@ -169,11 +196,12 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 				lead={<PageTopbarTitle as="h1" icon={<ListChecks className="size-icon-md" aria-hidden="true" />}>{t("decisions.title")}</PageTopbarTitle>}
 				actions={(
 					<>
-						{/* Folding applies to the board, so the controls leave with it during a search. */}
+						{/* The list and folding apply to the board, so their controls leave with it during a search. */}
 						{boardShown ? (
 							<>
-								<FoldAllButton label={t("decisions.expandAll")} onClick={() => folds.setAll(false)}><ChevronsUpDown aria-hidden="true" className="size-icon-sm" /></FoldAllButton>
-								<FoldAllButton label={t("decisions.collapseAll")} onClick={() => folds.setAll(true)}><ChevronsDownUp aria-hidden="true" className="size-icon-sm" /></FoldAllButton>
+								<TopbarIconButton label={t(listHidden ? "decisions.scope.showList" : "decisions.scope.hideList")} onClick={toggleList}><FolderTree aria-hidden="true" className="size-icon-sm" /></TopbarIconButton>
+								<TopbarIconButton label={t("decisions.expandAll")} onClick={() => folds.setAll(false)}><ChevronsUpDown aria-hidden="true" className="size-icon-sm" /></TopbarIconButton>
+								<TopbarIconButton label={t("decisions.collapseAll")} onClick={() => folds.setAll(true)}><ChevronsDownUp aria-hidden="true" className="size-icon-sm" /></TopbarIconButton>
 							</>
 						) : null}
 						<ToolbarSearch label={t("decisions.search")} query={draft} onQueryChange={setDraft} />
@@ -182,12 +210,16 @@ export function DecisionsView({ callId, query }: DecisionsViewProps) {
 			/>
 			<ResizablePanelGroup className="min-h-0 flex-1">
 				<ResizablePanel id="decisions-board" minSize="30%">
-					<div className="flex h-full min-w-0 flex-col">
-						<main className="min-h-0 flex-1 overflow-auto overscroll-contain">{body}</main>
-						{/* Whose ledger this is, and how fresh each linked machine is. */}
-						<footer className="shrink-0 border-t border-border px-(--space-4_5) py-1.5 text-caption text-muted-foreground">
-							<DecisionSyncFooter now={now} />
-						</footer>
+					<div className="@container/decisions flex h-full min-w-0">
+						{/* Beside the board while there is room for both; a narrow pane keeps the board. */}
+						{boardShown && !listHidden ? <DecisionScopeList tree={scopeTree} scope={scope} onChoose={chooseScope} className="hidden @2xl/decisions:flex" /> : null}
+						<div className="flex h-full min-w-0 flex-1 flex-col">
+							<main className="min-h-0 flex-1 overflow-auto overscroll-contain">{body}</main>
+							{/* Whose ledger this is, and how fresh each linked machine is. */}
+							<footer className="shrink-0 border-t border-border px-(--space-4_5) py-1.5 text-caption text-muted-foreground">
+								<DecisionSyncFooter now={now} />
+							</footer>
+						</div>
 					</div>
 				</ResizablePanel>
 				{callId ? (

@@ -5,6 +5,7 @@ import { useDecisionFolds } from "../hooks/useDecisionFolds";
 import { buildDecisionBoard } from "../lib/decision-board";
 import { DECISION_FOLD_STORAGE_KEY, decisionBandFoldKey, decisionRowFoldKey } from "../lib/decision-folds";
 import type { DecisionCall } from "../lib/decision-inbox";
+import { scopeDecisionBoard } from "../lib/decision-scope";
 import { DecisionsBoard as BareBoard, type DecisionsBoardProps } from "./DecisionsBoard";
 import { TooltipProvider } from "./ui/tooltip";
 
@@ -244,6 +245,16 @@ describe("DecisionsBoard", () => {
 		view.rerender(<DecisionsBoard model={buildDecisionBoard(after)} now={NOW} onSelect={vi.fn()} />);
 		expect(screen.getByRole("button", { name: /^Question kept/ })).toBeInTheDocument();
 		expect(within(screen.getByRole("group", { name: "Checkout" })).getByRole("button", { name: /Checkout/ })).toHaveAttribute("aria-expanded", "true");
+	});
+
+	it("draws one project on its own without its header, open even if the person had folded it", () => {
+		window.localStorage.setItem(DECISION_FOLD_STORAGE_KEY, JSON.stringify({ [decisionBandFoldKey("cloud")]: true }));
+		render(<DecisionsBoard model={scopeDecisionBoard(buildDecisionBoard(calls), { project: "cloud" })} now={NOW} onSelect={vi.fn()} soloBand />);
+		expect(screen.getByRole("region", { name: "skyvern-cloud" })).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: /skyvern-cloud/ })).not.toBeInTheDocument();
+		expect(screen.queryAllByTestId("decision-band-count")).toHaveLength(0);
+		expect(screen.getByRole("button", { name: /^Question need/ })).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: /^Question pending/ })).not.toBeInTheDocument();
 	});
 
 	describe("done cap", () => {
