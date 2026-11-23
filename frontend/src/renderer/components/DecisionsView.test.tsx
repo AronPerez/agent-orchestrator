@@ -17,6 +17,7 @@ vi.mock("./PageTopbar", () => ({
 import { useDecisionBoard } from "../hooks/useDecisionInbox";
 import { TooltipProvider } from "./ui/tooltip";
 import { DECISION_FOLD_STORAGE_KEY, decisionRowFoldKey } from "../lib/decision-folds";
+import { DECISION_TABS_STORAGE_KEY } from "../lib/decision-tabs";
 import { DecisionsView } from "./DecisionsView";
 
 function call(overrides: Partial<DecisionCall> & { id: string }): DecisionCall {
@@ -222,6 +223,166 @@ describe("DecisionsView", () => {
 			await waitFor(() => expect(getMock).toHaveBeenCalled());
 			expect(screen.queryByRole("tree", { name: "Projects and streams" })).not.toBeInTheDocument();
 			expect(screen.queryByRole("button", { name: "Hide project list" })).not.toBeInTheDocument();
+		});
+	});
+
+	describe("decision tabs", () => {
+		const option = [{ label: "Ship", consequence: "Release today.", recommended: true }];
+		const one = call({ id: "dec_1", options: option });
+		const two = call({ id: "dec_2", options: option, raisedAt: "2026-11-18T10:00:00Z" });
+		const details = { dec_1: one, dec_2: two };
+		const view = (props: Parameters<typeof DecisionsView>[0] = {}) => <QueryClientProvider client={client}><TooltipProvider><DecisionsView {...props} /></TooltipProvider></QueryClientProvider>;
+		let client: QueryClient;
+		beforeEach(() => { client = new QueryClient({ defaultOptions: { queries: { retry: false } } }); });
+		const strip = () => screen.getByRole("tablist", { name: "Board and open decisions" });
+		const tabNames = () => within(strip()).getAllByRole("tab").map((tab) => tab.textContent);
+		const boardGroup = () => screen.getByRole("group", { name: "Decisions board", hidden: true });
+		const kept = () => JSON.parse(window.localStorage.getItem(DECISION_TABS_STORAGE_KEY) ?? "[]");
+
+		it("has no strip until a decision is kept open from the panel beside the board", async () => {
+			answer(board([one, two]), details);
+			render(view({ callId: "dec_1" }));
+			const panel = await screen.findByRole("complementary", { name: "Decision" });
+			expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+			await userEvent.click(await within(panel).findByRole("button", { name: "Keep open" }));
+			expect(tabNames()).toEqual(["Board", "Question dec_1"]);
+			expect(within(strip()).getByRole("tab", { name: "Board" })).toHaveAttribute("aria-selected", "true");
+			expect(kept()).toEqual(["dec_1"]);
+			// Keeping is not leaving: the same panel stays beside the board, now marked.
+			expect(within(panel).getByText("Kept open")).toBeInTheDocument();
+			expect(within(panel).queryByRole("button", { name: "Keep open" })).not.toBeInTheDocument();
+			expect(screen.getByRole("button", { name: /^Question dec_1/ })).toHaveAttribute("data-kept", "true");
+			expect(navigateMock).not.toHaveBeenCalled();
+		});
+
+		it("keeps a card on double-click, and keeps tabs across visits and links", async () => {
+			answer(board([one, two]), details);
+			const first = render(view());
+			await userEvent.dblClick(await screen.findByRole("button", { name: /^Question dec_2/ }));
+			expect(kept()).toEqual(["dec_2"]);
+			first.unmount();
+			// A link or the bell opens another call; the kept tab is still there.
+			render(view({ callId: "dec_1" }));
+			await screen.findByRole("button", { name: /^Question dec_1/ });
+			expect(tabNames()).toEqual(["Board", "Question dec_2"]);
+		});
+
+		it("fills the page with a kept decision when its tab is the one in the URL", async () => {
+			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_1", "dec_2"]));
+			answer(board([one, two]), details);
+			render(view({ tab: "dec_2" }));
+			const page = await screen.findByRole("complementary", { name: "Decision" });
+			expect(await within(page).findByRole("heading", { level: 2, name: "Question dec_2" })).toBeInTheDocument();
+			expect(within(strip()).getByRole("tab", { name: "Question dec_2" })).toHaveAttribute("aria-selected", "true");
+			expect(within(strip()).getByRole("tab", { name: "Board" })).toHaveAttribute("aria-selected", "false");
+			expect(boardGroup()).not.toBeVisible();
+			// Its tab closes it; the page has no panel close, and no board controls.
+			expect(within(page).queryByRole("button", { name: "Close decision" })).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: "Collapse all" })).not.toBeInTheDocument();
+			expect(screen.queryByRole("tree", { name: "Projects and streams" })).not.toBeInTheDocument();
+		});
+
+		it("shows the board for a tab in the URL that is not kept", async () => {
+			answer(board([one, two]), details);
+			render(view({ tab: "dec_2" }));
+			expect(await screen.findByRole("button", { name: /^Question dec_2/ })).toBeVisible();
+			expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+		});
+
+		it("writes the chosen tab to the URL and the board's tab clears it, keeping the rest", async () => {
+			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_1"]));
+			answer(board([one, two]), details);
+			const mounted = render(view({ callId: "dec_2", project: "shop" }));
+			await screen.findByRole("button", { name: /^Question dec_2/ });
+			await userEvent.click(within(strip()).getByRole("tab", { name: "Question dec_1" }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: { call: "dec_2", project: "shop", tab: "dec_1" } });
+			mounted.rerender(view({ callId: "dec_2", project: "shop", tab: "dec_1" }));
+			await userEvent.click(within(strip()).getByRole("tab", { name: "Board" }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: { call: "dec_2", project: "shop" } });
+		});
+
+		it("closes a tab from its button or with Delete, returning to the board when it was showing", async () => {
+			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_1", "dec_2"]));
+			answer(board([one, two]), details);
+			render(view({ tab: "dec_1" }));
+			await screen.findByRole("heading", { level: 2, name: "Question dec_1" });
+			await userEvent.click(screen.getByRole("button", { name: "Close Question dec_1" }));
+			expect(kept()).toEqual(["dec_2"]);
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: {} });
+			navigateMock.mockClear();
+			act(() => within(strip()).getByRole("tab", { name: "Question dec_2" }).focus());
+			await userEvent.keyboard("{Delete}");
+			expect(kept()).toEqual([]);
+			expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+			// It was not the one showing, so the page does not move.
+			expect(navigateMock).not.toHaveBeenCalled();
+		});
+
+		it("moves along the strip with the arrow keys without choosing", async () => {
+			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_1", "dec_2"]));
+			answer(board([one, two]), details);
+			render(view());
+			await screen.findByRole("button", { name: /^Question dec_1/ });
+			const tab = (name: string) => within(strip()).getByRole("tab", { name });
+			act(() => tab("Board").focus());
+			await userEvent.keyboard("{ArrowRight}{ArrowRight}");
+			expect(tab("Question dec_2")).toHaveFocus();
+			await userEvent.keyboard("{Home}");
+			expect(tab("Board")).toHaveFocus();
+			await userEvent.keyboard("{End}{ArrowLeft}");
+			expect(tab("Question dec_1")).toHaveFocus();
+			expect(navigateMock).not.toHaveBeenCalled();
+		});
+
+		it("keeps what was typed when a decision is kept open and when its tab is left and returned to", async () => {
+			answer(board([one, two]), details);
+			const mounted = render(view({ callId: "dec_1" }));
+			const note = await screen.findByRole("textbox", { name: "Note for the session" });
+			// Focus by hand: with no layout here, a pointer press beside the board lands on the resize divider.
+			act(() => note.focus());
+			await userEvent.keyboard("ship it dark");
+			expect(note).toHaveValue("ship it dark");
+			await userEvent.click(screen.getByRole("button", { name: "Keep open" }));
+			// The same field, not a new one: keeping moves nothing.
+			expect(screen.getByRole("textbox", { name: "Note for the session" })).toBe(note);
+			expect(screen.getByRole("textbox", { name: "Note for the session" })).toHaveValue("ship it dark");
+			// Its tab fills the page, the board comes back, another call is viewed, and the tab is opened again.
+			mounted.rerender(view({ callId: "dec_1", tab: "dec_1" }));
+			expect(screen.getByRole("textbox", { name: "Note for the session" })).toHaveValue("ship it dark");
+			mounted.rerender(view({ callId: "dec_2" }));
+			await screen.findByRole("heading", { level: 2, name: "Question dec_2" });
+			mounted.rerender(view({ callId: "dec_2", tab: "dec_1" }));
+			expect(within(screen.getByRole("complementary", { name: "Decision" })).getByRole("textbox", { name: "Note for the session" })).toHaveValue("ship it dark");
+		});
+
+		it("asks before closing a tab that holds unsent text, and not otherwise", async () => {
+			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_1", "dec_2"]));
+			answer(board([one, two]), details);
+			render(view({ tab: "dec_1" }));
+			await userEvent.type(await screen.findByRole("textbox", { name: "Note for the session" }), "not sent yet");
+			await userEvent.click(screen.getByRole("button", { name: "Close Question dec_1" }));
+			const dialog = await screen.findByRole("dialog", { name: "Close this decision?" });
+			expect(kept()).toEqual(["dec_1", "dec_2"]);
+			await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+			expect(kept()).toEqual(["dec_1", "dec_2"]);
+			expect(screen.getByRole("textbox", { name: "Note for the session" })).toHaveValue("not sent yet");
+
+			await userEvent.click(screen.getByRole("button", { name: "Close Question dec_2" }));
+			expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+			expect(kept()).toEqual(["dec_1"]);
+
+			await userEvent.click(screen.getByRole("button", { name: "Close Question dec_1" }));
+			await userEvent.click(within(await screen.findByRole("dialog", { name: "Close this decision?" })).getByRole("button", { name: "Close and discard" }));
+			expect(kept()).toEqual([]);
+		});
+
+		it("leaves Escape alone on a decision's tab", async () => {
+			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_1"]));
+			answer(board([one, two]), details);
+			render(view({ callId: "dec_2", tab: "dec_1" }));
+			await userEvent.click(await screen.findByRole("textbox", { name: "Note for the session" }));
+			await userEvent.keyboard("{Escape}");
+			expect(navigateMock).not.toHaveBeenCalled();
 		});
 	});
 

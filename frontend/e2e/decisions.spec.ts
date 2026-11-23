@@ -366,3 +366,55 @@ test("decisions: the project and stream list narrows the board, survives a reloa
 	await expect(list).toBeHidden();
 	await expect(page.getByRole("button", { name: /^Shop question/ })).toBeVisible();
 });
+
+test("decisions: a decision kept open becomes a tab that fills the page, keeps what was typed, and asks before discarding it", async ({ page }) => {
+	const ledger = new Ledger([
+		call("dec_a", "First question", { raisedAt: iso(5 * hour) }),
+		call("dec_b", "Second question", { raisedAt: iso(2 * hour) }),
+	]);
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openDecisions(page, ledger);
+	const strip = page.getByRole("tablist", { name: "Board and open decisions" });
+	const panel = page.getByRole("complementary", { name: "Decision" });
+	await expect(strip).toHaveCount(0);
+
+	// View one beside the board, start a note, then keep it open.
+	await page.getByRole("button", { name: /^First question/ }).click();
+	await panel.getByRole("textbox", { name: "Note for the session" }).fill("ship it dark");
+	await panel.getByRole("button", { name: "Keep open" }).click();
+	await expect(strip.getByRole("tab")).toHaveText(["Board", "First question"]);
+	await expect(panel.getByRole("textbox", { name: "Note for the session" })).toHaveValue("ship it dark");
+
+	// Its tab fills the page; the board's tab brings the board back as it was.
+	await strip.getByRole("tab", { name: "First question" }).click();
+	await expect(page).toHaveURL(/tab=dec_a/);
+	await expect(page.getByRole("group", { name: "Decisions board" })).toBeHidden();
+	await expect(panel.getByRole("heading", { level: 2 })).toHaveText("First question");
+	await expect(panel.getByRole("textbox", { name: "Note for the session" })).toHaveValue("ship it dark");
+	await strip.getByRole("tab", { name: "Board" }).click();
+	await expect(page).not.toHaveURL(/tab=/);
+	await expect(page.getByRole("button", { name: /^Second question/ })).toBeVisible();
+	await expect(panel.getByRole("textbox", { name: "Note for the session" })).toHaveValue("ship it dark");
+
+	// A second one is kept from the keyboard, and the tabs survive a reload.
+	await page.getByRole("button", { name: /^Second question/ }).focus();
+	await page.keyboard.press("Shift+Enter");
+	await expect(strip.getByRole("tab")).toHaveText(["Board", "First question", "Second question"]);
+	await page.reload();
+	await expect(strip.getByRole("tab")).toHaveText(["Board", "First question", "Second question"]);
+
+	// Closing a tab with unsent text asks first; one without does not.
+	await strip.getByRole("tab", { name: "Second question" }).click();
+	await panel.getByRole("textbox", { name: "Note for the session" }).fill("not sent yet");
+	await page.getByRole("button", { name: "Close Second question" }).click();
+	const confirm = page.getByRole("dialog", { name: "Close this decision?" });
+	await confirm.getByRole("button", { name: "Cancel" }).click();
+	await expect(panel.getByRole("textbox", { name: "Note for the session" })).toHaveValue("not sent yet");
+	await page.getByRole("button", { name: "Close First question" }).click();
+	await expect(confirm).toHaveCount(0);
+	await expect(strip.getByRole("tab")).toHaveText(["Board", "Second question"]);
+	await page.getByRole("button", { name: "Close Second question" }).click();
+	await confirm.getByRole("button", { name: "Close and discard" }).click();
+	await expect(strip).toHaveCount(0);
+	await expect(page.getByRole("button", { name: /^First question/ })).toBeVisible();
+});

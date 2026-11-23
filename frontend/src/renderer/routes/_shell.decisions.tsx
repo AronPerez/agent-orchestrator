@@ -9,5 +9,5 @@ export const Route = createFileRoute("/_shell/decisions")({
 
 function DecisionsRoute() {
 	const search = Route.useSearch();
-	return <DecisionsView callId={search.call} query={search.q} project={search.project} stream={search.stream} />;
+	return <DecisionsView callId={search.call} query={search.q} project={search.project} stream={search.stream} tab={search.tab} />;
 }

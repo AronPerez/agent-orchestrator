@@ -6,6 +6,7 @@ import { apiErrorRequestId } from "../lib/api-client";
 import { decisionOptionRequiresNote, type DecisionCall } from "../lib/decision-inbox";
 import { LOCAL_HOST } from "../lib/hosts";
 import { cn } from "../lib/utils";
+import { useDecisionDraft } from "./DecisionDraftScope";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -164,6 +165,8 @@ function AnswerForm({
 	const [noteMissing, setNoteMissing] = useState(false);
 	const [dismissing, setDismissing] = useState(false);
 	const [dismissNote, setDismissNote] = useState("");
+	// Typed text that has not been sent; a pick alone is quick to make again.
+	useDecisionDraft(note.trim() !== (call.state === "in_progress" ? call.note ?? "" : "").trim() || dismissNote.trim() !== "");
 	// Sending the standing answer again would only append and deliver a copy.
 	const unchanged = standing !== "" && choice === standing && note.trim() === (call.note ?? "").trim();
 	const blocked = busy || unconfirmed || !choice || unchanged;
@@ -275,6 +278,7 @@ function OutcomeForm({ forEntry, busy, onRecord }: { forEntry?: string; busy: bo
 	// answer meanwhile, the draft stays and the person reviews the new answer
 	// before recording, instead of losing what they typed.
 	const [draftFor, setDraftFor] = useState(forEntry);
+	useDecisionDraft(text.trim() !== "" || link.trim() !== "");
 	const answerChanged = Boolean(text.trim() || link.trim()) && draftFor !== forEntry;
 	const submit = (event: FormEvent) => {
 		event.preventDefault();
@@ -342,6 +346,7 @@ function OverruleForm({ busy, extraActions, onOverrule }: { busy: boolean; extra
 	const id = useId();
 	const [note, setNote] = useState("");
 	const [missing, setMissing] = useState(false);
+	useDecisionDraft(note.trim() !== "");
 	const submit = (event: FormEvent) => {
 		event.preventDefault();
 		if (busy) return;

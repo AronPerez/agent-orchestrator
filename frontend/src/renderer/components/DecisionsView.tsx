@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { useMinuteClock } from "@aoagents/product-ui";
 import { ChevronsDownUp, ChevronsUpDown, FolderTree, ListChecks } from "@/components/app-icons";
@@ -9,8 +10,13 @@ import { useDecisionBoard, useDecisionSearch } from "../hooks/useDecisionInbox";
 import { apiErrorRequestId } from "../lib/api-client";
 import { buildDecisionBoard, DECISION_LANES } from "../lib/decision-board";
 import { decisionRowFoldKey } from "../lib/decision-folds";
+import { closeDecisionTab, DECISION_TABS_MAX, keepDecisionTab, readDecisionTabs, writeDecisionTabs } from "../lib/decision-tabs";
 import { decisionScopeTree, readDecisionListHidden, resolveDecisionScope, scopeDecisionBoard, writeDecisionListHidden, type DecisionScope } from "../lib/decision-scope";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { DecisionCallPanel } from "./DecisionCallPanel";
+import { DecisionDraftScope } from "./DecisionDraftScope";
+import { DecisionPanelSlot, useDecisionPanelHosts } from "./DecisionPanelHosts";
+import { DecisionTabStrip } from "./DecisionTabStrip";
 import { DecisionScopeList } from "./DecisionScopeList";
 import { DecisionSearchResults } from "./DecisionSearchResults";
 import { DecisionSyncFooter } from "./DecisionSyncFooter";
@@ -32,6 +38,8 @@ export type DecisionsViewProps = {
 	project?: string;
 	/** The stream of that project chosen in the list, from `?stream=`. */
 	stream?: string;
+	/** The kept-open decision filling the page, from `?tab=`. */
+	tab?: string;
 };
 
 /** The Decisions page: this computer's ledger as a live swimlane board. */
@@ -61,7 +69,7 @@ function TopbarIconButton({ label, onClick, children }: { label: string; onClick
 	);
 }
 
-export function DecisionsView({ callId, query, project, stream }: DecisionsViewProps) {
+export function DecisionsView({ callId, query, project, stream, tab }: DecisionsViewProps) {
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const board = useDecisionBoard();
@@ -80,6 +88,30 @@ export function DecisionsView({ callId, query, project, stream }: DecisionsViewP
 	});
 	// Every navigation on this page carries the scope along.
 	const scopeSearch = useMemo(() => ({ ...(project ? { project } : {}), ...(project && stream ? { stream } : {}) }), [project, stream]);
+
+	// Decisions kept open as tabs. The list is saved on this computer; the URL
+	// says only which one fills the page, and names nothing that is not kept.
+	const [kept, setKept] = useState(readDecisionTabs);
+	const loadedKept = useRef(kept);
+	useEffect(() => {
+		if (kept !== loadedKept.current) writeDecisionTabs(kept);
+	}, [kept]);
+	const keptIds = useMemo(() => new Set(kept), [kept]);
+	const activeTab = tab !== undefined && keptIds.has(tab) ? tab : undefined;
+	const keepOpen = useCallback((id: string) => setKept((current) => keepDecisionTab(current, id)), []);
+	// One live view per open decision: every kept one, and the one beside the board.
+	const panelIds = useMemo(() => (callId && !keptIds.has(callId) ? [...kept, callId] : kept), [callId, kept, keptIds]);
+	const hosts = useDecisionPanelHosts(panelIds);
+	// Which open decisions hold text that has not been sent.
+	const [drafts, setDrafts] = useState<ReadonlySet<string>>(() => new Set());
+	const markDraft = useCallback((id: string, dirty: boolean) => setDrafts((current) => {
+		if (current.has(id) === dirty) return current;
+		const next = new Set(current);
+		if (dirty) next.add(id);
+		else next.delete(id);
+		return next;
+	}), []);
+	const [closing, setClosing] = useState<string | undefined>(undefined);
 	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
 	const search = useDecisionSearch(words);
@@ -94,10 +126,11 @@ export function DecisionsView({ callId, query, project, stream }: DecisionsViewP
 		const next = draft.trim();
 		if (next === words) return;
 		const timer = setTimeout(() => {
-			void navigate({ to: "/decisions", search: { ...(callId ? { call: callId } : {}), ...(next ? { q: next } : {}), ...scopeSearch }, replace: true });
+			// Search results show in place of the board, so a search started from a decision's tab goes back to it.
+			void navigate({ to: "/decisions", search: { ...(callId ? { call: callId } : {}), ...(next ? { q: next } : activeTab ? { tab: activeTab } : {}), ...scopeSearch }, replace: true });
 		}, SEARCH_DEBOUNCE_MS);
 		return () => clearTimeout(timer);
-	}, [callId, draft, navigate, scopeSearch, words]);
+	}, [activeTab, callId, draft, navigate, scopeSearch, words]);
 	const clearSearch = useCallback(() => {
 		setDraft("");
 		void navigate({ to: "/decisions", search: { ...(callId ? { call: callId } : {}), ...scopeSearch }, replace: true });
@@ -125,7 +158,21 @@ export function DecisionsView({ callId, query, project, stream }: DecisionsViewP
 		}
 	}, [callId, navigate, scopeSearch, words]);
 
-	const boardShown = !words && Boolean(board.data && board.data.calls.length > 0);
+	const selectTab = useCallback((id: string | undefined) => {
+		void navigate({ to: "/decisions", search: { ...(callId ? { call: callId } : {}), ...(words ? { q: words } : {}), ...scopeSearch, ...(id ? { tab: id } : {}) } });
+	}, [callId, navigate, scopeSearch, words]);
+	const closeTab = useCallback((id: string) => {
+		setClosing(undefined);
+		setKept((current) => closeDecisionTab(current, id));
+		if (id === activeTab) selectTab(undefined);
+	}, [activeTab, selectTab]);
+	// A tab whose decision is also beside the board closes without loss: that view, and its text, stay.
+	const requestCloseTab = useCallback((id: string) => {
+		if (drafts.has(id) && id !== callId) setClosing(id);
+		else closeTab(id);
+	}, [callId, closeTab, drafts]);
+
+	const boardShown = !words && !activeTab && Boolean(board.data && board.data.calls.length > 0);
 	let body;
 	if (words) {
 		if (search.data && search.data.length > 0) {
@@ -163,7 +210,7 @@ export function DecisionsView({ callId, query, project, stream }: DecisionsViewP
 						{t("decisions.nothingNeedsYou")}
 					</p>
 				) : null}
-				<DecisionsBoard model={scopedModel} soloBand={scope.project !== undefined} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
+				<DecisionsBoard model={scopedModel} soloBand={scope.project !== undefined} keptIds={keptIds} onKeep={keepOpen} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
 			</>
 		);
 	} else if (board.data && !board.isError) {
@@ -184,7 +231,7 @@ export function DecisionsView({ callId, query, project, stream }: DecisionsViewP
 			className="flex min-h-0 flex-1 flex-col bg-background"
 			onKeyDown={(event) => {
 				// Escape closes the open call from anywhere on the page, a focused card included.
-				if (event.key !== "Escape" || event.defaultPrevented || !callId) return;
+				if (event.key !== "Escape" || event.defaultPrevented || !callId || activeTab) return;
 				event.preventDefault();
 				closeCall();
 			}}
@@ -208,30 +255,74 @@ export function DecisionsView({ callId, query, project, stream }: DecisionsViewP
 					</>
 				)}
 			/>
-			<ResizablePanelGroup className="min-h-0 flex-1">
-				<ResizablePanel id="decisions-board" minSize="30%">
-					<div className="@container/decisions flex h-full min-w-0">
-						{/* Beside the board while there is room for both; a narrow pane keeps the board. */}
-						{boardShown && !listHidden ? <DecisionScopeList tree={scopeTree} scope={scope} onChoose={chooseScope} className="hidden @2xl/decisions:flex" /> : null}
-						<div className="flex h-full min-w-0 flex-1 flex-col">
-							<main className="min-h-0 flex-1 overflow-auto overscroll-contain">{body}</main>
-							{/* Whose ledger this is, and how fresh each linked machine is. */}
-							<footer className="shrink-0 border-t border-border px-(--space-4_5) py-1.5 text-caption text-muted-foreground">
-								<DecisionSyncFooter now={now} />
-							</footer>
+			{kept.length > 0 ? (
+				<DecisionTabStrip
+					ids={kept}
+					activeId={activeTab}
+					onSelect={selectTab}
+					onClose={requestCloseTab}
+					fallback={(id) => model.cardById.get(id)?.card.call}
+				/>
+			) : null}
+			{/* A decision's tab fills the page. The board stays mounted underneath, so it comes back as it was left. */}
+			{activeTab ? <DecisionPanelSlot host={hosts.get(activeTab)} className="min-h-0 min-w-0 flex-1" /> : null}
+			<div hidden={Boolean(activeTab)} className="flex min-h-0 min-w-0 flex-1">
+				<ResizablePanelGroup className="min-h-0 flex-1">
+					<ResizablePanel id="decisions-board" minSize="30%">
+						<div className="@container/decisions flex h-full min-w-0">
+							{/* Beside the board while there is room for both; a narrow pane keeps the board. */}
+							{boardShown && !listHidden ? <DecisionScopeList tree={scopeTree} scope={scope} onChoose={chooseScope} className="hidden @2xl/decisions:flex" /> : null}
+							<div className="flex h-full min-w-0 flex-1 flex-col">
+								<main className="min-h-0 flex-1 overflow-auto overscroll-contain">{body}</main>
+								{/* Whose ledger this is, and how fresh each linked machine is. */}
+								<footer className="shrink-0 border-t border-border px-(--space-4_5) py-1.5 text-caption text-muted-foreground">
+									<DecisionSyncFooter now={now} />
+								</footer>
+							</div>
 						</div>
-					</div>
-				</ResizablePanel>
-				{callId ? (
-					<>
-						<ResizableHandle />
-						{/* The shell's inspector position: beside the board, never a modal. */}
-						<ResizablePanel id="decision-call" defaultSize="420px" minSize="360px" maxSize="55%">
-							<DecisionCallPanel key={callId} callId={callId} onClose={closeCall} />
-						</ResizablePanel>
-					</>
-				) : null}
-			</ResizablePanelGroup>
+					</ResizablePanel>
+					{callId ? (
+						<>
+							<ResizableHandle />
+							{/* The shell's inspector position: beside the board, never a modal. */}
+							<ResizablePanel id="decision-call" defaultSize="420px" minSize="360px" maxSize="55%">
+								<DecisionPanelSlot host={activeTab ? undefined : hosts.get(callId)} className="h-full min-w-0" />
+							</ResizablePanel>
+						</>
+					) : null}
+				</ResizablePanelGroup>
+			</div>
+			{panelIds.map((id) => {
+				const host = hosts.get(id);
+				if (!host) return null;
+				const filling = id === activeTab;
+				return createPortal(
+					<DecisionDraftScope onDraftChange={(dirty) => markDraft(id, dirty)}>
+						<DecisionCallPanel
+							callId={id}
+							layout={filling ? "page" : "panel"}
+							onClose={filling ? undefined : closeCall}
+							headerActions={keptIds.has(id)
+								? <span className="px-1.5 text-caption text-passive">{t("decisions.tabs.kept")}</span>
+								: kept.length >= DECISION_TABS_MAX
+									? <span className="px-1.5 text-caption text-passive">{t("decisions.tabs.full")}</span>
+									: <Button size="xs" variant="quiet" onClick={() => keepOpen(id)}>{t("decisions.tabs.keep")}</Button>}
+						/>
+					</DecisionDraftScope>,
+					host,
+					id,
+				);
+			})}
+			<ConfirmDialog
+				open={closing !== undefined}
+				title={t("decisions.tabs.discardTitle")}
+				description={t("decisions.tabs.discardBody")}
+				confirmLabel={t("decisions.tabs.discardConfirm")}
+				destructive
+				initialFocus="cancel"
+				onConfirm={() => { if (closing) closeTab(closing); }}
+				onOpenChange={(open) => { if (!open) setClosing(undefined); }}
+			/>
 		</div>
 	);
 }
