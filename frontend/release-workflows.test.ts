@@ -1,8 +1,12 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
+const execFileAsync = promisify(execFile);
 const releaseMutationPatterns = [
   /gh release (?:create|delete|edit|publish|upload)\b/,
   /gh api(?=[^\n]*(?:releases|git\/refs\/tags))(?=[^\n]*(?:(?:--method|-X)\s+(?:DELETE|PATCH|POST|PUT)))[^\n]*/,
@@ -16,6 +20,22 @@ const releaseMutationPatterns = [
 ];
 
 type WorkflowSource = { name: string; contents: string };
+
+// stepRunScript returns the `run: |` body of the workflow step with this name,
+// dedented, so a step's shell can be executed exactly as written.
+function stepRunScript(workflow: string, stepName: string): string {
+  const lines = workflow.split("\n");
+  const nameAt = lines.findIndex((line) => line.trim() === `- name: ${stepName}`);
+  if (nameAt < 0) throw new Error(`no step named ${stepName}`);
+  const runAt = lines.findIndex((line, index) => index > nameAt && line.trim() === "run: |");
+  const body: string[] = [];
+  const indent = lines[runAt + 1].length - lines[runAt + 1].trimStart().length;
+  for (const line of lines.slice(runAt + 1)) {
+    if (line.trim() !== "" && line.length - line.trimStart().length < indent) break;
+    body.push(line.slice(indent));
+  }
+  return body.join("\n");
+}
 
 // The one workflow allowed to create a release: the fork's tag-triggered
 // draft publisher (RELEASING.md). It is held to the stricter checks in its own
@@ -87,6 +107,63 @@ describe("desktop release workflows", () => {
         workflows.filter(({ name }) => name !== FORK_RELEASE_WORKFLOW),
       ),
     ).toEqual([]);
+  });
+
+  it("checks for an existing release or draft in the publish job, before creating one", async () => {
+    const contents = await readFile(
+      path.join(workflowsDirectory, FORK_RELEASE_WORKFLOW),
+      "utf8",
+    );
+    const publishJob = contents.slice(contents.indexOf("\n  publish:\n"));
+    const guard = publishJob.indexOf("- name: Refuse a tag that already has a release or draft");
+    expect(guard).toBeGreaterThan(0);
+    // The publish job is the only one whose token can see drafts.
+    expect(publishJob.indexOf("contents: write")).toBeLessThan(guard);
+    expect(guard).toBeLessThan(publishJob.indexOf("gh release create"));
+
+    const script = stepRunScript(contents, "Refuse a tag that already has a release or draft");
+    const dir = await mkdtemp(path.join(tmpdir(), "fork-release-guard-"));
+    try {
+      // A fake gh that answers the releases listing with FAKE_RELEASES (TSV rows,
+      // as the step's --jq produces) and records how it was called.
+      await writeFile(
+        path.join(dir, "gh"),
+        '#!/bin/sh\nprintf "%s\\n" "$*" > "$GH_ARGS"\nprintf "%b" "$FAKE_RELEASES"\n',
+      );
+      await chmod(path.join(dir, "gh"), 0o755);
+      const guardWith = async (releases: string) => {
+        try {
+          const { stdout } = await execFileAsync("bash", ["-c", script], {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              GH_ARGS: path.join(dir, "args"),
+              GH_REPO: "AronPerez/agent-orchestrator",
+              TAG: "v0.15.3-fork.1",
+              FAKE_RELEASES: releases,
+            },
+          });
+          return { code: 0, out: stdout };
+        } catch (error) {
+          const failed = error as { code: number; stdout: string };
+          return { code: failed.code, out: failed.stdout };
+        }
+      };
+
+      expect((await guardWith("")).code).toBe(0);
+      expect((await guardWith("v0.15.3-fork.10\\tpublished\\thttps://x/10\\n")).code).toBe(0);
+      const draft = await guardWith("v0.15.3-fork.1\\tdraft\\thttps://x/untagged-1\\n");
+      expect(draft.code).toBe(1);
+      expect(draft.out).toContain("already has a release or draft");
+      expect(draft.out).toContain("https://x/untagged-1");
+      expect((await guardWith("v0.15.3-fork.1\\tpublished\\thttps://x/1\\n")).code).toBe(1);
+      // It lists every release, drafts included, across pages.
+      expect(await readFile(path.join(dir, "args"), "utf8")).toMatch(
+        /^api repos\/AronPerez\/agent-orchestrator\/releases\?per_page=100 --paginate --jq /,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("lets the fork release workflow create only a gated draft release", async () => {
