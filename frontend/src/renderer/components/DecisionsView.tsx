@@ -8,12 +8,14 @@ import { ChevronsDownUp, ChevronsUpDown, FolderTree, ListChecks } from "@/compon
 import { useDecisionFolds } from "../hooks/useDecisionFolds";
 import { useDecisionBoard, useDecisionSearch } from "../hooks/useDecisionInbox";
 import { apiErrorRequestId } from "../lib/api-client";
+import { decisionArchiveEntries, type DecisionArchiveScope } from "../lib/decision-archive";
 import { buildDecisionBoard, DECISION_LANES } from "../lib/decision-board";
 import { decisionRowFoldKey } from "../lib/decision-folds";
 import { closeDecisionTab, DECISION_TABS_MAX, keepDecisionTab, readDecisionTabs, writeDecisionTabs } from "../lib/decision-tabs";
 import { decisionScopeTree, readDecisionListHidden, resolveDecisionScope, scopeDecisionBoard, writeDecisionListHidden, type DecisionScope } from "../lib/decision-scope";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { cn } from "../lib/utils";
+import { DecisionArchiveModal } from "./DecisionArchiveModal";
 import { DecisionCallPanel } from "./DecisionCallPanel";
 import { DecisionDraftScope } from "./DecisionDraftScope";
 import { DecisionPanelSlot, useDecisionPanelHosts } from "./DecisionPanelHosts";
@@ -113,6 +115,18 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 		return next;
 	}), []);
 	const [closing, setClosing] = useState<string | undefined>(undefined);
+	// The archive of done decisions, opened from a stream's Done cell. Each
+	// request has its own number, so it starts from its own stream and an empty search.
+	const [archive, setArchive] = useState<{ request: number; scope: DecisionArchiveScope; open: boolean } | undefined>(undefined);
+	const archiveEntries = useMemo(() => decisionArchiveEntries(model), [model]);
+	// What opened the archive, and what was chosen in it, for where focus goes when it closes.
+	const archiveOpener = useRef<HTMLElement | null>(null);
+	const archiveChosen = useRef<string | undefined>(undefined);
+	const showDone = useCallback((next: DecisionArchiveScope) => {
+		archiveOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		archiveChosen.current = undefined;
+		setArchive((current) => ({ request: (current?.request ?? 0) + 1, scope: next, open: true }));
+	}, []);
 	const discarded = useRef<string | undefined>(undefined);
 	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
@@ -141,6 +155,16 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 	const selectCall = useCallback((id: string) => {
 		void navigate({ to: "/decisions", search: { call: id, ...(words ? { q: words } : {}), ...scopeSearch } });
 	}, [navigate, scopeSearch, words]);
+	// A decision chosen in the archive opens beside the board. The archive can be widened past
+	// the stream it opened at, so the choice may lie outside what the board is narrowed to; the
+	// board then shows every project, so the chosen card is on it.
+	const openFromArchive = useCallback((id: string) => {
+		archiveChosen.current = id;
+		const at = model.cardById.get(id);
+		const inScope = !at || scope.project === undefined || (at.bandKey === scope.project && (scope.stream === undefined || at.rowKey === scope.stream));
+		if (inScope) selectCall(id);
+		else void navigate({ to: "/decisions", search: { call: id, ...(words ? { q: words } : {}) } });
+	}, [model, navigate, scope.project, scope.stream, selectCall, words]);
 	const chooseScope = useCallback((next: DecisionScope) => {
 		// Choosing a stream shows its cards, even if its row was folded.
 		if (next.project !== undefined && next.stream !== undefined) folds.open(decisionRowFoldKey(next.project, next.stream));
@@ -242,7 +266,7 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 						{t("decisions.nothingNeedsYou")}
 					</p>
 				) : null}
-				<DecisionsBoard model={scopedModel} soloBand={scope.project !== undefined} keptIds={keptIds} onKeep={keepOpen} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
+				<DecisionsBoard model={scopedModel} soloBand={scope.project !== undefined} keptIds={keptIds} onKeep={keepOpen} onShowDone={showDone} selectedId={callId} onSelect={selectCall} now={now} sync={Array.isArray(sync.data?.peers) ? sync.data : undefined} folds={folds} />
 			</>
 		);
 	} else if (board.data && !board.isError) {
@@ -360,6 +384,25 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 					id,
 				);
 			})}
+			{archive ? (
+				<DecisionArchiveModal
+					key={archive.request}
+					open={archive.open}
+					entries={archiveEntries}
+					scope={archive.scope}
+					onOpen={openFromArchive}
+					onOpenChange={(open) => setArchive((current) => (current ? { ...current, open } : current))}
+					// The dialog has no trigger of its own to return to. Focus goes back to the button
+					// that opened it, or to the chosen decision's card when that button is gone, as it is
+					// when the chosen card is the one that was out of sight.
+					onCloseAutoFocus={(event) => {
+						event.preventDefault();
+						const opener = archiveOpener.current;
+						if (opener?.isConnected) opener.focus();
+						else focusBoardCard(archiveChosen.current ?? callId ?? "");
+					}}
+				/>
+			) : null}
 			<ConfirmDialog
 				open={closing !== undefined}
 				title={t("decisions.tabs.discardTitle")}

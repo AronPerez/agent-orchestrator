@@ -134,22 +134,19 @@ describe("visibleDecisionTopology", () => {
 	const wide = decisionRowFoldKey("cloud", PROJECT_WIDE_ROW);
 
 	it("drops folded projects and streams", () => {
-		expect(visibleDecisionTopology(many, new Set([shop]), new Set()).map((row) => row.bandKey)).toEqual(["cloud"]);
-		expect(visibleDecisionTopology(many, new Set([wide]), new Set()).map((row) => row.bandKey)).toEqual(["shop"]);
+		expect(visibleDecisionTopology(many, new Set([shop])).map((row) => row.bandKey)).toEqual(["cloud"]);
+		expect(visibleDecisionTopology(many, new Set([wide])).map((row) => row.bandKey)).toEqual(["shop"]);
 	});
 
-	it("keeps only the newest Done cards of a row until that row is expanded", () => {
+	it("keeps only the newest Done cards of a row, and every card of the other lanes", () => {
 		expect(DECISION_DONE_SHOWN).toBe(3);
-		const cloudRow = (rows: ReturnType<typeof visibleDecisionTopology>) => rows.find((row) => row.bandKey === "cloud")!;
-		const capped = cloudRow(visibleDecisionTopology(many, new Set(), new Set()));
+		const capped = visibleDecisionTopology(many, new Set()).find((row) => row.bandKey === "cloud")!;
 		expect(capped.lanes.done).toEqual(["d5", "d4", "d3"]);
 		expect(capped.lanes.needs_you).toEqual(["open"]);
-		const expanded = cloudRow(visibleDecisionTopology(many, new Set(), new Set([wide])));
-		expect(expanded.lanes.done).toEqual(["d5", "d4", "d3", "d2", "d1"]);
 	});
 
 	it("always keeps the selected Done card, in its place, even past the cap", () => {
-		const row = (selectedId: string) => visibleDecisionTopology(many, new Set(), new Set(), selectedId).find((item) => item.bandKey === "cloud")!;
+		const row = (selectedId: string) => visibleDecisionTopology(many, new Set(), selectedId).find((item) => item.bandKey === "cloud")!;
 		expect(row("d1").lanes.done).toEqual(["d5", "d4", "d3", "d1"]);
 		expect(row("d2").lanes.done).toEqual(["d5", "d4", "d3", "d2"]);
 		expect(row("d4").lanes.done).toEqual(["d5", "d4", "d3"]);
