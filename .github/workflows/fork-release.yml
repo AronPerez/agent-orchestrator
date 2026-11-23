@@ -14,9 +14,6 @@ name: Fork release
 
 on:
   push:
-    # TEMPORARY: registers this workflow so it can be dispatched from this branch.
-    branches:
-      - ao/agent-orchestrator-41/fork-releases
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+-fork.[0-9]+"
   workflow_dispatch:
