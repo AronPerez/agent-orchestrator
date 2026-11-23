@@ -13,9 +13,16 @@ export TEST_LOG_DIR="$tmp/log" TEST_RECORDER="$tmp/recorder.sh" TEST_SETUP_ARGS=
 mkdir -p "$tmp/bin" "$TEST_LOG_DIR" "$tmp/home"
 export HOME="$tmp/home"
 
-for tool in awk bash cat chmod cp dirname grep mkdir mktemp readlink rm sed tar; do
+for tool in awk bash cat chmod cp dirname grep mkdir mktemp python3 readlink rm sed tar; do
 	ln -s "$(command -v "$tool")" "$tmp/bin/$tool"
 done
+# sha256sum is GNU-only; macOS runs this test with shasum behind the same name.
+if command -v sha256sum >/dev/null; then
+	ln -s "$(command -v sha256sum)" "$tmp/bin/sha256sum"
+else
+	printf '%s\n' '#!/bin/sh' "exec $(command -v shasum) -a 256 \"\$@\"" > "$tmp/bin/sha256sum"
+	chmod +x "$tmp/bin/sha256sum"
+fi
 printf '%s\n' '#!/bin/sh' 'case "$1" in -u) echo "${TEST_UID:-1000}" ;; -un) echo ao ;; esac' > "$tmp/bin/id"
 printf '%s\n' '#!/bin/sh' 'case "$1" in -s) echo Linux ;; -m) echo "${TEST_MACHINE:-x86_64}" ;; esac' > "$tmp/bin/uname"
 # sudo runs its command; every privileged command below is itself a stub.
@@ -36,12 +43,28 @@ printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$TEST_LOG_DIR/npm.log"' \
 	'if [ "$1" = run ] && [ "$2" = build:host ]; then' \
 	'  mkdir -p dist-host && : > "dist-host/ao-host-linux-${TEST_ARCH:-x64}.tar.gz"' \
 	'fi' > "$tmp/bin/npm"
-# curl -o FILE delivers the recorder (the installer download on the --bundle path).
+# curl -o FILE serves a fake fork release: its API metadata, host package and
+# SHA256SUMS; any other download (the installer) is the recorder.
+export TEST_RELEASE_DIR="$tmp/release"
+mkdir -p "$TEST_RELEASE_DIR"
 printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$TEST_LOG_DIR/curl.log"' \
-	'out=""; prev=""' \
-	'for a; do [ "$prev" = -o ] && out=$a; prev=$a; done' \
-	'[ -n "$out" ] && cp "$TEST_RECORDER" "$out"' \
+	'out=""; prev=""; url=""' \
+	'for a; do [ "$prev" = -o ] && out=$a; case "$a" in http*) url=$a ;; esac; prev=$a; done' \
+	'case "$url" in' \
+	'  https://api.github.com/*) [ -f "$TEST_RELEASE_DIR/release.json" ] || exit 22; cp "$TEST_RELEASE_DIR/release.json" "$out" ;;' \
+	'  https://dl.test/*) cp "$TEST_RELEASE_DIR/${url##*/}" "$out" ;;' \
+	'  *) [ -n "$out" ] && cp "$TEST_RECORDER" "$out" ;;' \
+	'esac' \
 	'exit 0' > "$tmp/bin/curl"
+# publish_release TAG ARCH [CHECKSUM_OVERRIDE]: plant a published fork release.
+publish_release() {
+	local tag=$1 arch=$2 asset="ao-host-linux-$2.tar.gz" sum
+	printf 'host package for %s\n' "$arch" > "$TEST_RELEASE_DIR/$asset"
+	sum="${3:-$("$tmp/bin/sha256sum" "$TEST_RELEASE_DIR/$asset" | awk '{print $1}')}"
+	printf '%s  %s\n' "$sum" "$asset" > "$TEST_RELEASE_DIR/SHA256SUMS"
+	printf '{"tag_name":"%s","draft":false,"prerelease":false,"assets":[{"name":"%s","browser_download_url":"https://dl.test/%s","digest":"sha256:%s"},{"name":"SHA256SUMS","browser_download_url":"https://dl.test/SHA256SUMS"}]}\n' \
+		"$tag" "$asset" "$asset" "$sum" > "$TEST_RELEASE_DIR/release.json"
+}
 printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$*" > "$TEST_SETUP_ARGS"' \
 	'printf "Pair this host\n\nAddress: http://192.0.2.1:3011\n\nPassword: test-secret\n\n"' > "$TEST_RECORDER"
 chmod +x "$tmp/bin/id" "$tmp/bin/uname" "$tmp/bin/sudo" "$tmp/bin/apt-get" "$tmp/bin/loginctl" \
@@ -59,10 +82,42 @@ fail() { cat "$tmp/out" >&2; printf '%s\n' "$1" >&2; exit 1; }
 
 case "${1:-}" in
 	default)
-		seed_toolchain x64
+		publish_release v0.15.3-fork.2 x64
 		# cloudflared already present: the tunnel default must not touch apt repos.
 		printf '%s\n' '#!/bin/sh' > "$tmp/bin/cloudflared"; chmod +x "$tmp/bin/cloudflared"
-		TEST_ARCH=x64 run || fail 'default run failed'
+		run || fail 'default run failed'
+		grep -q 'api.github.com/repos/AronPerez/agent-orchestrator/releases/latest' "$TEST_LOG_DIR/curl.log" || fail 'did not ask for the fork latest release'
+		grep -q 'raw.githubusercontent.com/AronPerez/agent-orchestrator/v0.15.3-fork.2/scripts/setup-self-hosted.sh' "$TEST_LOG_DIR/curl.log" || fail 'installer not fetched from the release tag'
+		[[ ! -e "$TEST_LOG_DIR/git.log" && ! -e "$TEST_LOG_DIR/npm.log" ]] || fail 'release install still cloned or built'
+		[[ "$(cat "$TEST_SETUP_ARGS")" == "--bundle "*"/ao-host-linux-x64.tar.gz --tunnel" ]] || fail "installer args: $(cat "$TEST_SETUP_ARGS")"
+		grep -q 'Installing fork release v0.15.3-fork.2' "$tmp/out" || fail 'release not announced'
+		grep -q 'enable-linger ao' "$TEST_LOG_DIR/loginctl.log" || fail 'linger not enabled'
+		! grep -q 'build-essential' "$TEST_LOG_DIR/apt-get.log" || fail 'release install pulled build tools'
+		! grep -q cloudflared "$TEST_LOG_DIR/apt-get.log" || fail 'reinstalled a present cloudflared'
+		grep -q 'Add project' "$tmp/out" || fail 'missing the fork pairing hint'
+		grep -q 'Address: http://192.0.2.1:3011' "$tmp/out" || fail 'installer output not shown'
+		;;
+	release-tag)
+		publish_release v0.15.3-fork.1 arm64
+		TEST_MACHINE=aarch64 run --lan --release v0.15.3-fork.1 || fail 'tagged release run failed'
+		grep -q 'api.github.com/repos/AronPerez/agent-orchestrator/releases/tags/v0.15.3-fork.1' "$TEST_LOG_DIR/curl.log" || fail 'did not ask for the tagged release'
+		[[ "$(cat "$TEST_SETUP_ARGS")" == "--bundle "*"/ao-host-linux-arm64.tar.gz" ]] || fail "installer args: $(cat "$TEST_SETUP_ARGS")"
+		if run --release v0.15.4; then fail 'accepted an upstream-style tag'; fi
+		if run --release latest --ref develop; then fail 'accepted --release with --ref'; fi
+		;;
+	bad-checksum)
+		publish_release v0.15.3-fork.1 x64 "$(printf '0%.0s' {1..64})"
+		if run --lan; then fail 'installed a package that fails SHA256SUMS'; fi
+		grep -q 'does not match SHA256SUMS' "$tmp/out" || fail 'wrong checksum refusal'
+		[[ ! -e "$TEST_SETUP_ARGS" ]] || fail 'ran the installer after a checksum mismatch'
+		rm -f "$TEST_RELEASE_DIR/release.json"
+		if run --lan; then fail 'succeeded with no published release'; fi
+		grep -q 'Pass --ref develop' "$tmp/out" || fail 'no hint when the fork has no release'
+		;;
+	source)
+		seed_toolchain x64
+		printf '%s\n' '#!/bin/sh' > "$tmp/bin/cloudflared"; chmod +x "$tmp/bin/cloudflared"
+		TEST_ARCH=x64 run --ref develop || fail 'source run failed'
 		grep -qE '^clone .*--branch develop https://github.com/AronPerez/agent-orchestrator.git ' "$TEST_LOG_DIR/git.log" || fail 'did not clone the fork at develop'
 		for step in '^ci$' '^run build:daemon$' '^run build:tmux$' '^run build:acp-runtime$' '^run build:host$'; do
 			grep -qE "$step" "$TEST_LOG_DIR/npm.log" || fail "missing npm step $step"
@@ -94,6 +149,6 @@ case "${1:-}" in
 		[[ ! -e "$TEST_LOG_DIR/apt-get.log" ]] || fail 'touched apt before refusing'
 		if TEST_UID=0 run; then fail 'accepted root'; fi
 		;;
-	*) printf 'Usage: %s {default|lan-ref|bundle|unsupported}\n' "$0" >&2; exit 2 ;;
+	*) printf 'Usage: %s {default|release-tag|bad-checksum|source|lan-ref|bundle|unsupported}\n' "$0" >&2; exit 2 ;;
 esac
 printf 'PASS %s\n' "$1"

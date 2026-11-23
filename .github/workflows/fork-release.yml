@@ -304,6 +304,8 @@ jobs:
           mkdir -p dist-release dist-signing
           # Versioned zip: what latest-mac.yml points the updater at.
           cp "$ZIP" "dist-release/Orchestrator-darwin-$ARCH-$VERSION.zip"
+          # Stable-named zip: what `ao start` and setup-self-hosted.sh download.
+          cp "$ZIP" "dist-release/agent-orchestrator-darwin-$ARCH.zip"
           # Stable-named dmg: the first-install download.
           cp "$DMG" "dist-release/agent-orchestrator-darwin-$ARCH.dmg"
           # Signing record the publish job checks: only Developer ID builds publish.
@@ -538,6 +540,8 @@ jobs:
             "Orchestrator-darwin-x64-$VERSION.zip"
             agent-orchestrator-darwin-arm64.dmg
             agent-orchestrator-darwin-x64.dmg
+            agent-orchestrator-darwin-arm64.zip
+            agent-orchestrator-darwin-x64.zip
             "Orchestrator-$VERSION.AppImage"
             "Orchestrator-$VERSION.AppImage.blockmap"
             agent-orchestrator-linux-x64.AppImage
