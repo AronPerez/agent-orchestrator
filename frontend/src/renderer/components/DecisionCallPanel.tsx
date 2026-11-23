@@ -21,7 +21,12 @@ import { Skeleton } from "./ui/skeleton";
 
 export type DecisionCallPanelProps = {
 	callId: string;
-	onClose: () => void;
+	/** Closes the panel. Left out where something else closes it, as its tab does for a decision filling the page. */
+	onClose?: () => void;
+	/** Controls drawn before the close button, such as Keep open. */
+	headerActions?: ReactNode;
+	/** "page" sets the call in a readable column for a decision that fills the page instead of sitting beside the board. */
+	layout?: "panel" | "page";
 };
 
 function isWebUrl(url: string): boolean {
@@ -66,11 +71,11 @@ function useExactTime() {
  * belongs, what was asked, and everything that has happened to it. Read-only
  * here; the actions arrive with the actionable panel.
  */
-export function DecisionCallPanel({ callId, onClose }: DecisionCallPanelProps) {
+export function DecisionCallPanel({ callId, onClose, headerActions, layout = "panel" }: DecisionCallPanelProps) {
 	const { t } = useTranslation();
 	const detail = useDecisionDetail(callId);
 	const onKeyDown = (event: KeyboardEvent) => {
-		if (event.key !== "Escape" || event.defaultPrevented) return;
+		if (event.key !== "Escape" || event.defaultPrevented || !onClose) return;
 		event.preventDefault();
 		onClose();
 	};
@@ -111,13 +116,27 @@ export function DecisionCallPanel({ callId, onClose }: DecisionCallPanelProps) {
 			className="flex h-full min-w-0 flex-col bg-background"
 			onKeyDown={onKeyDown}
 		>
-			<div className="flex h-9 shrink-0 items-center justify-end gap-2 border-b border-border px-2">
-				{detail.isFetching && detail.data ? (
-					<span role="status" className="mr-auto pl-2 text-caption text-passive">{t("decisions.updating")}</span>
-				) : null}
-				<CloseButton aria-label={t("decisions.close")} size="icon-sm" onClick={onClose} />
+			{layout === "page" ? null : (
+				<div className="flex h-9 shrink-0 items-center justify-end gap-2 border-b border-border px-2">
+					{detail.isFetching && detail.data ? (
+						<span role="status" className="mr-auto pl-2 text-caption text-passive">{t("decisions.updating")}</span>
+					) : null}
+					{headerActions}
+					{onClose ? <CloseButton aria-label={t("decisions.close")} size="icon-sm" onClick={onClose} /> : null}
+				</div>
+			)}
+			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+				{/*
+				  One wrapper in both layouts, so the call below keeps its place in the
+				  tree: switching between beside the board and filling the page must
+				  not rebuild it and lose what was typed. Filling the page, it is one
+				  readable column and its tab closes it.
+				*/}
+				<div className={layout === "page" ? "mx-auto w-full max-w-3xl py-2" : undefined}>
+					{layout === "page" && detail.isFetching && detail.data ? <p role="status" className="px-4 pt-1 text-caption text-passive">{t("decisions.updating")}</p> : null}
+					{body}
+				</div>
 			</div>
-			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{body}</div>
 		</aside>
 	);
 }

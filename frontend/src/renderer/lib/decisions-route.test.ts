@@ -45,6 +45,19 @@ describe("validateDecisionsSearch scope", () => {
 	});
 });
 
+describe("validateDecisionsSearch tab", () => {
+	it("keeps the active tab when it is a call id, beside the other fields", () => {
+		expect(validateDecisionsSearch({ tab: "dec_1" })).toEqual({ tab: "dec_1" });
+		expect(validateDecisionsSearch({ tab: "dec_1", call: "dec_2", project: "cloud" })).toEqual({ tab: "dec_1", call: "dec_2", project: "cloud" });
+	});
+
+	it("drops a tab that is not one path-safe call id", () => {
+		for (const tab of ["dec/1", "", "dec 1", 42, ["dec_1"]]) {
+			expect(validateDecisionsSearch({ tab }), String(tab)).toEqual({});
+		}
+	});
+});
+
 describe("formatDecisionCount", () => {
 	it("caps the visible count while keeping zero hidden", () => {
 		expect(formatDecisionCount(0)).toBeUndefined();

@@ -45,6 +45,10 @@ export type DecisionsBoardProps = {
 	 * to fold it by, it is always open.
 	 */
 	soloBand?: boolean;
+	/** The calls kept open as tabs; their cards carry a stronger edge. */
+	keptIds?: ReadonlySet<string>;
+	/** Keep a call open as a tab: a double-click on its card, or Shift and Enter. */
+	onKeep?: (callId: string) => void;
 };
 
 // Narrow pane: the state columns alone, each project's and stream's name as a
@@ -73,7 +77,7 @@ function countsText(counts: Record<DecisionLane, number>, t: TFunction): string 
  * streams both fold to their counts. Cards are the only individually bordered
  * objects; everything else shares hairlines.
  */
-export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: pageFolds, soloBand = false }: DecisionsBoardProps) {
+export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: pageFolds, soloBand = false, keptIds, onKeep }: DecisionsBoardProps) {
 	const { t } = useTranslation();
 	const hintId = useId();
 	const folds = useMemo(() => {
@@ -136,7 +140,7 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: 
 	return (
 		<DecisionSyncContext.Provider value={sync}>
 		<div className="@container min-w-0">
-			<p id={hintId} className="sr-only">{t("decisions.keyboardHint")}</p>
+			<p id={hintId} className="sr-only">{t("decisions.keyboardHint")}{onKeep ? <>{" "}{t("decisions.tabs.keepHint")}</> : null}</p>
 			<div
 				ref={gridRef}
 				className={DECISION_GRID_CLASS[model.lanes.length === 4 ? 4 : 3]}
@@ -183,6 +187,8 @@ export function DecisionsBoard({ model, selectedId, onSelect, now, sync, folds: 
 						selectedId={selectedId}
 						tabStop={tabStop}
 						onSelect={onSelect}
+						keptIds={keptIds}
+						onKeep={onKeep}
 						now={now}
 					/>
 				))}
@@ -200,6 +206,8 @@ type RowShared = {
 	selectedId?: string;
 	tabStop?: string;
 	onSelect: (callId: string) => void;
+	keptIds?: ReadonlySet<string>;
+	onKeep?: (callId: string) => void;
 	now: number;
 };
 
@@ -262,7 +270,7 @@ function DecisionBand({ band, solo, ...shared }: { band: DecisionProjectBand; so
 	);
 }
 
-function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, selectedId, tabStop, onSelect, now }: { bandKey: string; row: DecisionStreamRow } & RowShared) {
+function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, selectedId, tabStop, onSelect, keptIds, onKeep, now }: { bandKey: string; row: DecisionStreamRow } & RowShared) {
 	const { t } = useTranslation();
 	const name = row.projectWide
 		? t("decisions.projectWide")
@@ -295,7 +303,7 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
 					>
 						{shown.map((card) => (
 							<li key={card.id} className="min-w-0">
-								<DecisionCard card={card} selected={card.id === selectedId} tabStop={card.id === tabStop} onSelect={onSelect} now={now} />
+								<DecisionCard card={card} selected={card.id === selectedId} kept={keptIds?.has(card.id) ?? false} tabStop={card.id === tabStop} onSelect={onSelect} onKeep={onKeep} now={now} />
 							</li>
 						))}
 						{capped && (allDone || shown.length < cards.length) ? (
@@ -321,7 +329,7 @@ function DecisionRow({ bandKey, row, lanes, folds, expandedDone, onToggleDone, s
  * their glyph, and an answer that has not reached a session says so under the
  * title.
  */
-function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: DecisionCardModel; selected: boolean; tabStop: boolean; onSelect: (callId: string) => void; now: number }) {
+function DecisionCard({ card, selected, kept, tabStop, onSelect, onKeep, now }: { card: DecisionCardModel; selected: boolean; kept: boolean; tabStop: boolean; onSelect: (callId: string) => void; onKeep?: (callId: string) => void; now: number }) {
 	const { t, i18n } = useTranslation();
 	const sync = useContext(DecisionSyncContext);
 	const status = decisionStatusText(card.status, now, t, { sync, locale: i18n.language });
@@ -337,10 +345,19 @@ function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: Decisi
 		<Pressable
 			aria-current={selected ? "true" : undefined}
 			data-decision-card={card.id}
+			data-kept={kept || undefined}
 			tabIndex={tabStop ? 0 : -1}
 			onClick={() => onSelect(card.id)}
+			onDoubleClick={onKeep ? () => onKeep(card.id) : undefined}
+			onKeyDown={onKeep ? (event) => {
+				// Shift and Enter keeps the call open as a tab; plain Enter is the click that views it.
+				if (event.key !== "Enter" || !event.shiftKey) return;
+				event.preventDefault();
+				onKeep(card.id);
+			} : undefined}
 			className={cn(
 				"flex w-full min-w-0 flex-wrap items-start gap-x-1 rounded-md border border-border bg-card px-2 py-1 transition-colors duration-(--duration-fast) hover:bg-interactive-hover focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+				kept && "border-border-strong",
 				selected && "border-border-strong bg-interactive-active hover:bg-interactive-active",
 			)}
 		>
@@ -356,7 +373,11 @@ function DecisionCard({ card, selected, tabStop, onSelect, now }: { card: Decisi
 			{status && undelivered ? <>{" "}<span className="line-clamp-2 w-full text-caption leading-4 text-muted-foreground">{status}</span></> : null}
 		</Pressable>
 		</TooltipTrigger>
-		<TooltipContent side="bottom" align="start" hideArrow className="flex max-w-xs flex-col gap-0.5" passEscape>
+		{/*
+		  No fade-out: a tooltip that is still fading hears the "another tooltip opened" signal, its own
+		  included, so arrowing away from a card and straight back would close the details it just reopened.
+		*/}
+		<TooltipContent side="bottom" align="start" hideArrow className="flex max-w-xs flex-col gap-0.5 data-[state=closed]:animate-none!" passEscape>
 			<span className="font-medium">{card.title}</span>
 			{secondary ? <span className="text-muted-foreground">{secondary}</span> : null}
 			{status ? <span className={card.lane === "needs_you" ? "text-status-needs-you" : "text-muted-foreground"}>{status}</span> : null}

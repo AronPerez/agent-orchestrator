@@ -257,6 +257,37 @@ describe("DecisionsBoard", () => {
 		expect(screen.queryByRole("button", { name: /^Question pending/ })).not.toBeInTheDocument();
 	});
 
+	describe("keeping a call open", () => {
+		it("keeps a call on double-click or Shift and Enter, and views it on a plain click or Enter", async () => {
+			const onKeep = vi.fn();
+			const { onSelect } = renderBoard({ onKeep });
+			const card = screen.getByRole("button", { name: /^Question need/ });
+			await userEvent.dblClick(card);
+			expect(onKeep).toHaveBeenCalledTimes(1);
+			expect(onKeep).toHaveBeenLastCalledWith("need");
+			onSelect.mockClear();
+			act(() => card.focus());
+			await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
+			expect(onKeep).toHaveBeenCalledTimes(2);
+			expect(onSelect).not.toHaveBeenCalled();
+			await userEvent.keyboard("{Enter}");
+			expect(onSelect).toHaveBeenCalledWith("need");
+			expect(onKeep).toHaveBeenCalledTimes(2);
+		});
+
+		it("marks the cards of calls kept open, and says how to keep one", () => {
+			renderBoard({ onKeep: vi.fn(), keptIds: new Set(["need"]) });
+			expect(screen.getByRole("button", { name: /^Question need/ })).toHaveAttribute("data-kept", "true");
+			expect(screen.getByRole("button", { name: /^Question wide/ })).not.toHaveAttribute("data-kept");
+			expect(screen.getByRole("group", { name: "Decisions board" })).toHaveAccessibleDescription(/Shift and Enter/);
+		});
+
+		it("offers no keeping where the page gives none", async () => {
+			renderBoard();
+			expect(screen.getByRole("group", { name: "Decisions board" })).not.toHaveAccessibleDescription(/Shift and Enter/);
+		});
+	});
+
 	describe("done cap", () => {
 		const finished = [1, 2, 3, 4, 5].map((minute) => call({
 			id: `fin${minute}`, projectId: "cloud", projectName: "skyvern-cloud", state: "done", outcome: "Shipped", outcomeAt: `2026-11-18T11:0${minute}:00Z`,

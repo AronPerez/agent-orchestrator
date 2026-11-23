@@ -1,9 +1,10 @@
 /**
  * Search params of the Decisions page:
- * `/decisions?call=<id>&q=<words>&project=<band key>&stream=<row key>`.
+ * `/decisions?call=<id>&q=<words>&project=<band key>&stream=<row key>&tab=<id>`.
  * `project` and `stream` narrow the board to what was chosen in the list beside it.
+ * `tab` is the kept-open decision filling the page instead of the board.
  */
-export type DecisionsSearch = { call?: string; q?: string; project?: string; stream?: string };
+export type DecisionsSearch = { call?: string; q?: string; project?: string; stream?: string; tab?: string };
 
 export const DECISIONS_CALL_MAX = 200;
 export const DECISIONS_QUERY_MAX = 500;
@@ -35,6 +36,8 @@ export function validateDecisionsSearch(search: Record<string, unknown>): Decisi
 	const result: DecisionsSearch = {};
 	const call = typeof search.call === "string" ? boundedText(search.call, DECISIONS_CALL_MAX) : undefined;
 	if (call && isDecisionCallId(call)) result.call = call;
+	const tab = typeof search.tab === "string" ? boundedText(search.tab, DECISIONS_CALL_MAX) : undefined;
+	if (tab && isDecisionCallId(tab)) result.tab = tab;
 	const q = boundedText(search.q, DECISIONS_QUERY_MAX);
 	if (q) result.q = q;
 	// The scope is only ever compared with keys on the board, never sent to the

@@ -192,13 +192,16 @@ test("decisions: keyboard alone moves between cards, opens one and closes it", a
 	await expect(page.getByRole("button", { name: /^In flight/ })).toBeFocused();
 	await page.keyboard.press("Enter");
 	await expect(page).toHaveURL(/call=dec_c/);
-	// Arrowing on shows the next card's details. They pass Escape on, so one press still closes the call.
+	// Arrowing on shows the next card's details, here a card whose details were showing a moment ago.
+	// They pass Escape on, so one press still closes the call.
 	await page.keyboard.press("ArrowLeft");
 	await expect(page.locator("[data-slot='tooltip-content']").filter({ hasText: "question" })).toBeVisible();
 	await page.keyboard.press("Escape");
 	await expect(page).not.toHaveURL(/call=/);
 	await expect(page.getByRole("complementary", { name: "Decision" })).toHaveCount(0);
-	await expect(page.locator("[data-slot='tooltip-content']")).toHaveCount(0);
+	// That card's details went with the key. Focus is back on the opened card, which shows its own.
+	await expect(page.locator("[data-slot='tooltip-content']").filter({ hasText: "question" })).toHaveCount(0);
+	await expect(page.getByRole("button", { name: /^In flight/ })).toBeFocused();
 });
 
 test("decisions: a failed board load explains itself and recovers on retry", async ({ page }) => {
@@ -365,4 +368,111 @@ test("decisions: the project and stream list narrows the board, survives a reloa
 	await page.setViewportSize({ width: 620, height: 800 });
 	await expect(list).toBeHidden();
 	await expect(page.getByRole("button", { name: /^Shop question/ })).toBeVisible();
+});
+
+test("decisions: a decision kept open becomes a tab that fills the page, keeps what was typed, and asks before discarding it", async ({ page }) => {
+	const ledger = new Ledger([
+		call("dec_a", "First question", { raisedAt: iso(5 * hour) }),
+		call("dec_b", "Second question", { raisedAt: iso(2 * hour) }),
+	]);
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await openDecisions(page, ledger);
+	const strip = page.getByRole("tablist", { name: "Board and open decisions" });
+	const panel = page.getByRole("complementary", { name: "Decision" });
+	await expect(strip).toHaveCount(0);
+
+	// View one beside the board, start a note, then keep it open.
+	await page.getByRole("button", { name: /^First question/ }).click();
+	await panel.getByRole("textbox", { name: "Note for the session" }).fill("ship it dark");
+	await panel.getByRole("button", { name: "Keep open" }).click();
+	await expect(strip.getByRole("tab")).toHaveText(["Board", "First question"]);
+	await expect(panel.getByRole("textbox", { name: "Note for the session" })).toHaveValue("ship it dark");
+
+	// Its tab fills the page; the board's tab brings the board back as it was.
+	await strip.getByRole("tab", { name: "First question" }).click();
+	await expect(page).toHaveURL(/tab=dec_a/);
+	await expect(page.getByRole("group", { name: "Decisions board" })).toBeHidden();
+	await expect(panel.getByRole("heading", { level: 2 })).toHaveText("First question");
+	await expect(panel.getByRole("textbox", { name: "Note for the session" })).toHaveValue("ship it dark");
+	await strip.getByRole("tab", { name: "Board" }).click();
+	await expect(page).not.toHaveURL(/tab=/);
+	await expect(page.getByRole("button", { name: /^Second question/ })).toBeVisible();
+	await expect(panel.getByRole("textbox", { name: "Note for the session" })).toHaveValue("ship it dark");
+
+	// A second one is kept from the keyboard, and the tabs survive a reload.
+	await page.getByRole("button", { name: /^Second question/ }).focus();
+	await page.keyboard.press("Shift+Enter");
+	await expect(strip.getByRole("tab")).toHaveText(["Board", "First question", "Second question"]);
+	await page.reload();
+	await expect(strip.getByRole("tab")).toHaveText(["Board", "First question", "Second question"]);
+
+	// Closing a tab with unsent text asks first; one without does not.
+	await strip.getByRole("tab", { name: "Second question" }).click();
+	await panel.getByRole("textbox", { name: "Note for the session" }).fill("not sent yet");
+	await page.getByRole("button", { name: "Close Second question" }).click();
+	const confirm = page.getByRole("dialog", { name: "Close this decision?" });
+	await confirm.getByRole("button", { name: "Cancel" }).click();
+	await expect(panel.getByRole("textbox", { name: "Note for the session" })).toHaveValue("not sent yet");
+	await page.getByRole("button", { name: "Close First question" }).click();
+	await expect(confirm).toHaveCount(0);
+	await expect(strip.getByRole("tab")).toHaveText(["Board", "Second question"]);
+	await page.getByRole("button", { name: "Close Second question" }).click();
+	await confirm.getByRole("button", { name: "Close and discard" }).click();
+	await expect(strip).toHaveCount(0);
+	await expect(page.getByRole("button", { name: /^First question/ })).toBeVisible();
+});
+
+test("decisions: overflowing tabs stay reachable, a hidden list still names its filter, and the last tab hands focus back to the board", async ({ page }) => {
+	const cloud = { projectId: "cloud", projectName: "skyvern-cloud" };
+	const calls = Array.from({ length: 12 }, (_, index) => call(`dec_${index + 1}`, `Question number ${index + 1}`, index % 2 ? cloud : {}));
+	const ledger = new Ledger(calls);
+	await page.setViewportSize({ width: 1000, height: 800 });
+	await openDecisions(page, ledger, "/#/decisions", async (target) => {
+		await target.addInitScript((ids) => {
+			// Twelve decisions kept open, seeded once so later reloads keep what the test did.
+			if (window.sessionStorage.getItem("e2e-tabs-seeded")) return;
+			window.sessionStorage.setItem("e2e-tabs-seeded", "1");
+			window.localStorage.setItem("ao.decisions.open-tabs.v1", JSON.stringify(ids));
+		}, calls.map((item) => item.id));
+	});
+	const strip = page.getByRole("tablist", { name: "Board and open decisions" });
+	const tab = (n: number) => strip.getByRole("tab", { name: `Question number ${n}`, exact: true });
+	await expect(strip.getByRole("tab")).toHaveCount(13);
+
+	// More tabs than fit: the last one starts out of sight, and both the keyboard and the pointer reach it.
+	await expect(tab(12)).not.toBeInViewport();
+	await strip.getByRole("tab", { name: "Board" }).focus();
+	await page.keyboard.press("End");
+	await expect(tab(12)).toBeFocused();
+	await expect(tab(12)).toBeInViewport();
+	await tab(1).click();
+	await expect(page).toHaveURL(/tab=dec_1(?!\d)/);
+	await tab(12).click();
+	await expect(page).toHaveURL(/tab=dec_12/);
+	await expect(tab(12)).toBeInViewport();
+	await strip.getByRole("tab", { name: "Board" }).click();
+
+	// A narrowed board keeps saying what it is narrowed to once the list gives way, and offers the way back.
+	const list = page.getByRole("tree", { name: "Projects and streams" });
+	const chip = page.getByRole("button", { name: "Showing skyvern-cloud. Show all projects" });
+	await list.getByRole("treeitem", { name: /^skyvern-cloud/ }).click();
+	await expect(page).toHaveURL(/project=cloud/);
+	await expect(chip).toBeHidden();
+	await page.setViewportSize({ width: 620, height: 800 });
+	await expect(list).toBeHidden();
+	await expect(chip).toBeVisible();
+	await chip.click();
+	await expect(page).not.toHaveURL(/project=/);
+	await expect(chip).toHaveCount(0);
+	await page.setViewportSize({ width: 1000, height: 800 });
+
+	// Closing every tab from the keyboard: focus walks back along the strip, then lands on the last decision's card.
+	await tab(12).focus();
+	for (let remaining = 12; remaining > 1; remaining -= 1) {
+		await page.keyboard.press("Delete");
+		await expect(tab(remaining - 1)).toBeFocused();
+	}
+	await page.keyboard.press("Delete");
+	await expect(strip).toHaveCount(0);
+	await expect(page.getByRole("button", { name: /^Question number 1(?!\d)/ })).toBeFocused();
 });
