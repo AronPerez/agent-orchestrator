@@ -196,6 +196,8 @@ describe("verify-mac-artifact.sh", () => {
 		writeExecutable(join(mockBin, "codesign"), 'if [[ "$1" == "-d" ]]; then echo "<plist><dict></dict></plist>"; fi\n');
 		writeExecutable(join(mockBin, "spctl"), "exit 0\n");
 		writeExecutable(join(mockBin, "xcrun"), "exit 0\n");
+		// Required up front even for an .app (CI runs these tests on Linux).
+		writeExecutable(join(mockBin, "ditto"), "exit 0\n");
 		writeExecutable(join(mockBin, "lipo"), "echo x86_64\n");
 		writeExecutable(join(mockBin, "plutil"), plutilOutput.map((line) => `echo '${line}'\n`).join(""));
 		writeExecutable(node, "exit 0\n");
