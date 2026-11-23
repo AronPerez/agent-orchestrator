@@ -24,6 +24,16 @@ describe("fork release defaults", () => {
 		);
 	});
 
+	it("downloads the desktop app from the fork in `ao start`", () => {
+		expect(read("../backend/internal/cli/start.go")).toContain(`var releaseRepo = "${FORK}"`);
+	});
+
+	it("installs self-hosted releases from the fork", () => {
+		const installer = read("../scripts/setup-self-hosted.sh");
+		expect(installer).toContain(`release_repo="\${AO_RELEASE_REPO:-${FORK}}"`);
+		for (const owner of UPSTREAM_OWNERS) expect(installer).not.toContain(`repos/${owner}`);
+	});
+
 	it("reads the version floor from the fork's develop branch", () => {
 		const floor = read("src/main/desktop-version-floor.ts");
 		expect(floor).toContain(`https://raw.githubusercontent.com/${FORK}/develop/desktop-version-floor.json`);
