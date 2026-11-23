@@ -17,6 +17,15 @@ const releaseMutationPatterns = [
 
 type WorkflowSource = { name: string; contents: string };
 
+// The one workflow allowed to create a release: the fork's tag-triggered
+// draft publisher (RELEASING.md). It is held to the stricter checks in its own
+// test below instead of the blanket ban. Do not add names here.
+const FORK_RELEASE_WORKFLOW = "fork-release.yml";
+const FORK_RELEASE_EXEMPT_PATTERNS = [
+  releaseMutationPatterns[0].source,
+  "write-enabled release workflow",
+];
+
 function findReleaseMutationViolations(workflows: WorkflowSource[]) {
   return workflows.flatMap(({ name, contents }) => {
     const logicalCommands = contents.replace(/\\\r?\n[ \t]*/g, " ");
@@ -73,7 +82,60 @@ describe("desktop release workflows", () => {
   it("prevents public workflows from mutating releases or release tags", async () => {
     const workflows = await readWorkflows();
 
-    expect(findReleaseMutationViolations(workflows)).toEqual([]);
+    expect(
+      findReleaseMutationViolations(
+        workflows.filter(({ name }) => name !== FORK_RELEASE_WORKFLOW),
+      ),
+    ).toEqual([]);
+  });
+
+  it("lets the fork release workflow create only a gated draft release", async () => {
+    const contents = await readFile(
+      path.join(workflowsDirectory, FORK_RELEASE_WORKFLOW),
+      "utf8",
+    );
+
+    // Only "creates a release" and "has write access" trip the blanket rule:
+    // no tag pushes, no forge publish, no gh api/curl release mutations.
+    expect(
+      findReleaseMutationViolations([{ name: FORK_RELEASE_WORKFLOW, contents }])
+        .map((violation) => violation.slice(FORK_RELEASE_WORKFLOW.length + 2))
+        .sort(),
+    ).toEqual([...FORK_RELEASE_EXEMPT_PATTERNS].sort());
+
+    // Exactly one release command, and it creates a draft on the pushed tag.
+    expect(contents.match(/gh release (?:create|upload|edit|delete|publish)\b/g)).toEqual([
+      "gh release create",
+    ]);
+    expect(contents).toContain('gh release create "$TAG"');
+    expect(contents).toMatch(/args=\(--draft --verify-tag /);
+    expect(contents).not.toMatch(/--draft=false|make_latest|--latest\b|--prerelease=false/);
+
+    // Read-only by default; write only in the publish job; fork repo only.
+    expect(contents).toMatch(/^permissions:\s*\n\s*contents:\s*read/m);
+    expect(contents.match(/contents:\s*write/g)).toHaveLength(1);
+    expect(contents).toContain("if: github.repository == 'AronPerez/agent-orchestrator'");
+    expect(contents).toContain(
+      "if: needs.prepare.outputs.publish == 'true' && needs.prepare.outputs.sign-mac == 'true' && needs.assemble.outputs.mac-signed == 'true'",
+    );
+
+    // Releases come from fork tags on develop; a dispatch is always a dry run.
+    expect(contents).toContain('- "v[0-9]+.[0-9]+.[0-9]+-fork.[0-9]+"');
+    expect(contents).toContain('git merge-base --is-ancestor "$sha" origin/develop');
+    expect(contents).toMatch(/tag=""\s*\n\s*version="\$INPUT_VERSION"[\s\S]*?publish=false/);
+
+    // Never ship macOS unsigned: all six Apple secrets are required unless a
+    // dry run asked to skip signing.
+    for (const secret of [
+      "CSC_LINK",
+      "CSC_KEY_PASSWORD",
+      "APPLE_SIGNING_IDENTITY",
+      "APPLE_API_KEY_BASE64",
+      "APPLE_API_KEY_ID",
+      "APPLE_API_ISSUER",
+    ]) {
+      expect(contents).toContain(`HAS_${secret}: \${{ secrets.${secret} != '' }}`);
+    }
   });
 
   it("recognizes multiline mutations without rejecting allowed workflows", () => {

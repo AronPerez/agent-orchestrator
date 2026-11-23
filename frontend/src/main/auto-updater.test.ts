@@ -4732,6 +4732,20 @@ describe("channel downgrade safety", () => {
     expect(h.autoUpdater.allowDowngrade).toBe(false);
   });
 
+  it("treats a fork release as Stable, not a channel switch", async () => {
+    const h = await importAutoUpdater(stable, { version: "0.15.3-fork.2" });
+    serveVersion(h, "0.15.3-fork.1", "0.15.3-fork.2");
+    await h.module.startAutoUpdates(stateDir);
+    expect(h.module.getUpdateStatus().state).toBe("not-available");
+  });
+
+  it("offers the next fork release on Stable", async () => {
+    const h = await importAutoUpdater(stable, { version: "0.15.3-fork.1" });
+    serveVersion(h, "0.15.4-fork.1", "0.15.3-fork.1");
+    await h.module.startAutoUpdates(stateDir);
+    expect(h.module.getUpdateStatus()).toMatchObject({ state: "available", version: "0.15.4-fork.1" });
+  });
+
   it("waits when Nightly is older than installed Stable", async () => {
     const h = await importAutoUpdater(nightly, { version: "0.13.0" });
     serveVersion(h, "0.13.0-nightly.202609141844", "0.13.0");
