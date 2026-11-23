@@ -373,7 +373,11 @@ function DecisionCard({ card, selected, kept, tabStop, onSelect, onKeep, now }: 
 			{status && undelivered ? <>{" "}<span className="line-clamp-2 w-full text-caption leading-4 text-muted-foreground">{status}</span></> : null}
 		</Pressable>
 		</TooltipTrigger>
-		<TooltipContent side="bottom" align="start" hideArrow className="flex max-w-xs flex-col gap-0.5" passEscape>
+		{/*
+		  No fade-out: a tooltip that is still fading hears the "another tooltip opened" signal, its own
+		  included, so arrowing away from a card and straight back would close the details it just reopened.
+		*/}
+		<TooltipContent side="bottom" align="start" hideArrow className="flex max-w-xs flex-col gap-0.5 data-[state=closed]:animate-none!" passEscape>
 			<span className="font-medium">{card.title}</span>
 			{secondary ? <span className="text-muted-foreground">{secondary}</span> : null}
 			{status ? <span className={card.lane === "needs_you" ? "text-status-needs-you" : "text-muted-foreground"}>{status}</span> : null}

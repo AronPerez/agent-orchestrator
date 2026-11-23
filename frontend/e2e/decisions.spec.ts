@@ -192,13 +192,16 @@ test("decisions: keyboard alone moves between cards, opens one and closes it", a
 	await expect(page.getByRole("button", { name: /^In flight/ })).toBeFocused();
 	await page.keyboard.press("Enter");
 	await expect(page).toHaveURL(/call=dec_c/);
-	// Arrowing on shows the next card's details. They pass Escape on, so one press still closes the call.
+	// Arrowing on shows the next card's details, here a card whose details were showing a moment ago.
+	// They pass Escape on, so one press still closes the call.
 	await page.keyboard.press("ArrowLeft");
 	await expect(page.locator("[data-slot='tooltip-content']").filter({ hasText: "question" })).toBeVisible();
 	await page.keyboard.press("Escape");
 	await expect(page).not.toHaveURL(/call=/);
 	await expect(page.getByRole("complementary", { name: "Decision" })).toHaveCount(0);
-	await expect(page.locator("[data-slot='tooltip-content']")).toHaveCount(0);
+	// That card's details went with the key. Focus is back on the opened card, which shows its own.
+	await expect(page.locator("[data-slot='tooltip-content']").filter({ hasText: "question" })).toHaveCount(0);
+	await expect(page.getByRole("button", { name: /^In flight/ })).toBeFocused();
 });
 
 test("decisions: a failed board load explains itself and recovers on retry", async ({ page }) => {
