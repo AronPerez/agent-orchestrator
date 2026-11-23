@@ -217,6 +217,29 @@ describe("DecisionsView", () => {
 			expect(screen.getByRole("tree", { name: "Projects and streams" })).toBeInTheDocument();
 		});
 
+		it("names the chosen scope above the board with a way back to every project, for when the list is not showing", async () => {
+			answer(ledger());
+			renderView(<DecisionsView project="cloud" stream="h_a:nango" />);
+			const chip = await screen.findByRole("button", { name: "Showing skyvern-cloud: Nango. Show all projects" });
+			expect(chip).toHaveTextContent("skyvern-cloud:Nango");
+			// While the list has room it names the scope itself, so the chip gives way to it.
+			expect(chip.parentElement).toHaveClass("@2xl/decisions:hidden");
+			// Hidden by its button, the list is gone at every width, so the chip stays.
+			await userEvent.click(screen.getByRole("button", { name: "Hide project list" }));
+			expect(screen.getByRole("button", { name: /^Showing skyvern-cloud: Nango/ }).parentElement).not.toHaveClass("@2xl/decisions:hidden");
+			await userEvent.click(screen.getByRole("button", { name: /^Showing skyvern-cloud: Nango/ }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: {} });
+		});
+
+		it("names a chosen project alone, and shows no chip while every project is shown", async () => {
+			answer(ledger());
+			const view = renderView(<DecisionsView project="cloud" />);
+			expect(await screen.findByRole("button", { name: "Showing skyvern-cloud. Show all projects" })).toHaveTextContent("skyvern-cloud");
+			view.rerender(<QueryClientProvider client={clientOf(view)}><TooltipProvider><DecisionsView /></TooltipProvider></QueryClientProvider>);
+			await screen.findByRole("button", { name: /^Question dec_shop/ });
+			expect(screen.queryByRole("button", { name: /Show all projects$/ })).not.toBeInTheDocument();
+		});
+
 		it("leaves with the board during a search, and is not offered before any decision exists", async () => {
 			answer(ledger());
 			renderView(<DecisionsView query="auth" project="cloud" />);
@@ -374,6 +397,80 @@ describe("DecisionsView", () => {
 			await userEvent.click(screen.getByRole("button", { name: "Close Question dec_1" }));
 			await userEvent.click(within(await screen.findByRole("dialog", { name: "Close this decision?" })).getByRole("button", { name: "Close and discard" }));
 			expect(kept()).toEqual([]);
+		});
+
+		it("asks before closing a kept tab that is also beside the board, and closes that panel with it", async () => {
+			answer(board([one, two]), details);
+			render(view({ callId: "dec_1" }));
+			const note = await screen.findByRole("textbox", { name: "Note for the session" });
+			await userEvent.click(screen.getByRole("button", { name: "Keep open" }));
+			act(() => note.focus());
+			await userEvent.keyboard("not sent yet");
+			await userEvent.click(screen.getByRole("button", { name: "Close Question dec_1" }));
+			const dialog = await screen.findByRole("dialog", { name: "Close this decision?" });
+			expect(kept()).toEqual(["dec_1"]);
+			await userEvent.click(within(dialog).getByRole("button", { name: "Close and discard" }));
+			expect(kept()).toEqual([]);
+			// The text really is discarded: the panel beside the board that held it closes too.
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/decisions", search: {} });
+		});
+
+		it("closes a kept tab that is also beside the board without asking when nothing was typed, and leaves that panel", async () => {
+			answer(board([one, two]), details);
+			render(view({ callId: "dec_1" }));
+			await userEvent.click(await screen.findByRole("button", { name: "Keep open" }));
+			await userEvent.click(screen.getByRole("button", { name: "Close Question dec_1" }));
+			expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+			expect(kept()).toEqual([]);
+			expect(navigateMock).not.toHaveBeenCalled();
+		});
+
+		it("lets a full strip scroll, and brings the tab in view into sight", async () => {
+			const original = Element.prototype.scrollIntoView;
+			const scrollIntoView = vi.fn();
+			Element.prototype.scrollIntoView = scrollIntoView;
+			try {
+				const many = Array.from({ length: 12 }, (_, index) => call({ id: `dec_${index + 1}`, options: option }));
+				window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(many.map((item) => item.id)));
+				answer(board(many), Object.fromEntries(many.map((item) => [item.id, item])));
+				render(view({ tab: "dec_12" }));
+				const last = await within(strip()).findByRole("tab", { name: "Question dec_12" });
+				expect(within(strip()).getAllByRole("tab")).toHaveLength(13);
+				expect(last.closest("[data-slot='decision-tab-scroll']")).toHaveClass("overflow-x-auto");
+				// The board's tab stays put outside the scrolling part.
+				expect(within(strip()).getByRole("tab", { name: "Board" }).closest("[data-slot='decision-tab-scroll']")).toBeNull();
+				await waitFor(() => expect(scrollIntoView.mock.contexts).toContain(last));
+			} finally {
+				Element.prototype.scrollIntoView = original;
+			}
+		});
+
+		it("returns focus to the decision's card when the last tab closes, from the keyboard or its button", async () => {
+			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_2"]));
+			answer(board([one, two]), details);
+			render(view());
+			const card = await screen.findByRole("button", { name: /^Question dec_2/ });
+			act(() => within(strip()).getByRole("tab", { name: "Question dec_2" }).focus());
+			await userEvent.keyboard("{Delete}");
+			expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+			await waitFor(() => expect(card).toHaveFocus());
+
+			await userEvent.dblClick(card);
+			act(() => screen.getByRole("button", { name: "Close Question dec_2" }).focus());
+			await userEvent.keyboard("{Enter}");
+			expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+			await waitFor(() => expect(card).toHaveFocus());
+		});
+
+		it("keeps focus on the strip when a tab closes and others remain", async () => {
+			window.localStorage.setItem(DECISION_TABS_STORAGE_KEY, JSON.stringify(["dec_1", "dec_2"]));
+			answer(board([one, two]), details);
+			render(view());
+			await screen.findByRole("button", { name: /^Question dec_1/ });
+			act(() => screen.getByRole("button", { name: "Close Question dec_2" }).focus());
+			await userEvent.keyboard("{Enter}");
+			expect(kept()).toEqual(["dec_1"]);
+			expect(within(strip()).getByRole("tab", { name: "Question dec_1" })).toHaveFocus();
 		});
 
 		it("leaves Escape alone on a decision's tab", async () => {

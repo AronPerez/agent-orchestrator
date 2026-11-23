@@ -1599,6 +1599,7 @@
 	"decisions.scope.collapse": "Ocultar flujos de {{project}}",
 	"decisions.scope.hideList": "Ocultar lista de proyectos",
 	"decisions.scope.showList": "Mostrar lista de proyectos",
+	"decisions.scope.clear": "Mostrando {{scope}}. Mostrar todos los proyectos",
 	"decisions.tabs.label": "Tablero y decisiones abiertas",
 	"decisions.tabs.board": "Tablero",
 	"decisions.tabs.keep": "Mantener abierta",

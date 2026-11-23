@@ -421,3 +421,56 @@ test("decisions: a decision kept open becomes a tab that fills the page, keeps w
 	await expect(strip).toHaveCount(0);
 	await expect(page.getByRole("button", { name: /^First question/ })).toBeVisible();
 });
+
+test("decisions: overflowing tabs stay reachable, a hidden list still names its filter, and the last tab hands focus back to the board", async ({ page }) => {
+	const cloud = { projectId: "cloud", projectName: "skyvern-cloud" };
+	const calls = Array.from({ length: 12 }, (_, index) => call(`dec_${index + 1}`, `Question number ${index + 1}`, index % 2 ? cloud : {}));
+	const ledger = new Ledger(calls);
+	await page.setViewportSize({ width: 1000, height: 800 });
+	await openDecisions(page, ledger, "/#/decisions", (target) => target.addInitScript((ids) => {
+		// Twelve decisions kept open, seeded once so later reloads keep what the test did.
+		if (window.sessionStorage.getItem("e2e-tabs-seeded")) return;
+		window.sessionStorage.setItem("e2e-tabs-seeded", "1");
+		window.localStorage.setItem("ao.decisions.open-tabs.v1", JSON.stringify(ids));
+	}, calls.map((item) => item.id)));
+	const strip = page.getByRole("tablist", { name: "Board and open decisions" });
+	const tab = (n: number) => strip.getByRole("tab", { name: `Question number ${n}`, exact: true });
+	await expect(strip.getByRole("tab")).toHaveCount(13);
+
+	// More tabs than fit: the last one starts out of sight, and both the keyboard and the pointer reach it.
+	await expect(tab(12)).not.toBeInViewport();
+	await strip.getByRole("tab", { name: "Board" }).focus();
+	await page.keyboard.press("End");
+	await expect(tab(12)).toBeFocused();
+	await expect(tab(12)).toBeInViewport();
+	await tab(1).click();
+	await expect(page).toHaveURL(/tab=dec_1(?!\d)/);
+	await tab(12).click();
+	await expect(page).toHaveURL(/tab=dec_12/);
+	await expect(tab(12)).toBeInViewport();
+	await strip.getByRole("tab", { name: "Board" }).click();
+
+	// A narrowed board keeps saying what it is narrowed to once the list gives way, and offers the way back.
+	const list = page.getByRole("tree", { name: "Projects and streams" });
+	const chip = page.getByRole("button", { name: "Showing skyvern-cloud. Show all projects" });
+	await list.getByRole("treeitem", { name: /^skyvern-cloud/ }).click();
+	await expect(page).toHaveURL(/project=cloud/);
+	await expect(chip).toBeHidden();
+	await page.setViewportSize({ width: 620, height: 800 });
+	await expect(list).toBeHidden();
+	await expect(chip).toBeVisible();
+	await chip.click();
+	await expect(page).not.toHaveURL(/project=/);
+	await expect(chip).toHaveCount(0);
+	await page.setViewportSize({ width: 1000, height: 800 });
+
+	// Closing every tab from the keyboard: focus walks back along the strip, then lands on the last decision's card.
+	await tab(12).focus();
+	for (let remaining = 12; remaining > 1; remaining -= 1) {
+		await page.keyboard.press("Delete");
+		await expect(tab(remaining - 1)).toBeFocused();
+	}
+	await page.keyboard.press("Delete");
+	await expect(strip).toHaveCount(0);
+	await expect(page.getByRole("button", { name: /^Question number 1(?!\d)/ })).toBeFocused();
+});

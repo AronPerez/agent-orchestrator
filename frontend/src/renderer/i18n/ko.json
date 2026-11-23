@@ -1582,6 +1582,7 @@
 	"decisions.scope.collapse": "{{project}}의 스트림 숨기기",
 	"decisions.scope.hideList": "프로젝트 목록 숨기기",
 	"decisions.scope.showList": "프로젝트 목록 표시",
+	"decisions.scope.clear": "{{scope}} 표시 중. 모든 프로젝트 표시",
 	"decisions.tabs.label": "보드 및 열린 결정",
 	"decisions.tabs.board": "보드",
 	"decisions.tabs.keep": "열어 두기",

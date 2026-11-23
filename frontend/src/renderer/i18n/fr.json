@@ -1599,6 +1599,7 @@
 	"decisions.scope.collapse": "Masquer les flux de {{project}}",
 	"decisions.scope.hideList": "Masquer la liste des projets",
 	"decisions.scope.showList": "Afficher la liste des projets",
+	"decisions.scope.clear": "{{scope}} affiché. Afficher tous les projets",
 	"decisions.tabs.label": "Tableau et décisions ouvertes",
 	"decisions.tabs.board": "Tableau",
 	"decisions.tabs.keep": "Garder ouverte",

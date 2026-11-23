@@ -1548,6 +1548,7 @@
 	"decisions.scope.collapse": "{{project}} akışlarını gizle",
 	"decisions.scope.hideList": "Proje listesini gizle",
 	"decisions.scope.showList": "Proje listesini göster",
+	"decisions.scope.clear": "{{scope}} gösteriliyor. Tüm projeleri göster",
 	"decisions.tabs.label": "Pano ve açık kararlar",
 	"decisions.tabs.board": "Pano",
 	"decisions.tabs.keep": "Açık tut",

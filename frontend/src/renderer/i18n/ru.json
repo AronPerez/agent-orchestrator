@@ -1578,6 +1578,7 @@
 	"decisions.scope.collapse": "Скрыть потоки в {{project}}",
 	"decisions.scope.hideList": "Скрыть список проектов",
 	"decisions.scope.showList": "Показать список проектов",
+	"decisions.scope.clear": "Показано: {{scope}}. Показать все проекты",
 	"decisions.tabs.label": "Доска и открытые решения",
 	"decisions.tabs.board": "Доска",
 	"decisions.tabs.keep": "Оставить открытым",

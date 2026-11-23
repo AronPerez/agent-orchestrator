@@ -1582,6 +1582,7 @@
 	"decisions.scope.collapse": "{{project}} のストリームを非表示",
 	"decisions.scope.hideList": "プロジェクト一覧を非表示",
 	"decisions.scope.showList": "プロジェクト一覧を表示",
+	"decisions.scope.clear": "{{scope}} を表示中。すべてのプロジェクトを表示",
 	"decisions.tabs.label": "ボードと開いている決定",
 	"decisions.tabs.board": "ボード",
 	"decisions.tabs.keep": "開いたままにする",

@@ -13,6 +13,7 @@ import { decisionRowFoldKey } from "../lib/decision-folds";
 import { closeDecisionTab, DECISION_TABS_MAX, keepDecisionTab, readDecisionTabs, writeDecisionTabs } from "../lib/decision-tabs";
 import { decisionScopeTree, readDecisionListHidden, resolveDecisionScope, scopeDecisionBoard, writeDecisionListHidden, type DecisionScope } from "../lib/decision-scope";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { cn } from "../lib/utils";
 import { DecisionCallPanel } from "./DecisionCallPanel";
 import { DecisionDraftScope } from "./DecisionDraftScope";
 import { DecisionPanelSlot, useDecisionPanelHosts } from "./DecisionPanelHosts";
@@ -22,7 +23,7 @@ import { DecisionSearchResults } from "./DecisionSearchResults";
 import { DecisionSyncFooter } from "./DecisionSyncFooter";
 import { decisionSyncKey, fetchDecisionSyncStatus } from "../lib/decision-sync";
 import { DECISION_GRID_CLASS, DecisionsBoard } from "./DecisionsBoard";
-import { ToolbarSearch } from "./PageToolbar";
+import { FilterChip, ToolbarSearch } from "./PageToolbar";
 import { PageTopbar, PageTopbarTitle } from "./PageTopbar";
 import { Button } from "./ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "./ui/resizable";
@@ -112,6 +113,7 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 		return next;
 	}), []);
 	const [closing, setClosing] = useState<string | undefined>(undefined);
+	const discarded = useRef<string | undefined>(undefined);
 	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
 	const words = query?.trim() ?? "";
 	const search = useDecisionSearch(words);
@@ -161,16 +163,46 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 	const selectTab = useCallback((id: string | undefined) => {
 		void navigate({ to: "/decisions", search: { ...(callId ? { call: callId } : {}), ...(words ? { q: words } : {}), ...scopeSearch, ...(id ? { tab: id } : {}) } });
 	}, [callId, navigate, scopeSearch, words]);
+	// When the last tab closes the strip goes with it; focus then returns to that decision's card.
+	const refocusCard = useRef<string | undefined>(undefined);
+	const focusBoardCard = useCallback((id: string) => {
+		(document.querySelector<HTMLElement>(`[data-decision-card="${CSS.escape(id)}"]`) ?? document.querySelector<HTMLElement>("[data-decision-card][tabindex='0']"))?.focus();
+	}, []);
 	const closeTab = useCallback((id: string) => {
 		setClosing(undefined);
 		setKept((current) => closeDecisionTab(current, id));
-		if (id === activeTab) selectTab(undefined);
-	}, [activeTab, selectTab]);
-	// A tab whose decision is also beside the board closes without loss: that view, and its text, stay.
+		refocusCard.current = id;
+		// Unsent text is discarded with the tab. When the same decision is also
+		// beside the board, that panel is the one holding the text, so it closes too.
+		const dropPanel = id === callId && drafts.has(id);
+		if (id === activeTab || dropPanel) {
+			void navigate({ to: "/decisions", search: { ...(callId && !dropPanel ? { call: callId } : {}), ...(words ? { q: words } : {}), ...scopeSearch } });
+		}
+	}, [activeTab, callId, drafts, navigate, scopeSearch, words]);
+	useEffect(() => {
+		const id = refocusCard.current;
+		if (id === undefined) return;
+		// Tabs remain: the strip kept focus. None remain: wait for the board to be showing again.
+		if (kept.length > 0) refocusCard.current = undefined;
+		else if (!activeTab) {
+			refocusCard.current = undefined;
+			focusBoardCard(id);
+		}
+	}, [activeTab, focusBoardCard, kept]);
 	const requestCloseTab = useCallback((id: string) => {
-		if (drafts.has(id) && id !== callId) setClosing(id);
+		if (drafts.has(id)) setClosing(id);
 		else closeTab(id);
-	}, [callId, closeTab, drafts]);
+	}, [closeTab, drafts]);
+	// The chosen scope in words, for the chip that stands in for the list while it is not showing.
+	const scopeLabel = useMemo(() => {
+		const chosen = scopeTree.projects.find((item) => item.key === scope.project);
+		if (!chosen) return undefined;
+		const projectName = chosen.name ?? t("decisions.noProject");
+		const chosenStream = chosen.streams.find((item) => item.key === scope.stream);
+		if (!chosenStream) return { project: projectName, stream: undefined, text: projectName };
+		const streamName = chosenStream.projectWide ? t("decisions.projectWide") : [chosenStream.name ?? "", chosenStream.machine].filter(Boolean).join(" · ");
+		return { project: projectName, stream: streamName, text: `${projectName}: ${streamName}` };
+	}, [scope.project, scope.stream, scopeTree.projects, t]);
 
 	const boardShown = !words && !activeTab && Boolean(board.data && board.data.calls.length > 0);
 	let body;
@@ -273,6 +305,21 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 							{/* Beside the board while there is room for both; a narrow pane keeps the board. */}
 							{boardShown && !listHidden ? <DecisionScopeList tree={scopeTree} scope={scope} onChoose={chooseScope} className="hidden @2xl/decisions:flex" /> : null}
 							<div className="flex h-full min-w-0 flex-1 flex-col">
+								{/*
+								  While the list is not showing (hidden by its button, or given up to a
+								  narrow pane), the board still says what it is narrowed to and offers
+								  the way back. Where the list has room, the list says it.
+								*/}
+								{boardShown && scopeLabel ? (
+									<div className={cn("flex shrink-0 items-center border-b border-border px-(--space-4_5) py-1.5", !listHidden && "@2xl/decisions:hidden")}>
+										<FilterChip
+											label={scopeLabel.project}
+											value={scopeLabel.stream}
+											removeLabel={t("decisions.scope.clear", { scope: scopeLabel.text })}
+											onRemove={() => chooseScope({})}
+										/>
+									</div>
+								) : null}
 								<main className="min-h-0 flex-1 overflow-auto overscroll-contain">{body}</main>
 								{/* Whose ledger this is, and how fresh each linked machine is. */}
 								<footer className="shrink-0 border-t border-border px-(--space-4_5) py-1.5 text-caption text-muted-foreground">
@@ -320,8 +367,23 @@ export function DecisionsView({ callId, query, project, stream, tab }: Decisions
 				confirmLabel={t("decisions.tabs.discardConfirm")}
 				destructive
 				initialFocus="cancel"
-				onConfirm={() => { if (closing) closeTab(closing); }}
+				onConfirm={() => {
+					if (!closing) return;
+					discarded.current = closing;
+					closeTab(closing);
+				}}
 				onOpenChange={(open) => { if (!open) setClosing(undefined); }}
+				// After a discard the button that opened this is gone with its tab, so focus is placed
+				// by hand: on the strip if tabs remain, else on the decision's card.
+				onCloseAutoFocus={(event) => {
+					const id = discarded.current;
+					if (id === undefined) return;
+					discarded.current = undefined;
+					event.preventDefault();
+					const stripTab = document.querySelector<HTMLElement>("[role='tablist'] [role='tab'][tabindex='0']");
+					if (stripTab) stripTab.focus();
+					else focusBoardCard(id);
+				}}
 			/>
 		</div>
 	);

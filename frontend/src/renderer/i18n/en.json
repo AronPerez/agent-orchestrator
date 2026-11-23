@@ -1548,6 +1548,7 @@
 	"decisions.scope.collapse": "Hide streams in {{project}}",
 	"decisions.scope.hideList": "Hide project list",
 	"decisions.scope.showList": "Show project list",
+	"decisions.scope.clear": "Showing {{scope}}. Show all projects",
 	"decisions.tabs.label": "Board and open decisions",
 	"decisions.tabs.board": "Board",
 	"decisions.tabs.keep": "Keep open",

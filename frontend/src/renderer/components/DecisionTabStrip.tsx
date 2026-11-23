@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { ListChecks } from "@/components/app-icons";
 import { useDecisionDetail } from "../hooks/useDecisionInbox";
@@ -26,7 +26,8 @@ const tabClass = "inline-flex h-6.5 min-w-0 items-center gap-1.5 rounded-md px-2
  * The Decisions page's tabs: the board first, then one tab per decision kept
  * open. Choosing a decision's tab fills the page with it; the board's tab
  * brings the board back. Arrow keys move along the strip, Enter chooses, and
- * Delete closes the decision in focus.
+ * Delete closes the decision in focus. The board's tab stays put while the
+ * decisions' tabs scroll sideways once there are more than fit.
  */
 export function DecisionTabStrip({ ids, activeId, onSelect, onClose, fallback }: DecisionTabStripProps) {
 	const { t } = useTranslation();
@@ -48,10 +49,20 @@ export function DecisionTabStrip({ ids, activeId, onSelect, onClose, fallback }:
 		const id = tabs[index]?.dataset.decisionTab;
 		if ((event.key === "Delete" || event.key === "Backspace") && id) {
 			event.preventDefault();
-			// Focus stays on the strip: the tab before the one that closes.
-			(tabs[index - 1] ?? tabs[0])?.focus();
-			onClose(id);
+			close(id);
 		}
+	};
+	const close = (id: string) => {
+		// When focus is on the tab that closes, or its button, it moves to the tab
+		// before it rather than falling off the page. The page takes it to the
+		// board when the strip goes with its last tab.
+		const strip = stripRef.current;
+		if (strip?.contains(document.activeElement)) {
+			const tabs = [...strip.querySelectorAll<HTMLElement>("[role='tab']")];
+			const index = tabs.findIndex((tab) => tab.dataset.decisionTab === id);
+			(tabs[index - 1] ?? tabs[0])?.focus();
+		}
+		onClose(id);
 	};
 	return (
 		<div
@@ -73,9 +84,12 @@ export function DecisionTabStrip({ ids, activeId, onSelect, onClose, fallback }:
 				{t("decisions.tabs.board")}
 			</Pressable>
 			<span aria-hidden="true" className="mx-1 h-4 w-px shrink-0 bg-border" />
-			{ids.map((id) => (
-				<DecisionTab key={id} id={id} active={id === activeId} onSelect={onSelect} onClose={onClose} fallback={fallback(id)} />
-			))}
+			{/* Only the decisions scroll; a focused tab scrolls itself into sight. */}
+			<div role="presentation" data-slot="decision-tab-scroll" className="scrollbar-none flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
+				{ids.map((id) => (
+					<DecisionTab key={id} id={id} active={id === activeId} onSelect={onSelect} onClose={close} fallback={fallback(id)} />
+				))}
+			</div>
 		</div>
 	);
 }
@@ -86,9 +100,15 @@ function DecisionTab({ id, active, onSelect, onClose, fallback }: { id: string; 
 	const detail = useDecisionDetail(id);
 	const call = detail.data?.call ?? fallback;
 	const title = call?.title ?? (detail.data === null ? t("decisions.unavailableTitle") : t("decisions.loadingDecision"));
+	// The tab in view is never left scrolled out of the strip.
+	const tabRef = useRef<HTMLButtonElement>(null);
+	useEffect(() => {
+		if (active) tabRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+	}, [active]);
 	return (
-		<span className="group/tab relative inline-flex min-w-16 flex-[0_1_14rem] items-center">
+		<span className="group/tab relative inline-flex min-w-28 flex-[0_1_14rem] items-center">
 			<Pressable
+				ref={tabRef}
 				role="tab"
 				aria-selected={active}
 				data-active={active}

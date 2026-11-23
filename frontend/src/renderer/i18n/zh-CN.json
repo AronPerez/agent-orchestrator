@@ -1564,6 +1564,7 @@
 	"decisions.scope.collapse": "隐藏 {{project}} 的工作流",
 	"decisions.scope.hideList": "隐藏项目列表",
 	"decisions.scope.showList": "显示项目列表",
+	"decisions.scope.clear": "正在显示 {{scope}}。显示所有项目",
 	"decisions.tabs.label": "看板和打开的决策",
 	"decisions.tabs.board": "看板",
 	"decisions.tabs.keep": "保持打开",
