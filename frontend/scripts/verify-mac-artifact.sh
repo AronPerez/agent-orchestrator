@@ -205,10 +205,17 @@ if [[ "$ARTIFACT" == *.pkg ]]; then
 fi
 
 has_acp_node_entitlement() {
-	local entitlement="$1"
-	codesign -d --entitlements :- "$ACP_NODE" 2>/dev/null \
-		| plutil -p - \
-		| grep -Fq "\"$entitlement\" => true"
+	local entitlement="$1" entitlements
+	# Accept either way plutil -p can print a boolean (`true` or `1`). The macOS
+	# 15 Intel runner failed both checks on a Node that osx-sign had signed
+	# (osx-sign gives it allow-jit on every path) and Apple had notarized, so
+	# print what was read whenever an entitlement is not found.
+	entitlements="$(codesign -d --entitlements :- "$ACP_NODE" 2>/dev/null | plutil -p - 2>&1)" || true
+	if grep -Eq "\"${entitlement//./\\.}\" => (true|1)([[:space:]]|\$)" <<<"$entitlements"; then
+		return 0
+	fi
+	printf 'ACP Node entitlements as read (looking for %s):\n%s\n' "$entitlement" "$entitlements" >&2
+	return 1
 }
 
 # Seal intact. --deep walks nested code (helpers, frameworks, the bundled

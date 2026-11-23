@@ -186,6 +186,52 @@ describe("verify-mac-artifact.sh", () => {
 		expect(existsSync(sentinel)).toBe(false);
 	});
 
+	function trustedAppWithEntitlementOutput(name, plutilOutput) {
+		const mockBin = join(dir, `${name}-bin`);
+		const app = join(dir, `${name}.app`);
+		const node = join(app, "Contents", "Resources", "acp-runtime", "node", "bin", "node");
+		mkdirSync(mockBin, { recursive: true });
+		mkdirSync(dirname(node), { recursive: true });
+		writeExecutable(join(mockBin, "uname"), "echo Darwin\n");
+		writeExecutable(join(mockBin, "codesign"), 'if [[ "$1" == "-d" ]]; then echo "<plist><dict></dict></plist>"; fi\n');
+		writeExecutable(join(mockBin, "spctl"), "exit 0\n");
+		writeExecutable(join(mockBin, "xcrun"), "exit 0\n");
+		// Required up front even for an .app (CI runs these tests on Linux).
+		writeExecutable(join(mockBin, "ditto"), "exit 0\n");
+		writeExecutable(join(mockBin, "lipo"), "echo x86_64\n");
+		writeExecutable(join(mockBin, "plutil"), plutilOutput.map((line) => `echo '${line}'\n`).join(""));
+		writeExecutable(node, "exit 0\n");
+		return { app, env: { PATH: `${mockBin}:${process.env.PATH}` } };
+	}
+
+	it("accepts ACP Node entitlements whether plutil prints booleans as true or 1", async () => {
+		for (const value of ["true", "1"]) {
+			const { app, env } = trustedAppWithEntitlementOutput(`bool-${value}`, [
+				"{",
+				`  "com.apple.security.cs.allow-jit" => ${value}`,
+				`  "com.apple.security.cs.allow-unsigned-executable-memory" => ${value}`,
+				"}",
+			]);
+			const { code, stderr } = await run([app], env);
+			expect(stderr).toBe("");
+			expect(code).toBe(0);
+		}
+	});
+
+	it("prints the ACP Node entitlements it read when one is missing", async () => {
+		const { app, env } = trustedAppWithEntitlementOutput("missing-memory", [
+			"{",
+			'  "com.apple.security.cs.allow-jit" => true',
+			'  "com.apple.security.cs.allow-jitter" => true',
+			"}",
+		]);
+		const { code, stderr } = await run([app], env);
+		expect(code).toBe(1);
+		expect(stderr).toContain("ACP Node x64 executable-memory entitlement");
+		expect(stderr).toContain("ACP Node entitlements as read (looking for com.apple.security.cs.allow-unsigned-executable-memory)");
+		expect(stderr).not.toContain("ACP Node allow-jit entitlement failed");
+	});
+
 	it("encodes the verified command set (ditto, spctl -vv, stapler validate)", async () => {
 		const { readFileSync } = await import("node:fs");
 		const src = readFileSync(SCRIPT, "utf8");
