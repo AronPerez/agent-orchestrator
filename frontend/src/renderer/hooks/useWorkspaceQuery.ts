@@ -1,3 +1,4 @@
+import { AoError } from "../../../../packages/shared/telemetry/ao-error";
 import { markApiError } from "../lib/reported-errors";
 import { type QueryClient, useQueries, useQuery, useQueryClient, type Query, replaceEqualDeep } from "@tanstack/react-query";
 import { useRemoteUnpinStore, withRemoteUnpins } from "../stores/remote-unpin-store";
@@ -349,7 +350,7 @@ function fullProjectSummaries(
 ): FullProjectSummary[] {
 	const projects = response?.projects ?? [];
 	if (projects.some((project) => !("path" in project))) {
-		const error = new Error("Orchestrator returned a scoped project list to a full desktop client");
+		const error = new AoError("SCOPED_PROJECT_LIST", "Orchestrator returned a scoped project list to a full desktop client");
 		markApiError(error);
 		throw error;
 	}

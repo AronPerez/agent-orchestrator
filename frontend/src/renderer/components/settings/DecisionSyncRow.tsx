@@ -1,3 +1,4 @@
+import { AoError } from "../../../../../packages/shared/telemetry/ao-error";
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -13,7 +14,7 @@ type DecisionPeer = components["schemas"]["DecisionPeer"];
 /** This computer's decision sync links, read from its own daemon. Holds no tokens. */
 export async function fetchDecisionPeers(): Promise<DecisionPeer[]> {
 	const { data, error } = await clientForSessionHost(LOCAL_HOST).GET("/api/v1/decision-peers");
-	if (error || !data) throw new Error("Could not load decision sync links");
+	if (error || !data) throw new AoError("DECISION_SYNC_LINKS_UNAVAILABLE", "Could not load decision sync links");
 	return data.peers;
 }
 
@@ -39,7 +40,7 @@ export function DecisionSyncRow({ host, peers, onChanged }: {
 		setWarnings([]);
 		try {
 			const result = await aoBridge.remotes.setDecisionSync(host.url, next);
-			if (!result.ok) throw new Error(result.code);
+			if (!result.ok) throw new AoError("DECISION_SYNC_CHANGE_FAILED", result.code);
 			setWarnings(result.warnings.map((warning) => `ao://decisions/${warning.callId}`));
 			onChanged();
 		} catch {

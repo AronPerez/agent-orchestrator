@@ -1,3 +1,4 @@
+import { AoError } from "../../../packages/shared/telemetry/ao-error";
 import { autoUpdater as stockAutoUpdater } from "electron-updater";
 import { StableGitHubProvider } from "./stable-github-provider";
 import { MacDifferentialV2Updater } from "./mac-differential-v2-updater";
@@ -228,9 +229,9 @@ function nativeInstallBlocksRestart(): boolean {
 
 export function assertInstalledBuildRestartSafe(): void {
   const replaced = installedBuildReplacementDetected || !!installedBuildStatus;
-  if (replaced && nativeInstallBlocksRestart()) throw new Error(INSTALLED_BUILD_NATIVE_UPDATE_BLOCKER);
+  if (replaced && nativeInstallBlocksRestart()) throw new AoError("INSTALLED_BUILD_NATIVE_UPDATE_BLOCKED", INSTALLED_BUILD_NATIVE_UPDATE_BLOCKER);
   // Stable size/hash observations alone cannot establish AppImage completeness.
-  if (replaced && process.platform === "linux" && process.env.APPIMAGE) throw new Error(INSTALLED_BUILD_APPIMAGE_BLOCKER);
+  if (replaced && process.platform === "linux" && process.env.APPIMAGE) throw new AoError("INSTALLED_BUILD_APPIMAGE_BLOCKED", INSTALLED_BUILD_APPIMAGE_BLOCKER);
 }
 
 function noteNativeUpdateHandoff(): void {
@@ -3115,7 +3116,7 @@ export function clearUpdateRestartRequest(): void {
 }
 
 function assertNoInstalledBuild(): void {
-  if (installedBuildReplacementDetected || installedBuildStatus) throw new Error("A different build is already installed. Restart to use the installed build.");
+  if (installedBuildReplacementDetected || installedBuildStatus) throw new AoError("INSTALLED_BUILD_PENDING_RESTART", "A different build is already installed. Restart to use the installed build.");
 }
 
 function assertPhysicalBuildIsCurrent(): void {

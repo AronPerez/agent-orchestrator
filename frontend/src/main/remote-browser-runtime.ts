@@ -1,3 +1,4 @@
+import { AoError } from "../../../packages/shared/telemetry/ao-error";
 import type { BrowserRuntimeState } from "./browser-view-host";
 import { sessionUiKey } from "../renderer/lib/hosts";
 import { connectBrowserRuntime, type BrowserRuntimeCommand, type BrowserRuntimeSessionState } from "./browser-runtime-link";
@@ -15,7 +16,7 @@ export function attachRemoteBrowserRuntime(hostId: string, proxy: ActiveProxy, e
 		onSessionState,
 		execute: async (command, signal) => {
 			if (command.action.startsWith("__") && command.action !== "__destroy-session") {
-				throw new Error("Remote browser does not support offscreen rendering");
+				throw new AoError("REMOTE_BROWSER_OFFSCREEN_UNSUPPORTED", "Remote browser does not support offscreen rendering");
 			}
 			const id = command.sessionId;
 			const sessionId = sessionUiKey(id, hostId);
@@ -29,11 +30,11 @@ export function attachRemoteBrowserRuntime(hostId: string, proxy: ActiveProxy, e
 				if (loopback || parsed.hostname.replace(/\.+$/, "").endsWith(".localhost")) {
 					if (loopback) {
 						const response = await fetch(`${proxy.base}/api/v1/sessions/${encodeURIComponent(id)}/preview`, { signal });
-						if (!response.ok) throw new Error("Remote preview selection is unavailable");
+						if (!response.ok) throw new AoError("REMOTE_PREVIEW_SELECTION_UNAVAILABLE", "Remote preview selection is unavailable");
 						const selection = await response.json() as { previewUrl?: string };
 						const selected = selection.previewUrl ? new URL(selection.previewUrl) : null;
 						if (parsed.protocol !== "http:" || selected?.origin !== parsed.origin) {
-							throw Object.assign(new Error("Run ao preview start and open its selected URL"), { code: "PREVIEW_MANAGED_REQUIRED" });
+							throw new AoError("PREVIEW_MANAGED_REQUIRED", "Run ao preview start and open its selected URL");
 						}
 					}
 					args.url = proxy.previewUrl(id, parsed.href);

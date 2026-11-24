@@ -1,3 +1,4 @@
+import { AoError } from "../../../../packages/shared/telemetry/ao-error";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import type { components } from "../../api/schema";
@@ -103,7 +104,7 @@ export function useProjectOverlaps(
 			});
 			if (error) throw apiErrorException(error);
 			if (!isProjectOverlapsResponse(data)) {
-				throw new Error("Invalid project overlap response");
+				throw new AoError("PROJECT_OVERLAP_RESPONSE_INVALID", "Invalid project overlap response");
 			}
 			return data;
 		},

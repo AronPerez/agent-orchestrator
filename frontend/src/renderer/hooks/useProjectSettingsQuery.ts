@@ -1,3 +1,4 @@
+import { AoError } from "../../../../packages/shared/telemetry/ao-error";
 import { apiErrorException } from "../lib/api-error-exception";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -20,7 +21,7 @@ export function useProjectSettingsQuery(projectId: string, hostId?: string) {
 				params: { path: { id: projectId } },
 			});
 			if (error) throw apiErrorException(error);
-			if (data?.status !== "ok") throw new Error(t("settings.project.degraded"));
+			if (data?.status !== "ok") throw new AoError("PROJECT_SETTINGS_DEGRADED", t("settings.project.degraded"));
 			return data.project as components["schemas"]["Project"];
 		},
 	});

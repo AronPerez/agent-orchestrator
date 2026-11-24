@@ -1,3 +1,4 @@
+import { AoError } from "../../../../packages/shared/telemetry/ao-error";
 import { useQueries } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { apiErrorException } from "../lib/api-error-exception";
@@ -148,7 +149,7 @@ export function useProjectAvatars(workspaces: readonly WorkspaceSummary[]): Map<
 			queryFn: async ({ signal }) => {
 				const src = (await loadAvatarImage(image.url, signal)) ?? (await loadAvatarImage(image.url, signal, false));
 				if (src) return src;
-				const error = new Error("Project avatar image unavailable");
+				const error = new AoError("PROJECT_AVATAR_UNAVAILABLE", "Project avatar image unavailable");
 				markApiError(error);
 				throw error;
 			},
