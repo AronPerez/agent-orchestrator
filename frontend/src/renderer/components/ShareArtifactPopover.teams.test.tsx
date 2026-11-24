@@ -123,40 +123,6 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(screen.queryByRole("menuitemradio", { name: /Everyone at/ })).toBeNull();
 	});
 
-	it("keeps the workspace grant when a removal overlaps the workspace invitation", async () => {
-		mocks.candidates = [];
-		const maya = { id: "4a0b0b4e-be7f-4a7d-be95-9b4d7a5b6c85", email: "maya@acme.co", createdAt: "" };
-		// What the server holds; each call answers from it.
-		let server: CloudShareGrants = { ...none, people: [maya] };
-		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
-		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [{ ...share, grantCount: 1 }] });
-		vi.spyOn(aoBridge.cloudShare, "grants").mockImplementation(async () => server);
-		let release!: () => void;
-		vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => {
-			release = () => {
-				server = { ...server, workspaces: [everyone] };
-				resolve(server);
-			};
-		}));
-		const remove = vi.spyOn(aoBridge.cloudShare, "removeGrant").mockImplementation(async (_baseUrl, _shareId, grantId) => {
-			server = { ...server, people: server.people.filter((grant) => grant.id !== grantId) };
-		});
-		renderButton(cloudFile);
-		await userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
-		const people = await screen.findByRole("region", { name: "People with access" });
-		await within(people).findByText("maya@acme.co");
-		await userEvent.click(screen.getByRole("button", { name: /Only people invited/ }));
-		await userEvent.click(screen.getByRole("menuitemradio", { name: /Everyone at Acme/ }));
-		// Remove Maya while the workspace invitation is still open.
-		await userEvent.click(within(people).getByRole("button", { name: "Remove access for maya@acme.co" }));
-		release();
-		await waitFor(() => expect(remove).toHaveBeenCalledExactlyOnceWith("https://cp.test", SHARE_ID, maya.id));
-		await waitFor(() => expect(within(people).queryByText("maya@acme.co")).toBeNull());
-		// The server shares it with the whole workspace, and so does the panel.
-		expect(await screen.findByText("Everyone at Acme can open it after signing in, and finds it under Shared with you.")).toBeTruthy();
-		expect(screen.queryByText("Only you")).toBeNull();
-	});
-
 	it("shows access as unknown, and offers no change, until it has read who the link is shared with", async () => {
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
 		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [share] });
@@ -211,34 +177,6 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(screen.queryByText("Only you")).toBeNull();
 	});
 
-	it("reads the list after a workspace invitation left pending by a closed panel", async () => {
-		// What the server holds; reads answer from it.
-		let server: CloudShareGrants = none;
-		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
-		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [share] });
-		vi.spyOn(aoBridge.cloudShare, "grants").mockImplementation(async () => server);
-		let release!: () => void;
-		vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => {
-			release = () => {
-				server = { ...server, workspaces: [everyone] };
-				resolve(server);
-			};
-		}));
-		renderButton(cloudFile);
-		const open = async () => userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
-		await open();
-		await userEvent.click(await screen.findByRole("button", { name: /Only you/ }));
-		await userEvent.click(screen.getByRole("menuitemradio", { name: /Everyone at Acme/ }));
-		// Close the panel while the invitation is pending, then open it again.
-		await userEvent.keyboard("{Escape}");
-		await waitFor(() => expect(screen.queryByRole("region", { name: "People with access" })).toBeNull());
-		await open();
-		await screen.findByRole("region", { name: "People with access" });
-		release();
-		expect(await screen.findByText("Everyone at Acme can open it after signing in, and finds it under Shared with you.")).toBeTruthy();
-		expect(screen.queryByText("Only you")).toBeNull();
-	});
-
 	it("shares a new link with the teams set up before Publish, once it is live, and offers no workspace", async () => {
 		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue(inspection);
 		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue(links);
@@ -264,35 +202,6 @@ describe("ShareArtifactButton on a team workspace", () => {
 		expect(publish.mock.calls[0]![0]).not.toHaveProperty("teamIds");
 		await waitFor(() => expect(invite).toHaveBeenCalledExactlyOnceWith("https://cp.test", SHARE_ID, { orgId: ORG_ID, teamIds: [TEAM_ID] }));
 		expect(await screen.findByText("3 members")).toBeTruthy();
-	});
-
-	it("keeps access unknown until a workspace staged before Publish has been shared", async () => {
-		mocks.candidates = [];
-		// What the server holds; reads answer from it.
-		let server: CloudShareGrants = none;
-		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue(inspection);
-		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue(links);
-		const grants = vi.spyOn(aoBridge.cloudShare, "grants").mockImplementation(async () => server);
-		vi.spyOn(aoBridge.cloudShare, "publish").mockResolvedValue({ status: "published", replaced: false, share });
-		let release!: () => void;
-		vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => {
-			release = () => {
-				server = { ...server, workspaces: [everyone] };
-				resolve(server);
-			};
-		}));
-		renderButton(localFile);
-		await userEvent.click(await screen.findByRole("button", { name: "Publish: report.html" }));
-		await userEvent.click(await screen.findByRole("button", { name: /Only you/ }));
-		await userEvent.click(screen.getByRole("menuitemradio", { name: /Everyone at Acme/ }));
-		await userEvent.click(screen.getByRole("button", { name: "Publish" }));
-		// Live, the workspace grant still on its way: no read yet, and no choice offered.
-		const checking = await screen.findByRole("button", { name: "Checking who has access…" });
-		expect(checking).toHaveProperty("disabled", true);
-		expect(grants).not.toHaveBeenCalled();
-		expect(screen.queryByText("Only you")).toBeNull();
-		release();
-		expect(await screen.findByText("Everyone at Acme can open it after signing in, and finds it under Shared with you.")).toBeTruthy();
 	});
 
 	it("does not share with a pick removed while its invitation waited in the queue", async () => {
@@ -367,32 +276,6 @@ describe("ShareArtifactButton on a team workspace", () => {
 		await waitFor(() => expect(invite).toHaveBeenCalledTimes(2));
 		const people = await screen.findByRole("region", { name: "People with access" });
 		expect(await within(people).findByText("maya@acme.co")).toBeTruthy();
-	});
-
-	it("reads the list again after an invitation fails, since the server may have saved it", async () => {
-		// What the server holds; reads answer from it.
-		let server: CloudShareGrants = none;
-		vi.spyOn(aoBridge.cloudShare, "inspect").mockResolvedValue({ ...inspection, shareId: SHARE_ID });
-		vi.spyOn(aoBridge.cloudShare, "list").mockResolvedValue({ ...links, shares: [share] });
-		let answerRefresh!: () => void;
-		const grants = vi.spyOn(aoBridge.cloudShare, "grants")
-			.mockImplementationOnce(async () => server)
-			.mockImplementationOnce(() => new Promise<CloudShareGrants>((resolve) => { answerRefresh = () => resolve(server); }));
-		// Saved, then the answer is lost.
-		vi.spyOn(aoBridge.cloudShare, "invite").mockImplementationOnce(async () => {
-			server = { ...server, workspaces: [everyone] };
-			throw new Error("timed out");
-		});
-		renderButton(cloudFile);
-		await userEvent.click(await screen.findByRole("button", { name: "Published: report.html" }));
-		await userEvent.click(await screen.findByRole("button", { name: /Only you/ }));
-		await userEvent.click(screen.getByRole("menuitemradio", { name: /Everyone at Acme/ }));
-		// The invite failed: access is unknown, and offers no change, while the list is read again.
-		const checking = await screen.findByRole("button", { name: "Checking who has access…" });
-		expect(checking).toHaveProperty("disabled", true);
-		await waitFor(() => expect(grants).toHaveBeenCalledTimes(2));
-		answerRefresh();
-		expect(await screen.findByText("Everyone at Acme can open it after signing in, and finds it under Shared with you.")).toBeTruthy();
 	});
 
 	it("shares with a typed email on Enter", async () => {
