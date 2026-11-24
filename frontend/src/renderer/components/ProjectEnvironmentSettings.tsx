@@ -1,3 +1,4 @@
+import { AoError } from "../../../../packages/shared/telemetry/ao-error";
 import { apiErrorException } from "../lib/api-error-exception";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff, FileCode2, Plus, Trash2 } from "@/components/app-icons";
@@ -60,7 +61,7 @@ export function ProjectEnvironmentSettings({ projectId, hostId, onSaveState }: {
 	if (query.isLoading) return <div className="project-settings-form" aria-busy="true" aria-label={t("settings.project.loading")}><section><div className="settings-grouped-rows flex w-full flex-col"><div className="settings-row-bar" /></div></section></div>;
 	if (!query.data) return <div className="flex flex-col items-start gap-3 px-(--settings-row-inset)"><p role="alert" className="text-sm text-error">{query.error instanceof Error ? query.error.message : t("settings.project.loadFailed")}</p><Button type="button" variant="quiet" size="sm" onClick={() => void query.refetch()}>{t("settings.project.retry")}</Button></div>;
 	const save = async (env: Record<string, string>) => {
-		if (!hostConnected || query.isError) throw new Error(t("remote.hostOffline"));
+		if (!hostConnected || query.isError) throw new AoError("REMOTE_HOST_OFFLINE", t("remote.hostOffline"));
 		// Refresh before the whole-config PUT so this page cannot erase changes made elsewhere.
 		const current = await (hostId ? clientForHost(hostId) : apiClient).GET("/api/v1/projects/{id}", { params: { path: { id: projectId } } });
 		if (current.error) throw apiErrorException(current.error);
@@ -145,7 +146,7 @@ function VariablesEditor({ hostConnected = true, initial, description, note, rea
 	const unsaveable = dirty && envDraft === null;
 	const mutation = useMutation({
 		mutationFn: async (env: Record<string, string>) => {
-			if (!hostConnected) throw new Error(t("remote.hostOffline"));
+			if (!hostConnected) throw new AoError("REMOTE_HOST_OFFLINE", t("remote.hostOffline"));
 			await persist(env);
 			return env;
 		},

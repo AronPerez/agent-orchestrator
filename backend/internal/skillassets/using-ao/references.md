@@ -23,6 +23,7 @@ Natural-language-to-command mappings for common Orchestrator tasks.
 | Kill a session | `ao session kill <id>` |
 | List sessions | `ao session ls` |
 | Find active sessions changing the same files | `ao session overlaps` |
+| Set up Orchestrator for a new user | Read [commands/setup.md](commands/setup.md) |
 | Register a repo as a project | `ao project add --path <abs-path> --name <name>` |
 | List projects | `ao project ls` |
 | Check installed agent harnesses and readiness | `ao agent ls --refresh` |

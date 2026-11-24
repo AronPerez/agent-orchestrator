@@ -93,6 +93,7 @@ export async function closeMismatchedSide(options: {
 }
 
 class RecoveryHTTPError extends Error {
+	readonly code: string = "RECOVERY_HTTP_ERROR";
 	constructor(readonly status: number) { super(`Side chat launch recovery failed: HTTP ${status}`); }
 }
 

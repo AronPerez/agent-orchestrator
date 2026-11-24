@@ -1,3 +1,4 @@
+import { AoError, sentryErrorCode } from "../../../packages/shared/telemetry/ao-error";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -21,7 +22,7 @@ import {
 import { findRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
 import type { RemoteRegistry } from "./remote-registry";
 import { ACCOUNT_TOKEN, DEVICE_TOKEN_PREFIX, addRemote, holdsAccountToken, holdsPairingPassword, queueRemoteCleanup, readRemotes, removeCleanupRemote, updateRemote, type RemoteChanges, type RemoteEntry } from "./remotes-store";
-import { ExpectedIpcError } from "./main-error-capture";
+import { captureMainError, ExpectedIpcError } from "./main-error-capture";
 
 // An isolated desktop run must not read or write the real user's credentials.
 // Without an override, keep the existing ~/.ao location.
@@ -106,8 +107,9 @@ export type DecisionSyncResult =
 	| { ok: true; warnings: { callId: string; field: string }[] }
 	| { ok: false; code: string };
 
-class LocalIdentityUnavailableError extends Error {
-	constructor() { super("Local AO identity is unavailable; remote connection is offline"); }
+export class LocalIdentityUnavailableError extends ExpectedIpcError {
+	override readonly code: string = "LOCAL_IDENTITY_UNAVAILABLE_ERROR";
+	constructor() { super("Local Orchestrator identity is unavailable; remote connection is offline"); }
 }
 
 type AccountHost = { hostId: string; label: string; url: string; token: string };
@@ -131,7 +133,7 @@ export function registerRemotesIpc(
 ): void {
 	const disconnect = (url: string) => registry.disconnect(url);
 	const refuseSelf = (hostId: string | undefined, localHostId: string | null) => {
-		if (localHostId && hostId === localHostId) throw new Error("This AO installation is already available locally; a remote connection to itself is not allowed.");
+		if (localHostId && hostId === localHostId) throw new AoError("REMOTE_HOST_IS_LOCAL", "This AO installation is already available locally; a remote connection to itself is not allowed.");
 	};
 	const requireLocalIdentity = async () => {
 		const hostId = await localIdentity();
@@ -140,12 +142,12 @@ export function registerRemotesIpc(
 	};
 	const checkConnectionContext = async (localHostId: string, account: string) => {
 		const [currentLocalHostId, currentAccount] = await Promise.all([localIdentity(), getAccountId()]);
-		if (currentAccount !== account) throw new Error("Account changed during remote connection.");
+		if (currentAccount !== account) throw new AoError("ACCOUNT_CHANGED_DURING_CONNECT", "Account changed during remote connection.");
 		if (!currentLocalHostId) throw new LocalIdentityUnavailableError();
-		if (currentLocalHostId !== localHostId) throw new Error("Local AO identity changed; remote connection is offline");
+		if (currentLocalHostId !== localHostId) throw new AoError("LOCAL_IDENTITY_CHANGED", "Local AO identity changed; remote connection is offline");
 	};
 	const checkedProbe = async (entry: RemoteEntry, account: string): Promise<RemoteHealth> => {
-		if (!entry.hostId) throw new Error("remote host must be paired again to record its identity");
+		if (!entry.hostId) throw new AoError("REMOTE_HOST_NOT_PAIRED", "remote host must be paired again to record its identity");
 		const localHostId = await requireLocalIdentity();
 		refuseSelf(entry.hostId, localHostId);
 		let actual: string;
@@ -156,7 +158,7 @@ export function registerRemotesIpc(
 			return "offline";
 		}
 		refuseSelf(actual, localHostId);
-		if (actual !== entry.hostId) throw new Error(`remote host identity changed for ${entry.url}; connection refused`);
+		if (actual !== entry.hostId) throw new AoError("REMOTE_HOST_IDENTITY_CHANGED", `remote host identity changed for ${entry.url}; connection refused`);
 		await checkConnectionContext(localHostId, account);
 		const health = await probe(entry);
 		await checkConnectionContext(localHostId, account);
@@ -203,10 +205,10 @@ export function registerRemotesIpc(
 		pendingCoordinationDeviceIds,
 	});
 	const verifiedRevoke = async (entry: RemoteEntry, deviceID: string, localHostId: string, account: string): Promise<CoordinationTokenRevokeResult> => {
-		if (!entry.hostId || (entry.accountUserId && entry.accountUserId !== account)) throw new Error("Host does not belong to this account.");
+		if (!entry.hostId || (entry.accountUserId && entry.accountUserId !== account)) throw new AoError("REMOTE_HOST_NOT_OWNED", "Host does not belong to this account.");
 		const actual = await identity(entry);
 		refuseSelf(actual, localHostId);
-		if (actual !== entry.hostId) throw new Error(`remote host identity changed for ${entry.url}; connection refused`);
+		if (actual !== entry.hostId) throw new AoError("REMOTE_HOST_IDENTITY_CHANGED", `remote host identity changed for ${entry.url}; connection refused`);
 		await checkConnectionContext(localHostId, account);
 		const retired = await revokeCoordination(entry, deviceID);
 		await checkConnectionContext(localHostId, account);
@@ -368,7 +370,7 @@ export function registerRemotesIpc(
 	const accountID = async () => {
 		await requireAccount();
 		const id = await getAccountId();
-		if (!id) throw new Error("Sign in to AO Cloud to sync account hosts.");
+		if (!id) throw new AoError("CLOUD_SIGN_IN_REQUIRED", "Sign in to AO Cloud to sync account hosts.");
 		return id;
 	};
 	const owned = async () => {
@@ -387,10 +389,20 @@ export function registerRemotesIpc(
 	};
 	scheduleCleanupRetry(() => ordered(async () => retryCleanupRecords(await getAccountId())));
 
-	ipcMain.handle("remotes:list", () => ordered(async () => {
-		const localHostId = await localIdentity();
-		const entries = await owned();
-		return toHostViews(entries.filter((entry) => !localHostId || entry.hostId !== localHostId));
+	ipcMain.handle("remotes:list", (_event, includeErrorCode?: true) => ordered(async () => {
+		try {
+			// Local pairings need no Cloud account, so listing is never gated on one.
+			const localHostId = await localIdentity();
+			const entries = await owned();
+			return toHostViews(entries.filter((entry) => !localHostId || entry.hostId !== localHostId));
+		} catch (error) {
+			// Electron only serializes the message of an IPC rejection. Send
+			// coded failures as a structured result for the renderer bridge.
+			const code = includeErrorCode === true ? sentryErrorCode(error) : undefined;
+			if (!code || !(error instanceof Error)) throw error;
+			captureMainError({ category: "ipc", reason: "handler", detail: "channel:remotes:list", error });
+			return { code, message: error.toString(), ...(error instanceof ExpectedIpcError ? { expected: true } : {}) };
+		}
 	}));
 	ipcMain.handle("remotes:add", async (_event, input: RemoteEntry) => ordered(async () => {
 		const account = await getAccountId();
@@ -455,7 +467,7 @@ export function registerRemotesIpc(
 			&& (!candidate.accountUserId || candidate.accountUserId === account));
 		const entry = entries.find((candidate) => !candidate.cleanupOnly)
 			?? entries.find((candidate) => candidate.cleanupOnly);
-		if (!entry) throw new Error("Host does not belong to this account.");
+		if (!entry) throw new AoError("REMOTE_HOST_NOT_OWNED", "Host does not belong to this account.");
 		await stopDecisionSync(entry.hostId);
 		await disconnect(url);
 		const key = coordinationKey(entry);
@@ -465,7 +477,7 @@ export function registerRemotesIpc(
 	}));
 	ipcMain.handle("remotes:connect", async (_event, url: string, hostId?: string) => ordered(async () => {
 		const account = await getAccountId();
-		if (!(await owned()).some((entry) => entry.url === url && (!hostId || entry.hostId === hostId))) throw new Error("Host does not belong to this account.");
+		if (!(await owned()).some((entry) => entry.url === url && (!hostId || entry.hostId === hostId))) throw new AoError("REMOTE_HOST_NOT_OWNED", "Host does not belong to this account.");
 		const entry = await findRemote(file, url, hostId);
 		const localHostId = await localIdentity();
 		refuseSelf(entry.hostId, localHostId);
@@ -668,16 +680,16 @@ export function registerRemotesIpc(
 	ipcMain.handle("remotes:computerName", () => computerName());
 	ipcMain.handle("remotes:previewUrl", async (_event, hostId: string, sessionId: string, sourceUrl: string) => {
 		const account = await getAccountId();
-		if (!(await owned()).some((entry) => entry.hostId === hostId)) throw new Error("Host does not belong to this account.");
+		if (!(await owned()).some((entry) => entry.hostId === hostId)) throw new AoError("REMOTE_HOST_NOT_OWNED", "Host does not belong to this account.");
 		refuseSelf(hostId, await localIdentity());
-		if (await getAccountId() !== account) throw new Error("Account changed during remote connection.");
+		if (await getAccountId() !== account) throw new AoError("ACCOUNT_CHANGED_DURING_CONNECT", "Account changed during remote connection.");
 		return registry.previewUrl(hostId, sessionId, sourceUrl);
 	});
 	ipcMain.handle("remotes:resolvePreviewUrl", async (_event, hostId: string, sessionId: string, viewedUrl: string) => {
 		const account = await getAccountId();
-		if (!(await owned()).some((entry) => entry.hostId === hostId)) throw new Error("Host does not belong to this account.");
+		if (!(await owned()).some((entry) => entry.hostId === hostId)) throw new AoError("REMOTE_HOST_NOT_OWNED", "Host does not belong to this account.");
 		refuseSelf(hostId, await localIdentity());
-		if (await getAccountId() !== account) throw new Error("Account changed during remote connection.");
+		if (await getAccountId() !== account) throw new AoError("ACCOUNT_CHANGED_DURING_CONNECT", "Account changed during remote connection.");
 		return registry.resolvePreviewUrl(hostId, sessionId, viewedUrl);
 	});
 	ipcMain.handle("remotes:agentBrowserUrl", async (_event, hostId: string, sessionId: string) => {

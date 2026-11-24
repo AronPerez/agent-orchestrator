@@ -1,3 +1,4 @@
+import { AoError } from "../../../../packages/shared/telemetry/ao-error";
 import type { AoBridge } from "../../preload";
 import { coerceUiSettings, DEFAULT_UI_SETTINGS } from "../../shared/ui-locale";
 import { createWebSideCloseBridge } from "./web-side-close";
@@ -14,6 +15,10 @@ export const aoBridge: AoBridge =
 	({
 		triage: {
 			launch: async () => ({ ok: false, error: "report.desktopRequired" as const }),
+		},
+		awake: {
+			pushes: false,
+			onState: () => () => undefined,
 		},
 		dictation: {
 			start: async () => undefined,
@@ -195,8 +200,8 @@ export const aoBridge: AoBridge =
 			onStatus: () => () => undefined,
 		},
 		agentLogin: { request: async () => null },
-		sideChats: import.meta.env.VITE_NO_ELECTRON === "1" ? { ...createWebSideCloseBridge(), discardRetained: async () => { throw new Error("The desktop app is required to discard retained side chats."); } } : {
-			discardRetained: async () => { throw new Error("Desktop side chat bridge is unavailable. Reload the desktop app."); },
+		sideChats: import.meta.env.VITE_NO_ELECTRON === "1" ? { ...createWebSideCloseBridge(), discardRetained: async () => { throw new AoError("SIDE_CHAT_BRIDGE_UNAVAILABLE", "The desktop app is required to discard retained side chats."); } } : {
+			discardRetained: async () => { throw new AoError("SIDE_CHAT_BRIDGE_UNAVAILABLE", "Desktop side chat bridge is unavailable. Reload the desktop app."); },
 			protocolVersion: SIDE_CLOSE_PROTOCOL_VERSION,
 			mode: "desktop",
 			capture: async () => { throw new Error("Desktop side chat bridge is unavailable. Reload the desktop app."); },

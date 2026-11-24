@@ -1,3 +1,4 @@
+import { listRemoteHosts } from "../lib/remote-host-list";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { aoBridge } from "../lib/bridge";
 import { connectHost, connectedHosts, disconnectHost } from "../lib/host-clients";
@@ -133,12 +134,12 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; settle
 		if (!enabledRef.current) return;
 		const generation = ++refreshGeneration.current;
 		const current = () => enabledRef.current && accountRef.current === accountId && refreshGeneration.current === generation;
-		let saved: Awaited<ReturnType<typeof aoBridge.remotes.list>>;
-		try { saved = await aoBridge.remotes.list(); } catch { return; }
+		let saved: Awaited<ReturnType<typeof listRemoteHosts>>;
+		try { saved = await listRemoteHosts(); } catch { return; }
 		if (accountId && cloudBaseUrl) {
 			try {
 				await aoBridge.remotes.syncAccountHosts(accountId);
-				saved = await aoBridge.remotes.list();
+				saved = await listRemoteHosts();
 			} catch { /* Cloud outage must not hide locally paired machines. */ }
 		}
 		if (!current()) return;

@@ -461,6 +461,7 @@ UPDATE sessions SET
     auto_inject_review = sqlc.arg(auto_inject_review),
     auto_inject_ci = sqlc.arg(auto_inject_ci),
     plan_first_state = sqlc.arg(plan_first_state),
+    terminate_on_pr_merge = sqlc.arg(terminate_on_pr_merge),
     provision_state = sqlc.arg(provision_state),
     provision_error = '',
     client_request_id = sqlc.arg(client_request_id),

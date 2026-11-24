@@ -1,4 +1,5 @@
-import { AlertTriangle, Clock3 } from "lucide-react";
+import { uiUsage } from "../lib/ui-usage-telemetry";
+import { AlertTriangle, Clock3 } from "@/components/app-icons";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { DaemonStatus } from "../../shared/daemon-status";
@@ -40,6 +41,10 @@ function DaemonFailureContent({ status }: { status: DaemonStatus }) {
 			status.code === "exited" ||
 			status.code === "identity_mismatch" ||
 			status.code === "daemon_unreachable");
+	// One count per failure shown, keyed on its code; a slow start is not an error.
+	useEffect(() => {
+		if (!slowStartup) uiUsage.errorShown("daemon_unavailable", "banner", undefined, status.code ? status.code.toUpperCase() : undefined);
+	}, [slowStartup, status.code]);
 	useEffect(() => {
 		setCopied(false);
 		return () => {
@@ -101,6 +106,7 @@ function DaemonFailureContent({ status }: { status: DaemonStatus }) {
 							type="button"
 							className="mt-2 inline-flex h-control-md items-center rounded-md bg-accent-strong px-3 font-semibold text-accent-foreground transition-[filter,opacity] hover:brightness-110 disabled:cursor-wait disabled:opacity-60"
 							disabled={restarting}
+							data-telemetry-id="daemon_banner.retry"
 							onClick={() => void restartDaemon()}
 						>
 							{restarting ? t("daemon.restarting") : t("daemon.restart")}

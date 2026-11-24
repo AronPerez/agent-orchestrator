@@ -1,3 +1,4 @@
+import { AoError } from "../../../../packages/shared/telemetry/ao-error";
 import { apiErrorException } from "../lib/api-error-exception";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Plus, Trash2 } from "@/components/app-icons";
@@ -49,7 +50,7 @@ export function ProjectScriptsSettings({ projectId, hostId, onSaveState }: { pro
 	const project = query.data;
 	const scratch = project.kind === "scratch";
 	const save = async (steps: ScriptSteps) => {
-		if (!hostConnected || query.isError) throw new Error(t("remote.hostOffline"));
+		if (!hostConnected || query.isError) throw new AoError("REMOTE_HOST_OFFLINE", t("remote.hostOffline"));
 		// A local step always runs in the project's own workspace; its own time
 		// limit is stored with it, as a Cloud step's is.
 		const scripts = {
@@ -288,7 +289,7 @@ function ScriptsEditor({ hostId, hostConnected = true, projectId, scratch, postC
 	});
 	const retry = useMutation({
 		mutationFn: async () => {
-			if (!hostConnected) throw new Error(t("remote.hostOffline"));
+			if (!hostConnected) throw new AoError("REMOTE_HOST_OFFLINE", t("remote.hostOffline"));
 			const { data, error } = await (hostId ? clientForHost(hostId) : apiClient).POST("/api/v1/sessions/cleanup", { params: { query: { project: projectId ?? "" } } });
 			if (error) throw apiErrorException(error);
 			return data;

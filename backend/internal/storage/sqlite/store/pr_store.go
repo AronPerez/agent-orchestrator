@@ -94,6 +94,26 @@ func (s *Store) MarkPRMerged(ctx context.Context, prURL, mergeCommitSHA string, 
 	return nil
 }
 
+// MarkPRMergeQueue records a provider-confirmed merge queue change: entry is
+// the PR's place after joining the queue, or nil once it left. The observer's
+// next fetch reconciles it. A merged PR is never rewritten.
+func (s *Store) MarkPRMergeQueue(ctx context.Context, prURL string, entry *domain.MergeQueueEntry, at time.Time) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.MarkPRMergeQueue(ctx, gen.MarkPRMergeQueueParams{
+		MergeQueueEntry: encodeMergeQueueEntry(entry),
+		UpdatedAt:       at,
+		URL:             prURL,
+	})
+	if err != nil {
+		return fmt.Errorf("mark pr merge queue %s: %w", prURL, err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("mark pr merge queue %s: updated %d rows", prURL, rows)
+	}
+	return nil
+}
+
 // MarkPRState records the authoritative result of a provider close, reopen,
 // ready-for-review, or convert-to-draft mutation without replacing
 // concurrently refreshed CI or review facts. A merged PR is never rewritten.
@@ -760,8 +780,34 @@ func genPRParams(r domain.PullRequest) gen.UpsertPRParams {
 		ReviewObservedAt:         nullTime(r.ReviewObservedAt),
 		ReviewPartial:            r.ReviewPartial,
 		TamperAssessmentJson:     encodePRTamperAssessment(r.Tamper),
+		MergeQueueRequired:       r.MergeQueueRequired,
+		MergeQueueEntry:          encodeMergeQueueEntry(r.MergeQueue),
 		ID:                       r.SessionID,
 	}
+}
+
+// encodeMergeQueueEntry stores a merge queue entry as JSON, empty for none.
+func encodeMergeQueueEntry(entry *domain.MergeQueueEntry) string {
+	if entry == nil {
+		return ""
+	}
+	b, err := json.Marshal(entry)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeMergeQueueEntry reads a stored entry; an empty or unreadable one is none.
+func decodeMergeQueueEntry(raw string) *domain.MergeQueueEntry {
+	if raw == "" {
+		return nil
+	}
+	var entry domain.MergeQueueEntry
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil || entry.State == "" {
+		return nil
+	}
+	return &entry
 }
 
 func genLegacyPRParams(r domain.PullRequest) gen.UpsertLegacyPRParams {
@@ -868,6 +914,8 @@ func prRowFromGen(p gen.PR) domain.PullRequest {
 		ReviewPartial:            p.ReviewPartial,
 		AutoInjectCI:             p.AutoInjectCI,
 		Tamper:                   decodePRTamperAssessment(p.TamperAssessmentJson),
+		MergeQueueRequired:       p.MergeQueueRequired,
+		MergeQueue:               decodeMergeQueueEntry(p.MergeQueueEntry),
 	}
 }
 

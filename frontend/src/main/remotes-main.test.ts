@@ -1,14 +1,15 @@
+import { AoError } from "../../../packages/shared/telemetry/ao-error";
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { registerRemotesIpc, remotesDaemonEnvironment, remotesFilePath, type RemotesIpcDeps } from "./remotes-main";
+import { LocalIdentityUnavailableError, registerRemotesIpc, remotesDaemonEnvironment, remotesFilePath, type RemotesIpcDeps } from "./remotes-main";
 import { RemoteRegistry } from "./remote-registry";
 import { setPasswordCipher } from "./remotes-store";
 import { createLocalHostIdentity, type RemoteHealth } from "./remote-request";
-import { ExpectedIpcError } from "./main-error-capture";
+import { ExpectedIpcError, installIpcErrorCapture, resetMainErrorCaptureForTests, setMainErrorSink } from "./main-error-capture";
 
 type Handler = (event: unknown, ...args: unknown[]) => Promise<unknown>;
 
@@ -99,6 +100,56 @@ describe("remotesFilePath", () => {
 });
 
 describe("registerRemotesIpc", () => {
+	// This fork pairs hosts without a Cloud sign-in, so remotes:connect has no
+	// account gate to classify; the signed-out and account-gate cases do not apply.
+	it.each(["offline", "unauthorized", "unexpected"])("classifies %s IPC rejection without changing it", async (state) => {
+		resetMainErrorCaptureForTests();
+		try {
+			const ipc = fakeIpc();
+			installIpcErrorCapture(ipc.ipcMain as never);
+			const capture = vi.fn();
+			setMainErrorSink(capture);
+			const unexpected = new TypeError("unexpected probe failure");
+			registerRemotes(ipc.ipcMain, {
+				file: await tempFile(),
+				registry: new RemoteRegistry(async () => { throw new Error("must not connect"); }),
+				requireAccount: async () => {},
+				identity: async () => "h_workbox",
+				probe: async () => {
+					if (state === "unexpected") throw unexpected;
+					return state === "unauthorized" ? "unauthorized" : "offline";
+				},
+			});
+			const result = ipc.invoke("remotes:connect", "http://192.0.2.1:1", "h_workbox");
+			if (state === "unexpected") {
+				await expect(result).rejects.toBe(unexpected);
+				expect(capture).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ category: "ipc", reason: "handler", error: unexpected }));
+			} else {
+				await expect(result).rejects.toThrow(`is ${state}`);
+				expect(capture).not.toHaveBeenCalled();
+			}
+		} finally { resetMainErrorCaptureForTests(); }
+	});
+
+	it("preserves the code on a remotes:list failure requested by the renderer", async () => {
+		resetMainErrorCaptureForTests();
+		try {
+			const ipc = fakeIpc();
+			const capture = vi.fn();
+			setMainErrorSink(capture);
+			const error = new AoError("REMOTES_READ_FAILED", "Could not read remote hosts");
+			registerRemotes(ipc.ipcMain, {
+				file: await tempFile(),
+				registry: new RemoteRegistry(async () => { throw new Error("must not connect"); }),
+				requireAccount: signedIn,
+				localIdentity: async () => { throw error; },
+			});
+			await expect(ipc.invoke("remotes:list", true)).resolves.toEqual({ code: error.code, message: error.toString() });
+			expect(capture).toHaveBeenCalledExactlyOnceWith({ category: "ipc", reason: "handler", error, detail: "channel:remotes:list" });
+			await expect(ipc.invoke("remotes:list")).rejects.toBe(error);
+		} finally { resetMainErrorCaptureForTests(); }
+	});
+
 	it("hides this installation without deleting its account record or original password", async () => {
 		const file = await tempFile();
 		const original = await readFile(file, "utf8");
@@ -1406,4 +1457,19 @@ describe("remotes:setDecisionSync", () => {
 		expect(await ipc.invoke("remotes:setDecisionSync", "http://192.0.2.9:3011", true)).toEqual({ ok: false, code: "NOT_FOUND" });
 		expect(calls).toEqual([]);
 	});
+});
+
+it.each([
+	new ExpectedIpcError("Sign in to Orchestrator Cloud"),
+	new LocalIdentityUnavailableError(),
+])("marks expected remotes:list failures even when the subclass has its own code", async (error) => {
+	const ipc = fakeIpc();
+	registerRemotes(ipc.ipcMain, {
+		file: await tempFile(),
+		registry: new RemoteRegistry(async () => { throw new Error("must not connect"); }),
+		requireAccount: signedIn,
+		localIdentity: async () => { throw error; },
+	});
+	await expect(ipc.invoke("remotes:list", true)).resolves.toEqual({ code: error.code, message: error.toString(), expected: true });
+	await expect(ipc.invoke("remotes:list")).rejects.toBe(error);
 });

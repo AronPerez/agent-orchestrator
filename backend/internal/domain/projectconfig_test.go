@@ -271,6 +271,10 @@ func TestProjectConfigIsZero(t *testing.T) {
 	if (ProjectConfig{WorkerContracts: WorkerContractConfig{StallMinutes: 10}}).IsZero() {
 		t.Fatal("config with worker contract settings should not be zero")
 	}
+	tTrue := true
+	if (ProjectConfig{TerminateOnPRMerge: &tTrue}).IsZero() {
+		t.Fatal("config with terminateOnPrMerge enabled should not be zero")
+	}
 }
 
 // The project-level session interface is written by the app and by

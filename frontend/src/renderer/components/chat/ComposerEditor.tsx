@@ -313,7 +313,7 @@ class ComposerTokenNode extends DecoratorNode<JSX.Element> {
 				className={cn(
 					"mx-0.5 inline-flex items-center gap-1 rounded-md border border-border-strong bg-interactive-hover px-1.5 py-0.5 align-middle text-[0.9em] leading-none select-none",
 					this.__kind === "skill"
-						? "text-logo-accent"
+						? "text-logo-accent-text"
 						: "text-foreground",
 				)}
 			>
@@ -1095,7 +1095,7 @@ export const ComposerEditor = forwardRef<
 								if (event.defaultPrevented) event.stopPropagation();
 							}}
 							className={cn(
-								"max-h-40 min-h-[4.5rem] w-full overflow-y-auto overscroll-contain bg-transparent py-1 text-base! leading-relaxed text-foreground caret-foreground outline-none selection:bg-logo-accent selection:text-logo-accent-foreground",
+								"max-h-40 min-h-[4.5rem] w-full overflow-y-auto overscroll-contain bg-transparent py-1 text-base! leading-relaxed text-foreground caret-foreground outline-none selection:bg-foreground selection:text-on-foreground",
 								COMPOSER_TEXT_INSET,
 								COMPOSER_SCROLL_GUTTER,
 								suggestion && "absolute inset-0 overflow-visible overscroll-auto",

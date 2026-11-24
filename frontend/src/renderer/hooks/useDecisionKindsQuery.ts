@@ -1,3 +1,4 @@
+import { AoError } from "../../../../packages/shared/telemetry/ao-error";
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "../lib/api-client";
 import { apiErrorException } from "../lib/api-error-exception";
@@ -26,7 +27,7 @@ export function useDecisionKindsQuery(projectId: string, hostId?: string, enable
 			if (error) throw apiErrorException(error);
 			const kinds = decisionKindsFromResponse(data?.kinds);
 			// Failing the query hides the settings section, as for an older daemon.
-			if (!kinds) throw new Error("decision kinds without default reservations");
+			if (!kinds) throw new AoError("DECISION_KINDS_INVALID", "decision kinds without default reservations");
 			return kinds;
 		},
 	});

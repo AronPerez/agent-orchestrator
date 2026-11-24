@@ -400,3 +400,24 @@ func CoordinationDeliveryID(message string) (string, bool) {
 	}
 	return SessionDeliveryID(message)
 }
+
+// IsCoordinationMessage reports a prompt AO wrote itself: a delivery, a handoff
+// request, or a continuation kickoff. A report envelope followed by human text
+// is not coordination. These stay in provider history but aren't
+// the user's latest instruction.
+func IsCoordinationMessage(message string) bool {
+	message = strings.TrimSpace(message)
+	unwrapped := strings.TrimSpace(unwrapPastedContent(message))
+	if id, report := deliveryID(unwrapped, reportDeliveryPrefix); report {
+		// A report envelope may share a prompt with a human instruction; only
+		// an envelope that ends with its own footer is coordination. That
+		// includes one whose middle a TUI cut (the checksum no longer matches),
+		// which CoordinationDeliveryID records as truncated, but not one with
+		// human text after the footer.
+		_, footerID, _ := reportDeliveryFooterOf(unwrapped)
+		return footerID == id
+	}
+	_, delivery := CoordinationDeliveryID(message)
+	return delivery || strings.HasPrefix(message, "<ao-handoff-request") ||
+		strings.HasPrefix(message, "AO transferred the previous agent's context in hidden system instructions.")
+}

@@ -11,6 +11,7 @@ import { COORDINATION_TOKEN_PREFIX, DEVICE_TOKEN_PREFIX, type RemoteEntry } from
 export type RemoteHealth = "online" | "unauthorized" | "offline" | "not-a-daemon" | "incompatible";
 
 export class IncompatibleRemoteVersionError extends Error {
+	readonly code: string = "INCOMPATIBLE_REMOTE_VERSION_ERROR";
 	constructor() {
 		super("Orchestrator versions are incompatible. Update Orchestrator on this computer and the remote host.");
 		this.name = "IncompatibleRemoteVersionError";

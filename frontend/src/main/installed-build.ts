@@ -1,3 +1,4 @@
+import { AoError } from "../../../packages/shared/telemetry/ao-error";
 import { createHash } from "node:crypto";
 import type * as fs from "node:fs";
 import type { InstalledBuildStatus } from "./update-settings";
@@ -205,7 +206,7 @@ export class InstalledBuildGuard {
 		}
 		const target = this.status;
 		if (!target || this.deps.readIdentity() !== target.identity) {
-			throw new Error("The installed build is still changing. Wait for installation to finish and try again.");
+			throw new AoError("INSTALLED_BUILD_CHANGING", "The installed build is still changing. Wait for installation to finish and try again.");
 		}
 		const readiness = await this.idleState();
 		const { idle, openSideChats } = readiness;
@@ -215,8 +216,8 @@ export class InstalledBuildGuard {
 			this.publish({ ...target, ...readiness, restartWhenIdle: true });
 		} else if (!idle) {
 			this.publish({ ...target, ...readiness });
-			if (openSideChats?.length) throw new Error(`Read or save and close these side chats before restarting: ${openSideChats.join(", ")}.`);
-			throw new Error("Current tasks are not confirmed idle. Choose Restart when idle or try again after they finish.");
+			if (openSideChats?.length) throw new AoError("SIDE_CHATS_OPEN", `Read or save and close these side chats before restarting: ${openSideChats.join(", ")}.`);
+			throw new AoError("TASKS_NOT_IDLE", "Current tasks are not confirmed idle. Choose Restart when idle or try again after they finish.");
 		}
 		if (!idle || this.restarting) return;
 		// Recheck the target after the asynchronous worker probe as well.

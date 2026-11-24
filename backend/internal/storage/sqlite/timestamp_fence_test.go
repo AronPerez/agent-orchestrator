@@ -123,7 +123,10 @@ func TestTimestampRepairTriggerInventory(t *testing.T) {
 	// way; see TestRepairDoesNotPublishDecisionSyncEvents.
 	// review_run_worker_notice_pending only fires on status updates. Timestamp
 	// repair preserves notice state (TestTimestampRepairPreservesReviewDoneNotices).
-	const reviewed = "4e0fdfc14b058cba7052468cc2b365ef55e13dea3869ed894608e6cb3706d393"
+	// pr_cdc_update also watches the merge queue columns, which repair never writes.
+	// 2026-11-24: the upstream sync combines the decision triggers above with
+	// that pr_cdc_update; no other trigger changed.
+	const reviewed = "0da9988cdc4d245519bd7ddc72021b9d0d7c31f5d21db67948c7efea709193ee"
 	if got := fmt.Sprintf("%x", hash.Sum(nil)); got != reviewed {
 		t.Fatalf("timestamp trigger inventory changed; review preservation logic before updating fingerprint: %s", got)
 	}

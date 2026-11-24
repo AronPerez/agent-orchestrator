@@ -1,3 +1,4 @@
+import { AoError } from "../../packages/shared/telemetry/ao-error";
 import { parseSharedArtifactLink } from "../../packages/shared/artifacts/shared-artifact-link";
 import { openSharedArtifact, SHARED_ARTIFACT_VIEWER_ORIGINS } from "./main/shared-artifact-window";
 import type { SideCloseRequest, SideCloseState } from "./shared/side-close";
@@ -358,11 +359,11 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 		const body = await response.json();
 		const idle = await sessionsAndReviewsAreIdle(body, async (sessionId) => {
 			const reviews = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(sessionId)}/reviews`, { signal: AbortSignal.timeout(5_000) });
-			if (!reviews.ok) throw new Error("Review state unavailable");
+			if (!reviews.ok) throw new AoError("REVIEW_STATE_UNAVAILABLE", "Review state unavailable");
 			return reviews.json();
 		}, async (reviewId) => {
 			const conversation = await fetch(`http://127.0.0.1:${port}/api/v1/reviews/${encodeURIComponent(reviewId)}/conversation?limit=1`, { signal: AbortSignal.timeout(5_000) });
-			if (!conversation.ok) throw new Error("Reviewer activity unavailable");
+			if (!conversation.ok) throw new AoError("REVIEWER_ACTIVITY_UNAVAILABLE", "Reviewer activity unavailable");
 			return conversation.json();
 		});
 		if (!idle) return false;
@@ -375,7 +376,7 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 		setInstalledBuildStatus(status);
 	},
 	relaunch: () => {
-		if (chatDraftRisks.length > 0) throw new Error("Save current chat drafts before restarting Orchestrator.");
+		if (chatDraftRisks.length > 0) throw new AoError("CHAT_DRAFTS_UNSAVED", "Save current chat drafts before restarting Orchestrator.");
 		preserveAgentsOnQuit = true;
 		app.relaunch(process.platform === "linux" && process.env.APPIMAGE ? { execPath: process.env.APPIMAGE } : {});
 		desktopQuit.quitCompletely();
@@ -3913,7 +3914,7 @@ const remoteRegistry = new RemoteRegistry(async (entry) => {
 		const host = browserViewHost;
 		// App shutdown may already have disposed every view before proxies close.
 		if (!host && command.action === "__destroy-session") return { destroyed: false };
-		if (!host) throw new Error("Browser target owner is unavailable");
+		if (!host) throw new AoError("BROWSER_TARGET_OWNER_UNAVAILABLE", "Browser target owner is unavailable");
 		return host.execute(command.sessionId, command.action, command.args, signal);
 	}, undefined, (state) => getShellWebContents()?.send("browser:sessionRuntimeStateChanged", { ...state, hostId: entry.hostId } satisfies SessionBrowserRuntimeState));
 });
@@ -4285,7 +4286,7 @@ ipcMain.handle("featureBuilds:getActive", () => getActiveFeatureBuild());
 
 ipcMain.handle("updates:getStatus", (): UpdateStatus => getUpdateStatus());
 ipcMain.handle("updates:restartInstalled", (event, mode: unknown) => {
-	if (event.sender !== getShellWebContents() || !installedBuildGuard || typeof mode !== "string" || !["now", "when-idle", "cancel"].includes(mode)) throw new Error("Invalid installed build restart request.");
+	if (event.sender !== getShellWebContents() || !installedBuildGuard || typeof mode !== "string" || !["now", "when-idle", "cancel"].includes(mode)) throw new AoError("INSTALLED_BUILD_RESTART_INVALID", "Invalid installed build restart request.");
 	return installedBuildGuard.requestRestart(mode as "now" | "when-idle" | "cancel");
 });
 ipcMain.handle("updates:verifyBuild", async (event, identity: unknown) => {
@@ -5095,6 +5096,11 @@ app.whenReady().then(async () => {
 			baseURL: () => daemonStatus.state === "ready" && daemonStatus.port ? `http://127.0.0.1:${daemonStatus.port}` : null,
 			request: (url, init) => fetch(url, init),
 			setState: (active) => trayController?.setAwakeState(active),
+			// Every shell window shows Stay Awake in its sidebar and gets each change.
+			// The shell is a WebContentsView, so BrowserWindow.getAllWindows() misses it.
+			onAwakeState: (state) => {
+				for (const shellContents of trustedShellWebContents.values()) if (!shellContents.isDestroyed()) shellContents.send("awake:state", state);
+			},
 		});
 		app.once("will-quit", () => awakeTray.dispose());
 	}

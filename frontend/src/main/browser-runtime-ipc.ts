@@ -1,3 +1,4 @@
+import { AoError } from "../../../packages/shared/telemetry/ao-error";
 import type { IpcMain, WebContents } from "electron";
 import type { BrowserRuntimeLinkHandle } from "./browser-runtime-link";
 import { BROWSER_RUNTIME_DISCONNECTED } from "./browser-runtime-link";
@@ -10,11 +11,11 @@ export function registerBrowserRuntimeIpc(ipc: Pick<IpcMain, "handle">, options:
 	reconnectLocalRuntime: () => void;
 }): void {
 	const requireShell = (sender: WebContents) => {
-		if (!sender || sender !== options.getShellContents() || sender.isDestroyed()) throw new Error("Untrusted browser runtime request.");
+		if (!sender || sender !== options.getShellContents() || sender.isDestroyed()) throw new AoError("BROWSER_RUNTIME_UNTRUSTED_SENDER", "Untrusted browser runtime request.");
 	};
 	const sessionRuntime = (sessionId: string, hostId?: string) => {
 		if (typeof sessionId !== "string" || !sessionId || (hostId !== undefined && (typeof hostId !== "string" || !hostId))) {
-			throw new Error("Invalid browser session identity.");
+			throw new AoError("BROWSER_SESSION_INVALID", "Invalid browser session identity.");
 		}
 		return hostId ? options.getRemoteRuntime(hostId) : options.getLocalRuntime();
 	};
@@ -33,7 +34,7 @@ export function registerBrowserRuntimeIpc(ipc: Pick<IpcMain, "handle">, options:
 	});
 	ipc.handle("browser:runtime:attach", async (event, sessionId: string, hostId?: string, takeover = false): Promise<SessionBrowserRuntimeState> => {
 		requireShell(event.sender);
-		if (typeof takeover !== "boolean") throw new Error("Invalid browser session claim.");
+		if (typeof takeover !== "boolean") throw new AoError("BROWSER_SESSION_CLAIM_INVALID", "Invalid browser session claim.");
 		const runtime = sessionRuntime(sessionId, hostId);
 		return { hostId, ...(await runtime?.attachSession(sessionId, takeover) ?? { sessionId, connected: false, owned: false }) };
 	});

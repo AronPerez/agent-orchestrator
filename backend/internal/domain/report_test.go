@@ -216,3 +216,28 @@ func TestReportRecordValidatesSettlementDeadline(t *testing.T) {
 		t.Fatal("expected missing settlement deadline to fail")
 	}
 }
+
+func TestIsCoordinationMessage(t *testing.T) {
+	tests := []struct {
+		message string
+		want    bool
+	}{
+		{message: WrapReportDelivery("report-1", "worker finished"), want: true},
+		{message: "  " + WrapSessionDelivery("send-1", "hello"), want: true},
+		{message: `<ao-handoff-request id="1">`, want: true},
+		{message: "AO transferred the previous agent's context in hidden system instructions. Continue.", want: true},
+		{message: WrapReportDelivery("report-2", "worker finished") + "\nalso fix the login bug"},
+		// A TUI cut the middle of the batch: still AO's own (truncated) delivery.
+		{message: strings.Replace(WrapReportDelivery("report-3", "worker finished\nsecond report"), "second report", "", 1), want: true},
+		// A TUI dropped the head: the footer alone still marks AO's delivery.
+		{message: WrapReportDelivery("report-4", "worker finished")[len(`<ao-report-delivery id="report-4">`):], want: true},
+		{message: "fix the login bug"},
+		{message: "please mention <ao-handoff-request in the docs"},
+		{message: ""},
+	}
+	for _, tt := range tests {
+		if got := IsCoordinationMessage(tt.message); got != tt.want {
+			t.Errorf("IsCoordinationMessage(%q) = %v, want %v", tt.message, got, tt.want)
+		}
+	}
+}
