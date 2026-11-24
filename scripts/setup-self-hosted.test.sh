@@ -94,18 +94,20 @@ PY
 			'while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; https://*) url="$1"; shift ;; --retry) shift 2 ;; *) shift ;; esac; done' \
 			'echo "$url" >> "$TEST_CURL_LOG"' \
 			'case "$url" in' \
-			'  */releases/latest) cp "$TEST_RELEASE_FIXTURES/stable.json" "$out" ;;' \
+			'  */releases/latest)' \
+			'    if [ "$TEST_RELEASE_CASE" = unpublished ]; then echo 404; exit 22; fi' \
+			'    cp "$TEST_RELEASE_FIXTURES/stable.json" "$out" ;;' \
 			'  */releases\?per_page=100) cp "$TEST_RELEASE_FIXTURES/$TEST_RELEASE_CASE.json" "$out" ;;' \
 			'  https://example.test/*) cp "$TEST_RELEASE_FIXTURES/app.AppImage" "$out" ;;' \
 			'  *) exit 1 ;;' 'esac' > "$tmp/bin/curl"
 		chmod +x "$tmp/bin/curl"
-		for fixture in stable nightly empty missing-asset missing-digest bad-digest; do
-			args=()
-			[[ "$fixture" == stable ]] || args+=(--nightly)
+		for fixture in stable unpublished nightly empty missing-asset missing-digest bad-digest; do
+			args=(--install-only)
+			[[ "$fixture" == stable || "$fixture" == unpublished ]] || args+=(--nightly)
 			result=0
 			env PATH="$tmp/bin" AO_HOST_INSTALL_DIR="$tmp/host-$fixture" TEST_RELEASE_PACKAGE="$tmp/pkg" \
 				TEST_RELEASE_FIXTURES="$tmp" TEST_RELEASE_CASE="$fixture" TEST_CURL_LOG="$tmp/$fixture.urls" \
-				/bin/bash "$script" "${args[@]}" --install-only > "$tmp/out" 2>&1 || result=$?
+				/bin/bash "$script" "${args[@]}" > "$tmp/out" 2>&1 || result=$?
 			case "$fixture" in
 				stable|nightly)
 					[[ "$result" == 0 ]] || { cat "$tmp/out" >&2; exit 1; }
@@ -119,6 +121,12 @@ PY
 				*)
 					[[ "$result" != 0 && ! -e "$tmp/host-$fixture/current" ]]
 					case "$fixture" in
+						unpublished)
+							[[ "$result" == 22 ]]
+							grep -q 'No published stable release visible for AronPerez/agent-orchestrator' "$tmp/out"
+							grep -q -- '--app' "$tmp/out"
+							grep -q -- '--bundle' "$tmp/out"
+							;;
 						empty) grep -q 'No published nightly release' "$tmp/out" ;;
 						missing-asset|missing-digest) grep -q 'No verified release asset' "$tmp/out" ;;
 						bad-digest) grep -q 'Release SHA-256 mismatch' "$tmp/out" ;;

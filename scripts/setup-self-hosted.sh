@@ -127,7 +127,13 @@ else
 	[[ "$release_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { printf 'Invalid AO_RELEASE_REPO: %s\n' "$release_repo" >&2; exit 2; }
 	release_api="https://api.github.com/repos/$release_repo/releases/latest"
 	"$nightly" && release_api="https://api.github.com/repos/$release_repo/releases?per_page=100"
-	curl -fsSL --retry 3 "$release_api" -o "$metadata"
+	http_code="$(curl -fsSL --retry 3 -w '%{http_code}' "$release_api" -o "$metadata")" || {
+		curl_status=$?
+		if [[ "$http_code" == 404 ]] && ! "$nightly"; then
+			printf 'No published stable release visible for %s. Use --bundle PATH or, on macOS, --app "/Applications/Agent Orchestrator.app".\n' "$release_repo" >&2
+		fi
+		exit "$curl_status"
+	}
 	asset_info="$(python3 - "$metadata" "$asset" "$nightly" <<'PY'
 import json, re, sys
 release = json.load(open(sys.argv[1]))
