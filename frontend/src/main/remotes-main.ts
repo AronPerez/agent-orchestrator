@@ -391,7 +391,7 @@ export function registerRemotesIpc(
 
 	ipcMain.handle("remotes:list", (_event, includeErrorCode?: true) => ordered(async () => {
 		try {
-			await accountID();
+			// Local pairings need no Cloud account, so listing is never gated on one.
 			const localHostId = await localIdentity();
 			const entries = await owned();
 			return toHostViews(entries.filter((entry) => !localHostId || entry.hostId !== localHostId));

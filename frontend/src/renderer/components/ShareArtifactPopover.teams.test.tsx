@@ -246,7 +246,10 @@ describe("ShareArtifactButton on a team workspace", () => {
 		let server: CloudShareGrants = none;
 		vi.spyOn(aoBridge.cloudShare, "grants").mockImplementation(async () => server);
 		const publish = vi.spyOn(aoBridge.cloudShare, "publish").mockResolvedValue({ status: "published", replaced: false, share });
-		const invite = vi.spyOn(aoBridge.cloudShare, "invite").mockResolvedValue({ ...none, teams: [design] });
+		const invite = vi.spyOn(aoBridge.cloudShare, "invite").mockImplementation(async () => {
+			server = { ...none, teams: [design] };
+			return server;
+		});
 		renderButton(localFile);
 		await userEvent.click(await screen.findByRole("button", { name: "Publish: report.html" }));
 		await screen.findByRole("combobox", { name: "Add people by email or team" });

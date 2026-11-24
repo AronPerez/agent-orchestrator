@@ -407,10 +407,15 @@ func CoordinationDeliveryID(message string) (string, bool) {
 // the user's latest instruction.
 func IsCoordinationMessage(message string) bool {
 	message = strings.TrimSpace(message)
-	if _, report := ReportDeliveryID(message); report {
+	unwrapped := strings.TrimSpace(unwrapPastedContent(message))
+	if id, report := deliveryID(unwrapped, reportDeliveryPrefix); report {
 		// A report envelope may share a prompt with a human instruction; only
-		// the bare envelope is coordination.
-		return strings.HasSuffix(message, "</ao-report-delivery>")
+		// an envelope that ends with its own footer is coordination. That
+		// includes one whose middle a TUI cut (the checksum no longer matches),
+		// which CoordinationDeliveryID records as truncated, but not one with
+		// human text after the footer.
+		_, footerID, _ := reportDeliveryFooterOf(unwrapped)
+		return footerID == id
 	}
 	_, delivery := CoordinationDeliveryID(message)
 	return delivery || strings.HasPrefix(message, "<ao-handoff-request") ||

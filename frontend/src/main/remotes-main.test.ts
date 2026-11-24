@@ -100,7 +100,9 @@ describe("remotesFilePath", () => {
 });
 
 describe("registerRemotesIpc", () => {
-	it.each(["offline", "unauthorized", "signed-out", "account-gate", "unexpected"])("classifies %s IPC rejection without changing it", async (state) => {
+	// This fork pairs hosts without a Cloud sign-in, so remotes:connect has no
+	// account gate to classify; the signed-out and account-gate cases do not apply.
+	it.each(["offline", "unauthorized", "unexpected"])("classifies %s IPC rejection without changing it", async (state) => {
 		resetMainErrorCaptureForTests();
 		try {
 			const ipc = fakeIpc();
@@ -111,8 +113,7 @@ describe("registerRemotesIpc", () => {
 			registerRemotes(ipc.ipcMain, {
 				file: await tempFile(),
 				registry: new RemoteRegistry(async () => { throw new Error("must not connect"); }),
-				requireAccount: async () => { if (state === "account-gate") throw new ExpectedIpcError("Sign in to Orchestrator Cloud to use remote hosts."); },
-				getAccountId: async () => state === "signed-out" ? "" : TEST_ACCOUNT,
+				requireAccount: async () => {},
 				identity: async () => "h_workbox",
 				probe: async () => {
 					if (state === "unexpected") throw unexpected;
@@ -124,7 +125,7 @@ describe("registerRemotesIpc", () => {
 				await expect(result).rejects.toBe(unexpected);
 				expect(capture).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ category: "ipc", reason: "handler", error: unexpected }));
 			} else {
-				await expect(result).rejects.toThrow(state === "signed-out" || state === "account-gate" ? "Sign in to Orchestrator Cloud" : `is ${state}`);
+				await expect(result).rejects.toThrow(`is ${state}`);
 				expect(capture).not.toHaveBeenCalled();
 			}
 		} finally { resetMainErrorCaptureForTests(); }
@@ -140,7 +141,8 @@ describe("registerRemotesIpc", () => {
 			registerRemotes(ipc.ipcMain, {
 				file: await tempFile(),
 				registry: new RemoteRegistry(async () => { throw new Error("must not connect"); }),
-				requireAccount: async () => { throw error; },
+				requireAccount: signedIn,
+				localIdentity: async () => { throw error; },
 			});
 			await expect(ipc.invoke("remotes:list", true)).resolves.toEqual({ code: error.code, message: error.toString() });
 			expect(capture).toHaveBeenCalledExactlyOnceWith({ category: "ipc", reason: "handler", error, detail: "channel:remotes:list" });
@@ -1465,7 +1467,8 @@ it.each([
 	registerRemotes(ipc.ipcMain, {
 		file: await tempFile(),
 		registry: new RemoteRegistry(async () => { throw new Error("must not connect"); }),
-		requireAccount: async () => { throw error; },
+		requireAccount: signedIn,
+		localIdentity: async () => { throw error; },
 	});
 	await expect(ipc.invoke("remotes:list", true)).resolves.toEqual({ code: error.code, message: error.toString(), expected: true });
 	await expect(ipc.invoke("remotes:list")).rejects.toBe(error);
