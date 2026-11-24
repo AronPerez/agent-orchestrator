@@ -422,7 +422,8 @@ export function SessionCardView({
 	return (
 		<div
 			onClick={interactive ? onOpen : undefined}
-			role={interactive ? undefined : "listitem"}
+			data-telemetry-id={interactive ? "board.card" : undefined}
+			role={interactive || still ? undefined : "listitem"}
 			className={cn(
 				still
 					? // A hover preview: one elevated surface, no outline, no motion.

@@ -92,6 +92,7 @@ type Service struct {
 	logger          *slog.Logger
 	githubRepos     ports.GitHubRepositoryResolver
 	onConfigChanged func(domain.ProjectID)
+	preferredAgent  func(context.Context) domain.AgentHarness
 	// addMu serialises the whole body of Add. Workspace registration performs
 	// filesystem mutations (git init, .gitignore writes, commits) that are not
 	// covered by the store's own writeMu, so path/id conflict checks plus the
@@ -108,6 +109,13 @@ type Deps struct {
 	// DefaultHarness is the daemon's configured default agent (AO_AGENT).
 	// When empty, the service falls back to config.DefaultAgent.
 	DefaultHarness domain.AgentHarness
+	// PreferredAgent ranks this machine's agents the way the desktop does
+	// (installed and signed in first, then AO's priority) and returns the top
+	// one, or "" when AO has found no launchable agent installed. A new project
+	// gets it for any role it names no agent for; when it returns "", those
+	// roles stay empty so session start can fill them once an agent is
+	// installed. Left nil, DefaultHarness is used.
+	PreferredAgent func(context.Context) domain.AgentHarness
 	Store          Store
 	Sessions       SessionTeardowner
 	Clock          func() time.Time
@@ -147,6 +155,7 @@ func NewWithDeps(d Deps) *Service {
 		logger:          d.Logger,
 		githubRepos:     d.GitHubRepos,
 		onConfigChanged: d.OnConfigChanged,
+		preferredAgent:  d.PreferredAgent,
 	}
 	if s.clock == nil {
 		s.clock = time.Now
@@ -386,6 +395,11 @@ func (m *Service) Add(ctx context.Context, in AddInput) (Project, error) {
 		if err := row.Config.ValidateCanonicalRepository(row.RepoOriginURL); err != nil {
 			return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 		}
+		// Fill empty roles only after path and config validation succeed so
+		// rejected adds never wait on readiness checks.
+		if row.Config.MissingRoleAgent() {
+			row.Config.FillRoleAgents(m.PreferredAgent(ctx))
+		}
 		if err := m.store.UpsertWorkspaceProject(ctx, row, repos); err != nil {
 			return Project{}, apierr.Internal("PROJECT_ADD_FAILED", "Failed to register workspace project")
 		}
@@ -433,6 +447,11 @@ func (m *Service) Add(ctx context.Context, in AddInput) (Project, error) {
 	row.RepoOriginURL = originURL
 	if err := row.Config.ValidateCanonicalRepository(row.RepoOriginURL); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
+	}
+	// Fill empty roles only after repository and config validation succeed so
+	// rejected adds never wait on readiness checks.
+	if row.Config.MissingRoleAgent() {
+		row.Config.FillRoleAgents(m.PreferredAgent(ctx))
 	}
 	if err := m.store.UpsertProject(ctx, row); err != nil {
 		return Project{}, apierr.Internal("PROJECT_ADD_FAILED", "Failed to register project")
@@ -1255,6 +1274,18 @@ func sessionPrefix(id string) string {
 		return id
 	}
 	return id[:12]
+}
+
+// PreferredAgent is the agent a project gets for a role it names none for.
+// When a ranker is wired, only an installed launchable agent is returned (""
+// when none is found, so empty roles remain eligible for spawn-time filling
+// once an agent is installed). When no ranker is wired, the daemon's default
+// agent is returned.
+func (m *Service) PreferredAgent(ctx context.Context) domain.AgentHarness {
+	if m.preferredAgent != nil {
+		return m.preferredAgent(ctx)
+	}
+	return m.defaultHarness
 }
 
 // SetPermissions remembers the approval policy for future sessions of either role.

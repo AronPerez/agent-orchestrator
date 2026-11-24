@@ -1,4 +1,5 @@
-import { Pencil, Server, Trash2 } from "lucide-react";
+import { listRemoteHosts } from "../../lib/remote-host-list";
+import { Pencil, Server, Trash2 } from "@/components/app-icons";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { aoBridge } from "../../lib/bridge";
@@ -46,7 +47,7 @@ export function RemoteHostsSettings({ titleHidden }: { titleHidden?: boolean }) 
 		setLoading(true);
 		setLoadError("");
 		try {
-			const hosts = await aoBridge.remotes.list();
+			const hosts = await listRemoteHosts();
 			if (generation === loadGeneration.current) setSaved(hosts);
 		} catch (cause) {
 			if (generation === loadGeneration.current) setLoadError(cause instanceof Error ? cause.message : t("remote.loadHostsFailed"));
@@ -93,7 +94,7 @@ export function RemoteHostsSettings({ titleHidden }: { titleHidden?: boolean }) 
 			if (health === "incompatible") throw new Error(t("remote.hostIncompatible"));
 			if (editing?.hostId) await disconnectHost(editing.hostId);
 			if (editing && !editing.hostId && editing.url !== nextUrl) await aoBridge.remotes.remove(editing.url);
-			const current = (await aoBridge.remotes.list()).find((item) => item.url === nextUrl);
+			const current = (await listRemoteHosts()).find((item) => item.url === nextUrl);
 			if (status === "authenticated" && current?.hostId && cloudBaseUrl) await aoBridge.remotes.linkAccountHost(current.url);
 			await load();
 			resetForm();

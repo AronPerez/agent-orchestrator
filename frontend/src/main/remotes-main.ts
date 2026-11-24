@@ -1,3 +1,4 @@
+import { sentryErrorCode } from "../../../packages/shared/telemetry/ao-error";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -21,7 +22,7 @@ import {
 import { findRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
 import type { RemoteRegistry } from "./remote-registry";
 import { ACCOUNT_TOKEN, DEVICE_TOKEN_PREFIX, addRemote, holdsAccountToken, holdsPairingPassword, queueRemoteCleanup, readRemotes, removeCleanupRemote, updateRemote, type RemoteChanges, type RemoteEntry } from "./remotes-store";
-import { ExpectedIpcError } from "./main-error-capture";
+import { captureMainError, ExpectedIpcError } from "./main-error-capture";
 
 // An isolated desktop run must not read or write the real user's credentials.
 // Without an override, keep the existing ~/.ao location.
@@ -106,8 +107,9 @@ export type DecisionSyncResult =
 	| { ok: true; warnings: { callId: string; field: string }[] }
 	| { ok: false; code: string };
 
-class LocalIdentityUnavailableError extends Error {
-	constructor() { super("Local AO identity is unavailable; remote connection is offline"); }
+export class LocalIdentityUnavailableError extends ExpectedIpcError {
+	override readonly code: string = "LOCAL_IDENTITY_UNAVAILABLE_ERROR";
+	constructor() { super("Local Orchestrator identity is unavailable; remote connection is offline"); }
 }
 
 type AccountHost = { hostId: string; label: string; url: string; token: string };
@@ -387,10 +389,20 @@ export function registerRemotesIpc(
 	};
 	scheduleCleanupRetry(() => ordered(async () => retryCleanupRecords(await getAccountId())));
 
-	ipcMain.handle("remotes:list", () => ordered(async () => {
-		const localHostId = await localIdentity();
-		const entries = await owned();
-		return toHostViews(entries.filter((entry) => !localHostId || entry.hostId !== localHostId));
+	ipcMain.handle("remotes:list", (_event, includeErrorCode?: true) => ordered(async () => {
+		try {
+			await accountID();
+			const localHostId = await localIdentity();
+			const entries = await owned();
+			return toHostViews(entries.filter((entry) => !localHostId || entry.hostId !== localHostId));
+		} catch (error) {
+			// Electron only serializes the message of an IPC rejection. Send
+			// coded failures as a structured result for the renderer bridge.
+			const code = includeErrorCode === true ? sentryErrorCode(error) : undefined;
+			if (!code || !(error instanceof Error)) throw error;
+			captureMainError({ category: "ipc", reason: "handler", detail: "channel:remotes:list", error });
+			return { code, message: error.toString(), ...(error instanceof ExpectedIpcError ? { expected: true } : {}) };
+		}
 	}));
 	ipcMain.handle("remotes:add", async (_event, input: RemoteEntry) => ordered(async () => {
 		const account = await getAccountId();

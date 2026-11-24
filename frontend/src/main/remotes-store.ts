@@ -1,3 +1,4 @@
+import { AoError } from "../../../packages/shared/telemetry/ao-error";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -99,6 +100,7 @@ function seal({ password, sealedPassword, accountToken, fallbackPassword, sealed
 }
 
 export class RemotesFilePermissionError extends Error {
+	readonly code: string = "REMOTES_FILE_PERMISSION_ERROR";
 	constructor(
 		readonly path: string,
 		readonly mode: number,
@@ -295,7 +297,7 @@ export async function updateRemote(path: string, url: string, changes: RemoteCha
 	return serializeMutation(async () => {
 		const existing = await readRemotes(path);
 		const current = existing.find((candidate) => candidate.url === url && !candidate.cleanupOnly);
-		if (!current) throw new Error(`no saved host for ${url}`);
+		if (!current) throw new AoError("SAVED_REMOTE_NOT_FOUND", `no saved host for ${url}`);
 		const updated = applyRemoteChanges(current, changes);
 		// Re-pointing a host MOVES its entry. A different identified host already
 		// sitting on the new address may still own live child credentials, so keep

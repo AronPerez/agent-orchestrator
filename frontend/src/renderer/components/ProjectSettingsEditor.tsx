@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import type { ProjectSettingsSaveState, ProjectSettingsSection as SettingsSection } from "./ProjectSettingsForm";
 import { deriveRepoHost, deriveRepoPath, IntakeFields, intakeNeedsRule } from "./IntakeFields";
 import { ProductExternalLink } from "./ProductExternalLink";
-import { AgentModelField, ProjectAutoReviewToggle, ProjectCoAuthorCommitsToggle, ProjectWorkersRequestReviewToggle } from "./settings/ProjectAgentRoleControls";
+import { AgentModelField, ProjectAttributionToggles, ProjectAutoReviewToggle, ProjectCoAuthorCommitsToggle, ProjectWorkersRequestReviewToggle } from "./settings/ProjectAgentRoleControls";
 import { ProjectAutonomyControls } from "./settings/ProjectAutonomyControls";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 import type { AutonomyMode, DecisionKindOption } from "../lib/project-autonomy";
@@ -41,6 +41,10 @@ export type ProjectSettingsDraft = {
 	autonomyMode?: AutonomyMode;
 	/** Local-only: kinds the person keeps; undefined keeps the defaults. */
 	reservedKinds?: string[];
+	/** Local-only, Orchestrator attribution beta: add the Co-authored-by trailer to commits. */
+	attributionCommitTrailer?: boolean;
+	/** Local-only, Orchestrator attribution beta: end PR bodies with the Orchestrator line. */
+	attributionPRFooter?: boolean;
 	intakeEnabled: boolean;
 	intakeRepo: string;
 	intakeAssignee: string;
@@ -59,12 +63,16 @@ export type ProjectAgentPickerProps = {
 type Capabilities = {
 	workflow: boolean;
 	sessionPrefix: boolean;
+	/** Shown in an empty session prefix field: the prefix new sessions get. */
+	sessionPrefixPlaceholder?: string;
 	intake: boolean;
 	reviewer: boolean;
 	requiredAgents: boolean;
 	workersRequestReview?: boolean;
 	workerContracts?: boolean;
 	coAuthorCommits?: boolean;
+	/** Shown while the Orchestrator attribution beta is on (Settings, Advanced). */
+	attribution?: boolean;
 	nameLimit?: number;
 	requiredBranch?: boolean;
 	/** Cloud defaults and tuning belong to its runtime, rather than the local catalog. */
@@ -200,7 +208,7 @@ export function ProjectSettingsEditor({ initialValues, section, capabilities, de
 				{capabilities.workflow && <>
 					<ProjectSettingsSection title={t("settings.project.worktrees")} grouped>
 						<ProjectSettingsInputRow id="defaultBranch" label={t("settings.project.defaultBranch")} editLabel={t("settings.field.edit", { label: t("settings.project.defaultBranch") })} editIcon={<Pencil className="settings-inline-edit-icon" aria-hidden="true" />} value={draft.defaultBranch} placeholder={capabilities.requiredBranch ? undefined : "auto"} onChange={(defaultBranch) => patch({ defaultBranch })} />
-						{capabilities.sessionPrefix && <ProjectSettingsInputRow id="sessionPrefix" label={t("settings.project.sessionPrefix")} editLabel={t("settings.field.edit", { label: t("settings.project.sessionPrefix") })} editIcon={<Pencil className="settings-inline-edit-icon" aria-hidden="true" />} value={draft.sessionPrefix} placeholder="ao" onChange={(sessionPrefix) => patch({ sessionPrefix })} />}
+						{capabilities.sessionPrefix && <ProjectSettingsInputRow id="sessionPrefix" label={t("settings.project.sessionPrefix")} editLabel={t("settings.field.edit", { label: t("settings.project.sessionPrefix") })} editIcon={<Pencil className="settings-inline-edit-icon" aria-hidden="true" />} value={draft.sessionPrefix} placeholder={capabilities.sessionPrefixPlaceholder ?? "ao"} onChange={(sessionPrefix) => patch({ sessionPrefix })} />}
 					</ProjectSettingsSection>
 					{capabilities.workerContracts && <ProjectSettingsSection title={t("settings.project.workerContracts")} grouped>
 						<ProjectSettingsInputRow id="stallMinutes" label={t("settings.project.stallThreshold")} editLabel={t("settings.field.edit", { label: t("settings.project.stallThreshold") })} editIcon={<Pencil className="settings-inline-edit-icon" aria-hidden="true" />} value={draft.stallMinutes ?? "15"} onChange={(stallMinutes) => patch({ stallMinutes })} />
@@ -212,6 +220,9 @@ export function ProjectSettingsEditor({ initialValues, section, capabilities, de
 						{capabilities.coAuthorCommits && <ProjectCoAuthorCommitsToggle checked={draft.coAuthorCommits ?? true} onCheckedChange={(coAuthorCommits) => patch({ coAuthorCommits })} />}
 					</ProjectSettingsSection>
 					{decisionKinds && <ProjectAutonomyControls draft={{ autonomyMode: draft.autonomyMode ?? "off", reservedKinds: draft.reservedKinds }} kinds={decisionKinds} onChange={(next) => patch(next)} />}
+					{capabilities.attribution && <ProjectSettingsSection title={t("settings.project.attribution")} grouped>
+						<ProjectAttributionToggles commitTrailer={draft.attributionCommitTrailer ?? true} prFooter={draft.attributionPRFooter ?? true} onChange={patch} />
+					</ProjectSettingsSection>}
 				</>}
 				{generalExtra}
 			</> : <>

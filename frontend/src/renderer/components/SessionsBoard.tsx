@@ -1,5 +1,6 @@
 import { SessionFleet } from "./SessionFleet";
 import type { MessageKey } from "../i18n";
+import { useTelemetrySurface } from "../lib/ui-usage-telemetry";
 import { OrchestratorStartingChat } from "./chat/OrchestratorStartingChat";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -22,7 +23,6 @@ import {
 	newestActiveOrchestrator,
 	orchestratorHealth,
 	workerSessions,
-	hasConfiguredOrchestratorAgent,
 } from "../types/workspace";
 import { isArchivedSession } from "../lib/standalone-archive";
 import { boardSearchTokens, filterBoardSessions } from "../lib/board-search";
@@ -35,6 +35,8 @@ import {
 import { useSessionMenuAvailable } from "../hooks/useAppMenuCommand";
 import { isSettingsPageOpen, useAppShortcut, useSessionShortcut } from "../hooks/useAppShortcut";
 import { useTerminateSession } from "../hooks/useTerminateSession";
+import { useBackgroundTaskReadings } from "../hooks/useBackgroundTasks";
+import { BackgroundTasksBadge } from "./BackgroundTasks";
 import { useCloudCp } from "../hooks/useCloudCp";
 import { useSessionParticipants } from "../hooks/useSessionParticipants";
 import { useCloudProjectsQuery, useRemoteProjectQuery, useWorkspaceQuery, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
@@ -115,6 +117,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	// Only this machine's cloud projects start in place: a remote host's board
 	// never reads this machine's cloud settings (as useCloudCp below).
 	const localCloudBoard = !hostId && workspace?.kind === CLOUD_PROJECT_KIND;
+	const backgroundTasks = useBackgroundTaskReadings(!hostId && !localCloudBoard, projectId);
 	const cloudProjects = useCloudProjectsQuery({ enabled: localCloudBoard });
 	const offering = useCloudOffering(localCloudBoard);
 	const cloudProject = cloudProjects.data?.find((candidate) => candidate.id === projectId);
@@ -156,7 +159,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		openOrchestrator();
 	}, [autoStartFlagged, openOrchestrator, orchestrator, projectId, startsInPlace, workspace?.kind]);
 	// A Cloud standalone agent has no board: its one session is the agent.
-	// Arriving on its project (archiving it from Pinned) leaves for Home.
+	// Arriving on its project route leaves for Home.
 	useEffect(() => {
 		if (workspace?.standaloneAgent) void navigate({ to: "/", replace: true });
 	}, [navigate, workspace?.standaloneAgent]);
@@ -364,6 +367,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		</>
 	);
 
+	useTelemetrySurface("board", !(projectId && (isProvisioning || projectActions.isSpawning || autoStartPending)));
 	if (projectId && (isProvisioning || projectActions.isSpawning || autoStartPending)) {
 		return <OrchestratorStartingChat
 			cloud={workspace?.kind === CLOUD_PROJECT_KIND || autoStartPending}
@@ -374,7 +378,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	}
 
 	return (
-		<div className="relative flex h-full min-h-0 flex-col bg-background text-foreground" data-testid="board" ref={boardRef} data-host-id={hostId} data-project-id={projectId}>
+		<div className="relative flex h-full min-h-0 flex-col bg-background text-foreground" data-testid="board" data-telemetry-surface="board" ref={boardRef} data-host-id={hostId} data-project-id={projectId}>
 			<PageTopbar
 				lead={showWelcome ? undefined : (
 					<PageTopbarTitle
@@ -388,12 +392,6 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 			/>
 			{connected && remoteProjectQuery.isError ? <p role="alert" className="px-4 py-3 text-sm text-destructive">{t("shell.couldNotLoadProjects")}</p> : null}
 			{hostId && remoteProjectQuery.isSuccess && !workspace ? <p role="alert" className="px-4 py-3 text-sm text-destructive">{t("session.notFound")}</p> : null}
-			{hostId && projectId && connected && workspace && !orchestrator && !hasConfiguredOrchestratorAgent(workspace) ? (
-				<div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
-					<span className="min-w-0 flex-1">{t("remote.configureOrchestratorFirst", { label: labelForHost(hostId) ?? hostId, defaultValue: "Choose an orchestrator agent on {{label}} to start one." })}</span>
-					<Button type="button" variant="ghost" size="xs" className="font-medium" onClick={() => shell?.openRemoteProjectSettings(hostId, projectId)}>{t("restoreUnavailable.configureOrchestrator")}</Button>
-				</div>
-			) : null}
 
 			{canShowFleet ? (
 				<div className="flex gap-1 border-b border-border px-3 py-2" role="group" aria-label={t("fleet.view")}>
@@ -406,7 +404,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 				<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} hostId={hostId} />
 			</> : <>
 			<div className={cn("relative min-h-0 flex-1 overflow-hidden", hostOffline && workspace && "opacity-75")} data-host-offline={hostOffline && workspace ? "" : undefined}>
-				{projectId && !guest && health.state !== "ok" && (!hostId || connected && (health.state !== "missing" || hasConfiguredOrchestratorAgent(workspace))) ? (
+				{projectId && !guest && health.state !== "ok" && (!hostId || connected) ? (
 					<div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
 						<AlertTriangle className="size-icon-base shrink-0 text-warning" aria-hidden="true" />
 						<span className="min-w-0 flex-1">{health.message}</span>
@@ -478,6 +476,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 										peerNames: overlap.peers.map((peer) => collisionSessionNames.get(peer.sessionId) ?? peer.sessionId),
 									} : undefined;
 								})()}
+								backgroundTasks={!hostId && !localCloudBoard ? <BackgroundTasksBadge session={session} reading={backgroundTasks.data?.get(session.id)} stale={backgroundTasks.isError} /> : undefined}
 								participants={participantsBySession.get(session.id)}
 								me={cloudUserId}
 								memory={memoryBySession?.get(session.id)}

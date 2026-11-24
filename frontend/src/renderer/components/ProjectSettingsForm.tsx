@@ -176,6 +176,8 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 		),
 		workersRequestReview: config.workersRequestReview ?? false,
 		...initialAutonomyDraft(config.autonomy),
+		attributionCommitTrailer: !config.attribution?.disableCommitTrailer,
+		attributionPRFooter: !config.attribution?.disablePRFooter,
 		intakeEnabled: intake.enabled ?? false,
 		intakeRepo: intake.repo ?? "",
 		intakeAssignee: intake.assignee ?? "",
@@ -273,6 +275,11 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 							stallMinutes: Number(values.stallMinutes ?? 15),
 						},
 					} : {}),
+					// Opt-outs: an unset field means on, so only a switched-off part is stored.
+					attribution: blankToUndefined({
+						disableCommitTrailer: values.attributionCommitTrailer === false || undefined,
+						disablePRFooter: values.attributionPRFooter === false || undefined,
+					}),
 				};
 		const { error } = await (hostId ? clientForHost(hostId) : apiClient).PUT("/api/v1/projects/{id}", {
 			params: { path: { id: projectId } },
@@ -343,7 +350,7 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 		}
 	};
 	return <ProjectSettingsEditor initialValues={initialValues} section={section} disabled={!hostConnected}
-		capabilities={{ workflow: !isScratchProject, sessionPrefix: !isScratchProject, intake: intakeVisible, reviewer: !isScratchProject, requiredAgents: true, workersRequestReview: !isScratchProject, workerContracts: !isScratchProject && workerContractsSupported }}
+		capabilities={{ workflow: !isScratchProject, sessionPrefix: !isScratchProject, sessionPrefixPlaceholder: "orchestrator", intake: intakeVisible, reviewer: !isScratchProject, requiredAgents: true, workersRequestReview: !isScratchProject, workerContracts: !isScratchProject && workerContractsSupported, attribution: !isScratchProject && !hostId && !!settings?.commitAttribution }}
 		details={[{ label: t("settings.project.path"), value: project.path, href: hostId ? undefined : `file://${encodeURI(project.path)}` }, { label: t("settings.project.repo"), value: project.repo || "—", href: project.repo ? repositoryHref(project.repo) : undefined }]}
 		workspaceRepos={project.kind === "workspace" ? project.workspaceRepos ?? [] : undefined} repository={project.repo}
 		modelScope={() => projectId} defaultReviewer={(draft) => WORKER_DEFAULT_REVIEWERS[draft.workerAgent] ?? "claude-code"}
