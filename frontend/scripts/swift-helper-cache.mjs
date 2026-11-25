@@ -103,9 +103,20 @@ export function buildSwiftHelper({
 		rmSync(outDir, { recursive: true, force: true });
 	}
 	build();
-	if (outputFingerprint(outDir, helper.sentinels)) {
+	if (!outputFingerprint(outDir, helper.sentinels)) return "built";
+	// A source edited while swiftc ran would be stored under the old key and
+	// handed to a checkout that still has the old sources: recheck first.
+	if (helperCacheKey({ name, arch, swift, env, root }) !== key) {
+		log(`${name}: inputs changed during the build; not caching it.`);
+		return "built";
+	}
+	// The cache is optional: a failure to store or prune (say a read-only
+	// AO_BUILD_CACHE_DIR) is a warning, never a failed package.
+	try {
 		storeEntry(cacheRoot, entryName, key, outDir, { arch });
 		pruneEntries(cacheRoot, entryName);
+	} catch (error) {
+		log(`${name}: warning: could not store the build in the cache (${error.message}); continuing without it.`);
 	}
 	return "built";
 }

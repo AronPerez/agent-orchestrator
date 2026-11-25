@@ -98,6 +98,25 @@ describe("Swift helper cache", () => {
 		expect(entries()).toHaveLength(0);
 	});
 
+	it("does not store a build whose sources changed while it compiled", () => {
+		const lines = [];
+		const editingBuild = vi.fn(() => {
+			build();
+			writeFileSync(join(root, "native", "wake-helper", "main.swift"), "print(\"edited mid-build\")");
+		});
+		expect(prepare({ build: editingBuild, log: (line) => lines.push(line) })).toBe("built");
+		expect(entries()).toHaveLength(0);
+		expect(lines).toEqual(["wake-helper: inputs changed during the build; not caching it."]);
+	});
+
+	it("keeps a successful build when the cache cannot be written", () => {
+		const lines = [];
+		writeFileSync(cacheRoot, "not a directory");
+		expect(prepare({ log: (line) => lines.push(line) })).toBe("built");
+		expect(readFileSync(join(root, "wake-helper", "ao-wake"), "utf8")).toBe("binary-1");
+		expect(lines.some((line) => line.startsWith("wake-helper: warning: could not store the build in the cache"))).toBe(true);
+	});
+
 	it("builds without the cache when swiftc is unavailable", () => {
 		expect(prepare({ run: vi.fn(() => ({ status: 1, stdout: "" })) })).toBe("built");
 		expect(prepare({ run: vi.fn(() => ({ status: 1, stdout: "" })) })).toBe("built");
