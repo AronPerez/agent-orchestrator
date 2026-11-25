@@ -23,9 +23,12 @@ const cliServerAgentName = "Antigravity ACP Server"
 // minimumCLIACPVersion is the first agy CLI whose `agy acp` AO launches. Its
 // `agy acp` steers a running turn when another prompt arrives from 1.5.0, but
 // before 1.5.4 a turn hangs when a tool call needs a second approval, and a
-// resumed session drops back to the default mode (1.5.4 changelog). AO
-// launches older CLIs' separate server instead.
-const minimumCLIACPVersion = "1.5.4"
+// resumed session drops back to the default mode (1.5.4 changelog). Before
+// 1.5.15 it answers session/load before finishing history replay, or cuts
+// replay off after 2 seconds on a long conversation, so a reloaded Chat can
+// come back with part of its history (1.5.15 changelog). AO launches older
+// CLIs' separate server instead.
+const minimumCLIACPVersion = "1.5.15"
 
 var versionPattern = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
 
