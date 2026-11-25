@@ -7,13 +7,13 @@ import type { DecisionCall, DecisionHistoryEntry } from "../lib/decision-inbox";
 
 const { getMock, postMock, openExternalMock } = vi.hoisted(() => ({ getMock: vi.fn(), postMock: vi.fn(), openExternalMock: vi.fn() }));
 vi.mock("../lib/host-clients", () => ({ clientForSessionHost: () => ({ GET: getMock, POST: postMock }) }));
-vi.mock("../lib/external-link-policy", () => ({ openLinkInSystemBrowser: openExternalMock }));
-const { navigateMock, sessionTarget } = vi.hoisted(() => ({
+vi.mock("../lib/external-link-policy", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/external-link-policy")>(), openLinkInSystemBrowser: openExternalMock }));
+const { navigateMock, sessionMachine } = vi.hoisted(() => ({
 	navigateMock: vi.fn(),
-	sessionTarget: { current: { kind: "checking" } as import("../lib/decision-session-target").DecisionSessionTarget },
+	sessionMachine: { current: { kind: "checking" } as import("../lib/decision-session-target").DecisionMachine },
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigateMock }));
-vi.mock("../hooks/useDecisionSessionTarget", () => ({ useDecisionSessionTarget: () => sessionTarget.current }));
+vi.mock("../hooks/useDecisionSessionTarget", () => ({ useDecisionMachine: () => sessionMachine.current }));
 
 import { useDecisionBoard } from "../hooks/useDecisionInbox";
 import { DecisionCallPanel } from "./DecisionCallPanel";
@@ -83,7 +83,7 @@ beforeEach(() => {
 	getMock.mockReset().mockResolvedValue({ data: { call, history }, response: { status: 200 } });
 	postMock.mockReset().mockResolvedValue({ data: call });
 	navigateMock.mockReset();
-	sessionTarget.current = { kind: "checking" };
+	sessionMachine.current = { kind: "checking" };
 	openExternalMock.mockReset();
 });
 
@@ -113,13 +113,15 @@ describe("DecisionCallPanel", () => {
 		expect(view.container.querySelector("[data-decision-origin-line]")).toBeNull();
 	});
 
-	it("names the project, work stream, machine and session before the call itself", async () => {
-		renderPanel();
+	it("names the project and work stream before the call, and who raised it on which machine", async () => {
+		const view = renderPanel();
 		const title = await screen.findByRole("heading", { level: 2, name: call.title });
-		const place = screen.getByText("skyvern-cloud · Power BI and Nango");
-		const owner = screen.getByText("mac-mini · worker 5512");
+		const place = screen.getByText("skyvern-cloud");
+		expect(place.closest("p")).toHaveTextContent("skyvern-cloud·Power BI and Nango");
 		expect(place.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-		expect(owner.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		const raisedBy = view.container.querySelector("[data-decision-raised-by]");
+		expect(raisedBy).toHaveTextContent("Raised byworker 5512·mac-mini");
+		expect(screen.queryByText("Checking session…")).not.toBeInTheDocument();
 		expect(screen.getByText("In progress")).toBeInTheDocument();
 		expect(screen.getByText("Changed after it closed")).toBeInTheDocument();
 		expect(screen.getByText(call.context)).toBeInTheDocument();
@@ -137,7 +139,7 @@ describe("DecisionCallPanel", () => {
 
 	it("opens only web links, through the system browser", async () => {
 		renderPanel();
-		await userEvent.click(await screen.findByRole("link", { name: "Nango docs" }));
+		await userEvent.click(await screen.findByRole("link", { name: /^Nango docs/ }));
 		expect(openExternalMock).toHaveBeenCalledWith("https://docs.nango.dev/auth");
 		expect(screen.queryByRole("link", { name: "Local file" })).not.toBeInTheDocument();
 		expect(screen.getByText("Local file")).toBeInTheDocument();
@@ -501,11 +503,18 @@ describe("DecisionCallPanel", () => {
 		});
 	});
 
-	describe("open session", () => {
-		it("opens exactly the owning session on its machine", async () => {
-			sessionTarget.current = { kind: "open", host: "h_laptop", projectId: "shop", sessionId: "w-5512", terminated: false };
-			renderPanel();
-			await userEvent.click(await screen.findByRole("button", { name: "Open session" }));
+	describe("who raised it", () => {
+		const ready = (sessions: Array<{ id: string; title?: string; status?: string; isTerminated?: boolean; parentSessionId?: string; kind?: string }>, host = "local") => {
+			sessionMachine.current = { kind: "ready", host, workspaces: [{ id: "shop", sessions }] };
+		};
+
+		it("opens exactly the owning session on its machine, and says what it is doing", async () => {
+			ready([{ id: "w-5512", title: "worker 5512", status: "working" }], "h_laptop");
+			const view = renderPanel();
+			await screen.findByRole("heading", { level: 2, name: call.title });
+			const owner = await within(view.container.querySelector<HTMLElement>("[data-decision-raised-by]")!).findByRole("link", { name: "worker 5512" });
+			expect(owner.closest("[data-decision-raised-by]")).toHaveTextContent("Working");
+			await userEvent.click(owner);
 			expect(navigateMock).toHaveBeenCalledWith({
 				to: "/host/$hostId/project/$projectId/session/$sessionId",
 				params: { hostId: "h_laptop", projectId: "shop", sessionId: "w-5512" },
@@ -514,25 +523,149 @@ describe("DecisionCallPanel", () => {
 
 		it("opens a finished call's ended session without restarting it", async () => {
 			serve({ ...call, state: "done", stateLabel: "Done", outcome: "Shipped" });
-			sessionTarget.current = { kind: "open", host: "local", projectId: "shop", sessionId: "w-5512", terminated: true };
-			renderPanel();
-			await userEvent.click(await screen.findByRole("button", { name: "Open session" }));
+			ready([{ id: "w-5512", isTerminated: true }]);
+			const view = renderPanel();
+			await screen.findByRole("heading", { level: 2, name: call.title });
+			const owner = await within(view.container.querySelector<HTMLElement>("[data-decision-raised-by]")!).findByRole("link", { name: "worker 5512" });
+			expect(owner.closest("[data-decision-raised-by]")).toHaveTextContent("Ended");
+			await userEvent.click(owner);
 			expect(navigateMock).toHaveBeenCalledWith({ to: "/projects/$projectId/sessions/$sessionId", params: { projectId: "shop", sessionId: "w-5512" } });
 			expect(postMock).not.toHaveBeenCalled();
 		});
 
-		it.each([
-			[{ kind: "checking" } as const, "Checking session…"],
-			[{ kind: "offline", machine: "laptop" } as const, "Connect to laptop to open this session."],
-			[{ kind: "missing" } as const, "This session is no longer available."],
-			[{ kind: "error" } as const, "Could not check this session."],
-		])("is disabled and says why: %o", async (target, reason) => {
-			sessionTarget.current = target;
+		it("names the managers above it, each a link to its session", async () => {
+			ready([
+				{ id: "orch", kind: "orchestrator", title: "shop orchestrator" },
+				{ id: "nango", title: "Power BI and Nango: stream manager", parentSessionId: "orch" },
+				{ id: "w-5512", title: "worker 5512", parentSessionId: "nango", status: "idle" },
+			]);
 			renderPanel();
-			const open = await screen.findByRole("button", { name: "Open session" });
-			expect(open).toBeDisabled();
-			expect(open).toHaveAccessibleDescription(reason);
-			expect(screen.getByText(reason)).toBeInTheDocument();
+			const under = (await screen.findByText("Under")).closest("p")!;
+			expect(within(under).getAllByRole("link").map((link) => link.textContent)).toEqual(["Orchestrator", "Power BI and Nango"]);
+			// The stream in the heading is the same session, so it opens too.
+			expect(screen.getAllByRole("link", { name: "Power BI and Nango" })).toHaveLength(2);
+		});
+
+		it.each([
+			[{ kind: "checking" } as const, undefined],
+			[{ kind: "offline", machine: "laptop" } as const, "Connect to laptop to open this session."],
+			[{ kind: "error" } as const, "Could not check this session."],
+		])("is plain text and says why when the session cannot be opened: %o", async (machine, reason) => {
+			sessionMachine.current = machine;
+			const view = renderPanel();
+			await screen.findByRole("heading", { level: 2, name: call.title });
+			expect(screen.queryByRole("link", { name: "worker 5512" })).not.toBeInTheDocument();
+			const raisedBy = view.container.querySelector("[data-decision-raised-by]")!;
+			expect(raisedBy).toHaveTextContent("worker 5512");
+			if (reason) expect(raisedBy).toHaveTextContent(reason);
+			expect(screen.queryByText("Checking session…")).not.toBeInTheDocument();
+		});
+
+		it("says a session the machine no longer lists is gone", async () => {
+			ready([]);
+			const view = renderPanel();
+			await screen.findByRole("heading", { level: 2, name: call.title });
+			expect(view.container.querySelector("[data-decision-raised-by]")).toHaveTextContent("This session is no longer available.");
+		});
+
+		it("makes the session an answer was sent to reachable from the history", async () => {
+			ready([{ id: "w-5512", title: "worker 5512" }]);
+			serve(call, [entry({ id: "d1", kind: "delivered", authorKind: "system", status: "sent", sessionId: "w-5512", sessionName: "worker 5512: does the work", writtenAt: at(5) })]);
+			renderPanel();
+			const what = await screen.findByText((_, element) => element?.getAttribute("data-slot") === "history-what" && element.textContent === "Sent to worker 5512");
+			await userEvent.click(within(what).getByRole("link", { name: "worker 5512" }));
+			expect(navigateMock).toHaveBeenCalledWith({ to: "/projects/$projectId/sessions/$sessionId", params: { projectId: "shop", sessionId: "w-5512" } });
+		});
+	});
+
+	describe("what the call rests on", () => {
+		const earlier: DecisionCall = { ...call, id: "dec_earlier", link: "ao://decisions/dec_earlier", title: "Which layout first?", state: "done", stateLabel: "Done", choice: "other", chosenLabel: "Something else", note: "Show me the trees", outcome: "Drew the trees", changedAfterClose: false };
+		const later: DecisionCall = { ...call, id: "dec_later", link: "ao://decisions/dec_later", title: "With the trees in hand, which plan?", context: "Follow-up to ao://decisions/dec_1.", raisedAt: "2026-11-19T09:00:00Z", changedAfterClose: false };
+		const unrelated: DecisionCall = { ...later, id: "dec_other", title: "Mentions dec_10 only", context: "About dec_10." };
+
+		function route(main: DecisionCall) {
+			getMock.mockImplementation((path: string, init?: { params?: { path?: { id?: string }; query?: { q?: string } } }) => {
+				if (path === "/api/v1/decisions/{id}") {
+					const id = init?.params?.path?.id;
+					const found = [main, earlier].find((candidate) => candidate.id === id);
+					return Promise.resolve(found ? { data: { call: found, history: [] }, response: { status: 200 } } : { error: {}, response: { status: 404 } });
+				}
+				if (path === "/api/v1/decisions" && init?.params?.query?.q) return Promise.resolve({ data: { calls: [main, later, unrelated] }, response: { status: 200 } });
+				return Promise.resolve({ data: { call: main, history }, response: { status: 200 } });
+			});
+		}
+
+		it("draws the call's text with the calls and sessions it names as links, keeping its words", async () => {
+			sessionMachine.current = { kind: "ready", host: "local", workspaces: [{ id: "shop", sessions: [{ id: "w-5512", title: "worker 5512" }, { id: "shop-7", title: "reviewer" }] }] };
+			route({ ...call, context: "Your answer on ao://decisions/dec_earlier. The review is in shop-7; see #9." });
+			renderPanel();
+			const decision = await screen.findByRole("link", { name: "Which layout first?" });
+			expect(decision.closest("p")).toHaveTextContent("Your answer on Which layout first?. The review is in shop-7; see #9.");
+			await userEvent.click(decision);
+			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: { call: "dec_earlier" } });
+			await userEvent.click(screen.getByRole("link", { name: "shop-7" }));
+			expect(navigateMock).toHaveBeenLastCalledWith({ to: "/projects/$projectId/sessions/$sessionId", params: { projectId: "shop", sessionId: "shop-7" } });
+		});
+
+		it("lists earlier and later calls with what you chose and how each ended", async () => {
+			route({ ...call, context: "Follow-up to ao://decisions/dec_earlier." });
+			renderPanel();
+			const material = await screen.findByRole("region", { name: "Supporting material" });
+			const earlierGroup = await within(material).findByRole("region", { name: "Earlier decisions" });
+			expect(earlierGroup).toHaveTextContent("Which layout first?");
+			expect(earlierGroup).toHaveTextContent("You chose Something else");
+			expect(earlierGroup).toHaveTextContent("Your note: Show me the trees");
+			expect(earlierGroup).toHaveTextContent("Outcome: Drew the trees");
+			const laterGroup = await within(material).findByRole("region", { name: "Later decisions" });
+			// Found by searching for this call's id, kept only when its text names this call.
+			expect(within(laterGroup).getAllByRole("button").map((row) => row.textContent)).toEqual([expect.stringContaining("With the trees in hand")]);
+			await userEvent.click(within(laterGroup).getByRole("button"));
+			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: { call: "dec_later" } });
+		});
+
+		it("never reads a file the call names from this computer while its own machine is unavailable", async () => {
+			const plan = "ao://sessions/shop/w-5512/artifacts/plan.md";
+			sessionMachine.current = { kind: "offline", machine: "laptop" };
+			route({ ...call, context: `Approve ${plan} before I start.` });
+			renderPanel();
+			const material = await screen.findByRole("region", { name: "Supporting material" });
+			const files = within(material).getByRole("region", { name: "Files" });
+			expect(files).toHaveTextContent("plan.md");
+			expect(files).toHaveTextContent("Artifact unavailable");
+			expect(within(files).queryByRole("button")).not.toBeInTheDocument();
+			expect(screen.queryByRole("link", { name: "plan.md" })).not.toBeInTheDocument();
+			expect(screen.getByText((_, element) => element?.tagName === "P" && element.textContent === `Approve ${plan} before I start.`)).toBeInTheDocument();
+		});
+
+		it("links the file once its machine is read, without carrying the earlier state over", async () => {
+			const plan = "ao://sessions/shop/w-5512/artifacts/plan.md";
+			sessionMachine.current = { kind: "checking" };
+			route({ ...call, context: `Approve ${plan} before I start.` });
+			const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+			const view = render(<QueryClientProvider client={client}><DecisionCallPanel callId="dec_1" /></QueryClientProvider>);
+			await screen.findByText((_, element) => element?.tagName === "P" && element.textContent === `Approve ${plan} before I start.`);
+			sessionMachine.current = { kind: "ready", host: "h_laptop", workspaces: [{ id: "shop", sessions: [{ id: "w-5512", artifactFiles: [{ path: "plan.md" }] }] }] };
+			view.rerender(<QueryClientProvider client={client}><DecisionCallPanel callId="dec_1" /></QueryClientProvider>);
+			expect(await screen.findByRole("link", { name: "plan.md" })).toHaveAttribute("href", plan);
+		});
+
+		it("shows nothing for a call that names nothing", async () => {
+			route({ ...call, links: [] });
+			getMock.mockImplementation((path: string) => Promise.resolve(path === "/api/v1/decisions/{id}"
+				? { data: { call: { ...call, links: [] }, history }, response: { status: 200 } }
+				: { data: { calls: [] }, response: { status: 200 } }));
+			renderPanel();
+			await screen.findByRole("heading", { level: 2, name: call.title });
+			expect(screen.queryByRole("region", { name: "Supporting material" })).not.toBeInTheDocument();
+		});
+
+		it("draws the history as a timeline when the call fills the page", async () => {
+			const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+			const view = render(<QueryClientProvider client={client}><DecisionCallPanel callId="dec_1" layout="page" /></QueryClientProvider>);
+			const list = await screen.findByRole("list", { name: "History" });
+			expect(list).toHaveAttribute("data-history-style", "timeline");
+			view.rerender(<QueryClientProvider client={client}><DecisionCallPanel callId="dec_1" layout="panel" /></QueryClientProvider>);
+			expect(screen.getByRole("list", { name: "History" })).toHaveAttribute("data-history-style", "list");
 		});
 	});
 
