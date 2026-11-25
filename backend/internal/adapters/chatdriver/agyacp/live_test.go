@@ -146,7 +146,7 @@ func TestLiveAntigravityACPConformance(t *testing.T) {
 }
 
 // TestLiveAgyACPSteersARunningTurn proves steering against the real `agy acp`
-// (agy CLI 1.5.4 or newer). Run explicitly with AO_LIVE_AGY=1. It uses an empty
+// (agy CLI 1.5.15 or newer). Run explicitly with AO_LIVE_AGY=1. It uses an empty
 // private GEMINI_HOME (the CLI's login lives outside it) and the default
 // approval mode: it approves the one sleep command and requests that stay in
 // the test's temporary folders, and rejects anything else. While that command runs it steers, then
@@ -181,7 +181,7 @@ func TestLiveAgyACPSteersARunningTurn(t *testing.T) {
 		_ = conversation.Close()
 	}()
 	if !conversation.Capabilities()[ports.ChatCapabilitySteer] {
-		t.Skip("the installed agy has no `agy acp` that steers (needs agy 1.5.4 or newer)")
+		t.Skip("the installed agy has no `agy acp` that steers (needs agy 1.5.15 or newer)")
 	}
 	steerer, ok := conversation.(ports.ChatSteerer)
 	if !ok {

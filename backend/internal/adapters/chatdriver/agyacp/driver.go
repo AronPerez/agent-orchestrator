@@ -1,9 +1,10 @@
 // Package agyacp binds Google Antigravity to AO's reusable ACP Chat transport.
 //
 // The agy CLI has a built-in ACP server, `agy acp`, which steers a running turn
-// when another prompt arrives. AO launches it from agy 1.5.4, the first release
-// whose `agy acp` does not hang on a second approval. Older CLIs have no ACP
-// mode, or that bug, so AO falls back to
+// when another prompt arrives. AO launches it from agy 1.5.15, the first release
+// whose `agy acp` neither hangs on a second approval nor answers a history
+// reload before replaying it. Older CLIs have no ACP mode, or those bugs, so AO
+// falls back to
 // Google's separate `agy_acp_server` from the ACP registry (`antigravity-acp`),
 // found beside the agy CLI or on PATH. Like Autohand's separately distributed
 // `autohand-acp`, AO never downloads or bundles either. Login, models, MCP
