@@ -5,6 +5,7 @@ import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
 import { rebuild } from "@electron/rebuild";
 import electronPackage from "electron/package.json";
+import electronChecksums from "electron/checksums.json";
 import appPackage from "./package.json";
 import MakerNSIS from "./makers/maker-nsis";
 import MakerDMG, { isSigningConfigured, sealDmg, verifyDmg, verifyMacArtifact } from "./makers/maker-dmg";
@@ -64,6 +65,71 @@ async function prepareNativeDependencies(platform: NodeJS.Platform, arch: string
 		onlyModules: ["better-sqlite3"],
 		force: true,
 	});
+}
+
+// got, which @electron/get downloads Electron with, has no default timeout, and
+// Forge runs the packager quietly. A stalled connection to GitHub's release CDN
+// (an unanswered firewall prompt, a dead proxy or VPN) therefore hung `make`
+// forever behind three spinners with no output. `socket` is an idle timeout, so
+// a slow download that keeps moving still finishes.
+export const ELECTRON_DOWNLOAD_TIMEOUT_MS = { lookup: 30_000, connect: 30_000, secureConnect: 30_000, socket: 60_000 };
+
+type DownloadProgress = { percent: number; total?: number };
+
+// The download URL for an error message, without credentials: an authenticated
+// ELECTRON_MIRROR (https://user:token@host/…, or a token query parameter) must
+// not end up in terminal or CI logs.
+export function redactDownloadUrl(value: URL | string | undefined): string {
+	if (!value) return "GitHub";
+	try {
+		const url = new URL(String(value));
+		url.username = "";
+		url.password = "";
+		url.search = "";
+		return url.toString();
+	} catch {
+		return "the Electron mirror";
+	}
+}
+
+// Options for packagerConfig.download.
+//  - checksums: the SHA-256 list the installed electron package ships, the same
+//    one electron/install.js validates with. Without it @electron/get fetches
+//    SHASUMS256.txt from GitHub on every package run, even when the zip is
+//    already cached. It comes from node_modules/electron, so an Electron bump
+//    updates it with the lockfile; forge.config.test.ts fails if it ever lacks
+//    the installed version's zips.
+//  - downloadOptions: got options for a real (uncached) download. Bounded
+//    timeouts, progress in 10% steps, and an error that names the URL and what
+//    to check instead of got's bare "Timeout awaiting 'socket'".
+export function electronDownloadOptions(log: (line: string) => void = (line) => process.stderr.write(`${line}\n`)) {
+	let reportedStep = -1;
+	return {
+		checksums: electronChecksums as Record<string, string>,
+		downloadOptions: {
+			timeout: ELECTRON_DOWNLOAD_TIMEOUT_MS,
+			getProgressCallback: async ({ percent, total }: DownloadProgress) => {
+				// GitHub answers with a redirect first, whose empty body reports
+				// total 0 and percent 1. Count only the real zip.
+				if (!total) return;
+				const step = Math.floor(percent * 10);
+				if (step === reportedStep) return;
+				reportedStep = step;
+				log(`Downloading Electron ${electronPackage.version}: ${step * 10}%`);
+			},
+			hooks: {
+				beforeError: [
+					<E extends Error & { options?: { url?: URL | string } }>(error: E): E => {
+						error.message =
+							`Downloading Electron ${electronPackage.version} from ${redactDownloadUrl(error.options?.url)} failed: ${error.message}. ` +
+							"Check the network connection, any proxy or VPN (HTTPS_PROXY, ELECTRON_GET_USE_PROXY, ELECTRON_MIRROR), " +
+							"and any firewall prompt waiting on node, then run the build again.";
+						return error;
+					},
+				],
+			},
+		},
+	};
 }
 
 // Packager app name. It sets the bundle filename ("<name>.app"), which the
@@ -180,6 +246,7 @@ const config: ForgeConfig = {
 		// the .node binary outside app.asar.
 		ignore: ignoreFromVitePackage,
 		appBundleId: "dev.agent-orchestrator.desktop",
+		download: electronDownloadOptions(),
 		name: PACKAGER_NAME,
 		executableName: EXECUTABLE_NAME,
 		// Match the Windows installer without changing the executable name.

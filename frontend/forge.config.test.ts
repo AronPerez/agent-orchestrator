@@ -30,7 +30,14 @@ vi.mock("./makers/maker-dmg", async (importOriginal) => {
 	return { ...actual, sealDmg, verifyDmg, verifyMacArtifact, isSigningConfigured };
 });
 
-import config, { extraResourcesForPlatform, macSignOptionsForFile } from "./forge.config";
+import electronPackage from "electron/package.json";
+import config, {
+	ELECTRON_DOWNLOAD_TIMEOUT_MS,
+	electronDownloadOptions,
+	extraResourcesForPlatform,
+	macSignOptionsForFile,
+	redactDownloadUrl,
+} from "./forge.config";
 
 // Minimal synthetic Mach-O headers (thin little-endian + fat big-endian), the
 // two on-disk layouts the signing selector must tell apart. Full parser
@@ -200,6 +207,60 @@ afterEach(() => {
 	verifyDmg.mockReset().mockImplementation(async () => undefined);
 	verifyMacArtifact.mockReset().mockImplementation(async () => undefined);
 	isSigningConfigured.mockReset();
+});
+
+describe("Electron download", () => {
+	// A stalled GitHub connection used to hang `make` silently: @electron/get
+	// fetched SHASUMS256.txt on every run and got has no default timeout.
+	it("validates the cached zip with the installed electron package's checksums", () => {
+		const download = config.packagerConfig.download as ReturnType<typeof electronDownloadOptions>;
+		for (const target of ["darwin-arm64", "darwin-x64", "linux-x64", "win32-x64"]) {
+			expect(download.checksums).toHaveProperty([`electron-v${electronPackage.version}-${target}.zip`]);
+		}
+	});
+
+	it("bounds every download phase, including an idle socket", () => {
+		const { downloadOptions } = electronDownloadOptions(() => undefined);
+		expect(downloadOptions.timeout).toBe(ELECTRON_DOWNLOAD_TIMEOUT_MS);
+		expect(ELECTRON_DOWNLOAD_TIMEOUT_MS.socket).toBeGreaterThan(0);
+		for (const ms of Object.values(ELECTRON_DOWNLOAD_TIMEOUT_MS)) {
+			expect(Number.isFinite(ms) && ms > 0).toBe(true);
+		}
+	});
+
+	it("reports progress of the zip in 10% steps, ignoring GitHub's redirect", async () => {
+		const lines: string[] = [];
+		const { downloadOptions } = electronDownloadOptions((line) => lines.push(line));
+		// The event order a real GitHub download produces: request start, the
+		// empty redirect body (total 0, percent 1), then the zip itself.
+		await downloadOptions.getProgressCallback({ percent: 0 });
+		await downloadOptions.getProgressCallback({ percent: 1, total: 0 });
+		for (const percent of [0, 0.01, 0.05, 0.1, 0.12, 0.55, 1]) {
+			await downloadOptions.getProgressCallback({ percent, total: 130_000_000 });
+		}
+		expect(lines).toEqual([0, 10, 50, 100].map((step) => `Downloading Electron ${electronPackage.version}: ${step}%`));
+	});
+
+	it("turns a download error into one that names the URL and what to check", () => {
+		const { downloadOptions } = electronDownloadOptions(() => undefined);
+		const url = "https://github.com/electron/electron/releases/download/v1/electron.zip";
+		const error = Object.assign(new Error("Timeout awaiting 'socket' for 60000ms"), { options: { url: new URL(url) } });
+		const [beforeError] = downloadOptions.hooks.beforeError;
+		expect(beforeError(error)).toBe(error);
+		expect(error.message).toContain(`from ${url} failed: Timeout awaiting 'socket' for 60000ms`);
+		expect(error.message).toContain("proxy or VPN");
+	});
+
+	it("keeps mirror credentials out of the download error", () => {
+		const { downloadOptions } = electronDownloadOptions(() => undefined);
+		const mirror = "https://builder:s3cret@mirror.example.com/electron/v1/electron.zip?token=abc123";
+		const error = Object.assign(new Error("connect ETIMEDOUT"), { options: { url: new URL(mirror) } });
+		downloadOptions.hooks.beforeError[0](error);
+		expect(error.message).toContain("from https://mirror.example.com/electron/v1/electron.zip failed");
+		expect(error.message).not.toMatch(/builder|s3cret|abc123/);
+		expect(redactDownloadUrl(undefined)).toBe("GitHub");
+		expect(redactDownloadUrl("not a url")).toBe("the Electron mirror");
+	});
 });
 
 describe("macOS signing", () => {
