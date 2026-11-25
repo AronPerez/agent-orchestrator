@@ -188,6 +188,63 @@ func TestSessionPreambleKeepsTextWithoutAManagedRule(t *testing.T) {
 	}
 }
 
+// appendHandshake is `agy acp` 1.5.16's initialize response as far as the
+// system-prompt extension goes (agentCapabilities._meta.antigravity).
+func appendHandshake(advertised any) acpsdk.InitializeResponse {
+	var init acpsdk.InitializeResponse
+	init.AgentCapabilities.Meta = map[string]any{"antigravity": map[string]any{
+		"tier": true, "systemPrompt": map[string]any{"append": advertised},
+	}}
+	return init
+}
+
+func TestSystemPromptAppendIsReadFromTheHandshake(t *testing.T) {
+	if !systemPromptAppendAdvertised(appendHandshake(true)) {
+		t.Fatal("append: true must be recognised")
+	}
+	for name, init := range map[string]acpsdk.InitializeResponse{
+		"no meta":      {},
+		"append false": appendHandshake(false),
+		"append text":  appendHandshake("yes"),
+	} {
+		if systemPromptAppendAdvertised(init) {
+			t.Errorf("%s: reported as advertised", name)
+		}
+	}
+	if sessionMetaForAgent(appendHandshake(false)) != nil || sessionPreambleForAgent(appendHandshake(false)) != nil {
+		t.Fatal("a server without the extension must keep the plain-text preamble")
+	}
+}
+
+func TestAdvertisedAppendCarriesStandingInstructionsAsSystemPrompt(t *testing.T) {
+	init := appendHandshake(true)
+	meta := sessionMetaForAgent(init)(acpdriver.LaunchConfig{WorkspacePath: t.TempDir(), SystemPrompt: " Follow AO worker rules. "})
+	want := map[string]any{"antigravity": map[string]any{"systemPrompt": map[string]any{"append": "Follow AO worker rules."}}}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("session _meta = %#v, want %#v", meta, want)
+	}
+	if got := sessionPreambleForAgent(init)(acpdriver.LaunchConfig{SystemPrompt: "Follow AO worker rules."}); got != nil {
+		t.Fatalf("preamble = %#v, want none when the system prompt carries the instructions", got)
+	}
+	if got := sessionMetaForAgent(init)(acpdriver.LaunchConfig{SystemPrompt: "  "}); got != nil {
+		t.Fatalf("blank prompt _meta = %#v, want none", got)
+	}
+}
+
+// The managed rule already puts the instructions in agy's system prompt, so the
+// extension is not used to send them a second time.
+func TestAdvertisedAppendDefersToTheManagedStandingRule(t *testing.T) {
+	workspace := t.TempDir()
+	if err := agy.New().GetAgentHooks(context.Background(), ports.WorkspaceHookConfig{
+		WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionMetaForAgent(appendHandshake(true))(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules."}); got != nil {
+		t.Fatalf("session _meta = %#v, want none beside the managed rule", got)
+	}
+}
+
 func TestValidateInitializeAdmitsOnlyTestedAntigravityServers(t *testing.T) {
 	info := func(name, version string) acpsdk.InitializeResponse {
 		return acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: name, Version: version}}

@@ -129,6 +129,10 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 		SessionOptions:      sessionOptions,
 		SplitModelVariant:   splitModelVariant,
 		SessionPreamble:     sessionPreamble,
+		// `agy acp` from 1.5.16 advertises a system-prompt extension; a server
+		// that does not keeps the plain-text preamble above.
+		SessionMetaForAgent:     sessionMetaForAgent,
+		SessionPreambleForAgent: sessionPreambleForAgent,
 		// Every request Antigravity raises is answered by the user, except under
 		// `agy acp` in AO's auto modes (see permissionPolicy). AO never selects
 		// allow_always, which would let a cached grant survive a later switch to
@@ -268,9 +272,56 @@ func splitModelVariant(model string) (string, acpdriver.SessionOption, bool) {
 // same instructions (see agy.StandingRuleInstalled), which `agy acp` loads on
 // every turn, so the preamble is left out there rather than sent twice.
 func sessionPreamble(cfg acpdriver.LaunchConfig) []acpsdk.ContentBlock {
-	standing := strings.TrimSpace(cfg.SystemPrompt)
-	if standing == "" || agy.StandingRuleInstalled(cfg.WorkspacePath) {
+	standing := standingToSend(cfg)
+	if standing == "" {
 		return nil
 	}
 	return []acpsdk.ContentBlock{acpdriver.PlainStandingInstructionsBlock(standing)}
+}
+
+// standingToSend is the standing instructions AO still has to deliver over ACP:
+// none when there are none, or when AO's managed rule already carries them.
+func standingToSend(cfg acpdriver.LaunchConfig) string {
+	standing := strings.TrimSpace(cfg.SystemPrompt)
+	if standing == "" || agy.StandingRuleInstalled(cfg.WorkspacePath) {
+		return ""
+	}
+	return standing
+}
+
+// systemPromptAppendAdvertised reports agentCapabilities._meta.antigravity.
+// systemPrompt.append, which `agy acp` 1.5.16 advertises. The extension is
+// undocumented, so AO uses it only on that explicit signal.
+func systemPromptAppendAdvertised(init acpsdk.InitializeResponse) bool {
+	antigravity, _ := init.AgentCapabilities.Meta["antigravity"].(map[string]any)
+	systemPrompt, _ := antigravity["systemPrompt"].(map[string]any)
+	advertised, _ := systemPrompt["append"].(bool)
+	return advertised
+}
+
+// sessionMetaForAgent appends AO's standing instructions to agy's own system
+// prompt on session/new, session/load and session/resume, where the server
+// advertises that. The agent then follows them as instructions, and they stay
+// out of the user's first message and its replayed history. Beside AO's
+// managed rule, which already puts them in the system prompt, nothing is sent.
+func sessionMetaForAgent(init acpsdk.InitializeResponse) func(acpdriver.LaunchConfig) map[string]any {
+	if !systemPromptAppendAdvertised(init) {
+		return nil
+	}
+	return func(cfg acpdriver.LaunchConfig) map[string]any {
+		standing := standingToSend(cfg)
+		if standing == "" {
+			return nil
+		}
+		return map[string]any{"antigravity": map[string]any{"systemPrompt": map[string]any{"append": standing}}}
+	}
+}
+
+// sessionPreambleForAgent drops the plain-text preamble for a server that takes
+// the instructions through sessionMetaForAgent.
+func sessionPreambleForAgent(init acpsdk.InitializeResponse) func(acpdriver.LaunchConfig) []acpsdk.ContentBlock {
+	if !systemPromptAppendAdvertised(init) {
+		return nil
+	}
+	return func(acpdriver.LaunchConfig) []acpsdk.ContentBlock { return nil }
 }
