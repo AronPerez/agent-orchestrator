@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildCacheRoot, lookupEntry, pruneEntries, storeEntry } from "./dev-cache.mjs";
+import { buildCacheRoot, lookupEntry, pruneEntries, quarantineEntry, storeEntry } from "./dev-cache.mjs";
 
 export const CACHE_NAME = "bundled-tmux";
 
@@ -97,12 +97,29 @@ export async function ensureCachedBuild({
 	meta,
 	build,
 	use,
+	isComplete = () => true,
 	currentKey = () => key,
 	workRoot = tmpdir(),
 	log = (line) => console.log(line),
 }) {
 	const cached = lookupEntry(root, CACHE_NAME, key);
-	if (cached) return use(cached);
+	if (cached && isComplete(cached)) {
+		try {
+			return use(cached);
+		} catch (error) {
+			// Pruned or quarantined by another checkout while this one copied it.
+			if (error?.code !== "ENOENT") throw error;
+			log(`bundled tmux: the cached build disappeared while copying it (${error.message}); building.`);
+		}
+	} else if (cached) {
+		// An entry that lost a file would fail every checkout that shares it.
+		log("bundled tmux: the cached build is incomplete; replacing it.");
+		try {
+			quarantineEntry(root, CACHE_NAME, key, (dir) => !isComplete(join(dir, "output")));
+		} catch (error) {
+			log(`bundled tmux: warning: could not set the incomplete cache entry aside (${error.message}).`);
+		}
+	}
 	const work = mkdtempSync(join(workRoot, `${CACHE_NAME}-build-`));
 	try {
 		const output = join(work, "output");

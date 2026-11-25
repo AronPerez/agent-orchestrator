@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { cpus, tmpdir } from "node:os";
-import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -81,7 +81,9 @@ const { shared, root: cacheRoot } = tmuxCacheLocation({ repoRoot: resolve(fronte
 if (!shared) {
 	console.log(`Custom build environment (${Object.keys(cacheInputs.environment).join(", ")}): keeping the tmux build in this checkout.`);
 }
-const downloadsRoot = writableDownloadsDir(sourceDownloadsDir(), join(resolve(frontendRoot, ".."), ".cache", "bundled-tmux-sources"));
+// Resolved on the first download only: a hit, even from a read-only cache,
+// never needs a writable sources directory.
+let downloadsRoot;
 
 // The entry holds the binary and the licenses that ship beside it. The sources
 // are sha256-pinned and the environment and recipe are fixed for this process,
@@ -93,10 +95,17 @@ await ensureCachedBuild({
 	currentKey: () => tmuxCacheKey({ ...cacheInputs, compiler: compilerIdentity() }),
 	meta: { inputs: metaInputs },
 	build,
+	isComplete: (built) =>
+		existsSync(join(built, "tmux")) && SOURCES.every((source) => existsSync(join(built, "licenses", `${source.name}.txt`))),
 	use: (built) => {
 		rmSync(outputRoot, { recursive: true, force: true });
 		mkdirSync(join(outputRoot, "bin"), { recursive: true });
-		cpSync(join(built, "licenses"), join(outputRoot, "licenses"), { recursive: true });
+		// File by file into a fresh directory: copying the directory would carry
+		// over a read-only cache's permissions and block the next rebuild.
+		mkdirSync(join(outputRoot, "licenses"));
+		for (const source of SOURCES) {
+			copyFileSync(join(built, "licenses", `${source.name}.txt`), join(outputRoot, "licenses", `${source.name}.txt`));
+		}
 		copyFileSync(join(built, "tmux"), outputBinary);
 		chmodSync(outputBinary, 0o755);
 	},
@@ -249,6 +258,7 @@ async function download(source) {
 }
 
 function archivePath(source) {
+	downloadsRoot ??= writableDownloadsDir(sourceDownloadsDir(), join(resolve(frontendRoot, ".."), ".cache", "bundled-tmux-sources"));
 	return join(downloadsRoot, `${source.name}-${source.version}.tar.gz`);
 }
 

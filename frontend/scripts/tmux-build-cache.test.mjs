@@ -115,6 +115,10 @@ describe("cached builds", () => {
 		writeFileSync(join(output, "licenses", "tmux.txt"), "ISC");
 	});
 
+	beforeEach(() => {
+		fakeBuild.mockClear();
+	});
+
 	it("builds on a miss and reuses the entry afterwards", async () => {
 		const root = join(dir, "cache");
 		const first = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, use: (built) => built, workRoot: dir });
@@ -125,6 +129,49 @@ describe("cached builds", () => {
 		expect(fakeBuild).toHaveBeenCalledTimes(1);
 		// The private work directory is gone either way.
 		expect(readdirSync(dir).filter((name) => name.startsWith(`${CACHE_NAME}-build-`))).toEqual([]);
+	});
+
+	it("replaces a cached entry that lost its binary instead of failing every checkout", async () => {
+		const root = join(dir, "cache");
+		const final = join(root, CACHE_NAME, "k");
+		mkdirSync(join(final, "output", "licenses"), { recursive: true });
+		writeFileSync(join(final, "meta.json"), "{}");
+		const isComplete = (built) => existsSync(join(built, "tmux"));
+		const read = await ensureCachedBuild({
+			root,
+			key: "k",
+			meta: {},
+			build: fakeBuild,
+			isComplete,
+			use: (built) => readFileSync(join(built, "tmux"), "utf8"),
+			workRoot: dir,
+			log: () => undefined,
+		});
+		expect(read).toBe("binary");
+		expect(fakeBuild).toHaveBeenCalledTimes(1);
+		expect(readFileSync(join(final, "output", "tmux"), "utf8")).toBe("binary");
+		expect(readdirSync(join(root, CACHE_NAME)).filter((name) => name.startsWith(".tmp-stale-k-"))).toHaveLength(1);
+	});
+
+	it("builds when a cached entry disappears while it is being copied", async () => {
+		const root = join(dir, "cache");
+		await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, use: () => undefined, workRoot: dir });
+		let copies = 0;
+		const read = await ensureCachedBuild({
+			root,
+			key: "k",
+			meta: {},
+			build: fakeBuild,
+			use: (built) => {
+				copies += 1;
+				if (copies === 1) throw Object.assign(new Error(`ENOENT: no such file, open '${built}/tmux'`), { code: "ENOENT" });
+				return readFileSync(join(built, "tmux"), "utf8");
+			},
+			workRoot: dir,
+			log: () => undefined,
+		});
+		expect(read).toBe("binary");
+		expect(fakeBuild).toHaveBeenCalledTimes(2);
 	});
 
 	it("uses but never stores a build whose inputs changed while it ran", async () => {
