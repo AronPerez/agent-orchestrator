@@ -11,6 +11,18 @@ const { rebuild } = vi.hoisted(() => ({
 	rebuild: vi.fn(async () => undefined),
 }));
 vi.mock("@electron/rebuild", () => ({ rebuild }));
+// The better-sqlite3 cache spawns the target Electron to verify a build; its
+// own suite covers that. Here it passes straight through to the mocked rebuild.
+const { prepareBetterSqlite3 } = vi.hoisted(() => ({
+	prepareBetterSqlite3: vi.fn(async ({ rebuild }: { rebuild: () => Promise<void> }) => {
+		await rebuild();
+		return "rebuilt";
+	}),
+}));
+vi.mock("./scripts/native-module-cache.mjs", async (importOriginal) => ({
+	...(await importOriginal<typeof import("./scripts/native-module-cache.mjs")>()),
+	prepareBetterSqlite3,
+}));
 
 // postMake's dmg/zip branches only need to prove they call the right
 // maker-dmg functions with the right gates; the functions' own behavior
@@ -476,6 +488,14 @@ describe("desktop release feed", () => {
 			platform: "linux",
 			arch: "x64",
 			onlyModules: ["better-sqlite3"],
+			force: true,
+		}));
+		expect(prepareBetterSqlite3).toHaveBeenCalledWith(expect.objectContaining({
+			platform: "linux",
+			arch: "x64",
+			electronVersion: electronPackage.version,
+			moduleDir: expect.stringMatching(/node_modules\/better-sqlite3$/),
+			electronDir: expect.stringMatching(/node_modules\/electron$/),
 		}));
 
 		expect(writeFile).toHaveBeenCalledWith("app-update.yml", [
