@@ -3,7 +3,7 @@
 // a checkout with copy-on-write clones. Node built-ins only: dev-warm runs
 // before node_modules exists.
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	constants,
 	cpSync,
@@ -312,26 +312,32 @@ export function storeEntry(root, name, key, sourceDir, meta, { clone = cloneTree
 const LOCK_WAIT_MS = 30_000;
 const LOCK_STALE_MS = 60_000;
 
+// The lock is a directory holding an owner token. Taking over a stale lock and
+// releasing a lock are both ownership-safe: a waiter only ever removes the
+// exact abandoned lock it saw, and an owner only removes a lock that still
+// holds its own token.
 export function withEntryLock(root, name, key, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS } = {}) {
 	const lock = path.join(root, name, `.tmp-lock-${key}`);
+	const token = `${process.pid}-${randomUUID()}`;
 	mkdirSync(path.dirname(lock), { recursive: true });
 	const deadline = Date.now() + waitMs;
 	for (;;) {
 		try {
 			mkdirSync(lock);
+			writeFileSync(path.join(lock, "owner"), token);
 			break;
 		} catch (error) {
 			if (error?.code !== "EEXIST") throw error;
 		}
-		let age = 0;
+		let held;
 		try {
-			age = Date.now() - statSync(lock).mtimeMs;
+			held = statSync(lock);
 		} catch {
 			continue; // Released between the two calls: try again.
 		}
 		// Held far longer than any publish takes: its owner died. Take it over.
-		if (age > staleMs) {
-			rmSync(lock, { recursive: true, force: true });
+		if (Date.now() - held.mtimeMs > staleMs) {
+			takeOverStaleLock(lock, held.ino);
 			continue;
 		}
 		if (Date.now() > deadline) throw new Error(`timed out waiting for the build cache lock ${lock}`);
@@ -340,8 +346,49 @@ export function withEntryLock(root, name, key, fn, { waitMs = LOCK_WAIT_MS, stal
 	try {
 		return fn();
 	} finally {
-		rmSync(lock, { recursive: true, force: true });
+		releaseLock(lock, token);
 	}
+}
+
+// Rename the stale lock to a name only this waiter uses: of several waiters
+// that saw the same stale lock, exactly one rename succeeds. If what moved is
+// not that lock (it was released and a new owner took the path in between),
+// put it straight back.
+export function takeOverStaleLock(lock, staleIno) {
+	const aside = `${lock}-stale-${process.pid}-${randomUUID()}`;
+	try {
+		renameSync(lock, aside);
+	} catch {
+		return; // Another waiter moved it first, or it was released.
+	}
+	let moved;
+	try {
+		moved = statSync(aside).ino;
+	} catch {
+		return;
+	}
+	if (moved === staleIno) {
+		rmSync(aside, { recursive: true, force: true });
+		return;
+	}
+	try {
+		renameSync(aside, lock);
+	} catch {
+		// The path was taken again meanwhile. Pruning removes this .tmp- name
+		// after an hour.
+	}
+}
+
+// Remove the lock only while it still carries this owner's token: if it was
+// taken over as stale, the new owner's lock stays.
+function releaseLock(lock, token) {
+	let owner;
+	try {
+		owner = readFileSync(path.join(lock, "owner"), "utf8");
+	} catch {
+		return;
+	}
+	if (owner === token) rmSync(lock, { recursive: true, force: true });
 }
 
 function asidePath(root, name, key) {

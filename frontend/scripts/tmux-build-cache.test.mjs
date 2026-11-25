@@ -122,11 +122,13 @@ describe("cached builds", () => {
 
 	it("builds on a miss and reuses the entry afterwards", async () => {
 		const root = join(dir, "cache");
-		const first = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, use: (built) => built, workRoot: dir });
-		expect(readFileSync(join(first, "tmux"), "utf8")).toBe("binary");
-		expect(readFileSync(join(first, "licenses", "tmux.txt"), "utf8")).toBe("ISC");
+		const read = (built) => [readFileSync(join(built, "tmux"), "utf8"), readFileSync(join(built, "licenses", "tmux.txt"), "utf8")];
+		const first = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, use: read, workRoot: dir });
+		expect(first).toEqual(["binary", "ISC"]);
+		const stored = join(root, CACHE_NAME, "k", "output");
+		expect(readFileSync(join(stored, "tmux"), "utf8")).toBe("binary");
 		const second = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, use: (built) => built, workRoot: dir });
-		expect(second).toBe(first);
+		expect(second).toBe(stored);
 		expect(fakeBuild).toHaveBeenCalledTimes(1);
 		// The private work directory is gone either way.
 		expect(readdirSync(dir).filter((name) => name.startsWith(`${CACHE_NAME}-build-`))).toEqual([]);
@@ -179,6 +181,24 @@ describe("cached builds", () => {
 		} finally {
 			chmodSync(entries, 0o755);
 		}
+	});
+
+	it("copies the fresh build even if the stored entry is pruned while it is copied", async () => {
+		const root = join(dir, "cache");
+		const read = await ensureCachedBuild({
+			root,
+			key: "k",
+			meta: {},
+			build: fakeBuild,
+			use: (built) => {
+				// Another checkout prunes the entry this build just stored.
+				rmSync(join(root, CACHE_NAME, "k"), { recursive: true, force: true });
+				return readFileSync(join(built, "tmux"), "utf8");
+			},
+			workRoot: dir,
+			log: () => undefined,
+		});
+		expect(read).toBe("binary");
 	});
 
 	it("builds when a cached entry disappears while it is being copied", async () => {
@@ -268,7 +288,7 @@ describe("cached builds", () => {
 		const barrier = join(dir, "go");
 		const moduleUrl = new URL("./tmux-build-cache.mjs", import.meta.url).href;
 		const builder = `
-			import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+			import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 			import { join } from "node:path";
 			const { ensureCachedBuild } = await import(${JSON.stringify(moduleUrl)});
 			while (!existsSync(${JSON.stringify(barrier)})) await new Promise((r) => setTimeout(r, 2));
@@ -276,7 +296,7 @@ describe("cached builds", () => {
 				root: ${JSON.stringify(root)},
 				key: ${JSON.stringify(key)},
 				meta: {},
-				use: (built) => built,
+				use: (built) => readFileSync(join(built, "tmux"), "utf8").length,
 				workRoot: ${JSON.stringify(dir)},
 				build: async (_work, out) => {
 					await new Promise((r) => setTimeout(r, Math.random() * 40));
@@ -285,7 +305,7 @@ describe("cached builds", () => {
 					writeFileSync(join(out, "licenses", "tmux.txt"), "ISC");
 				},
 			});
-			process.stdout.write(output);
+			process.stdout.write(String(output));
 		`;
 		const children = Array.from({ length: 4 }, () =>
 			spawn(process.execPath, ["--input-type=module", "-e", builder], { stdio: ["ignore", "pipe", "pipe"] }),
@@ -322,10 +342,11 @@ describe("cached builds", () => {
 
 		for (const { code, stderr } of finished) expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
 		for (const { stdout } of finished) {
-			expect(stdout).toBe(join(final, "output"));
-			expect(readFileSync(join(stdout, "tmux"), "utf8")).toBe(payload);
+			// Every builder got the whole binary, from the cache or its own build.
+			expect(Number(stdout)).toBe(payload.length);
 		}
 		expect(violations).toEqual([]);
+		expect(readFileSync(join(final, "output", "tmux"), "utf8")).toBe(payload);
 		expect(readdirSync(join(root, CACHE_NAME)).filter((name) => !name.startsWith(".tmp-stale-"))).toEqual([key]);
 	}, 30_000);
 });
