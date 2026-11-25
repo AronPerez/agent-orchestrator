@@ -282,14 +282,18 @@ export function storeEntry(root, name, key, sourceDir, meta, { clone = cloneTree
 		for (const rel of omit) rmSync(path.join(temp, "output", rel), { recursive: true, force: true });
 		for (const [fileName, source] of Object.entries(files)) cpSync(source, path.join(temp, fileName));
 		writeFileSync(path.join(temp, "meta.json"), `${JSON.stringify({ name, key, createdAt: new Date().toISOString(), ...meta }, null, 2)}\n`);
-		if (entryIsComplete(final)) {
-			// Another checkout finished the same key while this one cloned: keep theirs,
-			// readers may already be cloning from it.
-			rmSync(temp, { recursive: true, force: true });
-			return final;
-		}
-		if (existsSync(final)) rmSync(final, { recursive: true, force: true }); // incomplete leftover
-		renameSync(temp, final);
+		withEntryLock(root, name, key, () => {
+			if (entryIsComplete(final)) {
+				// Another checkout finished the same key while this one cloned: keep
+				// theirs, readers may already be cloning from it.
+				rmSync(temp, { recursive: true, force: true });
+				return;
+			}
+			// An incomplete leftover: move it aside rather than delete it, under
+			// the lock, so the entry moved is the one just seen incomplete.
+			if (existsSync(final)) renameSync(final, asidePath(root, name, key));
+			renameSync(temp, final);
+		});
 	} catch (error) {
 		rmSync(temp, { recursive: true, force: true });
 		// Another checkout stored the same key first: theirs is equivalent.
@@ -297,6 +301,63 @@ export function storeEntry(root, name, key, sourceDir, meta, { clone = cloneTree
 		throw error;
 	}
 	return final;
+}
+
+// Publishing and quarantining an entry happen under a per-key lock, so the
+// completeness check and the rename that follows it see the same entry: no
+// checkout can move or replace an entry another just published. Readers never
+// take the lock. Entries are never deleted here: a bad one is renamed aside (a
+// .tmp- name that pruning removes after an hour), since a reader in another
+// checkout may still be cloning from it.
+const LOCK_WAIT_MS = 30_000;
+const LOCK_STALE_MS = 60_000;
+
+export function withEntryLock(root, name, key, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS } = {}) {
+	const lock = path.join(root, name, `.tmp-lock-${key}`);
+	mkdirSync(path.dirname(lock), { recursive: true });
+	const deadline = Date.now() + waitMs;
+	for (;;) {
+		try {
+			mkdirSync(lock);
+			break;
+		} catch (error) {
+			if (error?.code !== "EEXIST") throw error;
+		}
+		let age = 0;
+		try {
+			age = Date.now() - statSync(lock).mtimeMs;
+		} catch {
+			continue; // Released between the two calls: try again.
+		}
+		// Held far longer than any publish takes: its owner died. Take it over.
+		if (age > staleMs) {
+			rmSync(lock, { recursive: true, force: true });
+			continue;
+		}
+		if (Date.now() > deadline) throw new Error(`timed out waiting for the build cache lock ${lock}`);
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+	}
+	try {
+		return fn();
+	} finally {
+		rmSync(lock, { recursive: true, force: true });
+	}
+}
+
+function asidePath(root, name, key) {
+	return path.join(root, name, `.tmp-stale-${key}-${process.pid}-${Date.now()}`);
+}
+
+// Move an entry the caller found unusable (say its output lost a file) out of
+// the way so a fresh build can be published. Under the lock, `isBad` is asked
+// again: if another checkout replaced the entry meanwhile, it stays.
+export function quarantineEntry(root, name, key, isBad) {
+	const final = entryDir(root, name, key);
+	return withEntryLock(root, name, key, () => {
+		if (!existsSync(final) || !isBad(final)) return false;
+		renameSync(final, asidePath(root, name, key));
+		return true;
+	});
 }
 
 // Which entries to delete: everything but the `keep` most recently used, plus

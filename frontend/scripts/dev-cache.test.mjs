@@ -1,6 +1,6 @@
 // @vitest-environment node
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "vitest";
@@ -20,7 +20,9 @@ import {
 	relativeImports,
 	stableStringify,
 	stampIsCurrent,
+	quarantineEntry,
 	storeEntry,
+	withEntryLock,
 	summarizeDrift,
 } from "./dev-cache.mjs";
 import { normalizeGoEnv } from "./dev-prepare.mjs";
@@ -168,6 +170,51 @@ describe("cache entries", () => {
 		writeFileSync(path.join(src, "react", "index.js"), "changed");
 		storeEntry(cache, "node_modules", "k1", src, {}, { clone: copy });
 		assert.equal(readFileSync(path.join(output, "react", "index.js"), "utf8"), "react");
+	});
+
+	test("moves an incomplete leftover aside instead of deleting it, then publishes", () => {
+		const root = tempDir();
+		const src = path.join(root, "src");
+		mkdirSync(src);
+		writeFileSync(path.join(src, "f"), "mine");
+		const cache = path.join(root, "cache");
+		const final = path.join(cache, "daemon", "k");
+		mkdirSync(path.join(final, "output"), { recursive: true });
+		writeFileSync(path.join(final, "output", "f"), "half-written");
+		const copy = (from, to) => cpSync(from, to, { recursive: true });
+		assert.equal(storeEntry(cache, "daemon", "k", src, {}, { clone: copy }), final);
+		assert.equal(readFileSync(path.join(final, "output", "f"), "utf8"), "mine");
+		const aside = readdirSync(path.join(cache, "daemon")).filter((name) => name.startsWith(".tmp-stale-k-"));
+		assert.equal(aside.length, 1);
+		assert.equal(readFileSync(path.join(cache, "daemon", aside[0], "output", "f"), "utf8"), "half-written");
+	});
+
+	test("takes over a lock its owner abandoned, and times out on a live one", () => {
+		const root = tempDir();
+		const cache = path.join(root, "cache");
+		const lock = path.join(cache, "daemon", ".tmp-lock-k");
+		mkdirSync(lock, { recursive: true });
+		const old = new Date(Date.now() - 10 * 60 * 1000);
+		utimesSync(lock, old, old);
+		assert.equal(withEntryLock(cache, "daemon", "k", () => "ran"), "ran");
+		assert.equal(existsSync(lock), false);
+
+		mkdirSync(lock);
+		assert.throws(() => withEntryLock(cache, "daemon", "k", () => "ran", { waitMs: 50 }), /timed out waiting for the build cache lock/);
+		assert.equal(existsSync(lock), true);
+	});
+
+	test("quarantines an entry only while it is still bad", () => {
+		const root = tempDir();
+		const cache = path.join(root, "cache");
+		const final = path.join(cache, "daemon", "k");
+		mkdirSync(path.join(final, "output"), { recursive: true });
+		writeFileSync(path.join(final, "meta.json"), "{}");
+		assert.equal(quarantineEntry(cache, "daemon", "k", () => false), false);
+		assert.equal(existsSync(final), true);
+		assert.equal(quarantineEntry(cache, "daemon", "k", () => true), true);
+		assert.equal(existsSync(final), false);
+		assert.equal(readdirSync(path.join(cache, "daemon")).filter((name) => name.startsWith(".tmp-stale-k-")).length, 1);
 	});
 
 	test("never replaces an entry another checkout completed during the store", () => {

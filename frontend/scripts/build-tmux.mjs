@@ -1,18 +1,18 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { cpus, tmpdir } from "node:os";
-import {
-	chmodSync,
-	copyFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	buildEnvironment,
+	compilerIdentity,
+	ensureCachedBuild,
+	fetchVerified,
+	sourceDownloadsDir,
+	writableDownloadsDir,
+	tmuxCacheKey,
+	tmuxCacheLocation,
+} from "./tmux-build-cache.mjs";
 import { BUNDLED_TMUX_SHA256, BUNDLED_TMUX_VERSION } from "./tmux-version.mjs";
 
 const TMUX = {
@@ -55,7 +55,6 @@ const BUILD_REVISION = 5;
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = resolve(scriptsDir, "..");
-const repoRoot = resolve(frontendRoot, "..");
 const outputRoot = join(frontendRoot, "tmux");
 const outputBinary = join(outputRoot, "bin", "tmux");
 
@@ -65,34 +64,52 @@ if (process.platform !== "darwin" && process.platform !== "linux") {
 	process.exit(0);
 }
 
-const cacheKey = `${process.platform}-${process.arch}-r${BUILD_REVISION}-${SOURCES.map((source) => source.version).join("-")}`;
-// Keep source/build caches outside frontend/: Electron Packager treats that
-// directory as the app root and would otherwise copy hundreds of megabytes of
-// intermediate objects into app.asar in addition to the tiny extraResource.
-const cacheRoot = join(repoRoot, ".cache", "bundled-tmux", cacheKey);
-const downloadsRoot = join(repoRoot, ".cache", "bundled-tmux", "downloads");
-const sourceRoot = join(cacheRoot, "src");
-const prefix = join(cacheRoot, "prefix");
-const cachedBinary = join(cacheRoot, "tmux");
-const stampPath = join(cacheRoot, "complete.json");
-const expectedStamp =
-	JSON.stringify({ buildRevision: BUILD_REVISION, platform: process.platform, arch: process.arch, sources: SOURCES }, null, 2) +
-	"\n";
-
-mkdirSync(downloadsRoot, { recursive: true });
-
-if (!existsSync(cachedBinary) || !existsSync(stampPath) || readFileSync(stampPath, "utf8") !== expectedStamp) {
-	await build();
+// Shared by every checkout on this machine unless the build environment is
+// customised (see tmux-build-cache.mjs). The key covers the sources, compiler,
+// build-relevant environment and this file's build() recipe, so editing the
+// recipe or upgrading Xcode builds afresh instead of reusing a stale binary.
+const cacheInputs = {
+	platform: process.platform,
+	arch: process.arch,
+	buildRevision: BUILD_REVISION,
+	sources: SOURCES,
+	compiler: compilerIdentity(),
+	environment: buildEnvironment(),
+	recipe: build.toString(),
+};
+const { shared, root: cacheRoot } = tmuxCacheLocation({ repoRoot: resolve(frontendRoot, "..") });
+if (!shared) {
+	console.log(`Custom build environment (${Object.keys(cacheInputs.environment).join(", ")}): keeping the tmux build in this checkout.`);
 }
+// Resolved on the first download only: a hit, even from a read-only cache,
+// never needs a writable sources directory.
+let downloadsRoot;
 
-rmSync(outputRoot, { recursive: true, force: true });
-mkdirSync(join(outputRoot, "bin"), { recursive: true });
-mkdirSync(join(outputRoot, "licenses"), { recursive: true });
-copyFileSync(cachedBinary, outputBinary);
-chmodSync(outputBinary, 0o755);
-for (const source of SOURCES) {
-	copyFileSync(join(sourceRoot, source.directory, source.license), join(outputRoot, "licenses", `${source.name}.txt`));
-}
+// The entry holds the binary and the licenses that ship beside it. The sources
+// are sha256-pinned and the environment and recipe are fixed for this process,
+// so only the compiler can change under a running build: re-probe it after.
+const { recipe: _recipe, ...metaInputs } = cacheInputs;
+await ensureCachedBuild({
+	root: cacheRoot,
+	key: tmuxCacheKey(cacheInputs),
+	currentKey: () => tmuxCacheKey({ ...cacheInputs, compiler: compilerIdentity() }),
+	meta: { inputs: metaInputs },
+	build,
+	isComplete: (built) =>
+		existsSync(join(built, "tmux")) && SOURCES.every((source) => existsSync(join(built, "licenses", `${source.name}.txt`))),
+	use: (built) => {
+		rmSync(outputRoot, { recursive: true, force: true });
+		mkdirSync(join(outputRoot, "bin"), { recursive: true });
+		// File by file into a fresh directory: copying the directory would carry
+		// over a read-only cache's permissions and block the next rebuild.
+		mkdirSync(join(outputRoot, "licenses"));
+		for (const source of SOURCES) {
+			copyFileSync(join(built, "licenses", `${source.name}.txt`), join(outputRoot, "licenses", `${source.name}.txt`));
+		}
+		copyFileSync(join(built, "tmux"), outputBinary);
+		chmodSync(outputBinary, 0o755);
+	},
+});
 writeFileSync(
 	join(outputRoot, "VERSIONS.json"),
 	JSON.stringify(
@@ -116,7 +133,11 @@ if (version !== `tmux ${TMUX.version}`) {
 verifyTerminfoAttach(outputBinary);
 console.log(`Bundled ${version} at ${outputBinary}`);
 
-async function build() {
+// Builds in a private work directory and writes what ships (the binary and
+// each source's license) to `output`, which ensureCachedBuild then publishes.
+async function build(buildDir, output) {
+	const sourceRoot = join(buildDir, "src");
+	const prefix = join(buildDir, "prefix");
 	for (const source of SOURCES) await download(source);
 
 	rmSync(sourceRoot, { recursive: true, force: true });
@@ -219,42 +240,26 @@ async function build() {
 
 	const builtBinary = join(tmuxDir, "tmux");
 	verifyPortableLinkage(builtBinary, prefix);
-	copyFileSync(builtBinary, cachedBinary);
-	chmodSync(cachedBinary, 0o755);
-	writeFileSync(stampPath, expectedStamp);
+	const binary = join(output, "tmux");
+	copyFileSync(builtBinary, binary);
+	chmodSync(binary, 0o755);
+	mkdirSync(join(output, "licenses"));
+	for (const source of SOURCES) {
+		copyFileSync(join(sourceRoot, source.directory, source.license), join(output, "licenses", `${source.name}.txt`));
+	}
 }
 
 async function download(source) {
-	const archive = archivePath(source);
-	if (existsSync(archive) && sha256(archive) === source.sha256) return;
-	rmSync(archive, { force: true });
-	const part = `${archive}.part-${process.pid}`;
-	console.log(`Downloading ${source.name} ${source.version}...`);
-	let lastError;
-	for (let attempt = 1; attempt <= 3; attempt += 1) {
-		rmSync(part, { force: true });
-		try {
-			const response = await fetch(source.url, { redirect: "follow" });
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			writeFileSync(part, Buffer.from(await response.arrayBuffer()));
-			if (sha256(part) !== source.sha256) throw new Error("sha256 mismatch");
-			renameSync(part, archive);
-			return;
-		} catch (error) {
-			lastError = error;
-			if (attempt < 3) await new Promise((resolveDelay) => setTimeout(resolveDelay, attempt * 1000));
-		}
+	try {
+		await fetchVerified({ url: source.url, sha256: source.sha256, archive: archivePath(source), label: `${source.name} ${source.version}` });
+	} catch (error) {
+		fail(error instanceof Error ? error.message : String(error));
 	}
-	rmSync(part, { force: true });
-	fail(`failed to download ${source.url}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
 function archivePath(source) {
+	downloadsRoot ??= writableDownloadsDir(sourceDownloadsDir(), join(resolve(frontendRoot, ".."), ".cache", "bundled-tmux-sources"));
 	return join(downloadsRoot, `${source.name}-${source.version}.tar.gz`);
-}
-
-function sha256(file) {
-	return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
 
 function verifyPortableLinkage(binary, buildPrefix) {
