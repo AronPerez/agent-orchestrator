@@ -3,12 +3,15 @@ package agy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	agentagy "github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -25,12 +28,41 @@ const minimumVersion = "1.1.6"
 // HostTrustWarning documents the authority retained by Agy's interactive TUI.
 const HostTrustWarning = "experimental host-trusted reviewer: Agy sandbox mode is not OS isolation and its built-in tools retain host authority"
 
-var requiredFlags = []string{"--agent", "--conversation", "--prompt-interactive", "--sandbox"}
+var requiredFlags = []string{"--agent", "--conversation", "--prompt-interactive", "--sandbox", "--settings"}
+
+// reviewerSettings are agy session settings, never saved, whose deny rules keep
+// the reviewer from editing the checkout, committing, pushing or merging, and
+// from the worker's own Orchestrator commands. agy enforces deny rules even
+// over approvals that skip permission prompts (checked live on agy 1.5.16).
+//
+// The reviewer runs in the worker's checkout, where an agy worker's always-on
+// rule (.agents/rules/ao-agent-orchestrator.md) addresses any agy session there
+// as the worker, and agy follows that rule over the reviewer's own prompt. The
+// worker commands are denied so that following it cannot act as the worker.
+// Posting and recording the review (gh api --method POST, ao review submit)
+// stay allowed. Shell commands can still write files, so this is not
+// read-only isolation: see HostTrustWarning.
+var reviewerSettings = func() string {
+	encoded, err := json.Marshal(map[string]any{"permissions": map[string]any{"deny": reviewerDenyRules}})
+	if err != nil {
+		panic("agy reviewer: encode session settings: " + err.Error())
+	}
+	return string(encoded)
+}()
+
+var reviewerDenyRules = []string{
+	"write_file(*)", "mcp(*)",
+	"command(git commit)", "command(git push)",
+	"command(gh pr merge)", "command(gh pr create)",
+	"command(ao report)", "command(ao session)", "command(ao spawn)", "command(ao send)", "command(ao decision)",
+}
 
 // Reviewer describes Agy's host-trusted interactive lifecycle.
 type Reviewer struct {
 	resolveBinary func(context.Context) (string, error)
 	run           func(context.Context, map[string]string, string, ...string) ([]byte, error)
+	// installHooks installs AO's agy activity hooks in the reviewed checkout.
+	installHooks func(context.Context, string) error
 }
 
 // New returns the experimental host-trusted adapter.
@@ -42,6 +74,10 @@ func New() *Reviewer {
 			cmd.Env = appendEnvironment(os.Environ(), env)
 			return cmd.CombinedOutput()
 		},
+		installHooks: func(ctx context.Context, workspace string) error {
+			// No standing instructions: the worker's rule, if any, is left as is.
+			return agentagy.New().GetAgentHooks(ctx, ports.WorkspaceHookConfig{WorkspacePath: workspace})
+		},
 	}
 }
 
@@ -50,6 +86,11 @@ func (*Reviewer) Harness() domain.ReviewerHarness { return HarnessID }
 
 var _ ports.Reviewer = (*Reviewer)(nil)
 var _ ports.ReviewerCanceller = (*Reviewer)(nil)
+var _ ports.ReviewerActivityHooks = (*Reviewer)(nil)
+
+// ReviewActivityHooks reports that the reviewer installs AO's agy hooks in the
+// checkout before every launch, so its active and idle signals are reliable.
+func (*Reviewer) ReviewActivityHooks() bool { return true }
 
 // ReviewCommand launches Agy's permanent interactive TUI in sandbox mode. The
 // checkout and AO prompt root are explicitly added because this experimental
@@ -71,15 +112,27 @@ func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation
 	}
 	envVars := env.TUIEnvironment()
 	envVars["AO_DATA_DIR"] = env.DataDir
+	if err := seedOnboardingComplete(env.ConfigRoot); err != nil {
+		return ports.ReviewCommandSpec{}, fmt.Errorf("agy reviewer: seed first-run state: %w", err)
+	}
 	if err := r.verifyCompatibility(ctx, binary, envVars); err != nil {
 		return ports.ReviewCommandSpec{}, err
+	}
+	if err := r.verifySignedIn(ctx, binary, env.ConfigRoot, envVars); err != nil {
+		return ports.ReviewCommandSpec{}, err
+	}
+	if r.installHooks == nil {
+		return ports.ReviewCommandSpec{}, errors.New("agy reviewer: no activity hook installer")
+	}
+	if err := r.installHooks(ctx, inv.WorkspacePath); err != nil {
+		return ports.ReviewCommandSpec{}, fmt.Errorf("agy reviewer: install activity hooks: %w", err)
 	}
 	prompt := inv.Prompt
 	if strings.TrimSpace(inv.SystemPromptFile) != "" {
 		prompt = "Read and follow the reviewer system instructions at `" + filepath.ToSlash(inv.SystemPromptFile) + "`, then " + prompt
 	}
 	return ports.ReviewCommandSpec{
-		Argv:             interactiveArgv(binary, inv.WorkspacePath, inv.TaskPromptRoot, prompt),
+		Argv:             withReviewerSettings(interactiveArgv(binary, inv.WorkspacePath, inv.TaskPromptRoot, inv.Config.Model, prompt)),
 		Env:              envVars,
 		WorkingDirectory: inv.WorkspacePath,
 	}, nil
@@ -119,6 +172,26 @@ func (r *Reviewer) verifyCompatibility(ctx context.Context, binary string, env m
 	return nil
 }
 
+// signInProbeTimeout bounds the `agy models` sign-in probe.
+const signInProbeTimeout = 20 * time.Second
+
+// verifySignedIn fails fast when Agy is not signed in inside the isolated
+// reviewer home. A signed-out Agy opens its login picker, which nobody can
+// answer in the reviewer pane, so the review would wait forever (#8862).
+//
+// `agy models` starts no login. It exits 0 even when signed out, so only its
+// sign-in message counts as signed out; any other result, including a probe
+// error, is inconclusive and the launch proceeds as before.
+func (r *Reviewer) verifySignedIn(ctx context.Context, binary, configRoot string, env map[string]string) error {
+	probeCtx, cancel := context.WithTimeout(ctx, signInProbeTimeout)
+	defer cancel()
+	out, _ := r.run(probeCtx, env, binary, "models")
+	if !strings.Contains(strings.ToLower(string(out)), "please sign in") {
+		return nil
+	}
+	return fmt.Errorf("agy reviewer: Agy is not signed in for reviews; sign in once in the reviewer home by running `HOME=%q XDG_CONFIG_HOME=%q %q` and choosing a login method, then retry the review", configRoot, configRoot, binary)
+}
+
 func appendEnvironment(base []string, overrides map[string]string) []string {
 	result := append([]string(nil), base...)
 	for key, value := range overrides {
@@ -139,8 +212,70 @@ func (*Reviewer) ReviewCancel(context.Context) (ports.ReviewCancelSpec, error) {
 	return ports.ReviewCancelSpec{Mode: ports.ReviewCancelInterrupt, Interrupts: 1}, nil
 }
 
-func interactiveArgv(binary, workspacePath, promptRoot, prompt string) []string {
+// onboardingFlags are the cache/onboarding.json keys Agy's TUI reads to decide
+// whether to show its first-run setup wizard. Enterprise onboarding is left
+// untouched because it depends on the account, not on local setup.
+var onboardingFlags = []string{"consumerOnboardingComplete", "onboardingComplete"}
+
+// seedOnboardingComplete marks Agy's first-run setup as done inside the
+// isolated reviewer home. Without it the reviewer TUI opens on the setup
+// wizard (theme picker), which nobody can answer, so no verdict is returned
+// (#8862). Existing keys written by Agy are preserved.
+func seedOnboardingComplete(configRoot string) error {
+	dir := filepath.Join(configRoot, ".gemini", agentagy.CLIStorageDir, "cache")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "onboarding.json")
+	// Readable state is preserved; missing, unreadable, or corrupt state is
+	// replaced so it can never block the reviewer launch.
+	state := map[string]json.RawMessage{}
+	if raw, err := os.ReadFile(path); err == nil {
+		if json.Unmarshal(raw, &state) != nil || state == nil {
+			state = map[string]json.RawMessage{}
+		}
+	}
+	for _, key := range onboardingFlags {
+		state[key] = json.RawMessage("true")
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	// Write through a private temp file and rename it into place, so an
+	// existing file with an unusable mode is replaced rather than reused.
+	// Directory and storage failures still surface as errors.
+	tmp, err := os.CreateTemp(dir, ".onboarding-*.json")
+	if err != nil {
+		return err
+	}
+	// Best-effort cleanup; after a successful rename the temp name is gone.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+// withReviewerSettings puts reviewerSettings right after `agy --sandbox`.
+func withReviewerSettings(argv []string) []string {
+	return slices.Insert(argv, 2, "--settings", reviewerSettings)
+}
+
+func interactiveArgv(binary, workspacePath, promptRoot, model, prompt string) []string {
 	argv := []string{binary, "--sandbox"}
+	// Mirror the Agy worker launcher: pass the configured model, and omit the
+	// flag when unset so Agy falls back to its own default (#8919).
+	if model = strings.TrimSpace(model); model != "" {
+		argv = append(argv, "--model", model)
+	}
 	if strings.TrimSpace(workspacePath) != "" {
 		argv = append(argv, "--add-dir", workspacePath)
 	}
