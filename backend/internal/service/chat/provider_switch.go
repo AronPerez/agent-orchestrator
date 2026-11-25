@@ -434,6 +434,11 @@ func (s *Service) switchProvider(ctx context.Context, id domain.SessionID, reque
 			Detail:  detail, RequestID: strings.TrimSpace(request.IdempotencyKey),
 			ProviderItemID: started.ProviderBoundary.ID + ":provider-switch",
 		}
+		// Plan is stored with the chat, but a target that cannot plan must not
+		// inherit it: the composer would show Plan on while the agent acts.
+		if !started.Capabilities.Has(ports.ChatCapabilityPlanMode) {
+			started.Conversation.Settings.PlanMode = false
+		}
 		// The target's settings are saved with the switch, so the source never
 		// resumes with them, whether the target fails or the daemon dies first.
 		if err := s.store.CommitProviderSwitch(operationCtx, targetRecord, *started.ProviderBoundary, started.ControllerGeneration, started.Conversation.Settings, switchActivity); err != nil {
