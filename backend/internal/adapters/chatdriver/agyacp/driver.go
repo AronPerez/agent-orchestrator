@@ -263,13 +263,9 @@ func splitModelVariant(model string) (string, acpdriver.SessionOption, bool) {
 // resource URI in testing) rather than as instructions, so plain text is the
 // channel it follows. The instructions do not depend on any mode the user can
 // switch, so they survive approval changes.
-//
-// A workspace prepared for an agy session holds AO's always-on rule with the
-// same instructions (see agy.StandingRuleInstalled), which `agy acp` loads on
-// every turn, so the preamble is left out there rather than sent twice.
 func sessionPreamble(cfg acpdriver.LaunchConfig) []acpsdk.ContentBlock {
 	standing := strings.TrimSpace(cfg.SystemPrompt)
-	if standing == "" || agy.StandingRuleInstalled(cfg.WorkspacePath) {
+	if standing == "" {
 		return nil
 	}
 	return []acpsdk.ContentBlock{acpdriver.PlainStandingInstructionsBlock(standing)}
