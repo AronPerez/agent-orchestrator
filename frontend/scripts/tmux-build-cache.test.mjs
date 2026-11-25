@@ -2,14 +2,16 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	buildDirFor,
+	buildEnvironment,
 	compilerIdentity,
 	pruneAbandonedBuilds,
 	publishBuild,
 	tmuxBuildCacheRoot,
 	tmuxCacheKey,
+	tmuxCacheLocation,
 } from "./tmux-build-cache.mjs";
 
 const inputs = {
@@ -104,6 +106,46 @@ describe("tmux build cache", () => {
 
 	it("tolerates a cache root that does not exist yet", () => {
 		expect(() => pruneAbandonedBuilds(join(dir, "missing"))).not.toThrow();
+	});
+
+	describe("build environment", () => {
+		const keyFor = (env) => tmuxCacheKey({ ...inputs, environment: buildEnvironment(env) });
+
+		it("reuses one shared build across checkouts with the default environment", () => {
+			const env = { HOME: "/Users/me", PATH: "/usr/bin", PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig" };
+			const first = tmuxCacheLocation({ env, home: "/Users/me", repoRoot: "/src/checkout-a" });
+			const second = tmuxCacheLocation({ env, home: "/Users/me", repoRoot: "/src/checkout-b" });
+			expect(first).toEqual({ shared: true, root: "/Users/me/.ao/build-cache/bundled-tmux" });
+			expect(second).toEqual(first);
+			expect(keyFor(env)).toBe(keyFor({}));
+		});
+
+		it("never shares or reuses a build made with a custom flag", () => {
+			const env = { CFLAGS: "-O3 -march=native" };
+			expect(tmuxCacheLocation({ env, home: "/Users/me", repoRoot: "/src/checkout-a" })).toEqual({
+				shared: false,
+				root: "/src/checkout-a/.cache/bundled-tmux",
+			});
+			expect(keyFor(env)).not.toBe(keyFor({}));
+		});
+
+		it.each(["CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "MACOSX_DEPLOYMENT_TARGET", "SDKROOT"])(
+			"treats %s as customising the build",
+			(name) => {
+				expect(buildEnvironment({ [name]: "x" })).toEqual({ [name]: "x" });
+				expect(tmuxCacheLocation({ env: { [name]: "x" }, repoRoot: "/src/a" }).shared).toBe(false);
+			},
+		);
+
+		it("ignores unrelated and empty variables", () => {
+			expect(buildEnvironment({ PATH: "/usr/bin", CFLAGS: "", HOME: "/Users/me" })).toEqual({});
+		});
+
+		it("identifies the compiler named by $CC", () => {
+			const run = vi.fn(() => ({ status: 0, stdout: "gcc (GCC) 14.2.0\n" }));
+			expect(compilerIdentity(run, { CC: "gcc-14 -std=c11" }).cc).toBe("gcc (GCC) 14.2.0");
+			expect(run).toHaveBeenCalledWith("gcc-14", ["--version"], expect.anything());
+		});
 	});
 
 	it("identifies the compiler by its first version line", () => {

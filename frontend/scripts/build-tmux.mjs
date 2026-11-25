@@ -15,11 +15,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	buildDirFor,
+	buildEnvironment,
 	compilerIdentity,
 	pruneAbandonedBuilds,
 	publishBuild,
-	tmuxBuildCacheRoot,
 	tmuxCacheKey,
+	tmuxCacheLocation,
 } from "./tmux-build-cache.mjs";
 import { BUNDLED_TMUX_SHA256, BUNDLED_TMUX_VERSION } from "./tmux-version.mjs";
 
@@ -72,8 +73,9 @@ if (process.platform !== "darwin" && process.platform !== "linux") {
 	process.exit(0);
 }
 
-// Shared by every checkout on this machine (see tmux-build-cache.mjs). The key
-// covers the sources, compiler and this file's build() recipe, so editing the
+// Shared by every checkout on this machine unless the build environment is
+// customised (see tmux-build-cache.mjs). The key covers the sources, compiler,
+// build-relevant environment and this file's build() recipe, so editing the
 // recipe or upgrading Xcode builds afresh instead of reusing a stale binary.
 const cacheInputs = {
 	platform: process.platform,
@@ -81,9 +83,13 @@ const cacheInputs = {
 	buildRevision: BUILD_REVISION,
 	sources: SOURCES,
 	compiler: compilerIdentity(),
+	environment: buildEnvironment(),
 	recipe: build.toString(),
 };
-const buildCache = tmuxBuildCacheRoot();
+const { shared, root: buildCache } = tmuxCacheLocation({ repoRoot: resolve(frontendRoot, "..") });
+if (!shared) {
+	console.log(`Custom build environment (${Object.keys(cacheInputs.environment).join(", ")}): keeping the tmux build in this checkout.`);
+}
 const cacheRoot = join(buildCache, tmuxCacheKey(cacheInputs));
 const downloadsRoot = join(buildCache, "downloads");
 const sourceRoot = join(cacheRoot, "src");
