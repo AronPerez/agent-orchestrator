@@ -3640,6 +3640,13 @@
 	"shell.unpinSession": "Unpin session",
 	"shell.pinProject": "Pin to top",
 	"shell.unpinProject": "Unpin",
+	"shell.hideProject": "Masquer le projet",
+	"shell.showProject": "Afficher le projet",
+	"shell.hiddenProjectsCount": "Masqués : {{count}}",
+	"shell.hiddenProjectsAria": "Projets masqués : {{count}}",
+	"shell.hiddenProjects": "Projets masqués",
+	"shell.showHiddenProjectAction": "Afficher",
+	"shell.showHiddenProject": "Afficher {{name}}",
 	"newTask.task": "Task",
 	"newTask.taskPlaceholders": [
 		"Parcourez les fichiers du backend et dites-moi s'il y a du code mort",

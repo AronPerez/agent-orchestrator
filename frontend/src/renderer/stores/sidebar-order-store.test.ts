@@ -85,3 +85,52 @@ it("pins projects to the top and restores the pins after a renderer restart", as
 	const restarted = await import("./sidebar-order-store");
 	expect(restarted.useSidebarOrderStore.getState().pinnedProjectIds).toEqual(["delta"]);
 });
+
+it("hides a project on one machine only and restores the hidden list after a renderer restart", async () => {
+	const { HIDDEN_PROJECTS_STORAGE_KEY, hiddenProjectKey, useSidebarOrderStore } = await import("./sidebar-order-store");
+	const store = useSidebarOrderStore.getState();
+	store.setProjectHidden("skyvern-cloud", "https://m4-mini.example:3001", true);
+	store.setProjectHidden("cinder-cloud", undefined, true);
+	// Hiding twice does not add a second entry.
+	store.setProjectHidden("cinder-cloud", undefined, true);
+
+	const m4 = hiddenProjectKey("skyvern-cloud", "https://m4-mini.example:3001");
+	const hidden = useSidebarOrderStore.getState().hiddenProjectKeys;
+	expect(hidden).toEqual([m4, "cinder-cloud"]);
+	// The same project id here, on the local host, and on another machine stays listed.
+	expect(hidden).not.toContain(hiddenProjectKey("skyvern-cloud", "https://m6-mini.example:3001"));
+	expect(hidden).not.toContain(hiddenProjectKey("skyvern-cloud"));
+	expect(hidden).not.toContain(hiddenProjectKey("skyvern-cloud", "local"));
+	expect(hiddenProjectKey("cinder-cloud", "local")).toBe("cinder-cloud");
+	// Hiding is a list preference: order and pins are left alone.
+	expect(useSidebarOrderStore.getState().projectOrder).toEqual([]);
+	expect(useSidebarOrderStore.getState().pinnedProjectIds).toEqual([]);
+	expect(JSON.parse(window.localStorage.getItem(HIDDEN_PROJECTS_STORAGE_KEY) ?? "null")).toEqual([m4, "cinder-cloud"]);
+
+	vi.resetModules();
+	const restarted = await import("./sidebar-order-store");
+	expect(restarted.useSidebarOrderStore.getState().hiddenProjectKeys).toEqual([m4, "cinder-cloud"]);
+
+	restarted.useSidebarOrderStore.getState().setProjectHidden("skyvern-cloud", "https://m4-mini.example:3001", false);
+	expect(restarted.useSidebarOrderStore.getState().hiddenProjectKeys).toEqual(["cinder-cloud"]);
+	restarted.useSidebarOrderStore.getState().setProjectHidden("cinder-cloud", undefined, false);
+	expect(restarted.useSidebarOrderStore.getState().hiddenProjectKeys).toEqual([]);
+	expect(window.localStorage.getItem(HIDDEN_PROJECTS_STORAGE_KEY)).toBeNull();
+});
+
+it("keeps a pin through hiding, so the project returns to the pinned group", async () => {
+	const { useSidebarOrderStore } = await import("./sidebar-order-store");
+	const store = useSidebarOrderStore.getState();
+	store.setProjectOrder(["alpha", "beta"]);
+	store.setProjectPinned("beta", true);
+	store.setProjectHidden("beta", undefined, true);
+	store.setProjectHidden("beta", undefined, false);
+	expect(useSidebarOrderStore.getState().pinnedProjectIds).toEqual(["beta"]);
+	expect(useSidebarOrderStore.getState().projectOrder).toEqual(["beta", "alpha"]);
+});
+
+it("ignores a malformed saved hidden list", async () => {
+	window.localStorage.setItem("ao.sidebar.hidden-projects", '[1,"remote:h:p",null,"remote:h:p"]');
+	const { useSidebarOrderStore } = await import("./sidebar-order-store");
+	expect(useSidebarOrderStore.getState().hiddenProjectKeys).toEqual(["remote:h:p"]);
+});

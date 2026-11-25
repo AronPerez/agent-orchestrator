@@ -108,6 +108,8 @@ export type SidebarOrderInput = {
 	pinnedProjectIds?: readonly string[];
 	/** Drag order of each project's sessions, keyed by `sessionUiKey(projectId, hostId)`. */
 	sessionOrders?: Readonly<Record<string, readonly string[]>>;
+	/** Projects hidden from the sidebar, keyed by `sessionUiKey(projectId, hostId)`. */
+	hiddenProjectKeys?: readonly string[];
 };
 
 /** Sessions the sidebar lists for one project: workers only, terminated ones dropped. */
@@ -124,7 +126,7 @@ function listedSessions(
 /**
  * Every session reachable from the sidebar, in the order the sidebar shows
  * them: Sessions (the projectless agents), then projects (pinned first) in the
- * user's order, then remote hosts. Each group lists its own pinned sessions
+ * user's order, then remote hosts, leaving out hidden projects. Each group lists its own pinned sessions
  * first. A session is listed once, keyed by host. Keyboard navigation and the
  * ⌘1–9 jump both walk this list so they always agree with what is on screen.
  */
@@ -134,6 +136,7 @@ export function buildSidebarSessionOrder({
 	projectOrder = [],
 	pinnedProjectIds = [],
 	sessionOrders,
+	hiddenProjectKeys = [],
 }: SidebarOrderInput): SidebarNavSession[] {
 	const entries: SidebarNavSession[] = [];
 	const seen = new Set<string>();
@@ -160,12 +163,15 @@ export function buildSidebarSessionOrder({
 		sessions: scratchpads.flatMap((workspace) => workspace.sessions),
 	};
 	for (const session of listedSessions(scratchpad, sessionOrders)) add(session, scratchpadOf.get(session.id) ?? scratchpad);
-	const projects = workspaces.filter((workspace) => !scratchpads.includes(workspace));
+	// A hidden project's sessions are not on screen, so they are not stepped through.
+	const hidden = new Set(hiddenProjectKeys);
+	const listed = (workspace: WorkspaceSummary) => !hidden.has(sessionUiKey(workspace.id, workspace.hostId));
+	const projects = workspaces.filter((workspace) => !scratchpads.includes(workspace) && listed(workspace));
 	const orderedProjects = pinnedFirst(applyOrder(projects, (item) => item.id, projectOrder, "start"), (item) => item.id, pinnedProjectIds);
 	for (const workspace of orderedProjects) {
 		for (const session of listedSessions(workspace, sessionOrders)) add(session, workspace);
 	}
-	for (const workspace of remoteWorkspaces) {
+	for (const workspace of remoteWorkspaces.filter(listed)) {
 		for (const session of listedSessions(workspace, sessionOrders)) add(session, workspace);
 	}
 	return entries;

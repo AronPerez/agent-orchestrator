@@ -101,7 +101,7 @@ beforeEach(() => {
 	remoteDeleteMock.mockReset();
 	navigateMock.mockReset().mockResolvedValue(undefined);
 	useUiStore.getState().clearGlobalToast();
-	useSidebarOrderStore.setState({ pinnedProjectIds: [] });
+	useSidebarOrderStore.setState({ pinnedProjectIds: [], hiddenProjectKeys: [] });
 });
 
 afterEach(() => {
@@ -116,7 +116,7 @@ describe("useRemoveProject", () => {
 	it("drops the project and says so before the daemon answers, with no pending state", async () => {
 		const response = deferred<{ data: { projectId: string; removedStorageDir: boolean } }>();
 		deleteMock.mockReturnValue(response.promise);
-		useSidebarOrderStore.setState({ pinnedProjectIds: ["proj-2"] });
+		useSidebarOrderStore.setState({ pinnedProjectIds: ["proj-2"], hiddenProjectKeys: ["proj-2", "proj-3"] });
 		const { queryClient, remove } = setup();
 
 		act(() => remove("proj-2"));
@@ -136,6 +136,8 @@ describe("useRemoveProject", () => {
 		await waitFor(() => expect(isOptimisticallyRemovedProject("proj-2")).toBe(false));
 		expect(localIds(queryClient)).toEqual(["proj-1", "proj-3"]);
 		expect(useSidebarOrderStore.getState().pinnedProjectIds).toEqual([]);
+		// Its hide is forgotten too; other hidden projects stay hidden.
+		expect(useSidebarOrderStore.getState().hiddenProjectKeys).toEqual(["proj-3"]);
 		expect(toasts()).toHaveLength(1);
 	});
 

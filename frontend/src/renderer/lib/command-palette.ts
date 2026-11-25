@@ -513,6 +513,10 @@ export type ProjectActionContext = {
 	restarting: boolean;
 	hasOrchestrator: boolean;
 	setPinned: (pinned: boolean) => void;
+	/** Whether the sidebar's Projects list leaves this project out. */
+	isHidden?: boolean;
+	/** Hides or shows the project's sidebar row; absent where it cannot be hidden. */
+	setHidden?: (hidden: boolean) => void;
 	copyPath: () => void;
 	remove?: () => void;
 };
@@ -540,6 +544,11 @@ export function buildProjectActions(workspace: WorkspaceSummary, ctx: ProjectAct
 	if (workspace.path && !workspace.hostId) row("copy-path", t("editor.copyPath"), { kind: "run", run: ctx.copyPath });
 	if (ctx.canPin) {
 		row("pin", ctx.isPinned ? t("shell.unpinProject") : t("shell.pinProject"), { kind: "run", run: () => ctx.setPinned(!ctx.isPinned) });
+	}
+	const { setHidden } = ctx;
+	// A remote machine's Sessions row hides like a project; the local one is its own section.
+	if (setHidden && (!isStandalone || workspace.hostId)) {
+		row("hide", ctx.isHidden ? t("shell.showProject") : t("shell.hideProject"), { kind: "run", run: () => setHidden(!ctx.isHidden) });
 	}
 	if (!isStandalone && !isAgent) {
 		row("settings", t("shell.projectSettings"), { kind: "navigate", target: { to: "/projects/$projectId/settings", params: { projectId: workspace.id } } });

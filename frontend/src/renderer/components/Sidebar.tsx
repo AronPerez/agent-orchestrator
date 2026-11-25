@@ -22,6 +22,8 @@ import {
 	ChevronRight,
 	CircleAlert,
 	Copy,
+	Eye,
+	EyeOff,
 	GitMerge,
 	GitPullRequest,
 	LoaderCircle,
@@ -44,6 +46,7 @@ import {
 import {
 	useCallback,
 	useEffect,
+	useId,
 	useLayoutEffect,
 	memo,
 	useMemo,
@@ -150,7 +153,7 @@ import { AwakeMenuItem, awakeNeedsAttention, useFooterStayAwake } from "./AwakeC
 import { FOOTER_RAIL_BUTTON_CLASS, SidebarUpdateRail, SidebarUpdateRow } from "./SidebarUpdate";
 import { SettingsSaveStatus, useSettingsPage } from "./SettingsDialog";
 import { useUiStore } from "../stores/ui-store";
-import { useSidebarOrderStore } from "../stores/sidebar-order-store";
+import { hiddenProjectKey, useSidebarOrderStore } from "../stores/sidebar-order-store";
 import { useSessionImportStore } from "../stores/session-import-store";
 import { isSessionUnread, sessionReadKey, useSessionReadStore, useSessionUnread } from "../stores/session-read-store";
 import { useOrchestratorReplyState } from "../stores/orchestrator-reply-store";
@@ -979,10 +982,20 @@ export const Sidebar = memo(function Sidebar({
 	// gets its own Sessions section above the project list rather than a
 	// project row appended to the end of it. The person's own Cloud standalone
 	// agents join it there; each keeps its project, which routes it.
-	const projectWorkspaces = useMemo(() => {
+	// Hidden projects leave the Projects list only; their sessions stay
+	// reachable from Fleet, search, notifications and links.
+	const hiddenProjectKeys = useSidebarOrderStore((state) => state.hiddenProjectKeys);
+	const { projectWorkspaces, listedRemoteWorkspaces, hiddenWorkspaces } = useMemo(() => {
+		const hiddenKeys = new Set(hiddenProjectKeys);
+		const isHidden = (workspace: WorkspaceSummary) => hiddenKeys.has(hiddenProjectKey(workspace.id, workspace.hostId));
 		const scratchpads = new Set(ownScratchpadWorkspaces(orderedWorkspaces));
-		return orderedWorkspaces.filter((workspace) => !scratchpads.has(workspace));
-	}, [orderedWorkspaces]);
+		const projects = orderedWorkspaces.filter((workspace) => !scratchpads.has(workspace));
+		return {
+			projectWorkspaces: projects.filter((workspace) => !isHidden(workspace)),
+			listedRemoteWorkspaces: remoteWorkspaces.filter((workspace) => !isHidden(workspace)),
+			hiddenWorkspaces: [...projects, ...remoteWorkspaces].filter(isHidden),
+		};
+	}, [hiddenProjectKeys, orderedWorkspaces, remoteWorkspaces]);
 	const standaloneWorkspace = useMemo((): WorkspaceSummary => {
 		const scratchpads = ownScratchpadWorkspaces(workspaces);
 		const local = scratchpads.find((workspace) => workspace.kind === STANDALONE_PROJECT_KIND);
@@ -994,7 +1007,12 @@ export const Sidebar = memo(function Sidebar({
 			sessions: scratchpads.flatMap((workspace) => workspace.sessions),
 		};
 	}, [t, workspaces]);
-	const avatarWorkspaces = useMemo(() => [...projectWorkspaces, ...remoteWorkspaces], [projectWorkspaces, remoteWorkspaces]);
+	const remoteHostLabels = useMemo(() => new Map(remoteHosts.map((host) => [host.hostId, host.label])), [remoteHosts]);
+	// Hidden rows keep their avatars; hidden remote rows are already in remoteWorkspaces.
+	const avatarWorkspaces = useMemo(
+		() => [...projectWorkspaces, ...remoteWorkspaces, ...hiddenWorkspaces.filter((workspace) => !workspace.hostId)],
+		[hiddenWorkspaces, projectWorkspaces, remoteWorkspaces],
+	);
 	const projectAvatars = useProjectAvatars(avatarWorkspaces);
 	// A pinned session lives under its project, so a project that holds one
 	// stays listed rather than hiding behind Show more.
@@ -1008,7 +1026,8 @@ export const Sidebar = memo(function Sidebar({
 		showAll: showAllProjects,
 		toggleShowAll: toggleShowAllProjects,
 	} = useShowMoreCap(projectWorkspaces, projectLimit, selection.activeProjectId, isIconRail);
-	const projectContentOpen = (projectWorkspaces.length > 0 || remoteHosts.length > 0) && (projectsOpen || isIconRail);
+	const hasProjectRows = projectWorkspaces.length > 0 || remoteHosts.length > 0 || hiddenWorkspaces.length > 0;
+	const projectContentOpen = hasProjectRows && (projectsOpen || isIconRail);
 	const projectIds = useMemo(
 		() => projectWorkspaces.map((workspace) => workspace.id),
 		[projectWorkspaces],
@@ -1278,7 +1297,7 @@ export const Sidebar = memo(function Sidebar({
 								<p className="mt-1 text-caption text-passive">{workspaceError}</p>
 							</div>
 						) : null}
-						{projectWorkspaces.length > 0 || remoteHosts.length > 0 ? (
+						{hasProjectRows ? (
 							<SectionBody open={projectContentOpen} className="min-h-0 flex-initial group-data-[collapsible=icon]:flex-none">
 								<SidebarSectionScroller
 									className={`${SECTION_SCROLLER_CLASS} min-h-0 flex-1`}
@@ -1307,7 +1326,7 @@ export const Sidebar = memo(function Sidebar({
 										))}
 										<RemoteHostsSection
 											hosts={remoteHosts}
-											workspaces={remoteWorkspaces}
+											workspaces={listedRemoteWorkspaces}
 											failedHostIds={remoteFailedHostIds}
 											renderProject={(host, workspace) => {
 												const hostId = host.hostId;
@@ -1345,6 +1364,13 @@ export const Sidebar = memo(function Sidebar({
 											}}
 											onRetry={onRetryRemoteHosts}
 										/>
+										{!isIconRail && !workspaceError && hiddenWorkspaces.length > 0 ? (
+											<HiddenProjectsGroup
+												workspaces={hiddenWorkspaces}
+												hostLabels={remoteHostLabels}
+												avatars={projectAvatars}
+											/>
+										) : null}
 										{isIconRail && <CreateProjectListItem />}
 										<div
 											aria-hidden="true"
@@ -1846,6 +1872,13 @@ const ProjectItem = memo(function ProjectItem({
 	const canPin = !isStandalone && !workspace.hostId;
 	const isPinned = useSidebarOrderStore((state) => canPin && state.pinnedProjectIds.includes(workspace.id));
 	const setProjectPinned = useSidebarOrderStore((state) => state.setProjectPinned);
+	// Hiding only takes the row out of the Projects list, on this app install.
+	// Keyed per machine, so the same project on another host stays listed.
+	// The local Sessions section sits above Projects and is not a row here; a
+	// remote machine's Sessions row is, and hides like any project row.
+	const canHide = !isStandalone || Boolean(workspace.hostId);
+	const isHidden = useSidebarOrderStore((state) => canHide && state.hiddenProjectKeys.includes(hiddenProjectKey(workspace.id, workspace.hostId)));
+	const setProjectHidden = useSidebarOrderStore((state) => state.setProjectHidden);
 	const openPullRequestCount = new Set(
 		workspace.sessions.flatMap((session) => openPRs(session).map((pr) => pr.url)),
 	).size;
@@ -1926,6 +1959,15 @@ const ProjectItem = memo(function ProjectItem({
 					icon: isPinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />,
 					label: isPinned ? t("shell.unpinProject") : t("shell.pinProject"),
 					onSelect: () => setProjectPinned(workspace.id, !isPinned),
+				}]
+				: []),
+			...(canHide
+				? [{
+					kind: "item" as const,
+					id: "hide",
+					icon: isHidden ? <Eye aria-hidden="true" /> : <EyeOff aria-hidden="true" />,
+					label: isHidden ? t("shell.showProject") : t("shell.hideProject"),
+					onSelect: () => setProjectHidden(workspace.id, workspace.hostId, !isHidden),
 				}]
 				: []),
 			...(!isStandalone && !isAgent
@@ -2203,7 +2245,7 @@ const ProjectItem = memo(function ProjectItem({
 										</Tooltip>
 									</>
 								) : null}
-								{workspace.shared || isStandalone ? null : (
+								{workspace.shared || (isStandalone && !canHide) ? null : (
 									<>
 										<DropdownMenu>
 											<DropdownMenuTrigger asChild>
@@ -3241,6 +3283,107 @@ function FooterMobileMenu({ onConnectMobile, tabIndex }: { onConnectMobile: () =
 				<AwakeMenuItem stay={stay} />
 			</DropdownMenuContent>
 		</DropdownMenu>
+	);
+}
+
+/**
+ * The way back for hidden projects: one muted "N hidden" row at the end of
+ * Projects, opening the hidden rows in place, each with Show. Hidden rows are
+ * not navigation; their sessions stay reachable from Fleet, search and links.
+ */
+function HiddenProjectsGroup({
+	workspaces,
+	hostLabels,
+	avatars,
+}: {
+	workspaces: readonly WorkspaceSummary[];
+	hostLabels: ReadonlyMap<string, string>;
+	avatars: ReadonlyMap<string, string>;
+}) {
+	const { t } = useTranslation();
+	const [open, setOpen] = useState(false);
+	const toggleRef = useRef<HTMLButtonElement>(null);
+	const groupId = useId();
+	const setProjectHidden = useSidebarOrderStore((state) => state.setProjectHidden);
+	const show = (workspace: WorkspaceSummary) => {
+		setProjectHidden(workspace.id, workspace.hostId, false);
+		// The row leaves with its Show button; keep focus in the list: on the
+		// "N hidden" row while others stay hidden, else on the project shown.
+		requestAnimationFrame(() => {
+			if (toggleRef.current?.isConnected) {
+				toggleRef.current.focus();
+				return;
+			}
+			const row = Array.from(document.querySelectorAll<HTMLElement>("li[data-project-id]")).find((node) =>
+				node.dataset.projectId === workspace.id && node.dataset.hostId === workspace.hostId);
+			row?.querySelector<HTMLElement>('[data-telemetry-id="sidebar.project_row"]')?.focus();
+		});
+	};
+	return (
+		<>
+			<SidebarMenuItem className="sidebar-expanded-chrome">
+				<Pressable
+					ref={toggleRef}
+					aria-controls={groupId}
+					aria-expanded={open}
+					aria-label={t("shell.hiddenProjectsAria", { count: workspaces.length })}
+					className={cn(SECTION_ROW_CLASS, NAV_ROW_HIGHLIGHT_HOST_CLASS, "rounded-lg text-left text-muted-foreground")}
+					data-hidden-projects-toggle=""
+					onClick={() => setOpen((value) => !value)}
+					type="button"
+				>
+					<NavRowHighlight />
+					<ChevronRight
+						aria-hidden="true"
+						className={cn(
+							"relative z-[1] transition-[rotate] duration-normal ease-[var(--ease-out)] motion-reduce:transition-none",
+							open && "rotate-90",
+						)}
+					/>
+					<span className="relative z-[1] truncate">{t("shell.hiddenProjectsCount", { count: workspaces.length })}</span>
+				</Pressable>
+			</SidebarMenuItem>
+			{open ? (
+				<li className="sidebar-expanded-chrome list-none" data-sidebar="menu-item">
+					<ul aria-label={t("shell.hiddenProjects")} className="flex flex-col gap-0.5" id={groupId}>
+						{workspaces.map((workspace) => {
+							const key = hiddenProjectKey(workspace.id, workspace.hostId);
+							const hostLabel = workspace.hostId ? hostLabels.get(workspace.hostId) ?? workspace.hostId : undefined;
+							const nameWithHost = hostLabel ? `${workspace.name} · ${hostLabel}` : workspace.name;
+							return (
+								<li
+									key={key}
+									className={cn(SIDEBAR_ROW_CLASS, "flex min-w-0 items-center rounded-lg pl-2.5 pr-1 text-sm font-medium text-muted-foreground")}
+									data-hidden-project-id={workspace.id}
+									data-host-id={workspace.hostId}
+								>
+									<span aria-hidden="true" className="inline-flex size-icon-md shrink-0 translate-y-px items-center justify-center opacity-60">
+										<ProjectIcon avatarUrl={avatars.get(key)} expanded={false} name={workspace.name} seed={workspace.path || workspace.id} />
+									</span>
+									<span className="min-w-0 flex-1 translate-y-px truncate" data-hidden-project-label="">{workspace.name}</span>
+									{hostLabel ? (
+										<Badge variant="outline" className="h-4 min-w-0 max-w-1/2 shrink justify-start px-1.5 text-2xs">
+											<span className="truncate">{hostLabel}</span>
+										</Badge>
+									) : null}
+									<Button
+										size="xs"
+										variant="quiet"
+										aria-label={t("shell.showHiddenProject", { name: nameWithHost })}
+										data-telemetry-id="sidebar.hidden_project_show"
+										onClick={() => show(workspace)}
+										type="button"
+									>
+										<Eye aria-hidden="true" />
+										{t("shell.showHiddenProjectAction")}
+									</Button>
+								</li>
+							);
+						})}
+					</ul>
+				</li>
+			) : null}
+		</>
 	);
 }
 
