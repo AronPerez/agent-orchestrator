@@ -337,7 +337,7 @@ export function withEntryLock(root, name, key, fn, { waitMs = LOCK_WAIT_MS, stal
 		}
 		// Held far longer than any publish takes: its owner died. Take it over.
 		if (Date.now() - held.mtimeMs > staleMs) {
-			takeOverStaleLock(lock, held.ino);
+			takeOverStaleLock(lock, { ino: held.ino, owner: readOwner(lock) });
 			continue;
 		}
 		if (Date.now() > deadline) throw new Error(`timed out waiting for the build cache lock ${lock}`);
@@ -353,8 +353,10 @@ export function withEntryLock(root, name, key, fn, { waitMs = LOCK_WAIT_MS, stal
 // Rename the stale lock to a name only this waiter uses: of several waiters
 // that saw the same stale lock, exactly one rename succeeds. If what moved is
 // not that lock (it was released and a new owner took the path in between),
-// put it straight back.
-export function takeOverStaleLock(lock, staleIno) {
+// put it straight back. The lock is identified by its inode and its owner
+// token together: Linux reuses a freed inode number at once, so a replacement
+// can carry the stale lock's inode, but never its token.
+export function takeOverStaleLock(lock, stale) {
 	const aside = `${lock}-stale-${process.pid}-${randomUUID()}`;
 	try {
 		renameSync(lock, aside);
@@ -367,7 +369,7 @@ export function takeOverStaleLock(lock, staleIno) {
 	} catch {
 		return;
 	}
-	if (moved === staleIno) {
+	if (moved === stale.ino && readOwner(aside) === stale.owner) {
 		rmSync(aside, { recursive: true, force: true });
 		return;
 	}
@@ -379,16 +381,20 @@ export function takeOverStaleLock(lock, staleIno) {
 	}
 }
 
+// A lock's owner token, or null if it has none (its owner died between
+// creating the lock and writing the token).
+function readOwner(lock) {
+	try {
+		return readFileSync(path.join(lock, "owner"), "utf8");
+	} catch {
+		return null;
+	}
+}
+
 // Remove the lock only while it still carries this owner's token: if it was
 // taken over as stale, the new owner's lock stays.
 function releaseLock(lock, token) {
-	let owner;
-	try {
-		owner = readFileSync(path.join(lock, "owner"), "utf8");
-	} catch {
-		return;
-	}
-	if (owner === token) rmSync(lock, { recursive: true, force: true });
+	if (readOwner(lock) === token) rmSync(lock, { recursive: true, force: true });
 }
 
 function asidePath(root, name, key) {

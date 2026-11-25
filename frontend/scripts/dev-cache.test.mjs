@@ -223,16 +223,23 @@ describe("cache entries", () => {
 		const root = tempDir();
 		const lock = path.join(root, ".tmp-lock-k");
 		mkdirSync(lock);
-		const staleIno = statSync(lock).ino;
+		writeFileSync(path.join(lock, "owner"), "dead-owner");
+		const stale = { ino: statSync(lock).ino, owner: "dead-owner" };
 		rmSync(lock, { recursive: true });
 		// Between the waiter's check and its takeover, a new owner took the path.
+		// Linux may hand the new directory the freed inode number, so only the
+		// owner token tells them apart.
 		mkdirSync(lock);
 		writeFileSync(path.join(lock, "owner"), "new-owner");
-		takeOverStaleLock(lock, staleIno);
+		takeOverStaleLock(lock, stale);
+		assert.equal(readFileSync(path.join(lock, "owner"), "utf8"), "new-owner");
+
+		// A replacement that reuses the inode but carries another token stays.
+		takeOverStaleLock(lock, { ino: statSync(lock).ino, owner: "dead-owner" });
 		assert.equal(readFileSync(path.join(lock, "owner"), "utf8"), "new-owner");
 
 		// The stale lock itself is moved out of the way.
-		takeOverStaleLock(lock, statSync(lock).ino);
+		takeOverStaleLock(lock, { ino: statSync(lock).ino, owner: "new-owner" });
 		assert.equal(existsSync(lock), false);
 	});
 
