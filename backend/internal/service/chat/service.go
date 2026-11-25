@@ -343,6 +343,7 @@ func controllerStartResult(
 		ProviderConversationID: controller.ProviderConversationID(),
 		ControllerGeneration:   controller.Generation(),
 		Conversation:           controller.conversation,
+		Capabilities:           controller.Capabilities(),
 		ProviderBoundary:       providerBoundary,
 		CommitProviderHistory:  commitProviderHistory,
 	}
