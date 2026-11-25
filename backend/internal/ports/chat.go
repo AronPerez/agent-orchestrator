@@ -390,7 +390,11 @@ type ChatResumeConfig struct {
 	// Effort is optional; empty keeps the provider conversation's current effort.
 	Effort      string
 	Permissions PermissionMode
-	ReadOnly    bool
+	// Plan is the conversation's stored Plan choice. A driver that reattaches
+	// to a provider still running a turn reads it as that turn's Plan state;
+	// every later turn carries its own ChatTurnSettings.Plan.
+	Plan     bool
+	ReadOnly bool
 	// SystemPrompt is recomputed by the session manager on restore and reapplied
 	// to the provider process. It is not persisted in the conversation transcript.
 	SystemPrompt string

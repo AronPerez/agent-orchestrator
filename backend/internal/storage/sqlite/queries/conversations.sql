@@ -567,7 +567,7 @@ WHERE conversation_id = sqlc.arg(conversation_id)
 -- offset, so a multi-byte character here silently corrupts later queries.
 -- name: UpdateConversationTurnSettings :exec
 UPDATE conversations
-SET model = ?, reasoning_effort = ?, approval_mode = ?, opencode_mode = ?, auto_compact_window = ?, updated_at = ?
+SET model = ?, reasoning_effort = ?, approval_mode = ?, opencode_mode = ?, auto_compact_window = ?, plan_mode = ?, updated_at = ?
 WHERE id = ?;
 
 -- Token position for the conversation, latest wins.

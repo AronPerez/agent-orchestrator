@@ -610,7 +610,7 @@ func (s *Store) CommitProviderSwitch(ctx context.Context, rec domain.SessionReco
 		if err := q.UpdateConversationTurnSettings(ctx, gen.UpdateConversationTurnSettingsParams{
 			Model: nullableString(settings.Model), ReasoningEffort: nullableString(settings.ReasoningEffort),
 			ApprovalMode: nullableString(string(settings.ApprovalMode)), OpencodeMode: settings.OpenCodeMode,
-			AutoCompactWindow: settings.AutoCompactWindow, UpdatedAt: rec.UpdatedAt, ID: branch.ConversationID,
+			AutoCompactWindow: settings.AutoCompactWindow, PlanMode: settings.PlanMode, UpdatedAt: rec.UpdatedAt, ID: branch.ConversationID,
 		}); err != nil {
 			return fmt.Errorf("save switched conversation settings: %w", err)
 		}
@@ -2147,6 +2147,7 @@ func (s *Store) SetConversationSettings(
 		ID:              conversationID,
 
 		AutoCompactWindow: settings.AutoCompactWindow,
+		PlanMode:          settings.PlanMode,
 	}); err != nil {
 		return fmt.Errorf("set conversation settings for %s: %w", conversationID, err)
 	}
@@ -4838,6 +4839,7 @@ func conversationToDomain(row gen.Conversation) domain.ConversationRecord {
 			OpenCodeMode:    row.OpencodeMode,
 
 			AutoCompactWindow: row.AutoCompactWindow,
+			PlanMode:          row.PlanMode,
 		},
 		ProviderTitle: row.ProviderTitle,
 		AppliedTitle:  row.AppliedTitle,

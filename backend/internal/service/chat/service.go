@@ -930,6 +930,7 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 			Model:                  cfg.Model,
 			Effort:                 cfg.Effort,
 			Permissions:            cfg.Permissions,
+			Plan:                   conversation.Settings.PlanMode,
 			ReadOnly:               cfg.ReadOnly,
 			SystemPrompt:           providerSystemPrompt,
 			ProviderScopeID:        providerScopeID,
@@ -2268,9 +2269,8 @@ func (s *Service) Snapshot(ctx context.Context, id domain.SessionID) (Snapshot, 
 			state = live
 			caps = controller.Capabilities()
 		}
-		// Fast and plan mode live with the controller, not in the stored row.
-		live := controller.Settings()
-		rows.Conversation.Settings.FastMode, rows.Conversation.Settings.PlanMode = live.FastMode, live.PlanMode
+		// Fast mode lives with the controller, not in the stored row; Plan is stored.
+		rows.Conversation.Settings.FastMode = controller.Settings().FastMode
 	}
 
 	return Snapshot{
@@ -2389,9 +2389,8 @@ func (s *Service) SnapshotPage(ctx context.Context, id domain.SessionID, beforeS
 			state = live
 			caps = controller.Capabilities()
 		}
-		// Fast and plan mode live with the controller, not in the stored row.
-		live := controller.Settings()
-		rows.Conversation.Settings.FastMode, rows.Conversation.Settings.PlanMode = live.FastMode, live.PlanMode
+		// Fast mode lives with the controller, not in the stored row; Plan is stored.
+		rows.Conversation.Settings.FastMode = controller.Settings().FastMode
 	}
 	return Snapshot{
 		Conversation:                     rows.Conversation,
