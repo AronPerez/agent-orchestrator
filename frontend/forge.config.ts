@@ -76,6 +76,22 @@ export const ELECTRON_DOWNLOAD_TIMEOUT_MS = { lookup: 30_000, connect: 30_000, s
 
 type DownloadProgress = { percent: number; total?: number };
 
+// The download URL for an error message, without credentials: an authenticated
+// ELECTRON_MIRROR (https://user:token@host/…, or a token query parameter) must
+// not end up in terminal or CI logs.
+export function redactDownloadUrl(value: URL | string | undefined): string {
+	if (!value) return "GitHub";
+	try {
+		const url = new URL(String(value));
+		url.username = "";
+		url.password = "";
+		url.search = "";
+		return url.toString();
+	} catch {
+		return "the Electron mirror";
+	}
+}
+
 // Options for packagerConfig.download.
 //  - checksums: the SHA-256 list the installed electron package ships, the same
 //    one electron/install.js validates with. Without it @electron/get fetches
@@ -105,7 +121,7 @@ export function electronDownloadOptions(log: (line: string) => void = (line) => 
 				beforeError: [
 					<E extends Error & { options?: { url?: URL | string } }>(error: E): E => {
 						error.message =
-							`Downloading Electron ${electronPackage.version} from ${String(error.options?.url ?? "GitHub")} failed: ${error.message}. ` +
+							`Downloading Electron ${electronPackage.version} from ${redactDownloadUrl(error.options?.url)} failed: ${error.message}. ` +
 							"Check the network connection, any proxy or VPN (HTTPS_PROXY, ELECTRON_GET_USE_PROXY, ELECTRON_MIRROR), " +
 							"and any firewall prompt waiting on node, then run the build again.";
 						return error;

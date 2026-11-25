@@ -36,6 +36,7 @@ import config, {
 	electronDownloadOptions,
 	extraResourcesForPlatform,
 	macSignOptionsForFile,
+	redactDownloadUrl,
 } from "./forge.config";
 
 // Minimal synthetic Mach-O headers (thin little-endian + fat big-endian), the
@@ -248,6 +249,17 @@ describe("Electron download", () => {
 		expect(beforeError(error)).toBe(error);
 		expect(error.message).toContain(`from ${url} failed: Timeout awaiting 'socket' for 60000ms`);
 		expect(error.message).toContain("proxy or VPN");
+	});
+
+	it("keeps mirror credentials out of the download error", () => {
+		const { downloadOptions } = electronDownloadOptions(() => undefined);
+		const mirror = "https://builder:s3cret@mirror.example.com/electron/v1/electron.zip?token=abc123";
+		const error = Object.assign(new Error("connect ETIMEDOUT"), { options: { url: new URL(mirror) } });
+		downloadOptions.hooks.beforeError[0](error);
+		expect(error.message).toContain("from https://mirror.example.com/electron/v1/electron.zip failed");
+		expect(error.message).not.toMatch(/builder|s3cret|abc123/);
+		expect(redactDownloadUrl(undefined)).toBe("GitHub");
+		expect(redactDownloadUrl("not a url")).toBe("the Electron mirror");
 	});
 });
 
