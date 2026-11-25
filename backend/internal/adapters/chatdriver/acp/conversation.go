@@ -143,6 +143,12 @@ type conversation struct {
 	modeFor           func(ports.PermissionMode) string
 	optionsFor        func(ports.ChatTurnSettings) []SessionOption
 	splitModelVariant func(string) (string, SessionOption, bool)
+	// planMode is the agent's own plan mode, selected for a turn AO asks to
+	// plan; empty when the agent has none. See Config.PlanModeForAgent.
+	planMode string
+	// planning is set while the current turn runs in planMode. Every
+	// permission request then goes to the user; see RequestPermission.
+	planning bool
 	// requireAdvertised refuses a config option the session did not advertise
 	// instead of sending it. See Config.RequireAdvertisedOptions.
 	requireAdvertised bool
@@ -483,6 +489,27 @@ func (c *conversation) setReportedProviderConversationID(sessionID string) {
 	c.mu.Lock()
 	c.reportedSessionID = sessionID
 	c.mu.Unlock()
+}
+
+// setPlanMode records the agent's plan mode and advertises plan_mode when it
+// has one.
+func (c *conversation) setPlanMode(mode string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.planMode = mode
+	if mode != "" {
+		c.capabilities[ports.ChatCapabilityPlanMode] = true
+	}
+}
+
+// assumePlanningUntilNextTurn is for a live reconnect, which cannot tell
+// whether the turn still running on the host is a plan turn. Until the next
+// turn's settings say otherwise, an agent with a plan mode is treated as
+// planning, so its permission requests go to the user (see RequestPermission).
+func (c *conversation) assumePlanningUntilNextTurn() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.planning = c.planMode != ""
 }
 
 // setSessionPreamble arms standing context for the next prompt that actually
@@ -846,6 +873,7 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 	c.mu.Lock()
 	sessionID := c.sessionID
 	modeFor := c.modeFor
+	planMode := c.planMode
 	optionsFor := c.optionsFor
 	initialPermission := c.initialPermission
 	validateSettings := c.validateSettings
@@ -974,13 +1002,20 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 		}
 	}
 	effectiveApproval := settings.Approval
+	planning := modeFor != nil && settings.Plan && planMode != ""
 	if modeFor != nil {
-		if mode := modeFor(settings.Approval); mode != "" {
+		mode := modeFor(settings.Approval)
+		if planning {
+			// A plan turn runs in the agent's own plan mode; the approval policy
+			// still governs what the agent may do once the user leaves it.
+			mode = planMode
+		}
+		if mode != "" {
 			// Some ACP agents rebuild their permission modes after a model switch.
 			// Claude, for example, removes Auto for Haiku and clamps itself back to
 			// Default. Respect that authoritative catalog instead of immediately
 			// reapplying AO's default Auto choice and aborting session creation.
-			if ports.NormalizePermissionMode(settings.Approval) == ports.PermissionModeAuto {
+			if !planning && ports.NormalizePermissionMode(settings.Approval) == ports.PermissionModeAuto {
 				if offered, known := c.configOptionOffers("mode", mode); known && !offered {
 					if fallbackOffered, _ := c.configOptionOffers("mode", "default"); fallbackOffered {
 						mode = "default"
@@ -1006,6 +1041,7 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 		}
 	}
 	c.mu.Lock()
+	c.planning = planning
 	if settings.Approval != "" {
 		c.permissionMode = ports.NormalizePermissionMode(effectiveApproval)
 	}

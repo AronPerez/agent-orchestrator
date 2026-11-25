@@ -59,6 +59,13 @@ var modelVariantPattern = regexp.MustCompile(`^(.+)-(minimal|low|medium|high|xhi
 // auto, which runs without asking, does not map onto it.
 const cliModeAcceptEdits = "accept-edits"
 
+// cliModePlan is `agy acp`'s plan mode, and minimumPlanModeVersion the first
+// release AO ran a plan turn on end to end.
+const (
+	cliModePlan            = "plan"
+	minimumPlanModeVersion = "1.5.16"
+)
+
 // New constructs the Antigravity ACP Chat driver.
 func New(plugin Plugin, log *slog.Logger) ports.ChatDriver {
 	var agyCLI func(context.Context) (string, error)
@@ -126,9 +133,15 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 		AfterInitialize:     afterInitialize(newAuthBootstrap(agy.GeminiHome, cliSignedIn(resolve.agyCLI))),
 		SessionMode:         sessionMode,
 		SessionModeForAgent: sessionModeForAgent,
-		SessionOptions:      sessionOptions,
-		SplitModelVariant:   splitModelVariant,
-		SessionPreamble:     sessionPreamble,
+		// Antigravity's modes are approval tiers, which AO selects from its own
+		// approval picker, and plan, which AO switches per turn. Its mode list
+		// would show that setting twice, and a tier picked there that AO does
+		// not map would be undone by the next turn's approval mode.
+		SuppressSessionModes: true,
+		PlanModeForAgent:     planModeForAgent,
+		SessionOptions:       sessionOptions,
+		SplitModelVariant:    splitModelVariant,
+		SessionPreamble:      sessionPreamble,
 		// `agy acp` from 1.5.16 advertises a system-prompt extension; a server
 		// that does not keeps the plain-text preamble above.
 		SessionMetaForAgent:     sessionMetaForAgent,
@@ -194,6 +207,22 @@ func sessionModeForAgent(init acpsdk.InitializeResponse) func(ports.PermissionMo
 			return ""
 		}
 	}
+}
+
+// planModeForAgent is `agy acp`'s own plan mode, from the release AO verified
+// it on. There the agent researches, writes a plan for review into its own
+// data folder and ends the turn, asking no permission to do so, so AO's
+// approve-once policy cannot carry a plan turn on into edits. The separate
+// server has no plan mode.
+func planModeForAgent(init acpsdk.InitializeResponse) string {
+	if !isCLIServer(init) {
+		return ""
+	}
+	installed, ok := parseVersion(init.AgentInfo.Version)
+	if !ok || installed.less(mustVersion(minimumPlanModeVersion)) {
+		return ""
+	}
+	return cliModePlan
 }
 
 // permissionPolicy approves a request once under AO's auto modes, which is

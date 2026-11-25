@@ -118,6 +118,10 @@ type Config struct {
 	// harness whose ACP servers name their modes differently. It overrides
 	// SessionMode when it returns a mapping.
 	SessionModeForAgent func(acpsdk.InitializeResponse) func(ports.PermissionMode) string
+	// PlanModeForAgent names the agent's own plan mode, selected in place of the
+	// approval mode for a turn AO asks to plan (ChatTurnSettings.Plan). Empty
+	// means this agent has none. A non-empty mode advertises plan_mode.
+	PlanModeForAgent func(acpsdk.InitializeResponse) string
 	// SuppressSessionModes drops the agent's mode surfaces from the
 	// config-option catalog: the legacy session-mode list and any
 	// mode-category config option. It is for agents whose modes are pure
@@ -588,6 +592,7 @@ func (d *Driver) openNewSession(
 	if d.cfg.EncodeProviderConversationID != nil {
 		conv.setReportedProviderConversationID(d.cfg.EncodeProviderConversationID(string(resp.SessionId)))
 	}
+	conv.setPlanMode(d.planMode(init))
 	conv.setSessionPreamble(d.sessionPreamble(init, launchCfg))
 	if err := d.applyLaunchSessionOptions(ctx, conv, launchCfg); err != nil {
 		return fmt.Errorf("configure ACP session: %w", err)
@@ -614,6 +619,13 @@ func (d *Driver) applyLaunchSessionOptions(ctx context.Context, conv *conversati
 		return nil
 	}
 	return conv.applySessionOptions(ctx, d.cfg.LaunchSessionOptions(cfg))
+}
+
+func (d *Driver) planMode(init acpsdk.InitializeResponse) string {
+	if d.cfg.PlanModeForAgent == nil {
+		return ""
+	}
+	return d.cfg.PlanModeForAgent(init)
 }
 
 func (d *Driver) sessionPreamble(init acpsdk.InitializeResponse, cfg LaunchConfig) []acpsdk.ContentBlock {
@@ -756,6 +768,8 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		)
 		conv.setReportedProviderConversationID(reportedProviderConversationID)
 		conv.initialPermission = ports.PermissionMode(live.InitialPermissions)
+		conv.setPlanMode(d.planMode(init))
+		conv.assumePlanningUntilNextTurn()
 		conv.setSessionPreamble(d.sessionPreamble(init, launchCfg))
 		// The snapshot's current values are the agent's launch defaults; the
 		// provider process is in the state these restored settings describe.
@@ -853,6 +867,7 @@ func (d *Driver) resumeSession(
 	// Standing context is process input, not transcript history, so a resumed
 	// conversation must receive it again even though the provider recovers the
 	// messages itself.
+	conv.setPlanMode(d.planMode(init))
 	conv.setSessionPreamble(d.sessionPreamble(init, launchCfg))
 	if err := d.applyLaunchSessionOptions(ctx, conv, launchCfg); err != nil {
 		conv.discard()
