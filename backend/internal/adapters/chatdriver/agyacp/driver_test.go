@@ -158,10 +158,18 @@ func TestSessionPreambleCarriesStandingInstructionsAsText(t *testing.T) {
 // appendHandshake is `agy acp` 1.5.16's initialize response as far as the
 // system-prompt extension goes (agentCapabilities._meta.antigravity).
 func appendHandshake(advertised any) acpsdk.InitializeResponse {
-	var init acpsdk.InitializeResponse
+	init := acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: cliServerAgentName, Version: "1.5.16"}}
 	init.AgentCapabilities.Meta = map[string]any{"antigravity": map[string]any{
 		"tier": true, "systemPrompt": map[string]any{"append": advertised},
 	}}
+	return init
+}
+
+// standaloneAppendHandshake is Google's separate agy_acp_server, which also
+// advertises the extension (1.4.0) but does not load workspace rules.
+func standaloneAppendHandshake() acpsdk.InitializeResponse {
+	init := appendHandshake(true)
+	init.AgentInfo = &acpsdk.Implementation{Name: serverAgentName, Version: "1.4.1"}
 	return init
 }
 
@@ -232,8 +240,19 @@ func TestAdvertisedAppendSendsInstructionsTheRuleDoesNotHold(t *testing.T) {
 	}
 }
 
-// Google's separate agy_acp_server does not load workspace rules and does not
-// advertise the extension, so beside the rule it still gets the preamble.
+// The separate agy_acp_server advertises the extension but does not load
+// workspace rules, so beside an identical rule it still gets the instructions.
+func TestStandaloneServerGetsTheAppendBesideTheRule(t *testing.T) {
+	workspace := workspaceWithStandingRule(t, "Follow AO worker rules.")
+	meta := sessionMetaForAgent(standaloneAppendHandshake())(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules."})
+	want := map[string]any{"antigravity": map[string]any{"systemPrompt": map[string]any{"append": "Follow AO worker rules."}}}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("session _meta = %#v, want %#v", meta, want)
+	}
+}
+
+// A server that does not advertise the extension keeps the preamble beside the
+// rule.
 func TestServerWithoutAppendKeepsThePreambleBesideTheRule(t *testing.T) {
 	workspace := workspaceWithStandingRule(t, "Follow AO worker rules.")
 	if sessionPreambleForAgent(acpsdk.InitializeResponse{}) != nil {

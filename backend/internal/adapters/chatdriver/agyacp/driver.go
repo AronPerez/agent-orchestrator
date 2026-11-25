@@ -290,18 +290,21 @@ func systemPromptAppendAdvertised(init acpsdk.InitializeResponse) bool {
 // advertises that. The agent then follows them as instructions, and they stay
 // out of the user's first message and its replayed history.
 //
-// A server that advertises the extension is `agy acp`, which loads workspace
-// rules, so where AO's managed rule holds exactly these instructions they are
-// already in the system prompt and nothing is sent. Instructions the rule does
-// not hold, such as a text-handoff fork's appended conversation or a prompt
-// recomputed on relaunch, are sent in full.
+// `agy acp` loads workspace rules, so where AO's managed rule holds exactly
+// these instructions they are already in its system prompt and nothing is
+// sent. The separate agy_acp_server advertises the extension too but does not
+// load workspace rules (google-antigravity/antigravity-cli#1540), so it always
+// gets them. Instructions the rule does not hold, such as a text-handoff
+// fork's appended conversation or a prompt recomputed on relaunch, are sent in
+// full.
 func sessionMetaForAgent(init acpsdk.InitializeResponse) func(acpdriver.LaunchConfig) map[string]any {
 	if !systemPromptAppendAdvertised(init) {
 		return nil
 	}
+	loadsRules := isCLIServer(init)
 	return func(cfg acpdriver.LaunchConfig) map[string]any {
 		standing := strings.TrimSpace(cfg.SystemPrompt)
-		if standing == "" || agy.StandingRuleHolds(cfg.WorkspacePath, standing) {
+		if standing == "" || (loadsRules && agy.StandingRuleHolds(cfg.WorkspacePath, standing)) {
 			return nil
 		}
 		return map[string]any{"antigravity": map[string]any{"systemPrompt": map[string]any{"append": standing}}}
