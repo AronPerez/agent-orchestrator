@@ -52,6 +52,38 @@ case "${1:-}" in
 		fi
 		expect "$(cat "$tmp/npm-args")" "run package"
 		;;
-	*) printf 'Usage: %s {env|https|ssh|unknown|build}\n' "$0" >&2; exit 2 ;;
+	copy)
+		# The install clones the bundle (cp -c) and falls back to a plain copy,
+		# after removing any partial clone, when cloning fails.
+		if [[ "$(uname -s)" != Darwin ]]; then printf 'PASS %s (skipped: needs macOS)\n' "$1"; exit 0; fi
+		case "$(uname -m)" in arm64) arch=arm64 ;; *) arch=x64 ;; esac
+		repo="$tmp/repo"
+		mkdir -p "$repo/scripts"
+		cp "$script" "$repo/scripts/"
+		app="$repo/frontend/out/Agent Orchestrator-darwin-$arch/Agent Orchestrator.app"
+		mkdir -p "$app/Contents/MacOS"
+		printf 'plist\n' > "$app/Contents/Info.plist"
+		printf 'binary\n' > "$app/Contents/MacOS/agent-orchestrator"
+		printf '%s\n' '#!/bin/sh' 'exit 0' > "$tmp/bin/codesign"
+		# cp: log every call; with TEST_CLONE_FAILS, leave a partial clone and fail.
+		printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$*" >> "$TEST_CP_LOG"' \
+			'if [ -n "$TEST_CLONE_FAILS" ] && [ "$1" = "-cR" ]; then mkdir -p "$3/Agent Orchestrator.app/Contents"; : > "$3/Agent Orchestrator.app/Contents/partial"; exit 1; fi' \
+			'exec /bin/cp "$@"' > "$tmp/bin/cp"
+		chmod +x "$tmp/bin/codesign" "$tmp/bin/cp"
+		install_app() {
+			rm -rf "$tmp/dest" "$tmp/cp.log"; mkdir -p "$tmp/dest"
+			env PATH="$tmp/bin:$PATH" TEST_REMOTE_URL="https://github.com/AronPerez/agent-orchestrator.git" TEST_CP_LOG="$tmp/cp.log" "$@" \
+				/bin/bash "$repo/scripts/install-desktop-app.sh" --skip-build --no-daemon --no-launch --dest "$tmp/dest" > "$tmp/out" 2>&1 \
+				|| { cat "$tmp/out" >&2; exit 1; }
+			installed="$tmp/dest/Agent Orchestrator.app"
+			expect "$(cat "$installed/Contents/MacOS/agent-orchestrator")" "binary"
+		}
+		install_app
+		expect "$(head -1 "$tmp/cp.log")" "-cR $app $tmp/dest/"
+		install_app TEST_CLONE_FAILS=1
+		expect "$(sed -n 2p "$tmp/cp.log")" "-R $app $tmp/dest/"
+		[[ ! -e "$installed/Contents/partial" ]] || { printf '%s\n' 'the partial clone was not removed before the fallback copy' >&2; exit 1; }
+		;;
+	*) printf 'Usage: %s {env|https|ssh|unknown|build|copy}\n' "$0" >&2; exit 2 ;;
 esac
 printf 'PASS %s\n' "$1"

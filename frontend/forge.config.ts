@@ -19,6 +19,7 @@ import path from "node:path";
 import { BUNDLED_TMUX_VERSION } from "./scripts/tmux-version.mjs";
 import { checkMacDmgLayout } from "./scripts/build-mac-dmg.mjs";
 import { prepareBetterSqlite3 } from "./scripts/native-module-cache.mjs";
+import { buildSwiftHelper } from "./scripts/swift-helper-cache.mjs";
 
 // Vite builds main and renderer separately; both inherit this invocation's token.
 // Even two local builds at the same dirty commit must reject each other's JS.
@@ -337,15 +338,24 @@ const config: ForgeConfig = {
 		prePackage: async (_forgeConfig, platform, arch) => {
 			await prepareNativeDependencies(platform as NodeJS.Platform, arch);
 			if (platform === "darwin") {
-				const helperBuild = spawnSync(process.execPath, [path.resolve("scripts/build-update-helper.mjs"), "--arch", arch], { stdio: "inherit" });
-				if (helperBuild.error) throw helperBuild.error;
-				if (helperBuild.status !== 0) throw new Error("macOS update helper build failed");
-                const wakeBuild = spawnSync(process.execPath, [path.resolve("scripts/build-wake-helper.mjs"), "--arch", arch], { stdio: "inherit" });
-                if (wakeBuild.error) throw wakeBuild.error;
-                if (wakeBuild.status !== 0) throw new Error("macOS wake helper build failed");
-				const dictationBuild = spawnSync(process.execPath, [path.resolve("scripts/build-dictation-helper.mjs"), "--arch", arch], { stdio: "inherit" });
-				if (dictationBuild.error) throw dictationBuild.error;
-				if (dictationBuild.status !== 0) throw new Error("macOS dictation helper build failed");
+				// Each helper is restored from the build cache when nothing it reads
+				// changed (scripts/swift-helper-cache.mjs); otherwise its script runs.
+				const helpers = [
+					["update-helper", "scripts/build-update-helper.mjs", "macOS update helper build failed"],
+					["wake-helper", "scripts/build-wake-helper.mjs", "macOS wake helper build failed"],
+					["dictation-helper", "scripts/build-dictation-helper.mjs", "macOS dictation helper build failed"],
+				] as const;
+				for (const [name, script, failure] of helpers) {
+					buildSwiftHelper({
+						name,
+						arch,
+						build: () => {
+							const result = spawnSync(process.execPath, [path.resolve(script), "--arch", arch], { stdio: "inherit" });
+							if (result.error) throw result.error;
+							if (result.status !== 0) throw new Error(failure);
+						},
+					});
+				}
 			}
 			const { owner, name } = parseReleaseRepo(process.env.AO_RELEASE_REPO);
 			const yml = [
