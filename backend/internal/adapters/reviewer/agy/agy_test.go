@@ -2,6 +2,9 @@ package agy
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -13,12 +16,49 @@ import (
 func testReviewer(help, version string) *Reviewer {
 	return &Reviewer{
 		resolveBinary: func(context.Context) (string, error) { return "/opt/agy/bin/agy", nil },
+		installHooks:  func(context.Context, string) error { return nil },
 		run: func(_ context.Context, _ map[string]string, _ string, args ...string) ([]byte, error) {
 			if slices.Equal(args, []string{"--help"}) {
 				return []byte(help), nil
 			}
 			return []byte(version), nil
 		},
+	}
+}
+
+// signInReviewer answers `agy models` with the given output and error.
+func signInReviewer(models string, modelsErr error) *Reviewer {
+	r := testReviewer(strings.Join(requiredFlags, "\n"), "1.1.9")
+	base := r.run
+	r.run = func(ctx context.Context, env map[string]string, binary string, args ...string) ([]byte, error) {
+		if slices.Equal(args, []string{"models"}) {
+			return []byte(models), modelsErr
+		}
+		return base(ctx, env, binary, args...)
+	}
+	return r
+}
+
+func TestReviewCommandSignInProbe(t *testing.T) {
+	inv := func(dataDir string) ports.ReviewInvocation {
+		return ports.ReviewInvocation{DataDir: dataDir, ReviewerID: "review-worker-1", TaskPromptRoot: "/ao/prompts", WorkspacePath: "/worker", Prompt: "p"}
+	}
+
+	dataDir := t.TempDir()
+	_, err := signInReviewer("Fetching available models... Error: Please sign in to view available models.", nil).ReviewCommand(context.Background(), inv(dataDir))
+	home := filepath.Join(dataDir, "reviewer-runtime", "review-worker-1", "config")
+	if err == nil || !strings.Contains(err.Error(), "not signed in") || !strings.Contains(err.Error(), home) {
+		t.Fatalf("signed-out err = %v, want sign-in guidance naming %s", err, home)
+	}
+
+	for name, r := range map[string]*Reviewer{
+		"signed in":   signInReviewer("gemini-3-flash\tGemini 3 Flash\n", nil),
+		"probe error": signInReviewer("", errors.New("deadline exceeded")),
+	} {
+		spec, err := r.ReviewCommand(context.Background(), inv(t.TempDir()))
+		if err != nil || !slices.Contains(spec.Argv, "--prompt-interactive") {
+			t.Fatalf("%s: spec = %+v, err = %v; want launch", name, spec, err)
+		}
 	}
 }
 
@@ -46,17 +86,113 @@ func TestReviewCommandLaunchesHostTrustedInteractiveTUI(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantPrompt := "Read and follow the reviewer system instructions at `/ao/prompts/worker/reviewer/system.md`, then Read and follow `/ao/task.md`."
-	want := []string{"/opt/agy/bin/agy", "--sandbox", "--add-dir", "/worker", "--add-dir", "/ao/prompts/worker/reviewer", "--prompt-interactive", wantPrompt}
+	want := []string{"/opt/agy/bin/agy", "--sandbox", "--settings", reviewerSettings, "--add-dir", "/worker", "--add-dir", "/ao/prompts/worker/reviewer", "--prompt-interactive", wantPrompt}
 	if !slices.Equal(spec.Argv, want) || spec.WorkingDirectory != "/worker" {
 		t.Fatalf("spec = %+v, want argv %#v", spec, want)
 	}
 	if spec.Env["HOME"] != filepath.Join(dataDir, "reviewer-runtime", "review-worker-1", "config") || spec.Env["AO_DATA_DIR"] != dataDir {
 		t.Fatalf("AO-owned environment = %#v", spec.Env)
 	}
+	assertOnboardingComplete(t, filepath.Join(spec.Env["HOME"], ".gemini", "antigravity-cli", "cache", "onboarding.json"))
+}
+
+func TestReviewCommandPassesConfiguredModel(t *testing.T) {
+	inv := ports.ReviewInvocation{
+		DataDir:        t.TempDir(),
+		ReviewerID:     "review-worker-1",
+		TaskPromptRoot: "/ao/prompts/worker/reviewer",
+		WorkspacePath:  "/worker",
+		Prompt:         "Read and follow `/ao/task.md`.",
+	}
+	inv.Config.Model = "  gemini-3-pro  "
+	spec, err := testReviewer(strings.Join(requiredFlags, "\n"), "1.1.9").ReviewCommand(context.Background(), inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/opt/agy/bin/agy", "--sandbox", "--settings", reviewerSettings, "--model", "gemini-3-pro", "--add-dir", "/worker", "--add-dir", "/ao/prompts/worker/reviewer", "--prompt-interactive", "Read and follow `/ao/task.md`."}
+	if !slices.Equal(spec.Argv, want) {
+		t.Fatalf("argv = %#v, want %#v", spec.Argv, want)
+	}
+}
+
+func TestInteractiveArgvModelFlag(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		want  []string
+	}{
+		{"", []string{"agy", "--sandbox", "--prompt-interactive", "p"}},
+		{"   ", []string{"agy", "--sandbox", "--prompt-interactive", "p"}},
+		{"gemini-3-flash", []string{"agy", "--sandbox", "--model", "gemini-3-flash", "--prompt-interactive", "p"}},
+	} {
+		if got := interactiveArgv("agy", "", "", tc.model, "p"); !slices.Equal(got, tc.want) {
+			t.Errorf("interactiveArgv(model=%q) = %#v, want %#v", tc.model, got, tc.want)
+		}
+	}
+}
+
+func TestSeedOnboardingCompletePreservesExistingState(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".gemini", "antigravity-cli", "cache", "onboarding.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"consumerOnboardingComplete":false,"enterpriseOnboardingComplete":false,"onboardingComplete":false,"other":"kept"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedOnboardingComplete(root); err != nil {
+		t.Fatalf("seedOnboardingComplete: %v", err)
+	}
+	state := assertOnboardingComplete(t, path)
+	if string(state["other"]) != `"kept"` || string(state["enterpriseOnboardingComplete"]) != "false" {
+		t.Fatalf("existing keys not preserved: %s", state)
+	}
+
+	// Corrupt state is replaced rather than blocking the reviewer launch.
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedOnboardingComplete(root); err != nil {
+		t.Fatalf("seedOnboardingComplete(corrupt): %v", err)
+	}
+	assertOnboardingComplete(t, path)
+
+	// Unreadable (write-only) state is replaced with a private, readable file.
+	if err := os.Chmod(path, 0o200); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedOnboardingComplete(root); err != nil {
+		t.Fatalf("seedOnboardingComplete(unreadable): %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("onboarding state mode = %o, want 600", mode)
+	}
+	assertOnboardingComplete(t, path)
+}
+
+func assertOnboardingComplete(t *testing.T, path string) map[string]json.RawMessage {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read onboarding state: %v", err)
+	}
+	state := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode onboarding state %q: %v", raw, err)
+	}
+	for _, key := range []string{"consumerOnboardingComplete", "onboardingComplete"} {
+		if string(state[key]) != "true" {
+			t.Fatalf("%s = %s, want true (state %s)", key, state[key], raw)
+		}
+	}
+	return state
 }
 
 func TestInteractiveArgvIsPermanentTUIOnly(t *testing.T) {
-	argv := interactiveArgv("agy", "/worker", "/ao/prompts", "Read and follow `/ao/task.md`.")
+	argv := interactiveArgv("agy", "/worker", "/ao/prompts", "", "Read and follow `/ao/task.md`.")
 	want := []string{"agy", "--sandbox", "--add-dir", "/worker", "--add-dir", "/ao/prompts", "--prompt-interactive", "Read and follow `/ao/task.md`."}
 	if !slices.Equal(argv, want) {
 		t.Fatalf("argv = %#v, want %#v", argv, want)
@@ -119,5 +255,78 @@ func TestVersionAtLeast(t *testing.T) {
 		if got := versionAtLeast(tc.got, minimumVersion); got != tc.want {
 			t.Errorf("versionAtLeast(%q) = %v, want %v", tc.got, got, tc.want)
 		}
+	}
+}
+
+// The reviewer runs in the worker's checkout, where an agy worker's always-on
+// rule tells any agy session there to act as the worker, and agy follows that
+// rule over the reviewer's own prompt (checked live on agy 1.5.16). The
+// session's deny rules therefore keep the reviewer read-only and away from the
+// worker's Orchestrator commands, while leaving the two commands that post and
+// record its review.
+func TestReviewerSettingsDenyEditsAndWorkerCommands(t *testing.T) {
+	var settings struct {
+		Permissions struct {
+			Deny []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal([]byte(reviewerSettings), &settings); err != nil {
+		t.Fatalf("reviewer settings are not JSON: %v", err)
+	}
+	for _, rule := range []string{
+		"write_file(*)", "mcp(*)",
+		"command(git commit)", "command(git push)",
+		"command(gh pr merge)", "command(gh pr create)",
+		"command(ao report)", "command(ao session)", "command(ao spawn)", "command(ao send)", "command(ao decision)",
+	} {
+		if !slices.Contains(settings.Permissions.Deny, rule) {
+			t.Errorf("deny rules %v lack %q", settings.Permissions.Deny, rule)
+		}
+	}
+	for _, needed := range []string{"gh api --method POST /repos/o/r/pulls/1/reviews --input -", "ao review submit --session w-1"} {
+		for _, rule := range settings.Permissions.Deny {
+			prefix, ok := strings.CutPrefix(rule, "command(")
+			if ok && strings.HasPrefix(needed, strings.TrimSuffix(prefix, ")")) {
+				t.Errorf("deny rule %q blocks the reviewer's own %q", rule, needed)
+			}
+		}
+	}
+}
+
+func TestCompatibilityProbeRequiresSessionSettings(t *testing.T) {
+	help := strings.Replace(strings.Join(requiredFlags, "\n"), "--settings", "", 1)
+	if err := testReviewer(help, "1.1.9").verifyCompatibility(context.Background(), "/opt/agy/bin/agy", nil); err == nil || !strings.Contains(err.Error(), "--settings") {
+		t.Fatalf("missing --settings err = %v", err)
+	}
+}
+
+// Installing AO's agy hooks in the checkout lets the review lifecycle see the
+// reviewer go active and idle, as it does for Claude Code's reviewer.
+func TestReviewCommandInstallsActivityHooksInTheCheckout(t *testing.T) {
+	r := testReviewer(strings.Join(requiredFlags, "\n"), "1.1.9")
+	var installed []string
+	r.installHooks = func(_ context.Context, workspace string) error {
+		installed = append(installed, workspace)
+		return nil
+	}
+	if _, err := r.ReviewCommand(context.Background(), ports.ReviewInvocation{
+		DataDir: t.TempDir(), ReviewerID: "review-worker-1", TaskPromptRoot: "/ao/prompts/worker/reviewer",
+		WorkspacePath: "/worker", Prompt: "Read and follow `/ao/task.md`.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(installed, []string{"/worker"}) {
+		t.Fatalf("hooks installed in %v, want the worker checkout", installed)
+	}
+	if !r.ReviewActivityHooks() {
+		t.Fatal("the agy reviewer must report reliable activity hooks once it installs them")
+	}
+
+	r.installHooks = func(context.Context, string) error { return errors.New("read-only checkout") }
+	if _, err := r.ReviewCommand(context.Background(), ports.ReviewInvocation{
+		DataDir: t.TempDir(), ReviewerID: "review-worker-1", TaskPromptRoot: "/ao/prompts/worker/reviewer",
+		WorkspacePath: "/worker", Prompt: "p",
+	}); err == nil || !strings.Contains(err.Error(), "hooks") {
+		t.Fatalf("hook install failure err = %v", err)
 	}
 }

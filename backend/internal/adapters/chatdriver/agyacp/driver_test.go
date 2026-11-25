@@ -155,6 +155,114 @@ func TestSessionPreambleCarriesStandingInstructionsAsText(t *testing.T) {
 	}
 }
 
+// appendHandshake is `agy acp` 1.5.16's initialize response as far as the
+// system-prompt extension goes (agentCapabilities._meta.antigravity).
+func appendHandshake(advertised any) acpsdk.InitializeResponse {
+	init := acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: cliServerAgentName, Version: "1.5.16"}}
+	init.AgentCapabilities.Meta = map[string]any{"antigravity": map[string]any{
+		"tier": true, "systemPrompt": map[string]any{"append": advertised},
+	}}
+	return init
+}
+
+// standaloneAppendHandshake is Google's separate agy_acp_server, which also
+// advertises the extension (1.4.0) but does not load workspace rules.
+func standaloneAppendHandshake() acpsdk.InitializeResponse {
+	init := appendHandshake(true)
+	init.AgentInfo = &acpsdk.Implementation{Name: serverAgentName, Version: "1.4.1"}
+	return init
+}
+
+func TestSystemPromptAppendIsReadFromTheHandshake(t *testing.T) {
+	if !systemPromptAppendAdvertised(appendHandshake(true)) {
+		t.Fatal("append: true must be recognised")
+	}
+	for name, init := range map[string]acpsdk.InitializeResponse{
+		"no meta":      {},
+		"append false": appendHandshake(false),
+		"append text":  appendHandshake("yes"),
+	} {
+		if systemPromptAppendAdvertised(init) {
+			t.Errorf("%s: reported as advertised", name)
+		}
+	}
+	if sessionMetaForAgent(appendHandshake(false)) != nil || sessionPreambleForAgent(appendHandshake(false)) != nil {
+		t.Fatal("a server without the extension must keep the plain-text preamble")
+	}
+}
+
+func TestAdvertisedAppendCarriesStandingInstructionsAsSystemPrompt(t *testing.T) {
+	init := appendHandshake(true)
+	meta := sessionMetaForAgent(init)(acpdriver.LaunchConfig{WorkspacePath: t.TempDir(), SystemPrompt: " Follow AO worker rules. "})
+	want := map[string]any{"antigravity": map[string]any{"systemPrompt": map[string]any{"append": "Follow AO worker rules."}}}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("session _meta = %#v, want %#v", meta, want)
+	}
+	if got := sessionPreambleForAgent(init)(acpdriver.LaunchConfig{SystemPrompt: "Follow AO worker rules."}); got != nil {
+		t.Fatalf("preamble = %#v, want none when the system prompt carries the instructions", got)
+	}
+	if got := sessionMetaForAgent(init)(acpdriver.LaunchConfig{SystemPrompt: "  "}); got != nil {
+		t.Fatalf("blank prompt _meta = %#v, want none", got)
+	}
+}
+
+func workspaceWithStandingRule(t *testing.T, instructions string) string {
+	t.Helper()
+	workspace := t.TempDir()
+	if err := agy.New().GetAgentHooks(context.Background(), ports.WorkspaceHookConfig{
+		WorkspacePath: workspace, SystemPrompt: instructions,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return workspace
+}
+
+// A managed rule holding exactly these instructions already puts them in the
+// system prompt of an `agy acp` that advertises the extension (that server
+// loads workspace rules), so they are not sent a second time.
+func TestAdvertisedAppendDefersToAManagedRuleWithTheSameInstructions(t *testing.T) {
+	workspace := workspaceWithStandingRule(t, "Follow AO worker rules.")
+	if got := sessionMetaForAgent(appendHandshake(true))(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules."}); got != nil {
+		t.Fatalf("session _meta = %#v, want none beside the managed rule", got)
+	}
+}
+
+// A text-handoff fork appends the parent's conversation to the Chat prompt after
+// the rule was written, and a relaunch recomputes the prompt; either way the
+// rule no longer holds what this Chat must receive, so it is sent in full.
+func TestAdvertisedAppendSendsInstructionsTheRuleDoesNotHold(t *testing.T) {
+	workspace := workspaceWithStandingRule(t, "Follow AO worker rules.")
+	prompt := "Follow AO worker rules.\n\nConversation so far: ..."
+	meta := sessionMetaForAgent(appendHandshake(true))(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: prompt})
+	want := map[string]any{"antigravity": map[string]any{"systemPrompt": map[string]any{"append": prompt}}}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("session _meta = %#v, want %#v", meta, want)
+	}
+}
+
+// The separate agy_acp_server advertises the extension but does not load
+// workspace rules, so beside an identical rule it still gets the instructions.
+func TestStandaloneServerGetsTheAppendBesideTheRule(t *testing.T) {
+	workspace := workspaceWithStandingRule(t, "Follow AO worker rules.")
+	meta := sessionMetaForAgent(standaloneAppendHandshake())(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules."})
+	want := map[string]any{"antigravity": map[string]any{"systemPrompt": map[string]any{"append": "Follow AO worker rules."}}}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("session _meta = %#v, want %#v", meta, want)
+	}
+}
+
+// A server that does not advertise the extension keeps the preamble beside the
+// rule.
+func TestServerWithoutAppendKeepsThePreambleBesideTheRule(t *testing.T) {
+	workspace := workspaceWithStandingRule(t, "Follow AO worker rules.")
+	if sessionPreambleForAgent(acpsdk.InitializeResponse{}) != nil {
+		t.Fatal("a server without the extension must keep the default preamble")
+	}
+	if got := sessionPreamble(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules."}); len(got) != 1 {
+		t.Fatalf("preamble = %#v, want the standing-instructions block", got)
+	}
+}
+
 func TestValidateInitializeAdmitsOnlyTestedAntigravityServers(t *testing.T) {
 	info := func(name, version string) acpsdk.InitializeResponse {
 		return acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: name, Version: version}}

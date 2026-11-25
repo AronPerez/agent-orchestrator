@@ -90,6 +90,10 @@ type Config struct {
 	// Only use this for extensions the provider's session handlers actually read.
 	// An agent that ignores _meta on session/new needs SessionPreamble instead.
 	SessionMeta func(LaunchConfig) map[string]any
+	// SessionMetaForAgent picks the session metadata from the handshake, for a
+	// harness whose ACP servers differ in the extensions they read. It overrides
+	// SessionMeta when it returns a function.
+	SessionMetaForAgent func(acpsdk.InitializeResponse) func(LaunchConfig) map[string]any
 	// SessionPreamble returns standing context to attach to the first prompt of a
 	// session as an embedded ACP resource. It is for agents that accept no
 	// system-prompt launch flag and ignore session/new _meta, but do execute
@@ -97,6 +101,11 @@ type Config struct {
 	// resumed conversation that already has turns received it then, so it is not
 	// repeated (see conversation.setSessionPreamble).
 	SessionPreamble func(LaunchConfig) []acpsdk.ContentBlock
+	// SessionPreambleForAgent picks the preamble from the handshake, for a
+	// harness whose newer server takes standing context through
+	// SessionMetaForAgent instead. It overrides SessionPreamble when it returns
+	// a function.
+	SessionPreambleForAgent func(acpsdk.InitializeResponse) func(LaunchConfig) []acpsdk.ContentBlock
 	// ResetsConversation reports a prompt the agent answers by clearing its
 	// conversation in place (Hermes' `/reset`). The session id survives, so no
 	// relaunch re-delivers SessionPreamble: the reset prompt is sent without it,
@@ -552,10 +561,7 @@ func (d *Driver) openNewSession(
 	additional []string,
 	mcpServers []acpsdk.McpServer,
 ) error {
-	meta := map[string]any(nil)
-	if d.cfg.SessionMeta != nil {
-		meta = d.cfg.SessionMeta(launchCfg)
-	}
+	meta := d.sessionMeta(init, launchCfg)
 	openCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	sessionStarted := time.Now()
@@ -582,7 +588,7 @@ func (d *Driver) openNewSession(
 	if d.cfg.EncodeProviderConversationID != nil {
 		conv.setReportedProviderConversationID(d.cfg.EncodeProviderConversationID(string(resp.SessionId)))
 	}
-	conv.setSessionPreamble(d.sessionPreamble(launchCfg))
+	conv.setSessionPreamble(d.sessionPreamble(init, launchCfg))
 	if err := d.applyLaunchSessionOptions(ctx, conv, launchCfg); err != nil {
 		return fmt.Errorf("configure ACP session: %w", err)
 	}
@@ -610,11 +616,33 @@ func (d *Driver) applyLaunchSessionOptions(ctx context.Context, conv *conversati
 	return conv.applySessionOptions(ctx, d.cfg.LaunchSessionOptions(cfg))
 }
 
-func (d *Driver) sessionPreamble(cfg LaunchConfig) []acpsdk.ContentBlock {
-	if d.cfg.SessionPreamble == nil {
-		return nil
+func (d *Driver) sessionPreamble(init acpsdk.InitializeResponse, cfg LaunchConfig) []acpsdk.ContentBlock {
+	if preamble := forAgent(init, d.cfg.SessionPreamble, d.cfg.SessionPreambleForAgent); preamble != nil {
+		return preamble(cfg)
 	}
-	return d.cfg.SessionPreamble(cfg)
+	return nil
+}
+
+func (d *Driver) sessionMeta(init acpsdk.InitializeResponse, cfg LaunchConfig) map[string]any {
+	if meta := forAgent(init, d.cfg.SessionMeta, d.cfg.SessionMetaForAgent); meta != nil {
+		return meta(cfg)
+	}
+	return nil
+}
+
+// forAgent returns the binding's handshake-selected function when it picks
+// one for this agent, and its default otherwise.
+func forAgent[T any](
+	init acpsdk.InitializeResponse,
+	fallback func(LaunchConfig) T,
+	pick func(acpsdk.InitializeResponse) func(LaunchConfig) T,
+) func(LaunchConfig) T {
+	if pick != nil {
+		if picked := pick(init); picked != nil {
+			return picked
+		}
+	}
+	return fallback
 }
 
 func (d *Driver) logStartStage(sessionID domain.SessionID, stage string, started time.Time, err error) {
@@ -728,7 +756,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		)
 		conv.setReportedProviderConversationID(reportedProviderConversationID)
 		conv.initialPermission = ports.PermissionMode(live.InitialPermissions)
-		conv.setSessionPreamble(d.sessionPreamble(launchCfg))
+		conv.setSessionPreamble(d.sessionPreamble(init, launchCfg))
 		// The snapshot's current values are the agent's launch defaults; the
 		// provider process is in the state these restored settings describe.
 		conv.markSettingsApplied(ports.ChatTurnSettings{Model: cfg.Model, Effort: cfg.Effort, Approval: cfg.Permissions})
@@ -767,10 +795,7 @@ func (d *Driver) resumeSession(
 
 	resumeCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	meta := map[string]any(nil)
-	if d.cfg.SessionMeta != nil {
-		meta = d.cfg.SessionMeta(launchCfg)
-	}
+	meta := d.sessionMeta(init, launchCfg)
 	var configOptions []acpsdk.SessionConfigOption
 	var modes *acpsdk.SessionModeState
 	var historyConversation *refreshableConversation
@@ -828,7 +853,7 @@ func (d *Driver) resumeSession(
 	// Standing context is process input, not transcript history, so a resumed
 	// conversation must receive it again even though the provider recovers the
 	// messages itself.
-	conv.setSessionPreamble(d.sessionPreamble(launchCfg))
+	conv.setSessionPreamble(d.sessionPreamble(init, launchCfg))
 	if err := d.applyLaunchSessionOptions(ctx, conv, launchCfg); err != nil {
 		conv.discard()
 		return nil, fmt.Errorf("%w: configure ACP session: %w", ports.ErrChatResumeFailed, err)
