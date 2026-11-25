@@ -167,6 +167,61 @@ describe("better-sqlite3 build cache", () => {
 		expect(run).toHaveBeenCalledWith(process.execPath, [join(electronDir, "install.js")], expect.objectContaining({ timeout: 5_000 }));
 	});
 
+	it("never prints the Electron installer's output, which can carry mirror credentials", () => {
+		rmSync(join(electronDir, "path.txt"));
+		const lines = [];
+		const run = vi.fn(() => ({
+			status: 1,
+			stdout: "",
+			stderr: "HTTPError: Response code 403 for https://builder:s3cret@mirror.example.com/electron.zip?token=abc123",
+		}));
+		expect(devElectronBinary(electronDir, run, 5_000, (line) => lines.push(line))).toBeNull();
+		expect(run).toHaveBeenCalledWith(process.execPath, [join(electronDir, "install.js")], expect.objectContaining({ stdio: ["ignore", "pipe", "pipe"] }));
+		expect(lines).toEqual(["better-sqlite3: installing the dev Electron binary exited 1"]);
+		expect(lines.join("\n")).not.toMatch(/s3cret|abc123|mirror\.example/);
+	});
+
+	it("reports an installer timeout without its output", () => {
+		rmSync(join(electronDir, "path.txt"));
+		const lines = [];
+		const run = vi.fn(() => ({ status: null, signal: "SIGTERM", error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }) }));
+		expect(devElectronBinary(electronDir, run, 5_000, (line) => lines.push(line))).toBeNull();
+		expect(lines).toEqual(["better-sqlite3: installing the dev Electron binary timed out after 5 s"]);
+	});
+
+	it.each(["npm_config_sqlite3", "npm_package_config_sqlite3", "npm_config_debug"])(
+		"never caches or reuses a build when %s customises it",
+		async (name) => {
+			await prepare();
+			const run = fakeElectron();
+			await expect(prepare({ env: { [name]: "/opt/sqlite-amalgamation" }, run })).resolves.toBe("rebuilt");
+			expect(rebuild).toHaveBeenCalledTimes(2);
+			expect(run).not.toHaveBeenCalled();
+			expect(cacheEntries()).toHaveLength(1);
+			expect(cachedBinary(cacheEntries()[0])).toBe("build-1");
+		},
+	);
+
+	it("does not treat npm's own run-time settings as a custom build", () => {
+		const npmDefaults = {
+			npm_config_cache: "/Users/me/.npm",
+			npm_config_node_gyp: "/opt/node/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js",
+			npm_config_user_agent: "npm/11.19.1 node/v24.22.1 darwin arm64",
+			npm_config_prefix: "/opt/node",
+			npm_config_loglevel: "notice",
+		};
+		expect(customBuildEnvironment(npmDefaults)).toEqual([]);
+	});
+
+	it("keeps packaging when the cache cannot be written", async () => {
+		const lines = [];
+		writeFileSync(cacheRoot, "not a directory");
+		await expect(prepare({ log: (line) => lines.push(line) })).resolves.toBe("rebuilt");
+		expect(rebuild).toHaveBeenCalledTimes(1);
+		expect(readFileSync(join(releaseDir, "better_sqlite3.node"), "utf8")).toBe("build-1");
+		expect(lines.some((line) => line.startsWith("better-sqlite3: warning: could not store the build in the cache"))).toBe(true);
+	});
+
 	it("keys on every input", () => {
 		const inputs = { platform: "darwin", arch: "arm64", electronVersion: "44.11.3", abi: "149", moduleVersion: "12.11.1", sourceDigest: "a".repeat(64) };
 		const key = nativeModuleCacheKey(inputs);

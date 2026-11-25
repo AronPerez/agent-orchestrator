@@ -19,10 +19,12 @@ export const CACHE_NAME = "better-sqlite3";
 // packaging-time rebuild reads the marker to skip recompiling the copied module.
 export const CACHED_FILES = ["better_sqlite3.node", ".forge-meta"];
 
-// Environment node-gyp inherits that can change the binary. A customised one
-// (say CXXFLAGS=-march=native) can produce a binary that is wrong for other
-// machines, so it bypasses the cache and rebuilds as before.
+// Environment that can change the binary. A customised one bypasses the cache
+// and rebuilds as before: CXXFLAGS=-march=native can produce a binary that is
+// wrong for other machines, and a custom SQLite would otherwise be stored under
+// the default key and reused by a checkout that never asked for it.
 export const BUILD_ENVIRONMENT = [
+	// The compiler, its flags, and the SDK and library search paths.
 	"CC",
 	"CXX",
 	"CFLAGS",
@@ -35,7 +37,19 @@ export const BUILD_ENVIRONMENT = [
 	"DEVELOPER_DIR",
 	"CPATH",
 	"LIBRARY_PATH",
+	// node-gyp reads npm_config_<name> as GYP variables and options.
+	// better-sqlite3's `sqlite3` variable builds against an external SQLite.
 	"GYP_DEFINES",
+	"npm_config_sqlite3",
+	"npm_package_config_sqlite3",
+	"npm_config_debug",
+	"npm_config_devdir",
+	"npm_config_nodedir",
+	"npm_config_dist_url",
+	"npm_config_runtime",
+	"npm_config_target",
+	"npm_config_arch",
+	"npm_config_target_arch",
 ];
 
 export function customBuildEnvironment(env = process.env) {
@@ -70,7 +84,11 @@ export function nativeModuleCacheKey({ platform, arch, electronVersion, abi, mod
 // installer's download has none. It validates with the bundled checksums and
 // reuses the same zip cache the packager fills, so it adds no download when
 // packaging would have downloaded anyway. Returns null when unavailable.
-export function devElectronBinary(electronDir, run = spawnSync, timeoutMs = 180_000) {
+//
+// The installer's output is captured and never printed: on a failed download
+// @electron/get puts the full request URL in its error, which for an
+// authenticated mirror carries credentials.
+export function devElectronBinary(electronDir, run = spawnSync, timeoutMs = 180_000, log = () => undefined) {
 	const resolveBinary = () => {
 		const pathFile = join(electronDir, "path.txt");
 		if (!existsSync(pathFile)) return null;
@@ -79,8 +97,16 @@ export function devElectronBinary(electronDir, run = spawnSync, timeoutMs = 180_
 	};
 	const installed = resolveBinary();
 	if (installed) return installed;
-	const install = run(process.execPath, [join(electronDir, "install.js")], { stdio: "inherit", timeout: timeoutMs });
-	return install.status === 0 ? resolveBinary() : null;
+	const install = run(process.execPath, [join(electronDir, "install.js")], {
+		stdio: ["ignore", "pipe", "pipe"],
+		timeout: timeoutMs,
+	});
+	if (install.status !== 0) {
+		const how = install.error?.code === "ETIMEDOUT" ? `timed out after ${timeoutMs / 1000} s` : `exited ${install.status ?? install.signal}`;
+		log(`better-sqlite3: installing the dev Electron binary ${how}`);
+		return null;
+	}
+	return resolveBinary();
 }
 
 function runUnderElectron(electronBinary, args, run) {
@@ -115,15 +141,28 @@ function copyBuild(fromDir, toDir) {
 	for (const name of CACHED_FILES) copyFileSync(join(fromDir, name), join(toDir, name));
 }
 
-function storeBuild(cacheRoot, key, releaseDir, meta) {
+// The cache is optional: a failure to store, prune or discard (say a read-only
+// AO_BUILD_CACHE_DIR) is a warning, never a failed package.
+function storeBuild(cacheRoot, key, releaseDir, meta, log) {
 	// Store only the two runtime files, not node-gyp's intermediate objects.
-	const staging = mkdtempSync(join(tmpdir(), "better-sqlite3-"));
+	let staging;
 	try {
+		staging = mkdtempSync(join(tmpdir(), "better-sqlite3-"));
 		copyBuild(releaseDir, staging);
 		storeEntry(cacheRoot, CACHE_NAME, key, staging, meta);
 		pruneEntries(cacheRoot, CACHE_NAME);
+	} catch (error) {
+		log(`better-sqlite3: warning: could not store the build in the cache (${error.message}); continuing without it.`);
 	} finally {
-		rmSync(staging, { recursive: true, force: true });
+		if (staging) rmSync(staging, { recursive: true, force: true });
+	}
+}
+
+function discardEntry(cacheRoot, key, log) {
+	try {
+		rmSync(entryDir(cacheRoot, CACHE_NAME, key), { recursive: true, force: true });
+	} catch (error) {
+		log(`better-sqlite3: warning: could not remove the bad cache entry (${error.message}).`);
 	}
 }
 
@@ -148,7 +187,7 @@ export async function prepareBetterSqlite3({
 	if (platform !== process.platform || arch !== process.arch) return rebuildWithoutCache();
 	const custom = customBuildEnvironment(env);
 	if (custom.length > 0) return rebuildWithoutCache(`custom build environment (${custom.join(", ")})`);
-	const electronBinary = devElectronBinary(electronDir, run);
+	const electronBinary = devElectronBinary(electronDir, run, undefined, log);
 	const abi = electronBinary ? electronAbi(electronBinary, run) : null;
 	if (!electronBinary || !abi) return rebuildWithoutCache("target Electron unavailable to verify a cached build");
 	const moduleVersion = JSON.parse(readFileSync(join(moduleDir, "package.json"), "utf8")).version;
@@ -170,7 +209,7 @@ export async function prepareBetterSqlite3({
 			return "cached";
 		}
 		log(`better-sqlite3: the cached build did not load under Electron ${electronVersion}; discarding it.`);
-		rmSync(entryDir(cacheRoot, CACHE_NAME, key), { recursive: true, force: true });
+		discardEntry(cacheRoot, key, log);
 	}
 
 	await rebuild();
@@ -178,6 +217,6 @@ export async function prepareBetterSqlite3({
 		log("better-sqlite3: the fresh build did not load under the target Electron; not caching it.");
 		return "rebuilt";
 	}
-	storeBuild(cacheRoot, key, releaseDir, { electronVersion, abi, moduleVersion });
+	storeBuild(cacheRoot, key, releaseDir, { electronVersion, abi, moduleVersion }, log);
 	return "rebuilt";
 }
