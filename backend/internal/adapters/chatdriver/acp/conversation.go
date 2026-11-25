@@ -143,6 +143,9 @@ type conversation struct {
 	modeFor           func(ports.PermissionMode) string
 	optionsFor        func(ports.ChatTurnSettings) []SessionOption
 	splitModelVariant func(string) (string, SessionOption, bool)
+	// planMode is the agent's own plan mode, selected for a turn AO asks to
+	// plan; empty when the agent has none. See Config.PlanModeForAgent.
+	planMode string
 	// requireAdvertised refuses a config option the session did not advertise
 	// instead of sending it. See Config.RequireAdvertisedOptions.
 	requireAdvertised bool
@@ -483,6 +486,17 @@ func (c *conversation) setReportedProviderConversationID(sessionID string) {
 	c.mu.Lock()
 	c.reportedSessionID = sessionID
 	c.mu.Unlock()
+}
+
+// setPlanMode records the agent's plan mode and advertises plan_mode when it
+// has one.
+func (c *conversation) setPlanMode(mode string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.planMode = mode
+	if mode != "" {
+		c.capabilities[ports.ChatCapabilityPlanMode] = true
+	}
 }
 
 // setSessionPreamble arms standing context for the next prompt that actually
@@ -846,6 +860,7 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 	c.mu.Lock()
 	sessionID := c.sessionID
 	modeFor := c.modeFor
+	planMode := c.planMode
 	optionsFor := c.optionsFor
 	initialPermission := c.initialPermission
 	validateSettings := c.validateSettings
@@ -975,12 +990,19 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 	}
 	effectiveApproval := settings.Approval
 	if modeFor != nil {
-		if mode := modeFor(settings.Approval); mode != "" {
+		mode := modeFor(settings.Approval)
+		planning := settings.Plan && planMode != ""
+		if planning {
+			// A plan turn runs in the agent's own plan mode; the approval policy
+			// still governs what the agent may do once the user leaves it.
+			mode = planMode
+		}
+		if mode != "" {
 			// Some ACP agents rebuild their permission modes after a model switch.
 			// Claude, for example, removes Auto for Haiku and clamps itself back to
 			// Default. Respect that authoritative catalog instead of immediately
 			// reapplying AO's default Auto choice and aborting session creation.
-			if ports.NormalizePermissionMode(settings.Approval) == ports.PermissionModeAuto {
+			if !planning && ports.NormalizePermissionMode(settings.Approval) == ports.PermissionModeAuto {
 				if offered, known := c.configOptionOffers("mode", mode); known && !offered {
 					if fallbackOffered, _ := c.configOptionOffers("mode", "default"); fallbackOffered {
 						mode = "default"

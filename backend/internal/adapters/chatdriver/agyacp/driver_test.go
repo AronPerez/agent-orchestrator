@@ -155,6 +155,42 @@ func TestSessionPreambleCarriesStandingInstructionsAsText(t *testing.T) {
 	}
 }
 
+// AO plans a turn in `agy acp`'s own plan mode where it has verified that mode
+// end to end; the separate server has no plan mode.
+func TestPlanModeIsOfferedOnlyForAVerifiedAgyACP(t *testing.T) {
+	info := func(name, version string) acpsdk.InitializeResponse {
+		return acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: name, Version: version}}
+	}
+	for _, tc := range []struct {
+		init acpsdk.InitializeResponse
+		want string
+	}{
+		{info(cliServerAgentName, "1.5.16"), "plan"},
+		{info(cliServerAgentName, "1.6.0"), "plan"},
+		{info(cliServerAgentName, "1.5.15"), ""},
+		{info(serverAgentName, "1.4.1"), ""},
+		{acpsdk.InitializeResponse{}, ""},
+	} {
+		if got := planModeForAgent(tc.init); got != tc.want {
+			t.Errorf("planModeForAgent(%+v) = %q, want %q", tc.init.AgentInfo, got, tc.want)
+		}
+	}
+}
+
+// Antigravity's modes are approval tiers AO maps from its own approval
+// picker, plus plan, which AO switches per turn; its mode list would render
+// that one setting twice, and a choice AO does not map would be undone by the
+// next turn's approval mode.
+func TestBuildConfigLeavesModesToAOsOwnControls(t *testing.T) {
+	cfg := buildConfig(nil, testResolver(t, nil), nil)
+	if !cfg.SuppressSessionModes {
+		t.Fatal("agy's session modes must not surface beside AO's approval picker")
+	}
+	if cfg.PlanModeForAgent == nil {
+		t.Fatal("agy must name its plan mode")
+	}
+}
+
 func TestValidateInitializeAdmitsOnlyTestedAntigravityServers(t *testing.T) {
 	info := func(name, version string) acpsdk.InitializeResponse {
 		return acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: name, Version: version}}
