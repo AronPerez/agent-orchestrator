@@ -146,6 +146,9 @@ type conversation struct {
 	// planMode is the agent's own plan mode, selected for a turn AO asks to
 	// plan; empty when the agent has none. See Config.PlanModeForAgent.
 	planMode string
+	// planning is set while the current turn runs in planMode. Every
+	// permission request then goes to the user; see RequestPermission.
+	planning bool
 	// requireAdvertised refuses a config option the session did not advertise
 	// instead of sending it. See Config.RequireAdvertisedOptions.
 	requireAdvertised bool
@@ -989,9 +992,9 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 		}
 	}
 	effectiveApproval := settings.Approval
+	planning := modeFor != nil && settings.Plan && planMode != ""
 	if modeFor != nil {
 		mode := modeFor(settings.Approval)
-		planning := settings.Plan && planMode != ""
 		if planning {
 			// A plan turn runs in the agent's own plan mode; the approval policy
 			// still governs what the agent may do once the user leaves it.
@@ -1028,6 +1031,7 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 		}
 	}
 	c.mu.Lock()
+	c.planning = planning
 	if settings.Approval != "" {
 		c.permissionMode = ports.NormalizePermissionMode(effectiveApproval)
 	}

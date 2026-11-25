@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
@@ -101,5 +102,62 @@ func TestACPDriverWithoutAPlanModeIgnoresPlanTurns(t *testing.T) {
 	sendTurnWithSettings(t, conv, ports.ChatTurnSettings{Approval: ports.PermissionModeAcceptEdits, Plan: true})
 	if got := agentMode(agent); got != "accept-edits" {
 		t.Fatalf("plan request ran in mode %q, want the approval mode accept-edits", got)
+	}
+}
+
+// While a turn plans, every permission request goes to the user, whatever the
+// approval mode: an auto policy would otherwise approve the agent's own
+// plan-review or leave-plan gate and let it start editing unseen. The next
+// turn that does not plan applies the policy again.
+func TestACPDriverAsksTheUserForEveryPermissionWhilePlanning(t *testing.T) {
+	cfg := planModeConfig("plan")
+	cfg.Capabilities[ports.ChatCapabilityApprovals] = true
+	cfg.PermissionPolicy = func(mode ports.PermissionMode, params acpsdk.RequestPermissionRequest) (acpsdk.PermissionOptionId, bool) {
+		if ports.NormalizePermissionMode(mode) != ports.PermissionModeAuto {
+			return "", false
+		}
+		return params.Options[0].OptionId, true
+	}
+	agent := &fakeAgent{promptNoPermission: true}
+	driver := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.useTestProcess(fakeSpawn(agent))
+	opened, err := driver.Start(context.Background(), ports.ChatStartConfig{WorkspacePath: t.TempDir(), Permissions: ports.PermissionModeAuto})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	_ = nextEvent(t, opened.Events()) // controller.ready
+	conv := opened.(*conversation)
+	request := acpsdk.RequestPermissionRequest{
+		ToolCall: acpsdk.ToolCallUpdate{ToolCallId: "exit-plan-1", Title: acpsdk.Ptr("Leave plan mode and start implementing")},
+		Options:  []acpsdk.PermissionOption{{OptionId: "allow-once", Name: "Allow", Kind: acpsdk.PermissionOptionKindAllowOnce}},
+	}
+
+	if err := conv.applyTurnSettings(context.Background(), ports.ChatTurnSettings{Approval: ports.PermissionModeAuto, Plan: true}); err != nil {
+		t.Fatalf("plan turn settings: %v", err)
+	}
+	answered := make(chan acpsdk.RequestPermissionResponse, 1)
+	go func() {
+		response, _ := conv.RequestPermission(context.Background(), request)
+		answered <- response
+	}()
+	select {
+	case response := <-answered:
+		t.Fatalf("a permission request during a plan turn was answered automatically: %#v", response)
+	case event := <-opened.Events():
+		if event.Kind != ports.ChatEventApprovalRequested {
+			t.Fatalf("event = %q, want the request parked for the user", event.Kind)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the permission request was neither answered nor parked")
+	}
+
+	if err := conv.applyTurnSettings(context.Background(), ports.ChatTurnSettings{Approval: ports.PermissionModeAuto}); err != nil {
+		t.Fatalf("normal turn settings: %v", err)
+	}
+	request.ToolCall.ToolCallId = "edit-1"
+	response, err := conv.RequestPermission(context.Background(), request)
+	if err != nil || response.Outcome.Selected == nil || response.Outcome.Selected.OptionId != "allow-once" {
+		t.Fatalf("after planning the auto policy must apply again; response %#v, err %v", response, err)
 	}
 }

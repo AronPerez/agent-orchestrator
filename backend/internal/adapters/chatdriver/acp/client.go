@@ -62,9 +62,13 @@ func (c *conversation) RequestPermission(
 		return c.handleQwenUserQuestion(ctx, params)
 	}
 	c.mu.Lock()
-	policy, mode := c.permissionFor, c.permissionMode
+	policy, mode, planning := c.permissionFor, c.permissionMode, c.planning
 	c.mu.Unlock()
-	if policy != nil {
+	// While a turn plans, the user answers every request: an auto policy
+	// would otherwise approve the agent's own plan-review or leave-plan gate
+	// (agy's exit_plan_mode, an artifact feedback request) and let it edit
+	// before the user has seen the plan.
+	if policy != nil && !planning {
 		if selected, handled := policy(mode, params); handled {
 			if selected == CancelPermission {
 				return acpsdk.RequestPermissionResponse{Outcome: acpsdk.NewRequestPermissionOutcomeCancelled()}, nil
