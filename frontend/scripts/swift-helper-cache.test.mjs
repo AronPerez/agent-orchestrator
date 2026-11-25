@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -115,6 +115,108 @@ describe("Swift helper cache", () => {
 		expect(prepare({ log: (line) => lines.push(line) })).toBe("built");
 		expect(readFileSync(join(root, "wake-helper", "ao-wake"), "utf8")).toBe("binary-1");
 		expect(lines.some((line) => line.startsWith("wake-helper: warning: could not store the build in the cache"))).toBe(true);
+	});
+
+	it("restores from a read-only cache on every package run, not just the first", () => {
+		prepare();
+		const [entry] = entries();
+		const entryDir = join(cacheRoot, "package-wake-helper", entry);
+		const setMode = (dir, mode) => {
+			chmodSync(dir, mode);
+			for (const name of readdirSync(dir)) {
+				const child = join(dir, name);
+				if (statSync(child).isDirectory()) setMode(child, mode);
+			}
+		};
+		setMode(entryDir, 0o555);
+		try {
+			expect(prepare()).toBe("restored");
+			expect(statSync(join(root, "wake-helper")).mode & 0o200).toBe(0o200);
+			expect(prepare()).toBe("restored");
+			expect(build).toHaveBeenCalledTimes(1);
+		} finally {
+			setMode(entryDir, 0o755);
+		}
+	});
+
+	it("removes an output folder an earlier restore left read-only", () => {
+		prepare();
+		chmodSync(join(root, "wake-helper"), 0o555);
+		try {
+			expect(prepare()).toBe("restored");
+		} finally {
+			chmodSync(join(root, "wake-helper"), 0o755);
+		}
+	});
+
+	describe("dictation bundle", () => {
+		const bundle = () => join(root, "dictation-helper", "Orchestrator.app", "Contents");
+		const dictationBuild = vi.fn(() => {
+			mkdirSync(join(bundle(), "MacOS"), { recursive: true });
+			mkdirSync(join(bundle(), "Resources"), { recursive: true });
+			mkdirSync(join(bundle(), "_CodeSignature"), { recursive: true });
+			writeFileSync(join(bundle(), "MacOS", "Orchestrator"), `binary-${dictationBuild.mock.calls.length}`);
+			writeFileSync(join(bundle(), "Info.plist"), "plist");
+			writeFileSync(join(bundle(), "Resources", "icon.icns"), "icon");
+			writeFileSync(join(bundle(), "_CodeSignature", "CodeResources"), "seal");
+		});
+		// xcrun answers the toolchain probe; codesign answers per `sealValid`.
+		const tools = (sealValid) =>
+			vi.fn((command) => (command === "codesign" ? { status: sealValid() ? 0 : 1, stdout: "" } : { status: 0, stdout: "Apple Swift version 6.3\n" }));
+		const prepareDictation = (overrides = {}) =>
+			buildSwiftHelper({
+				name: "dictation-helper",
+				arch: "arm64",
+				build: dictationBuild,
+				root,
+				cacheRoot,
+				env: {},
+				run: tools(() => true),
+				log: () => undefined,
+				...overrides,
+			});
+		const cachedOutput = () => {
+			const dir = join(cacheRoot, "package-dictation-helper");
+			const [entry] = readdirSync(dir).filter((name) => !name.startsWith("."));
+			return join(dir, entry, "output", "Orchestrator.app", "Contents");
+		};
+
+		beforeEach(() => {
+			dictationBuild.mockClear();
+			mkdirSync(join(root, "native", "dictation-helper"), { recursive: true });
+			mkdirSync(join(root, "assets"), { recursive: true });
+			writeFileSync(join(root, "native", "dictation-helper", "main.swift"), "print(1)");
+			writeFileSync(join(root, "native", "dictation-helper", "Info.plist"), "plist");
+			writeFileSync(join(root, "assets", "icon.icns"), "icon");
+			writeFileSync(join(root, "scripts", "build-dictation-helper.mjs"), "// build script");
+		});
+
+		it("reuses a complete bundle whose seal verifies", () => {
+			expect(prepareDictation()).toBe("built");
+			expect(prepareDictation()).toBe("restored");
+			expect(dictationBuild).toHaveBeenCalledTimes(1);
+		});
+
+		it.each([
+			["its icon", "Resources/icon.icns"],
+			["its code signature", "_CodeSignature/CodeResources"],
+		])("rebuilds and replaces a cached bundle that lost %s", (_name, rel) => {
+			prepareDictation();
+			rmSync(join(cachedOutput(), rel));
+			expect(prepareDictation()).toBe("built");
+			expect(dictationBuild).toHaveBeenCalledTimes(2);
+			expect(existsSync(join(cachedOutput(), rel))).toBe(true);
+			expect(prepareDictation()).toBe("restored");
+		});
+
+		it("rebuilds when the cached bundle's seal does not verify", () => {
+			prepareDictation();
+			let verifications = 0;
+			// The restored copy fails codesign once; the rebuilt one passes.
+			const run = tools(() => ++verifications > 2);
+			expect(prepareDictation({ run })).toBe("built");
+			expect(dictationBuild).toHaveBeenCalledTimes(2);
+		});
 	});
 
 	it("builds without the cache when swiftc is unavailable", () => {

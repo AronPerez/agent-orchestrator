@@ -5,7 +5,7 @@
 // ~/.ao/build-cache/outputs), keyed by everything the build reads, and cloned
 // back into place on a hit. A miss runs the existing build script unchanged.
 import { spawnSync } from "node:child_process";
-import { readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -16,13 +16,15 @@ import {
 	lookupEntry,
 	outputFingerprint,
 	pruneEntries,
+	quarantineEntry,
 	storeEntry,
 } from "./dev-cache.mjs";
 
 const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-// What each helper build reads (its script and sources, relative to frontend/)
-// and the files its output folder must contain.
+// What each helper build reads (its script and sources, relative to frontend/),
+// the files its output folder must contain, and an optional check that the
+// output is sound (the dictation bundle must still carry a valid seal).
 export const SWIFT_HELPERS = {
 	"update-helper": {
 		outDir: "update-helper",
@@ -37,9 +39,37 @@ export const SWIFT_HELPERS = {
 	"dictation-helper": {
 		outDir: "dictation-helper",
 		inputs: ["scripts/build-dictation-helper.mjs", "native/dictation-helper", "assets/icon.icns"],
-		sentinels: ["Orchestrator.app/Contents/MacOS/Orchestrator", "Orchestrator.app/Contents/Info.plist"],
+		sentinels: [
+			"Orchestrator.app/Contents/MacOS/Orchestrator",
+			"Orchestrator.app/Contents/Info.plist",
+			"Orchestrator.app/Contents/Resources/icon.icns",
+			"Orchestrator.app/Contents/_CodeSignature/CodeResources",
+		],
+		verify: (outDir, run) => run("codesign", ["--verify", path.join(outDir, "Orchestrator.app")], { encoding: "utf8" }).status === 0,
 	},
 };
+
+function helperIsSound(helper, outDir, run) {
+	return Boolean(outputFingerprint(outDir, helper.sentinels)) && (!helper.verify || helper.verify(outDir, run));
+}
+
+// A clone keeps the cache's directory modes. From a read-only cache that would
+// leave read-only folders in the checkout, and the next package run could not
+// remove them. Files keep their modes; only folders need to be writable.
+function makeFoldersWritable(dir) {
+	const stat = lstatSync(dir);
+	if (!stat.isDirectory()) return;
+	chmodSync(dir, stat.mode | 0o700);
+	for (const entry of readdirSync(dir)) makeFoldersWritable(path.join(dir, entry));
+}
+
+// Remove a helper output folder, including one an earlier restore left
+// read-only.
+function removeTree(dir) {
+	if (!existsSync(dir)) return;
+	makeFoldersWritable(dir);
+	rmSync(dir, { recursive: true, force: true });
+}
 
 // Every file under each input (a file or a directory), relative to `root`.
 function inputFiles(root, inputs) {
@@ -90,20 +120,29 @@ export function buildSwiftHelper({
 	const entryName = `package-${name}`;
 	const cached = lookupEntry(cacheRoot, entryName, key);
 	if (cached) {
-		rmSync(outDir, { recursive: true, force: true });
+		removeTree(outDir);
 		try {
 			cloneTree(cached, outDir);
-			if (outputFingerprint(outDir, helper.sentinels)) {
+			makeFoldersWritable(outDir);
+			if (helperIsSound(helper, outDir, run)) {
 				log(`${name}: reused the cached ${arch} build (${key.slice(0, 12)}).`);
 				return "restored";
+			}
+			// A damaged entry would be reused forever: set it aside so this build
+			// can replace it. Optional, like the rest of the cache.
+			log(`${name}: the cached build is incomplete or its signature is invalid; rebuilding.`);
+			try {
+				quarantineEntry(cacheRoot, entryName, key, (dir) => !helperIsSound(helper, path.join(dir, "output"), run));
+			} catch (error) {
+				log(`${name}: warning: could not set the bad cache entry aside (${error.message}).`);
 			}
 		} catch (error) {
 			log(`${name}: could not restore the cached build (${error.message}); building.`);
 		}
-		rmSync(outDir, { recursive: true, force: true });
+		removeTree(outDir);
 	}
 	build();
-	if (!outputFingerprint(outDir, helper.sentinels)) return "built";
+	if (!helperIsSound(helper, outDir, run)) return "built";
 	// A source edited while swiftc ran would be stored under the old key and
 	// handed to a checkout that still has the old sources: recheck first.
 	if (helperCacheKey({ name, arch, swift, env, root }) !== key) {

@@ -1,6 +1,7 @@
 // @vitest-environment node
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "vitest";
@@ -22,6 +23,7 @@ import {
 	stampIsCurrent,
 	quarantineEntry,
 	storeEntry,
+	takeOverStaleLock,
 	withEntryLock,
 	summarizeDrift,
 } from "./dev-cache.mjs";
@@ -203,6 +205,80 @@ describe("cache entries", () => {
 		assert.throws(() => withEntryLock(cache, "daemon", "k", () => "ran", { waitMs: 50 }), /timed out waiting for the build cache lock/);
 		assert.equal(existsSync(lock), true);
 	});
+
+	test("releases only its own lock, never one that replaced it after a takeover", () => {
+		const root = tempDir();
+		const cache = path.join(root, "cache");
+		const lock = path.join(cache, "daemon", ".tmp-lock-k");
+		withEntryLock(cache, "daemon", "k", () => {
+			// Another builder decided this lock was stale and took the path over.
+			rmSync(lock, { recursive: true, force: true });
+			mkdirSync(lock);
+			writeFileSync(path.join(lock, "owner"), "someone-else");
+		});
+		assert.equal(readFileSync(path.join(lock, "owner"), "utf8"), "someone-else");
+	});
+
+	test("takes over only the stale lock it saw, and puts back a replacement it moved", () => {
+		const root = tempDir();
+		const lock = path.join(root, ".tmp-lock-k");
+		mkdirSync(lock);
+		writeFileSync(path.join(lock, "owner"), "dead-owner");
+		const stale = { ino: statSync(lock).ino, owner: "dead-owner" };
+		rmSync(lock, { recursive: true });
+		// Between the waiter's check and its takeover, a new owner took the path.
+		// Linux may hand the new directory the freed inode number, so only the
+		// owner token tells them apart.
+		mkdirSync(lock);
+		writeFileSync(path.join(lock, "owner"), "new-owner");
+		takeOverStaleLock(lock, stale);
+		assert.equal(readFileSync(path.join(lock, "owner"), "utf8"), "new-owner");
+
+		// A replacement that reuses the inode but carries another token stays.
+		takeOverStaleLock(lock, { ino: statSync(lock).ino, owner: "dead-owner" });
+		assert.equal(readFileSync(path.join(lock, "owner"), "utf8"), "new-owner");
+
+		// The stale lock itself is moved out of the way.
+		takeOverStaleLock(lock, { ino: statSync(lock).ino, owner: "new-owner" });
+		assert.equal(existsSync(lock), false);
+	});
+
+	test("never lets two builders hold the lock when they race to take over a stale one", async () => {
+		const root = tempDir();
+		const cache = path.join(root, "cache");
+		const lock = path.join(cache, "daemon", ".tmp-lock-k");
+		mkdirSync(lock, { recursive: true });
+		const old = new Date(Date.now() - 10 * 60 * 1000);
+		utimesSync(lock, old, old);
+		const inside = path.join(root, "inside");
+		const violations = path.join(root, "violations");
+		mkdirSync(inside);
+		const barrier = path.join(root, "go");
+		const moduleUrl = new URL("./dev-cache.mjs", import.meta.url).href;
+		const script = `
+			import { appendFileSync, existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+			import { join } from "node:path";
+			const { withEntryLock } = await import(${JSON.stringify(moduleUrl)});
+			while (!existsSync(${JSON.stringify(barrier)})) await new Promise((r) => setTimeout(r, 1));
+			withEntryLock(${JSON.stringify(cache)}, "daemon", "k", () => {
+				const mine = join(${JSON.stringify(inside)}, String(process.pid));
+				if (readdirSync(${JSON.stringify(inside)}).length > 0) appendFileSync(${JSON.stringify(violations)}, "overlap\\n");
+				writeFileSync(mine, "");
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+				rmSync(mine);
+			});
+		`;
+		const children = Array.from({ length: 5 }, () => spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "ignore", "pipe"] }));
+		const exits = children.map((child) => new Promise((resolve) => {
+			let stderr = "";
+			child.stderr.on("data", (chunk) => (stderr += chunk));
+			child.on("exit", (code) => resolve({ code, stderr }));
+		}));
+		writeFileSync(barrier, "");
+		for (const result of await Promise.all(exits)) assert.deepEqual(result, { code: 0, stderr: "" });
+		assert.equal(existsSync(violations), false);
+		assert.equal(existsSync(lock), false);
+	}, 30_000);
 
 	test("quarantines an entry only while it is still bad", () => {
 		const root = tempDir();

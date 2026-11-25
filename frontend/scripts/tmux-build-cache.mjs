@@ -134,12 +134,11 @@ export async function ensureCachedBuild({
 			pruneEntries(root, CACHE_NAME);
 		} catch (error) {
 			log(`bundled tmux: warning: could not store the build in the cache (${error.message}); continuing without it.`);
-			return use(output);
 		}
-		// A damaged entry that could not be set aside (a read-only cache) is still
-		// at the key: use this fresh build, never the entry, unless it is complete.
-		const stored = lookupEntry(root, CACHE_NAME, key);
-		return use(stored && isComplete(stored) ? stored : output);
+		// Always hand over this fresh build, never the stored entry: another
+		// checkout may prune or quarantine that entry while it is being copied,
+		// and a read-only cache may still hold a damaged one at this key.
+		return use(output);
 	} finally {
 		rmSync(work, { recursive: true, force: true });
 	}

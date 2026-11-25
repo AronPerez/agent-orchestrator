@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -261,6 +261,22 @@ describe("better-sqlite3 build cache", () => {
 		});
 		await expect(prepare({ run })).resolves.toBe("rebuilt");
 		expect(cacheEntries()).toHaveLength(0);
+	});
+
+	it("keeps hitting a read-only cache on every package run, not just the first", async () => {
+		await prepare();
+		const [entry] = cacheEntries();
+		const output = join(cacheRoot, CACHE_NAME, entry, "output");
+		for (const name of ["better_sqlite3.node", ".forge-meta"]) chmodSync(join(output, name), 0o444);
+		rmSync(join(moduleDir, "build"), { recursive: true });
+		try {
+			await expect(prepare()).resolves.toBe("cached");
+			// The restored files are now read-only too; the next restore must still work.
+			await expect(prepare()).resolves.toBe("cached");
+			expect(rebuild).toHaveBeenCalledTimes(1);
+		} finally {
+			for (const name of ["better_sqlite3.node", ".forge-meta"]) chmodSync(join(output, name), 0o644);
+		}
 	});
 
 	it("keeps packaging when the cache cannot be written", async () => {
