@@ -7499,3 +7499,60 @@ func TestStartRejectsProviderPermissionBeforeDriverLaunch(t *testing.T) {
 		t.Fatal("unsupported permission reached provider launch")
 	}
 }
+
+// Chat's Plan toggle is stored with the conversation, so a controller rebuilt
+// after a daemon restart still plans: queued work drains with Plan on, and the
+// driver is told the running turn's Plan choice for a live reconnect.
+func TestResumeRestoresTheStoredPlanChoice(t *testing.T) {
+	st := openStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 25, 4, 0, 0, 0, time.UTC)
+	conversation, err := st.CreateConversation(
+		ctx, "persisted-plan-conversation", domain.ConversationScopeProject,
+		testProject, testSession, now,
+	)
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	if err := st.SetConversationSettings(ctx, conversation.ID, domain.ConversationSettings{
+		ApprovalMode: domain.PermissionModeAuto, PlanMode: true,
+	}, now); err != nil {
+		t.Fatalf("SetConversationSettings: %v", err)
+	}
+
+	conv := newFakeConversation()
+	conv.providerConversationID = "thread-plan"
+	var resumed ports.ChatResumeConfig
+	svc := chatsvc.New(chatsvc.Options{
+		Store: st, Sessions: st,
+		Drivers: fakeRegistry{driver: fakeDriver{
+			conv: conv, resumeCfg: &resumed,
+			caps: ports.ChatCapabilities{
+				ports.ChatCapabilityStreaming: true,
+				ports.ChatCapabilityResume:    true,
+				ports.ChatCapabilityPlanMode:  true,
+			},
+		}},
+		Log:   slog.New(slog.DiscardHandler),
+		NewID: func() string { return "persisted-plan-start" },
+	})
+	t.Cleanup(func() { _ = svc.Stop(context.Background(), testSession) })
+
+	if _, err := svc.Start(ctx, chatsvc.StartConfig{
+		SessionID: testSession, ProjectID: testProject, Harness: domain.HarnessCodex,
+		WorkspacePath: t.TempDir(), ProviderConversationID: "thread-plan",
+		Permissions: ports.PermissionModeAuto,
+	}); err != nil {
+		t.Fatalf("Start resume: %v", err)
+	}
+	if !resumed.Plan {
+		t.Fatal("the resume config must carry the stored Plan choice")
+	}
+	controller, err := svc.Controller(testSession)
+	if err != nil {
+		t.Fatalf("Controller: %v", err)
+	}
+	if !controller.Settings().PlanMode {
+		t.Fatal("the rebuilt controller must keep Plan on, so queued work still plans")
+	}
+}
