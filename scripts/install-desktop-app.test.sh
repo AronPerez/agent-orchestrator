@@ -37,6 +37,21 @@ case "${1:-}" in
 		expect "$(print_repo 'https://example.com/x/y.git')" ""
 		grep -q 'could not derive' "$tmp/err" || { cat "$tmp/err" >&2; printf '%s\n' 'missing warning for an unrecognized remote' >&2; exit 1; }
 		;;
-	*) printf 'Usage: %s {env|https|ssh|unknown}\n' "$0" >&2; exit 2 ;;
+	build)
+		# The install uses only the .app, so it packages instead of making the
+		# zip and dmg. prepackage must build everything premake does, or the
+		# installed app would miss a bundled resource.
+		frontend="$(cd "$(dirname "$script")/../frontend" && pwd)"
+		node -e 'const s = require(process.argv[1]).scripts; if (s.prepackage !== s.premake) { console.error(`prepackage differs from premake:\n  ${s.prepackage}\n  ${s.premake}`); process.exit(1); }' "$frontend/package.json"
+		if [[ "$(uname -s)" != Darwin ]]; then printf 'PASS %s (package.json only; the build step needs macOS)\n' "$1"; exit 0; fi
+		printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$*" > "$TEST_NPM_ARGS"' 'exit 1' > "$tmp/bin/npm"
+		chmod +x "$tmp/bin/npm"
+		if env PATH="$tmp/bin:$PATH" TEST_REMOTE_URL="https://github.com/AronPerez/agent-orchestrator.git" TEST_NPM_ARGS="$tmp/npm-args" \
+			/bin/bash "$script" --dest "$tmp/dest" --no-daemon --no-launch > /dev/null 2>&1; then
+			printf '%s\n' 'expected the stubbed build to stop the install' >&2; exit 1
+		fi
+		expect "$(cat "$tmp/npm-args")" "run package"
+		;;
+	*) printf 'Usage: %s {env|https|ssh|unknown|build}\n' "$0" >&2; exit 2 ;;
 esac
 printf 'PASS %s\n' "$1"
