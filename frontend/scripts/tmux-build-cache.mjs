@@ -4,7 +4,7 @@
 // once, so every step here is safe to run concurrently against one cache.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildCacheRoot, lookupEntry, pruneEntries, storeEntry } from "./dev-cache.mjs";
@@ -81,35 +81,72 @@ export function compilerIdentity(run = spawnSync, env = process.env) {
 	return identity;
 }
 
-// The cached build for `key`, building it first on a miss. Each builder works
-// in its own temporary directory and publishes through dev-cache's storeEntry
-// (write once, atomic rename, never delete a published entry), so concurrent
-// builders of one key all end with the same complete entry. Returns the
-// entry's output directory.
-export async function ensureCachedBuild({ root, key, meta, build, workRoot = tmpdir() }) {
+// Hands the build for `key` to `use(outputDir)` and returns what `use`
+// returns, building first on a miss. Each builder works in its own temporary
+// directory and publishes through dev-cache's storeEntry (write once, atomic
+// rename, never delete a published entry), so concurrent builders of one key
+// all end with the same complete entry.
+//
+// The cache is optional and must never hold a build under a key it does not
+// match. If `currentKey()` differs after the build (an input changed while it
+// ran), or the cache cannot be written (say a read-only AO_BUILD_CACHE_DIR),
+// this build is used once and not stored.
+export async function ensureCachedBuild({
+	root,
+	key,
+	meta,
+	build,
+	use,
+	currentKey = () => key,
+	workRoot = tmpdir(),
+	log = (line) => console.log(line),
+}) {
 	const cached = lookupEntry(root, CACHE_NAME, key);
-	if (cached) return cached;
+	if (cached) return use(cached);
 	const work = mkdtempSync(join(workRoot, `${CACHE_NAME}-build-`));
 	try {
 		const output = join(work, "output");
 		mkdirSync(output);
 		await build(work, output);
-		storeEntry(root, CACHE_NAME, key, output, meta);
-		pruneEntries(root, CACHE_NAME);
+		if (currentKey() !== key) {
+			log("bundled tmux: inputs changed during the build; not caching it.");
+			return use(output);
+		}
+		try {
+			storeEntry(root, CACHE_NAME, key, output, meta);
+			pruneEntries(root, CACHE_NAME);
+		} catch (error) {
+			log(`bundled tmux: warning: could not store the build in the cache (${error.message}); continuing without it.`);
+			return use(output);
+		}
+		return use(lookupEntry(root, CACHE_NAME, key) ?? output);
 	} finally {
 		rmSync(work, { recursive: true, force: true });
 	}
-	const stored = lookupEntry(root, CACHE_NAME, key);
-	if (!stored) throw new Error(`bundled tmux cache entry ${key} is missing after storing it`);
-	return stored;
+}
+
+// The shared source downloads directory, or this checkout's when the shared
+// one cannot be written: the cache must never fail a build.
+export function writableDownloadsDir(shared, fallback) {
+	for (const dir of [shared, fallback]) {
+		try {
+			mkdirSync(dir, { recursive: true });
+			accessSync(dir, constants.W_OK);
+			return dir;
+		} catch {
+			// Try the next one.
+		}
+	}
+	return fallback;
 }
 
 // Fetch `url` to `archive` unless a copy with `sha256` is already there. The
 // published archive is never unlinked: a verified download replaces it with
 // one atomic rename, so another checkout that is extracting it keeps reading a
 // whole file.
-export async function fetchVerified({ url, sha256, archive, fetchImpl = fetch, attempts = 3, retryDelayMs = 1000 }) {
+export async function fetchVerified({ url, sha256, archive, label = url, fetchImpl = fetch, attempts = 3, retryDelayMs = 1000, log = (line) => console.log(line) }) {
 	if (fileSha256(archive) === sha256) return;
+	log(`Downloading ${label}...`);
 	const part = `${archive}.part-${process.pid}`;
 	let lastError;
 	for (let attempt = 1; attempt <= attempts; attempt += 1) {

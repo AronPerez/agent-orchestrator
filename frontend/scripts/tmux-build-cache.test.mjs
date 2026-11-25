@@ -24,6 +24,7 @@ import {
 	fetchVerified,
 	tmuxCacheKey,
 	tmuxCacheLocation,
+	writableDownloadsDir,
 } from "./tmux-build-cache.mjs";
 
 const inputs = {
@@ -116,14 +117,59 @@ describe("cached builds", () => {
 
 	it("builds on a miss and reuses the entry afterwards", async () => {
 		const root = join(dir, "cache");
-		const first = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, workRoot: dir });
+		const first = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, use: (built) => built, workRoot: dir });
 		expect(readFileSync(join(first, "tmux"), "utf8")).toBe("binary");
 		expect(readFileSync(join(first, "licenses", "tmux.txt"), "utf8")).toBe("ISC");
-		const second = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, workRoot: dir });
+		const second = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, use: (built) => built, workRoot: dir });
 		expect(second).toBe(first);
 		expect(fakeBuild).toHaveBeenCalledTimes(1);
 		// The private work directory is gone either way.
 		expect(readdirSync(dir).filter((name) => name.startsWith(`${CACHE_NAME}-build-`))).toEqual([]);
+	});
+
+	it("uses but never stores a build whose inputs changed while it ran", async () => {
+		const root = join(dir, "cache");
+		const lines = [];
+		const read = await ensureCachedBuild({
+			root,
+			key: "k",
+			currentKey: () => "k-after-an-xcode-update",
+			meta: {},
+			build: fakeBuild,
+			use: (built) => readFileSync(join(built, "tmux"), "utf8"),
+			workRoot: dir,
+			log: (line) => lines.push(line),
+		});
+		expect(read).toBe("binary");
+		expect(existsSync(join(root, CACHE_NAME, "k"))).toBe(false);
+		expect(lines).toEqual(["bundled tmux: inputs changed during the build; not caching it."]);
+	});
+
+	it("keeps a successful build when the cache cannot be written", async () => {
+		const root = join(dir, "read-only-cache");
+		writeFileSync(root, "not a directory");
+		const lines = [];
+		const read = await ensureCachedBuild({
+			root,
+			key: "k",
+			meta: {},
+			build: fakeBuild,
+			use: (built) => readFileSync(join(built, "licenses", "tmux.txt"), "utf8"),
+			workRoot: dir,
+			log: (line) => lines.push(line),
+		});
+		expect(read).toBe("ISC");
+		expect(lines.some((line) => line.startsWith("bundled tmux: warning: could not store the build in the cache"))).toBe(true);
+		expect(readdirSync(dir).filter((name) => name.startsWith(`${CACHE_NAME}-build-`))).toEqual([]);
+	});
+
+	it("falls back to this checkout's downloads directory when the shared one cannot be written", () => {
+		const blocked = join(dir, "blocked");
+		writeFileSync(blocked, "a file, not a directory");
+		const fallback = join(dir, "checkout", ".cache", "bundled-tmux-sources");
+		expect(writableDownloadsDir(join(blocked, "sources"), fallback)).toBe(fallback);
+		expect(existsSync(fallback)).toBe(true);
+		expect(writableDownloadsDir(join(dir, "shared"), fallback)).toBe(join(dir, "shared"));
 	});
 
 	// Several workers spawn worktrees at once, so builders race for real here:
@@ -155,6 +201,7 @@ describe("cached builds", () => {
 				root: ${JSON.stringify(root)},
 				key: ${JSON.stringify(key)},
 				meta: {},
+				use: (built) => built,
 				workRoot: ${JSON.stringify(dir)},
 				build: async (_work, out) => {
 					await new Promise((r) => setTimeout(r, Math.random() * 40));
@@ -251,6 +298,14 @@ describe("source downloads", () => {
 			closeSync(reader);
 		}
 		expect(readFileSync(archive).equals(archiveBytes)).toBe(true);
+	});
+
+	it("says what it downloads, and only when it downloads", async () => {
+		const archive = join(dir, "tmux.tar.gz");
+		const lines = [];
+		await fetchVerified({ url: "u", sha256, archive, label: "tmux 3.5a", fetchImpl: slowFetch(0), log: (line) => lines.push(line) });
+		await fetchVerified({ url: "u", sha256, archive, label: "tmux 3.5a", fetchImpl: slowFetch(0), log: (line) => lines.push(line) });
+		expect(lines).toEqual(["Downloading tmux 3.5a..."]);
 	});
 
 	it("does not fetch when a verified archive is already there", async () => {

@@ -9,6 +9,7 @@ import {
 	ensureCachedBuild,
 	fetchVerified,
 	sourceDownloadsDir,
+	writableDownloadsDir,
 	tmuxCacheKey,
 	tmuxCacheLocation,
 } from "./tmux-build-cache.mjs";
@@ -80,23 +81,26 @@ const { shared, root: cacheRoot } = tmuxCacheLocation({ repoRoot: resolve(fronte
 if (!shared) {
 	console.log(`Custom build environment (${Object.keys(cacheInputs.environment).join(", ")}): keeping the tmux build in this checkout.`);
 }
-const downloadsRoot = sourceDownloadsDir();
-mkdirSync(downloadsRoot, { recursive: true });
+const downloadsRoot = writableDownloadsDir(sourceDownloadsDir(), join(resolve(frontendRoot, ".."), ".cache", "bundled-tmux-sources"));
 
-// The entry holds the binary and the licenses that ship beside it.
+// The entry holds the binary and the licenses that ship beside it. The sources
+// are sha256-pinned and the environment and recipe are fixed for this process,
+// so only the compiler can change under a running build: re-probe it after.
 const { recipe: _recipe, ...metaInputs } = cacheInputs;
-const cached = await ensureCachedBuild({
+await ensureCachedBuild({
 	root: cacheRoot,
 	key: tmuxCacheKey(cacheInputs),
+	currentKey: () => tmuxCacheKey({ ...cacheInputs, compiler: compilerIdentity() }),
 	meta: { inputs: metaInputs },
 	build,
+	use: (built) => {
+		rmSync(outputRoot, { recursive: true, force: true });
+		mkdirSync(join(outputRoot, "bin"), { recursive: true });
+		cpSync(join(built, "licenses"), join(outputRoot, "licenses"), { recursive: true });
+		copyFileSync(join(built, "tmux"), outputBinary);
+		chmodSync(outputBinary, 0o755);
+	},
 });
-
-rmSync(outputRoot, { recursive: true, force: true });
-mkdirSync(join(outputRoot, "bin"), { recursive: true });
-cpSync(join(cached, "licenses"), join(outputRoot, "licenses"), { recursive: true });
-copyFileSync(join(cached, "tmux"), outputBinary);
-chmodSync(outputBinary, 0o755);
 writeFileSync(
 	join(outputRoot, "VERSIONS.json"),
 	JSON.stringify(
@@ -238,7 +242,7 @@ async function build(buildDir, output) {
 
 async function download(source) {
 	try {
-		await fetchVerified({ url: source.url, sha256: source.sha256, archive: archivePath(source) });
+		await fetchVerified({ url: source.url, sha256: source.sha256, archive: archivePath(source), label: `${source.name} ${source.version}` });
 	} catch (error) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
