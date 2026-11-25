@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { BUNDLED_TMUX_VERSION } from "./scripts/tmux-version.mjs";
 import { checkMacDmgLayout } from "./scripts/build-mac-dmg.mjs";
+import { prepareBetterSqlite3 } from "./scripts/native-module-cache.mjs";
 
 // Vite builds main and renderer separately; both inherit this invocation's token.
 // Even two local builds at the same dirty commit must reject each other's JS.
@@ -54,16 +55,27 @@ function ignoreFromVitePackage(file: string): boolean {
 }
 
 async function prepareNativeDependencies(platform: NodeJS.Platform, arch: string): Promise<void> {
-	// Rebuild in the source tree, where prebuild-install and its helper packages
-	// are available. The Vite package intentionally carries only the resulting
-	// native runtime, not the install-time download toolchain.
-	await rebuild({
-		buildPath: process.cwd(),
-		electronVersion: electronPackage.version,
+	// Reuse a machine-wide build when its key (Electron version and ABI, arch,
+	// module version, source hash) matches and it loads under the target
+	// Electron; otherwise rebuild. See scripts/native-module-cache.mjs.
+	await prepareBetterSqlite3({
+		moduleDir: path.resolve("node_modules", "better-sqlite3"),
+		electronDir: path.resolve("node_modules", "electron"),
 		platform,
 		arch,
-		onlyModules: ["better-sqlite3"],
-		force: true,
+		electronVersion: electronPackage.version,
+		// Rebuild in the source tree, where prebuild-install and its helper
+		// packages are available. The Vite package intentionally carries only the
+		// resulting native runtime, not the install-time download toolchain.
+		rebuild: () =>
+			rebuild({
+				buildPath: process.cwd(),
+				electronVersion: electronPackage.version,
+				platform,
+				arch,
+				onlyModules: ["better-sqlite3"],
+				force: true,
+			}),
 	});
 }
 
