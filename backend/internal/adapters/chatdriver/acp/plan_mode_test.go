@@ -2,13 +2,16 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/persistenthost"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
@@ -112,12 +115,7 @@ func TestACPDriverWithoutAPlanModeIgnoresPlanTurns(t *testing.T) {
 func TestACPDriverAsksTheUserForEveryPermissionWhilePlanning(t *testing.T) {
 	cfg := planModeConfig("plan")
 	cfg.Capabilities[ports.ChatCapabilityApprovals] = true
-	cfg.PermissionPolicy = func(mode ports.PermissionMode, params acpsdk.RequestPermissionRequest) (acpsdk.PermissionOptionId, bool) {
-		if ports.NormalizePermissionMode(mode) != ports.PermissionModeAuto {
-			return "", false
-		}
-		return params.Options[0].OptionId, true
-	}
+	cfg.PermissionPolicy = approveFirstOptionUnderAuto
 	agent := &fakeAgent{promptNoPermission: true}
 	driver := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	driver.useTestProcess(fakeSpawn(agent))
@@ -160,4 +158,107 @@ func TestACPDriverAsksTheUserForEveryPermissionWhilePlanning(t *testing.T) {
 	if err != nil || response.Outcome.Selected == nil || response.Outcome.Selected.OptionId != "allow-once" {
 		t.Fatalf("after planning the auto policy must apply again; response %#v, err %v", response, err)
 	}
+}
+
+// planModeLiveReconnect resumes a plan-capable binding with an auto-approve
+// policy onto a persistent host that still runs the provider session, as after
+// a daemon restart in the middle of a turn.
+func planModeLiveReconnect(t *testing.T) *conversation {
+	t.Helper()
+	initialize, err := json.Marshal(acpsdk.InitializeResponse{
+		ProtocolVersion: acpsdk.ProtocolVersionNumber,
+		AgentCapabilities: acpsdk.AgentCapabilities{
+			SessionCapabilities: acpsdk.SessionCapabilities{Resume: &acpsdk.SessionResumeCapabilities{}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := json.Marshal(acpsdk.NewSessionResponse{SessionId: "provider-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon, host := net.Pipe()
+	t.Cleanup(func() { _ = host.Close() })
+	agent := &fakeAgent{}
+	agent.conn = acpsdk.NewAgentSideConnection(agent, host, host)
+	cfg := planModeConfig("plan")
+	cfg.Capabilities[ports.ChatCapabilityResume] = true
+	cfg.PermissionPolicy = approveFirstOptionUnderAuto
+	driver := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.connectHost = func(context.Context, persistenthost.Config) (*persistenthost.Transport, error) {
+		return &persistenthost.Transport{
+			Stdin: daemon, Stdout: daemon, Reconnected: true,
+			ACPState: &persistenthost.ACPState{InitializeResult: initialize, SessionResult: session, SessionID: "provider-session"},
+		}, nil
+	}
+	opened, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
+		SessionID: "ao-session", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+		ProviderConversationID: "provider-session", ProviderScopeID: "scope",
+		Permissions: ports.PermissionModeAuto,
+	})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	conv, ok := opened.(*conversation)
+	if !ok {
+		t.Fatalf("live reconnect returned %T, want *conversation", opened)
+	}
+	return conv
+}
+
+// A live reconnect cannot tell whether the turn still running on the host is
+// a plan turn, so until the next turn says otherwise every permission request
+// goes to the user: an auto policy could otherwise pass the plan gate of a plan
+// turn that outlived the old daemon.
+func TestACPDriverAsksTheUserAfterALiveReconnectUntilTheNextTurn(t *testing.T) {
+	conv := planModeLiveReconnect(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The controller activates a live reconnect before its first turn; that
+	// releases the provider's replies to this attachment.
+	if err := conv.ActivateLiveReconnect(ctx, ""); err != nil {
+		t.Fatalf("ActivateLiveReconnect: %v", err)
+	}
+	request := acpsdk.RequestPermissionRequest{
+		ToolCall: acpsdk.ToolCallUpdate{ToolCallId: "exit-plan-1"},
+		Options:  []acpsdk.PermissionOption{{OptionId: "allow-once", Name: "Allow", Kind: acpsdk.PermissionOptionKindAllowOnce}},
+	}
+	answered := make(chan struct{}, 1)
+	go func() {
+		_, _ = conv.RequestPermission(context.Background(), request)
+		answered <- struct{}{}
+	}()
+	deadline := time.After(2 * time.Second)
+	for parked := false; !parked; {
+		select {
+		case <-answered:
+			t.Fatal("a permission request after a live reconnect was answered automatically")
+		case event := <-conv.Events():
+			// The reconnect announces its controller state first.
+			parked = event.Kind == ports.ChatEventApprovalRequested
+		case <-deadline:
+			t.Fatal("the permission request was neither answered nor parked")
+		}
+	}
+
+	if err := conv.applyTurnSettings(ctx, ports.ChatTurnSettings{Approval: ports.PermissionModeAuto}); err != nil {
+		t.Fatalf("next turn settings: %v", err)
+	}
+	request.ToolCall.ToolCallId = "edit-1"
+	response, err := conv.RequestPermission(ctx, request)
+	if err != nil || response.Outcome.Selected == nil || response.Outcome.Selected.OptionId != "allow-once" {
+		t.Fatalf("after the next turn the auto policy must apply again; response %#v, err %v", response, err)
+	}
+}
+
+// approveFirstOptionUnderAuto is a binding's auto-approve policy: under AO's
+// Auto it selects the first offered option, and otherwise leaves the request
+// to the user.
+func approveFirstOptionUnderAuto(mode ports.PermissionMode, params acpsdk.RequestPermissionRequest) (acpsdk.PermissionOptionId, bool) {
+	if ports.NormalizePermissionMode(mode) != ports.PermissionModeAuto {
+		return "", false
+	}
+	return params.Options[0].OptionId, true
 }

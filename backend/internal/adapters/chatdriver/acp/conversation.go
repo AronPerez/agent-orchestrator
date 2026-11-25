@@ -502,6 +502,16 @@ func (c *conversation) setPlanMode(mode string) {
 	}
 }
 
+// assumePlanningUntilNextTurn is for a live reconnect, which cannot tell
+// whether the turn still running on the host is a plan turn. Until the next
+// turn's settings say otherwise, an agent with a plan mode is treated as
+// planning, so its permission requests go to the user (see RequestPermission).
+func (c *conversation) assumePlanningUntilNextTurn() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.planning = c.planMode != ""
+}
+
 // setSessionPreamble arms standing context for the next prompt that actually
 // reaches the provider. Any earlier preamble is dropped: the newest launch
 // context is the one that should be delivered, which is how a recomputed system

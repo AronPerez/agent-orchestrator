@@ -769,6 +769,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		conv.setReportedProviderConversationID(reportedProviderConversationID)
 		conv.initialPermission = ports.PermissionMode(live.InitialPermissions)
 		conv.setPlanMode(d.planMode(init))
+		conv.assumePlanningUntilNextTurn()
 		conv.setSessionPreamble(d.sessionPreamble(init, launchCfg))
 		// The snapshot's current values are the agent's launch defaults; the
 		// provider process is in the state these restored settings describe.
