@@ -1,4 +1,4 @@
-import { SessionFleet } from "./SessionFleet";
+import { FleetOverview } from "./FleetOverview";
 import type { MessageKey } from "../i18n";
 import { useTelemetrySurface } from "../lib/ui-usage-telemetry";
 import { OrchestratorStartingChat } from "./chat/OrchestratorStartingChat";
@@ -60,6 +60,8 @@ import { labelForHost } from "../lib/host-clients";
 import { HostOfflineStatus, hostOfflineReasonKey } from "./HostOfflineStatus";
 import { cn } from "../lib/utils";
 import { useConnectedHosts } from "../hooks/useHostConnection";
+import { useLocalHostId } from "../hooks/useLocalHostId";
+import { useOpenFleetSession } from "../hooks/useOpenFleetSession";
 import { LOCAL_HOST, refKey, sessionUiKey } from "../lib/hosts";
 import { useShellMaybe } from "../lib/shell-context";
 import { sessionNavigateTarget } from "../lib/navigate-to-session";
@@ -309,6 +311,27 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		if (session.kind === "worker") recordManualWorkerOpen(session.id, hostId);
 		void navigate(sessionNavigateTarget(session.workspaceId, session.id, hostId));
 	}, [navigate, hostId]);
+	// A fleet row can be a session on another machine, drawn under its parent here.
+	const openFleetSession = useOpenFleetSession();
+	const showFleet = canShowFleet && view === "fleet";
+	const localHostId = useLocalHostId(showFleet);
+	// The board's own read of a remote project is the freshest copy of it; the
+	// rest of the fleet comes from the same cached lists as the Fleet page.
+	const fleetRemoteWorkspaces = useMemo(() => {
+		const cached = shell?.remoteWorkspaces ?? [];
+		if (!hostId || !workspace) return cached;
+		return [
+			...cached.filter((candidate) => !(candidate.hostId === hostId && candidate.id === workspace.id)),
+			{ ...workspace, hostId },
+		];
+	}, [hostId, shell?.remoteWorkspaces, workspace]);
+	// The board's own machine is always known to its tree, with its live
+	// connection, even when it is paired here rather than saved in the shell.
+	const fleetRemoteHosts = useMemo(() => {
+		const hosts = shell?.remoteHosts ?? [];
+		if (!hostId || hosts.some((host) => host.hostId === hostId)) return hosts;
+		return [...hosts, { hostId, label: hostLabel ?? hostId, url: "", status: connected ? "connected" as const : "offline" as const }];
+	}, [connected, hostId, hostLabel, shell?.remoteHosts]);
 	const openSessionArtifact = useCallback((session: WorkspaceSession, path: string) => {
 		useUiStore.getState().requestWorkspaceFileOpen(session.id, path, hostId, "artifact");
 		openSession(session);
@@ -399,9 +422,21 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 					<Button variant={view === "fleet" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "fleet"} onClick={() => setView("fleet")}>{t("fleet.tab")}</Button>
 				</div>
 			) : null}
-			{canShowFleet && view === "fleet" && workspace ? <>
+			{showFleet && workspace ? <>
 				{boardLoadFailed || (hostId && remoteProjectQuery.isError) ? <p role="alert" className="px-4 py-2 text-xs text-destructive">{t("fleet.stale")}</p> : null}
-				<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} hostId={hostId} />
+				{usesPreviewWorkspaceData && !hostId ? <p className="px-4 py-2 text-xs text-muted-foreground">{t("fleet.preview")}</p> : null}
+				<FleetOverview
+					key={scopeKey}
+					scope={{ projectId: workspace.id, machineId: hostId ?? LOCAL_HOST }}
+					localHostId={localHostId}
+					localWorkspaces={localWorkspaceQuery.data ?? []}
+					onOpen={openFleetSession}
+					remoteHosts={fleetRemoteHosts}
+					remoteWorkspaces={fleetRemoteWorkspaces}
+					remoteFailedHostIds={shell?.remoteFailedHostIds}
+					remoteLoadedProjectHostIds={shell?.remoteLoadedProjectHostIds}
+					remoteLoadedSessionHostIds={shell?.remoteLoadedSessionHostIds}
+				/>
 			</> : <>
 			<div className={cn("relative min-h-0 flex-1 overflow-hidden", hostOffline && workspace && "opacity-75")} data-host-offline={hostOffline && workspace ? "" : undefined}>
 				{projectId && !guest && health.state !== "ok" && (!hostId || connected) ? (

@@ -4,8 +4,32 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { components } from "../../api/schema";
 import type { RemoteHost } from "../hooks/useRemoteHosts";
 import { toWorkspaceSession } from "../hooks/useWorkspaceQuery";
+import { LOCAL_HOST } from "../lib/hosts";
 import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
 import { FleetOverview } from "./FleetOverview";
+
+// The details' history reads are covered in FleetSessionDetails.test.tsx; here
+// only what the tree hands them matters.
+vi.mock("./FleetSessionDetails", () => ({
+	FleetSessionDetails: (props: {
+		session: WorkspaceSession;
+		hostId?: string;
+		parentName?: string;
+		roleLabel: string;
+		statusLabel: string;
+		sessionNames: ReadonlyMap<string, string>;
+		onOpen: () => void;
+		onClose: () => void;
+	}) => (
+		<div role="group" aria-label={`Details for ${props.session.title}`} data-host={props.hostId}>
+			<p>{`${props.roleLabel} · ${props.statusLabel}`}</p>
+			<p>{props.parentName ? `Spawned by ${props.parentName}` : "No recorded parent"}</p>
+			<p>{`Known: ${[...props.sessionNames.values()].join(", ")}`}</p>
+			<button type="button" onClick={props.onOpen}>Open session</button>
+			<button type="button" onClick={props.onClose}>Close details</button>
+		</div>
+	),
+}));
 
 function session(
 	id: string,
@@ -123,6 +147,9 @@ describe("FleetOverview", () => {
 		expect(sessions).toHaveLength(2);
 
 		await userEvent.click(sessions[1]!);
+		expect(onOpen).not.toHaveBeenCalled();
+		expect(screen.getByRole("group", { name: "Details for Fix cache" })).toHaveAttribute("data-host", "build-box");
+		await userEvent.dblClick(sessions[1]!);
 		expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: "same" }), "build-box");
 	});
 
@@ -390,6 +417,12 @@ describe("FleetOverview", () => {
 		expect(screen.getByRole("treeitem", { name: /^Remote namesake/ })).toHaveAttribute("aria-level", "3");
 
 		await userEvent.click(child);
+		const details = screen.getByRole("group", { name: "Details for Remote worker" });
+		expect(details).toHaveAttribute("data-host", "build-box");
+		expect(details).toHaveTextContent("Spawned by Coordinator");
+		// History names come from the worker's own machine, not from this computer.
+		expect(details).toHaveTextContent("Known: Remote worker, Remote namesake");
+		await userEvent.click(within(details).getByRole("button", { name: "Open session" }));
 		expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: "worker" }), "build-box");
 	});
 
@@ -506,5 +539,146 @@ describe("FleetOverview", () => {
 		const restored = screen.getAllByRole("treeitem", { name: /^Same/ });
 		expect(restored[0]).toHaveAttribute("aria-expanded", "false");
 		expect(restored[1]).toHaveAttribute("aria-expanded", "true");
+	});
+	it("scopes to one project on one machine by exact identity and starts at its machine", () => {
+		const local = workspace("alpha", "Alpha", [session("same", "Local fix")]);
+		const remote = workspace("alpha", "Alpha", [session("same", "Remote fix", "idle", { hostId: "build-box" })], { hostId: "build-box" });
+		const other = workspace("beta", "Beta", [session("other", "Other project work")]);
+		const props = {
+			localWorkspaces: [local, other],
+			onOpen: vi.fn(),
+			remoteHosts: [host("build-box", "Build box", "connected"), host("idle-box", "Idle box", "connected")],
+			remoteWorkspaces: [remote],
+		};
+		const view = render(<FleetOverview {...props} scope={{ projectId: "alpha", machineId: LOCAL_HOST }} />);
+
+		expect(screen.queryByRole("treeitem", { name: /^Alpha/ })).not.toBeInTheDocument();
+		expect(screen.getByRole("treeitem", { name: /^This computer/ })).toHaveAttribute("aria-level", "1");
+		expect(screen.getByRole("treeitem", { name: /^Local fix/ })).toHaveAttribute("aria-level", "2");
+		expect(screen.queryByText("Remote fix")).not.toBeInTheDocument();
+		expect(screen.queryByText("Other project work")).not.toBeInTheDocument();
+		expect(screen.queryByText("Build box")).not.toBeInTheDocument();
+		expect(screen.queryByText("Idle box")).not.toBeInTheDocument();
+
+		view.unmount();
+		render(<FleetOverview {...props} scope={{ projectId: "alpha", machineId: "build-box" }} />);
+		expect(screen.getByRole("treeitem", { name: /^Build box/ })).toHaveAttribute("aria-level", "1");
+		expect(screen.getByRole("treeitem", { name: /^Remote fix/ })).toBeInTheDocument();
+		expect(screen.queryByText("Local fix")).not.toBeInTheDocument();
+		expect(screen.queryByText("This computer")).not.toBeInTheDocument();
+	});
+
+	it("keeps a child on another machine under its parent in a project-scoped tree", () => {
+		const orchestrator = session("orch", "Coordinator", "working", { kind: "orchestrator" });
+		const worker = session("worker", "Remote worker", "needs_input", {
+			hostId: "build-box",
+			parentHostId: "h_local",
+			parentSessionId: "orch",
+		});
+		render(
+			<FleetOverview
+				localHostId="h_local"
+				localWorkspaces={[workspace("project", "Alpha", [orchestrator])]}
+				onOpen={vi.fn()}
+				remoteHosts={[host("build-box", "Build box", "connected")]}
+				remoteWorkspaces={[workspace("remote-project", "Alpha box", [worker], { hostId: "build-box" })]}
+				scope={{ projectId: "project", machineId: LOCAL_HOST }}
+			/>,
+		);
+
+		expect(screen.getByRole("treeitem", { name: /^Coordinator/ })).toHaveAttribute("aria-level", "2");
+		const child = screen.getByRole("treeitem", { name: /^Remote worker/ });
+		expect(child).toHaveAttribute("aria-level", "3");
+		expect(within(child).getByText("On Build box")).toBeInTheDocument();
+		expect(screen.getByRole("treeitem", { name: /^This computer/ })).toHaveTextContent("1 Needs you");
+	});
+
+	it("opens a project-scoped tree on its machine and top sessions, folding only deeper large branches", () => {
+		const orchestrator = session("orch", "Coordinator", "working", { kind: "orchestrator" });
+		const manager = session("manager", "Busy manager", "working", { parentSessionId: "orch" });
+		const workers = Array.from({ length: 8 }, (_, index) => session(`worker-${index}`, `Worker ${index}`, "working", { parentSessionId: "manager" }));
+		const local = workspace("project", "Alpha", [orchestrator, manager, ...workers]);
+		const view = render(<FleetOverview localWorkspaces={[local]} onOpen={vi.fn()} />);
+		expect(screen.getByRole("treeitem", { name: /^Alpha/ })).toHaveAttribute("aria-expanded", "false");
+
+		view.unmount();
+		render(<FleetOverview localWorkspaces={[local]} onOpen={vi.fn()} scope={{ projectId: "project", machineId: LOCAL_HOST }} />);
+		expect(screen.getByRole("treeitem", { name: /^This computer/ })).toHaveAttribute("aria-expanded", "true");
+		expect(screen.getByRole("treeitem", { name: /^Coordinator/ })).toHaveAttribute("aria-expanded", "true");
+		expect(screen.getByRole("treeitem", { name: /^Busy manager/ })).toHaveAttribute("aria-expanded", "false");
+		expect(screen.queryByText("Worker 0")).not.toBeInTheDocument();
+	});
+
+	it("shows an empty project's machine with no sessions", () => {
+		render(
+			<FleetOverview
+				localWorkspaces={[workspace("empty", "Empty", []), workspace("busy", "Busy", [session("w", "Elsewhere")])]}
+				onOpen={vi.fn()}
+				scope={{ projectId: "empty", machineId: LOCAL_HOST }}
+			/>,
+		);
+
+		expect(screen.getAllByRole("treeitem")).toHaveLength(1);
+		expect(screen.getByRole("treeitem", { name: /^This computer/ })).toHaveTextContent("No sessions to display.");
+		expect(screen.queryByText("Elsewhere")).not.toBeInTheDocument();
+	});
+
+	it("unfolds a session's details under its row and folds them with a second pick, Escape or Close", async () => {
+		const onOpen = vi.fn();
+		const orchestrator = session("orch", "Coordinator", "working", { kind: "orchestrator" });
+		const worker = session("worker", "Picked worker", "working", { parentSessionId: "orch" });
+		const orphan = session("orphan", "Orphan", "working", { parentSessionId: "gone", parentHostId: "h_unpaired" });
+		render(<FleetOverview localWorkspaces={[workspace("project", "Project", [orchestrator, worker, orphan])]} onOpen={onOpen} />);
+
+		const row = screen.getByRole("treeitem", { name: /^Picked worker/ });
+		expect(row).toHaveAttribute("aria-selected", "false");
+		await userEvent.click(row);
+		expect(row).toHaveAttribute("aria-selected", "true");
+		const details = screen.getByRole("group", { name: "Details for Picked worker" });
+		expect(details).toHaveTextContent("Worker · Working");
+		expect(details).toHaveTextContent("Spawned by Coordinator");
+		// The details sit directly under the picked row.
+		expect(row.nextElementSibling).toBe(details);
+		expect(onOpen).not.toHaveBeenCalled();
+
+		await userEvent.click(row);
+		expect(screen.queryByRole("group")).not.toBeInTheDocument();
+
+		row.focus();
+		fireEvent.keyDown(row, { key: " " });
+		expect(screen.getByRole("group", { name: "Details for Picked worker" })).toBeInTheDocument();
+		fireEvent.keyDown(row, { key: "Escape" });
+		expect(screen.queryByRole("group")).not.toBeInTheDocument();
+		expect(row).toHaveFocus();
+
+		await userEvent.click(screen.getByRole("treeitem", { name: /^Orphan/ }));
+		expect(screen.getByRole("group", { name: "Details for Orphan" })).toHaveTextContent("Spawned by h_unpaired/gone");
+		await userEvent.click(screen.getByRole("treeitem", { name: /^Coordinator/ }));
+		expect(screen.queryByRole("group", { name: "Details for Orphan" })).not.toBeInTheDocument();
+		expect(screen.getByRole("group", { name: "Details for Coordinator" })).toHaveTextContent("No recorded parent");
+		await userEvent.click(screen.getByRole("button", { name: "Close details" }));
+		expect(screen.queryByRole("group")).not.toBeInTheDocument();
+		expect(screen.getByRole("treeitem", { name: /^Coordinator/ })).toHaveFocus();
+	});
+	it("keeps this project's session spawned from another machine as a root that names its parent", async () => {
+		const orchestrator = session("orch", "M6 coordinator", "working", { kind: "orchestrator" });
+		const aide = session("aide", "Rotation aide", "working", { hostId: "m4", parentHostId: "h_local", parentSessionId: "orch" });
+		render(
+			<FleetOverview
+				localHostId="h_local"
+				localWorkspaces={[workspace("sky", "Sky", [orchestrator])]}
+				onOpen={vi.fn()}
+				remoteHosts={[host("m4", "M4 Mini", "connected")]}
+				remoteWorkspaces={[workspace("sky", "Sky", [aide], { hostId: "m4" })]}
+				scope={{ projectId: "sky", machineId: "m4" }}
+			/>,
+		);
+
+		expect(screen.getByRole("treeitem", { name: /^M4 Mini/ })).toHaveTextContent("1 Working");
+		const row = screen.getByRole("treeitem", { name: /^Rotation aide.*Spawned by M6 coordinator/ });
+		expect(row).toHaveAttribute("aria-level", "2");
+		expect(screen.queryByText("M6 coordinator")).not.toBeInTheDocument();
+		await userEvent.click(row);
+		expect(screen.getByRole("group", { name: "Details for Rotation aide" })).toHaveTextContent("Spawned by M6 coordinator");
 	});
 });
