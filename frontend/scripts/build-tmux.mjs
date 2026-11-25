@@ -292,7 +292,10 @@ function verifyTerminfoAttach(binary) {
 	};
 	run(binary, ["-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", session, "sleep 10"]);
 	try {
-		const tmuxArgs = [binary, "-S", socket, "-u", "-T", "RGB", "attach-session", "-t", session];
+		// Detach as soon as the client is up: terminfo is resolved while
+		// attaching, so a missing database still fails here. Without the detach,
+		// attach-session waited out the session's `sleep 10` on every build.
+		const tmuxArgs = [binary, "-S", socket, "-u", "-T", "RGB", "attach-session", "-t", session, ";", "detach-client"];
 		const result =
 			process.platform === "darwin"
 				? run("script", ["-q", "/dev/null", ...tmuxArgs], {

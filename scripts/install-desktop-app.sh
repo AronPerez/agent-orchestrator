@@ -3,7 +3,7 @@
 # install-desktop-app.sh — build, sign, and install the AO desktop app locally (macOS).
 #
 # Why this exists: an Electron app built without an Apple Developer ID (the
-# default for a local `npm run make`) gets an ad-hoc signature that
+# default for a local `npm run package`) gets an ad-hoc signature that
 #   1. macOS auto-update (Squirrel/ShipIt) refuses — it can't satisfy the
 #      installed app's code requirement, so releases can't self-update; and
 #   2. is frequently *broken* for a customized bundle ("code has no resources
@@ -23,7 +23,7 @@
 #   scripts/install-desktop-app.sh [options]
 #
 # Options:
-#   --skip-build     Use the existing build in frontend/out (don't run `npm run make`).
+#   --skip-build     Use the existing build in frontend/out (don't run `npm run package`).
 #   --no-daemon      Don't install the daemon into ~/.ao/host (app-only update).
 #   --no-launch      Install but don't open the app.
 #   --dest DIR       Install directory (default: /Applications).
@@ -36,7 +36,7 @@
 #   * The app's updater polls the GitHub repo baked at build time (AO_RELEASE_REPO;
 #     forge defaults to upstream). Unset, this script derives owner/repo from this
 #     checkout's origin remote, so a fork build never offers upstream's releases.
-#   * If APPLE_SIGNING_IDENTITY is set, `npm run make` already signs with a real
+#   * If APPLE_SIGNING_IDENTITY is set, `npm run package` already signs with a real
 #     identity, so the ad-hoc re-sign is skipped (it would clobber that).
 #   * The app and the daemon must be built from the SAME commit for the identity
 #     match — this script builds the app and reloads the daemon together, so keep
@@ -68,7 +68,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 
 # --- update feed -----------------------------------------------------------
 # forge.config.ts bakes the updater's GitHub repo from AO_RELEASE_REPO and
-# defaults to upstream, so a plain `npm run make` builds an app that polls
+# defaults to upstream, so a plain `npm run package` builds an app that polls
 # upstream's releases. Derive owner/repo from this checkout's origin remote
 # instead; an explicit AO_RELEASE_REPO still wins. Always returns 0: an
 # unrecognized remote prints nothing and forge keeps its own default.
@@ -107,8 +107,11 @@ log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 
 # --- 1. build --------------------------------------------------------------
 if [ "$skip_build" -eq 0 ]; then
-  log "Building app + daemon (npm run make; update feed: ${AO_RELEASE_REPO:-forge default})…"
-  ( cd "$frontend" && npm run make )
+  # `package`, not `make`: this script installs the .app from out/, so the zip
+  # and dmg distributables (about 20 s) were built and never used. Its
+  # prepackage script builds the same daemon and bundled resources as premake.
+  log "Building app + daemon (npm run package; update feed: ${AO_RELEASE_REPO:-forge default})…"
+  ( cd "$frontend" && npm run package )
 else
   log "Skipping build (--skip-build)."
 fi
@@ -122,7 +125,7 @@ app_src="$(
 )"
 [ -n "$app_src" ] && [ -d "$app_src" ] || {
   echo "error: no built .app found under ${frontend}/out for arch ${arch}." >&2
-  echo "       run without --skip-build, or check that 'npm run make' succeeded." >&2
+  echo "       run without --skip-build, or check that 'npm run package' succeeded." >&2
   exit 1
 }
 app_name="$(basename "$app_src")"
