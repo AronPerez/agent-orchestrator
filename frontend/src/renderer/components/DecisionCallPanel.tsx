@@ -1,19 +1,23 @@
 import { useQuery } from "@tanstack/react-query";
-import { useId, type KeyboardEvent, type ReactNode } from "react";
-import { useTranslation } from "react-i18next";
+import { useMemo, type KeyboardEvent, type ReactNode } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { Check, ShieldAlert, TriangleAlert } from "@/components/app-icons";
 import { useDecisionDetail } from "../hooks/useDecisionInbox";
-import { useDecisionSessionTarget } from "../hooks/useDecisionSessionTarget";
-import { useNavigateToSession } from "../lib/navigate-to-session";
+import { useDecisionMachine } from "../hooks/useDecisionSessionTarget";
 import { apiErrorRequestId } from "../lib/api-client";
 import type { DecisionCall, DecisionHistoryEntry } from "../lib/decision-inbox";
-import { decisionSyncKey, fetchDecisionSyncStatus, originFreshness } from "../lib/decision-sync";
+import { decisionMaterial, decisionTextParts } from "../lib/decision-references";
+import { decisionSessionChain, decisionSessionTarget, findDecisionSession, type DecisionMachine, type DecisionSessionTarget, type DecisionWorkspaceSource } from "../lib/decision-session-target";
+import { decisionSyncKey, fetchDecisionSyncStatus, originFreshness, type DecisionSyncStatus } from "../lib/decision-sync";
 import { openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { formatTimeCompact } from "../lib/format-time";
+import { getSessionStatusView } from "../lib/session-presentation";
 import { cn } from "../lib/utils";
+import { toSessionStatus } from "../types/workspace";
 import { DecisionCallActions, decisionAcceptsAnswer } from "./DecisionCallActions";
-import { decisionOwner, decisionPlace } from "./DecisionLinkPreviewCard";
+import { decisionMachineHost, DecisionSessionChip, DecisionText, shortSessionName } from "./DecisionReference";
+import { DecisionSupportingMaterial, hasDecisionMaterial, useLaterDecisions } from "./DecisionSupportingMaterial";
 import { DecisionStateDot, decisionStateLabel } from "./DecisionStateLabel";
 import { Button } from "./ui/button";
 import { CloseButton } from "./ui/close-button";
@@ -25,7 +29,7 @@ export type DecisionCallPanelProps = {
 	onClose?: () => void;
 	/** Controls drawn before the close button, such as Keep open. */
 	headerActions?: ReactNode;
-	/** "page" sets the call in a readable column for a decision that fills the page instead of sitting beside the board. */
+	/** "page" lays out a decision that fills the page: a readable column, with what it rests on beside it when there is room. */
 	layout?: "panel" | "page";
 };
 
@@ -85,7 +89,7 @@ export function DecisionCallPanel({ callId, onClose, headerActions, layout = "pa
 		body = (
 			<>
 				{detail.isError ? <RefreshError error={detail.error} onRetry={() => void detail.refetch()} /> : null}
-				<DecisionCallDetail call={detail.data.call} history={detail.data.history} onRecheck={() => void detail.refetch()} />
+				<DecisionCallDetail call={detail.data.call} history={detail.data.history} layout={layout} onRecheck={() => void detail.refetch()} />
 			</>
 		);
 	} else if (detail.data === null) {
@@ -129,11 +133,11 @@ export function DecisionCallPanel({ callId, onClose, headerActions, layout = "pa
 				{/*
 				  One wrapper in both layouts, so the call below keeps its place in the
 				  tree: switching between beside the board and filling the page must
-				  not rebuild it and lose what was typed. Filling the page, it is one
-				  readable column and its tab closes it.
+				  not rebuild it and lose what was typed. Filling the page, its tab
+				  closes it, and the call lays itself out for the width it has.
 				*/}
-				<div className={layout === "page" ? "mx-auto w-full max-w-3xl py-2" : undefined}>
-					{layout === "page" && detail.isFetching && detail.data ? <p role="status" className="px-4 pt-1 text-caption text-passive">{t("decisions.updating")}</p> : null}
+				<div className={layout === "page" ? "w-full py-2" : undefined}>
+					{layout === "page" && detail.isFetching && detail.data ? <p role="status" className="mx-auto max-w-3xl px-4 pt-1 text-caption text-passive">{t("decisions.updating")}</p> : null}
 					{body}
 				</div>
 			</div>
@@ -156,132 +160,199 @@ function RefreshError({ error, onRetry }: { error: unknown; onRetry: () => void 
 
 /** States in which an answer or overrule still has to reach the owning machine. */
 const DECISION_OPEN_STATES = new Set<string>(["needs_you", "in_progress", "decided"]);
+const NO_WORKSPACES: DecisionWorkspaceSource["workspaces"] = [];
 
-function DecisionCallDetail({ call, history, onRecheck }: { call: DecisionCall; history: DecisionHistoryEntry[]; onRecheck: () => void }) {
+/** A machine's name as this computer knows it; the id only when nothing names it. */
+function machineNamer(call: DecisionCall, sync: DecisionSyncStatus | undefined): (hostId: string) => string {
+	return (hostId) => {
+		if (hostId === call.hostId) return call.machineLabel || hostId;
+		if (sync && hostId === sync.hostId) return sync.machineLabel || hostId;
+		return originFreshness(hostId, sync, new Date()).machine;
+	};
+}
+
+type DetailProps = { call: DecisionCall; history: DecisionHistoryEntry[]; layout: "panel" | "page"; onRecheck: () => void };
+
+/**
+ * The call itself. Beside the board it is one column: the question and its
+ * answer, then what it rests on, then its history. Filling the page, what it
+ * rests on moves to a column of its own when there is room, and the history
+ * becomes a timeline. Both are the same elements in the same order, so moving
+ * between them never rebuilds the answer form and loses what was typed.
+ */
+function DecisionCallDetail({ call, history, layout, onRecheck }: DetailProps) {
 	const { t } = useTranslation();
 	const exactTime = useExactTime();
-	const place = decisionPlace(call);
 	const sync = useQuery({ queryKey: decisionSyncKey(), queryFn: ({ signal }) => fetchDecisionSyncStatus(signal) });
-	const servingHostId = Array.isArray(sync.data?.peers) ? sync.data.hostId : undefined;
+	const syncStatus = Array.isArray(sync.data?.peers) ? sync.data : undefined;
+	const servingHostId = syncStatus?.hostId;
 	const remoteMachine = servingHostId && call.hostId && call.hostId !== servingHostId && DECISION_OPEN_STATES.has(call.state)
-		? originFreshness(call.hostId, sync.data, new Date()).machine
+		? originFreshness(call.hostId, syncStatus, new Date()).machine
 		: undefined;
+	const machineName = machineNamer(call, syncStatus);
+	const machine = useDecisionMachine(call);
+	const workspaces = machine.kind === "ready" ? machine.workspaces : NO_WORKSPACES;
+	const textContext = useMemo(() => ({
+		workspaces,
+		projectId: call.projectId,
+		ownerSessionId: call.ownerSessionId,
+		pullRequestUrls: [...call.links.map((link) => link.url), ...(call.outcomeLink ? [call.outcomeLink] : [])],
+	}), [workspaces, call.projectId, call.ownerSessionId, call.links, call.outcomeLink]);
+	const contextParts = useMemo(() => decisionTextParts(call.context, textContext), [call.context, textContext]);
+	const outcomeParts = useMemo(() => (call.outcome ? decisionTextParts(call.outcome, textContext) : []), [call.outcome, textContext]);
+	const material = useMemo(() => {
+		// The reference often names the call's main file; only a file it names counts.
+		const referenceFiles = call.reference ? decisionTextParts(call.reference, textContext).filter((part) => part.kind === "artifact") : [];
+		return decisionMaterial(call, [...contextParts, ...outcomeParts, ...referenceFiles]);
+	}, [call, contextParts, outcomeParts, textContext]);
+	const later = useLaterDecisions(call);
+	const page = layout === "page";
+	const wide = page && (hasDecisionMaterial(material) || later.length > 0);
 	return (
-		<div className="flex flex-col gap-4 px-4 py-3">
-			<header className="flex flex-col gap-1">
-				{place ? <p className="truncate text-caption text-muted-foreground" title={place}>{place}</p> : null}
-				<p className="truncate text-caption text-muted-foreground">{decisionOwner(call)}</p>
-				<h2 className="mt-1 text-subtitle font-semibold leading-snug text-foreground">{call.title}</h2>
-				{remoteMachine ? (
-					<p className="text-caption text-muted-foreground" data-decision-origin-line="">{t("decisions.panel.onMachine", { machine: remoteMachine })}</p>
-				) : null}
-				<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-caption">
-					<span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-						<DecisionStateDot state={call.state} />
-						{decisionStateLabel(call.state, t)}
-					</span>
-					<span className="text-muted-foreground" title={exactTime(call.raisedAt)}>
-						{t("decisions.raisedAt", { time: formatTimeCompact(call.raisedAt) })}
-					</span>
-					{call.retired ? <span className="text-muted-foreground">{t("decisions.history.retired")}</span> : null}
-				</div>
-				{call.changedAfterClose ? (
-					<p className="mt-1 flex items-center gap-1.5 text-caption text-status-in-review">
-						<TriangleAlert aria-hidden="true" className="size-3.5 shrink-0" />
-						{t("decisions.changedAfterClose")}
-					</p>
-				) : null}
-			</header>
-			{call.context ? <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">{call.context}</p> : null}
-			{call.links.length > 0 ? (
-				<section aria-label={t("decisions.links")} className="flex flex-col gap-1 text-sm">
-					{call.links.map((link) => (
-						<SafeLink key={`${link.label}:${link.url}`} url={link.url}>{link.label || link.url}</SafeLink>
-					))}
-				</section>
-			) : null}
-			{call.decided ? <DecidedDetails call={call} exactTime={exactTime} /> : null}
-			{decisionAcceptsAnswer(call) || call.options.length === 0 ? null : <ul aria-label={t("decisions.options")} className="overflow-hidden rounded-lg bg-card">
-				{call.options.map((option, index) => {
-					const chosen = call.choice === "option" && call.option === index + 1;
-					return (
-						<li key={`${index}:${option.label}`} className="flex gap-2 border-border px-3 py-2 not-first:border-t">
-							<span aria-hidden="true" className={cn("mt-0.5 flex size-3.5 shrink-0 items-center justify-center", chosen ? "text-accent" : "text-transparent")}>
-								<Check className="size-3.5" />
+		<div className="@container/decision">
+			<div className={cn(
+				"mx-auto grid w-full grid-cols-1 items-start gap-4 px-4 py-3",
+				page && "max-w-3xl",
+				wide && "@4xl/decision:max-w-[68rem] @4xl/decision:grid-cols-[minmax(0,1fr)_18rem] @4xl/decision:grid-rows-[auto_1fr] @4xl/decision:gap-x-8",
+			)}>
+				<div className={cn("flex min-w-0 flex-col gap-4", wide && "@4xl/decision:col-start-1 @4xl/decision:row-start-1")}>
+					<header className="flex flex-col gap-1">
+						<p className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-muted-foreground">
+							<span className="truncate">{call.projectName || call.projectId}</span>
+							{call.streamSessionId ? (
+								<>
+									<span aria-hidden="true">·</span>
+									<DecisionSessionChip machine={machine} sessionId={call.streamSessionId}>{shortSessionName(call.streamName || call.streamSessionId)}</DecisionSessionChip>
+								</>
+							) : null}
+						</p>
+						<h2 className="mt-1 text-subtitle font-semibold leading-snug text-foreground">{call.title}</h2>
+						{remoteMachine ? (
+							<p className="text-caption text-muted-foreground" data-decision-origin-line="">{t("decisions.panel.onMachine", { machine: remoteMachine })}</p>
+						) : null}
+						<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-caption">
+							<span className="inline-flex items-center gap-1.5 font-medium text-foreground">
+								<DecisionStateDot state={call.state} />
+								{decisionStateLabel(call.state, t)}
 							</span>
-							<span className="min-w-0 flex-1">
-								<span className="block text-sm font-medium text-foreground">{option.label}</span>
-								{option.consequence ? <span className="block text-caption text-muted-foreground">{option.consequence}</span> : null}
-								{option.recommended || chosen ? (
-									<span className="mt-0.5 block text-caption text-muted-foreground">
-										{[option.recommended ? t("decisionInbox.recommended") : "", chosen ? t("decisions.chosen") : ""].filter(Boolean).join(" · ")}
-									</span>
-								) : null}
+							<span className="text-muted-foreground" title={exactTime(call.raisedAt)}>
+								{t("decisions.raisedAt", { time: formatTimeCompact(call.raisedAt) })}
 							</span>
-						</li>
-					);
-				})}
-			</ul>}
-			{call.note && !decisionAcceptsAnswer(call) ? <p className="whitespace-pre-wrap break-words border-l-2 border-border pl-3 text-sm text-muted-foreground">{call.note}</p> : null}
-			<DecisionCallActions call={call} extraActions={<OpenSessionButton call={call} />} onRecheck={onRecheck} />
-			{call.outcome ? (
-				<section aria-label={t("decisions.outcome")} className="text-sm">
-					<p className="font-medium text-foreground">{call.outcome}</p>
-					{call.outcomeLink ? <SafeLink url={call.outcomeLink}>{call.outcomeLink}</SafeLink> : null}
-				</section>
-			) : null}
-			<section className="flex flex-col gap-2">
-				<h3 className="text-caption font-medium text-muted-foreground">{t("decisions.history")}</h3>
-				<ol aria-label={t("decisions.history")} className="flex flex-col gap-2.5">
-					{history.map((item) => (
-						<li key={item.id} className="text-caption">
-							<p data-slot="history-what" className="text-sm text-foreground">{historyWhat(item, call, t)}</p>
-							{item.note ? <p className="whitespace-pre-wrap break-words text-muted-foreground">{item.note}</p> : null}
-							{item.kind === "outcome" && item.link ? <SafeLink url={item.link}>{item.link}</SafeLink> : null}
-							<p className="text-muted-foreground">
-								{historyWho(item, call, t)} · <time dateTime={item.writtenAt}>{exactTime(item.writtenAt)}</time>
+							{call.retired ? <span className="text-muted-foreground">{t("decisions.history.retired")}</span> : null}
+						</div>
+						<RaisedBy call={call} machine={machine} machineName={machineName} />
+						{call.changedAfterClose ? (
+							<p className="mt-1 flex items-center gap-1.5 text-caption text-status-in-review">
+								<TriangleAlert aria-hidden="true" className="size-3.5 shrink-0" />
+								{t("decisions.changedAfterClose")}
 							</p>
-						</li>
-					))}
-				</ol>
-			</section>
+						) : null}
+					</header>
+					{call.context ? <DecisionText parts={contextParts} machine={machine} className="text-sm leading-relaxed text-foreground" /> : null}
+					{call.decided ? <DecidedDetails call={call} exactTime={exactTime} /> : null}
+					{decisionAcceptsAnswer(call) || call.options.length === 0 ? null : <ul aria-label={t("decisions.options")} className="overflow-hidden rounded-lg bg-card">
+						{call.options.map((option, index) => {
+							const chosen = call.choice === "option" && call.option === index + 1;
+							return (
+								<li key={`${index}:${option.label}`} className="flex gap-2 border-border px-3 py-2 not-first:border-t">
+									<span aria-hidden="true" className={cn("mt-0.5 flex size-3.5 shrink-0 items-center justify-center", chosen ? "text-accent" : "text-transparent")}>
+										<Check className="size-3.5" />
+									</span>
+									<span className="min-w-0 flex-1">
+										<span className="block text-sm font-medium text-foreground">{option.label}</span>
+										{option.consequence ? <span className="block text-caption text-muted-foreground">{option.consequence}</span> : null}
+										{option.recommended || chosen ? (
+											<span className="mt-0.5 block text-caption text-muted-foreground">
+												{[option.recommended ? t("decisionInbox.recommended") : "", chosen ? t("decisions.chosen") : ""].filter(Boolean).join(" · ")}
+											</span>
+										) : null}
+									</span>
+								</li>
+							);
+						})}
+					</ul>}
+					{call.note && !decisionAcceptsAnswer(call) ? <p className="whitespace-pre-wrap break-words border-l-2 border-border pl-3 text-sm text-muted-foreground">{call.note}</p> : null}
+					<DecisionCallActions call={call} onRecheck={onRecheck} />
+					{call.outcome ? (
+						<section aria-label={t("decisions.outcome")} className="text-sm">
+							<DecisionText parts={outcomeParts} machine={machine} className="font-medium text-foreground" />
+							{call.outcomeLink ? <SafeLink url={call.outcomeLink}>{call.outcomeLink}</SafeLink> : null}
+						</section>
+					) : null}
+				</div>
+				<div className={cn("min-w-0 empty:hidden", wide && "@4xl/decision:col-start-2 @4xl/decision:row-span-2 @4xl/decision:row-start-1")}>
+					<DecisionSupportingMaterial material={material} later={later} host={decisionMachineHost(machine)} />
+				</div>
+				<section className={cn("flex min-w-0 flex-col gap-2", wide && "@4xl/decision:col-start-1 @4xl/decision:row-start-2")}>
+					<h3 className="text-caption font-medium text-muted-foreground">{t("decisions.history")}</h3>
+					<ol aria-label={t("decisions.history")} data-history-style={page ? "timeline" : "list"} className={cn("flex flex-col", page ? "ml-1 gap-3 border-l border-border-strong pl-4" : "gap-2.5")}>
+						{history.map((item) => (
+							<li
+								key={item.id}
+								className={cn("text-caption", page && "relative before:absolute before:top-1.5 before:-left-[20.5px] before:size-[7px] before:rounded-full before:border before:border-muted-foreground before:bg-background")}
+							>
+								<p data-slot="history-what" className="text-sm text-foreground"><HistoryWhat item={item} call={call} machine={machine} /></p>
+								{item.note ? <p className="whitespace-pre-wrap break-words text-muted-foreground">{item.note}</p> : null}
+								{item.kind === "outcome" && item.link ? <SafeLink url={item.link}>{item.link}</SafeLink> : null}
+								<p className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-muted-foreground">
+									<HistoryWho item={item} call={call} machine={machine} machineName={machineName} />
+									<span aria-hidden="true">·</span>
+									<time dateTime={item.writtenAt}>{exactTime(item.writtenAt)}</time>
+								</p>
+							</li>
+						))}
+					</ol>
+				</section>
+			</div>
 		</div>
 	);
 }
 
+/** The raising session's state in a word, or why it cannot be opened; nothing while that is still being checked. */
+function ownerStatusText(target: DecisionSessionTarget, status: string | undefined, t: TFunction): string | undefined {
+	switch (target.kind) {
+		case "open":
+			if (target.terminated) return t("decisions.sessionEnded");
+			return status ? getSessionStatusView(toSessionStatus(status), t).label : undefined;
+		case "offline": return t("decisions.sessionOffline", { machine: target.machine });
+		case "missing": return t("decisions.sessionMissing");
+		case "error": return t("decisions.sessionCheckFailed");
+		case "checking": return undefined;
+	}
+}
+
 /**
- * Opens the call's owning session on the machine that raised it, or says why
- * it cannot. A finished session opens to its existing view; nothing restarts it.
+ * Who raised the call, as a link to that session with its state in a word,
+ * and the managers above it. It replaces a separate Open session button.
  */
-function OpenSessionButton({ call }: { call: DecisionCall }) {
+function RaisedBy({ call, machine, machineName }: { call: DecisionCall; machine: DecisionMachine; machineName: (hostId: string) => string }) {
 	const { t } = useTranslation();
-	const reasonId = useId();
-	const target = useDecisionSessionTarget(call);
-	const navigateToSession = useNavigateToSession();
-	const reason = target.kind === "checking"
-		? t("decisions.sessionChecking")
-		: target.kind === "offline"
-			? t("decisions.sessionOffline", { machine: target.machine })
-			: target.kind === "missing"
-				? t("decisions.sessionMissing")
-				: target.kind === "error"
-					? t("decisions.sessionCheckFailed")
-					: undefined;
+	const target = decisionSessionTarget(machine, call.ownerSessionId);
+	const owner = findDecisionSession(machine, call.ownerSessionId)?.session;
+	const chain = decisionSessionChain(machine, call.ownerSessionId);
+	const status = ownerStatusText(target, owner?.status, t);
 	return (
 		<>
-			<Button
-				type="button"
-				variant="secondary"
-				size="sm"
-				disabled={target.kind !== "open"}
-				aria-describedby={reason ? reasonId : undefined}
-				onClick={() => {
-					if (target.kind === "open") navigateToSession(target.projectId, target.sessionId, target.host);
-				}}
-			>
-				{t("decisions.openSession")}
-			</Button>
-			{reason ? <span id={reasonId} className="text-caption text-muted-foreground">{reason}</span> : null}
+			<p data-decision-raised-by="" className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-muted-foreground">
+				<span>{t("decisions.raisedBy")}</span>
+				<DecisionSessionChip machine={machine} sessionId={call.ownerSessionId}>{shortSessionName(call.ownerSessionName || call.ownerSessionId)}</DecisionSessionChip>
+				{status ? <span>{status}</span> : null}
+				<span aria-hidden="true">·</span>
+				<span>{machineName(call.hostId)}</span>
+			</p>
+			{chain.length > 0 ? (
+				<p className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-caption text-muted-foreground">
+					<span>{t("decisions.under")}</span>
+					{chain.map((session, index) => (
+						<span key={session.id} className="inline-flex min-w-0 items-center gap-1">
+							{index > 0 ? <span aria-hidden="true" className="text-passive">›</span> : null}
+							<DecisionSessionChip machine={machine} sessionId={session.id}>
+								{session.kind === "orchestrator" ? t("shell.orchestrator") : shortSessionName(session.title || session.id)}
+							</DecisionSessionChip>
+						</span>
+					))}
+				</p>
+			) : null}
 		</>
 	);
 }
@@ -327,8 +398,10 @@ function DecidedDetails({ call, exactTime }: { call: DecisionCall; exactTime: (i
 	);
 }
 
+
 /** What one history entry recorded, in the page's words. Reduction stays in the daemon. */
-function historyWhat(item: DecisionHistoryEntry, call: DecisionCall, t: TFunction): string {
+function HistoryWhat({ item, call, machine }: { item: DecisionHistoryEntry; call: DecisionCall; machine: DecisionMachine }): ReactNode {
+	const { t } = useTranslation();
 	switch (item.kind) {
 		case "raised": return t("decisions.history.raised");
 		case "answered": {
@@ -338,9 +411,19 @@ function historyWhat(item: DecisionHistoryEntry, call: DecisionCall, t: TFunctio
 			return t("decisions.history.answered", { choice });
 		}
 		case "dismissed": return t("decisions.history.dismissed");
-		case "delivered":
+		case "delivered": {
 			if (item.status === "no_session") return t("decisions.noSession");
-			return t(item.fallback ? "decisions.sentToFallback" : "decisions.sentTo", { session: item.sessionName || item.sessionId || "" });
+			const session = shortSessionName(item.sessionName || item.sessionId || "");
+			if (!item.sessionId) return t(item.fallback ? "decisions.sentToFallback" : "decisions.sentTo", { session });
+			return (
+				<Trans
+					t={t}
+					i18nKey={item.fallback ? "decisions.history.sentToFallback" : "decisions.history.sentTo"}
+					values={{ session }}
+					components={{ session: <DecisionSessionChip machine={machine} sessionId={item.sessionId} /> }}
+				/>
+			);
+		}
 		case "outcome": return t("decisions.history.outcome", { text: item.text ?? "" });
 		case "withdrawn": return t("decisions.history.withdrawn");
 		case "retired": return t(item.retired ? "decisions.history.retired" : "decisions.history.unretired");
@@ -351,18 +434,25 @@ function historyWhat(item: DecisionHistoryEntry, call: DecisionCall, t: TFunctio
 	}
 }
 
-/** Who wrote an entry and from which device. */
-function historyWho(item: DecisionHistoryEntry, call: DecisionCall, t: TFunction): string {
-	const machine = item.hostId === call.hostId ? call.machineLabel || call.hostId : item.hostId;
+/** Who wrote an entry and on which machine; a session is a link to it. */
+function HistoryWho({ item, call, machine, machineName }: { item: DecisionHistoryEntry; call: DecisionCall; machine: DecisionMachine; machineName: (hostId: string) => string }) {
+	const { t } = useTranslation();
+	const where = machineName(item.hostId);
 	if (item.authorKind === "person") {
 		const surface = item.authorSurface === "desktop" || item.authorSurface === "cli" || item.authorSurface === "mobile"
 			? t(`decisions.surface.${item.authorSurface}`)
 			: item.authorSurface;
-		return [t("decisions.author.person"), surface, machine].filter(Boolean).join(" · ");
+		return <span>{[t("decisions.author.person"), surface, where].filter(Boolean).join(" · ")}</span>;
 	}
-	if (item.authorKind === "session") {
-		const session = item.authorSession === call.ownerSessionId ? call.ownerSessionName || call.ownerSessionId : item.authorSession;
-		return [session, machine].filter(Boolean).join(" · ");
+	if (item.authorKind === "session" && item.authorSession) {
+		const name = item.authorSession === call.ownerSessionId ? call.ownerSessionName || call.ownerSessionId : item.authorSession;
+		return (
+			<>
+				<DecisionSessionChip machine={machine} sessionId={item.authorSession}>{shortSessionName(name)}</DecisionSessionChip>
+				<span aria-hidden="true">·</span>
+				<span>{where}</span>
+			</>
+		);
 	}
-	return [t("decisions.author.system"), machine].filter(Boolean).join(" · ");
+	return <span>{[t("decisions.author.system"), where].filter(Boolean).join(" · ")}</span>;
 }
