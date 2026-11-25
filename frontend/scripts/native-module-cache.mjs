@@ -151,7 +151,13 @@ function hasBuild(dir) {
 
 function copyBuild(fromDir, toDir) {
 	mkdirSync(toDir, { recursive: true });
-	for (const name of CACHED_FILES) copyFileSync(join(fromDir, name), join(toDir, name));
+	for (const name of CACHED_FILES) {
+		// copyFileSync keeps the source's mode, so a file restored from a
+		// read-only cache is read-only and cannot be copied over next time.
+		// Replace it instead.
+		rmSync(join(toDir, name), { force: true });
+		copyFileSync(join(fromDir, name), join(toDir, name));
+	}
 }
 
 // The cache is optional: a failure to store, prune or discard (say a read-only
