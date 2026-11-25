@@ -189,7 +189,7 @@ describe("better-sqlite3 build cache", () => {
 		expect(lines).toEqual(["better-sqlite3: installing the dev Electron binary timed out after 5 s"]);
 	});
 
-	it.each(["npm_config_sqlite3", "npm_package_config_sqlite3", "npm_config_debug"])(
+	it.each(["npm_config_sqlite3", "npm_package_config_node_gyp_sqlite3", "npm_package_config_sqlite3", "npm_config_debug"])(
 		"never caches or reuses a build when %s customises it",
 		async (name) => {
 			await prepare();
@@ -201,6 +201,28 @@ describe("better-sqlite3 build cache", () => {
 			expect(cachedBinary(cacheEntries()[0])).toBe("build-1");
 		},
 	);
+
+	it("treats any node-gyp package-config variable as customising the build", () => {
+		expect(customBuildEnvironment({ npm_package_config_node_gyp_sqlite3: "/opt/sqlite", npm_package_config_node_gyp_openssl: "x" })).toEqual([
+			"npm_package_config_node_gyp_openssl",
+			"npm_package_config_node_gyp_sqlite3",
+		]);
+		expect(customBuildEnvironment({ npm_package_config_port: "3000" })).toEqual([]);
+	});
+
+	it("rebuilds when the cached build disappears while it is restored", async () => {
+		await prepare();
+		const [entry] = cacheEntries();
+		// The entry passes the existence check but its copy fails, as when another
+		// checkout discards or replaces it between the lookup and the copy.
+		const binary = join(cacheRoot, CACHE_NAME, entry, "output", "better_sqlite3.node");
+		rmSync(binary);
+		mkdirSync(binary);
+		const lines = [];
+		await expect(prepare({ log: (line) => lines.push(line) })).resolves.toBe("rebuilt");
+		expect(rebuild).toHaveBeenCalledTimes(2);
+		expect(lines.some((line) => line.startsWith("better-sqlite3: could not restore the cached build"))).toBe(true);
+	});
 
 	it("does not treat npm's own run-time settings as a custom build", () => {
 		const npmDefaults = {

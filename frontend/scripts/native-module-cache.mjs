@@ -52,8 +52,14 @@ export const BUILD_ENVIRONMENT = [
 	"npm_config_target_arch",
 ];
 
+// node-gyp also strips this prefix from any variable and passes the rest as a
+// GYP variable (npm_package_config_node_gyp_sqlite3 becomes `sqlite3`).
+const NODE_GYP_PACKAGE_CONFIG = "npm_package_config_node_gyp_";
+
 export function customBuildEnvironment(env = process.env) {
-	return BUILD_ENVIRONMENT.filter((name) => env[name]);
+	const named = BUILD_ENVIRONMENT.filter((name) => env[name]);
+	const gypVariables = Object.keys(env).filter((name) => name.startsWith(NODE_GYP_PACKAGE_CONFIG) && env[name]);
+	return [...named, ...gypVariables.sort()];
 }
 
 // Everything node-gyp compiles: the manifest, binding.gyp, src/ and the
@@ -206,13 +212,23 @@ export async function prepareBetterSqlite3({
 
 	const cached = lookupEntry(cacheRoot, CACHE_NAME, key);
 	if (cached && hasBuild(cached)) {
-		copyBuild(cached, releaseDir);
-		if (loadsUnderElectron(electronBinary, moduleDir, run)) {
+		let restored = false;
+		try {
+			copyBuild(cached, releaseDir);
+			restored = true;
+		} catch (error) {
+			// Discarded or pruned by another checkout after the lookup: the cache
+			// is optional, so build instead.
+			log(`better-sqlite3: could not restore the cached build (${error.message}); rebuilding.`);
+		}
+		if (restored && loadsUnderElectron(electronBinary, moduleDir, run)) {
 			log(`better-sqlite3: reused the cached build for Electron ${electronVersion} (${key}).`);
 			return "cached";
 		}
-		log(`better-sqlite3: the cached build did not load under Electron ${electronVersion}; discarding it.`);
-		discardEntry(cacheRoot, key, log);
+		if (restored) {
+			log(`better-sqlite3: the cached build did not load under Electron ${electronVersion}; discarding it.`);
+			discardEntry(cacheRoot, key, log);
+		}
 	}
 
 	await rebuild();
