@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,12 +28,41 @@ const minimumVersion = "1.1.6"
 // HostTrustWarning documents the authority retained by Agy's interactive TUI.
 const HostTrustWarning = "experimental host-trusted reviewer: Agy sandbox mode is not OS isolation and its built-in tools retain host authority"
 
-var requiredFlags = []string{"--agent", "--conversation", "--prompt-interactive", "--sandbox"}
+var requiredFlags = []string{"--agent", "--conversation", "--prompt-interactive", "--sandbox", "--settings"}
+
+// reviewerSettings are agy session settings, never saved, whose deny rules keep
+// the reviewer from editing the checkout, committing, pushing or merging, and
+// from the worker's own Orchestrator commands. agy enforces deny rules even
+// over approvals that skip permission prompts (checked live on agy 1.5.16).
+//
+// The reviewer runs in the worker's checkout, where an agy worker's always-on
+// rule (.agents/rules/ao-agent-orchestrator.md) addresses any agy session there
+// as the worker, and agy follows that rule over the reviewer's own prompt. The
+// worker commands are denied so that following it cannot act as the worker.
+// Posting and recording the review (gh api --method POST, ao review submit)
+// stay allowed. Shell commands can still write files, so this is not
+// read-only isolation: see HostTrustWarning.
+var reviewerSettings = func() string {
+	encoded, err := json.Marshal(map[string]any{"permissions": map[string]any{"deny": reviewerDenyRules}})
+	if err != nil {
+		panic("agy reviewer: encode session settings: " + err.Error())
+	}
+	return string(encoded)
+}()
+
+var reviewerDenyRules = []string{
+	"write_file(*)", "mcp(*)",
+	"command(git commit)", "command(git push)",
+	"command(gh pr merge)", "command(gh pr create)",
+	"command(ao report)", "command(ao session)", "command(ao spawn)", "command(ao send)", "command(ao decision)",
+}
 
 // Reviewer describes Agy's host-trusted interactive lifecycle.
 type Reviewer struct {
 	resolveBinary func(context.Context) (string, error)
 	run           func(context.Context, map[string]string, string, ...string) ([]byte, error)
+	// installHooks installs AO's agy activity hooks in the reviewed checkout.
+	installHooks func(context.Context, string) error
 }
 
 // New returns the experimental host-trusted adapter.
@@ -44,6 +74,10 @@ func New() *Reviewer {
 			cmd.Env = appendEnvironment(os.Environ(), env)
 			return cmd.CombinedOutput()
 		},
+		installHooks: func(ctx context.Context, workspace string) error {
+			// No standing instructions: the worker's rule, if any, is left as is.
+			return agentagy.New().GetAgentHooks(ctx, ports.WorkspaceHookConfig{WorkspacePath: workspace})
+		},
 	}
 }
 
@@ -52,6 +86,11 @@ func (*Reviewer) Harness() domain.ReviewerHarness { return HarnessID }
 
 var _ ports.Reviewer = (*Reviewer)(nil)
 var _ ports.ReviewerCanceller = (*Reviewer)(nil)
+var _ ports.ReviewerActivityHooks = (*Reviewer)(nil)
+
+// ReviewActivityHooks reports that the reviewer installs AO's agy hooks in the
+// checkout before every launch, so its active and idle signals are reliable.
+func (*Reviewer) ReviewActivityHooks() bool { return true }
 
 // ReviewCommand launches Agy's permanent interactive TUI in sandbox mode. The
 // checkout and AO prompt root are explicitly added because this experimental
@@ -82,12 +121,18 @@ func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation
 	if err := r.verifySignedIn(ctx, binary, env.ConfigRoot, envVars); err != nil {
 		return ports.ReviewCommandSpec{}, err
 	}
+	if r.installHooks == nil {
+		return ports.ReviewCommandSpec{}, errors.New("agy reviewer: no activity hook installer")
+	}
+	if err := r.installHooks(ctx, inv.WorkspacePath); err != nil {
+		return ports.ReviewCommandSpec{}, fmt.Errorf("agy reviewer: install activity hooks: %w", err)
+	}
 	prompt := inv.Prompt
 	if strings.TrimSpace(inv.SystemPromptFile) != "" {
 		prompt = "Read and follow the reviewer system instructions at `" + filepath.ToSlash(inv.SystemPromptFile) + "`, then " + prompt
 	}
 	return ports.ReviewCommandSpec{
-		Argv:             interactiveArgv(binary, inv.WorkspacePath, inv.TaskPromptRoot, inv.Config.Model, prompt),
+		Argv:             withReviewerSettings(interactiveArgv(binary, inv.WorkspacePath, inv.TaskPromptRoot, inv.Config.Model, prompt)),
 		Env:              envVars,
 		WorkingDirectory: inv.WorkspacePath,
 	}, nil
@@ -217,6 +262,11 @@ func seedOnboardingComplete(configRoot string) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// withReviewerSettings puts reviewerSettings right after `agy --sandbox`.
+func withReviewerSettings(argv []string) []string {
+	return slices.Insert(argv, 2, "--settings", reviewerSettings)
 }
 
 func interactiveArgv(binary, workspacePath, promptRoot, model, prompt string) []string {

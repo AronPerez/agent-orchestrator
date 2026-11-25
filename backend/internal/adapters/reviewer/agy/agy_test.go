@@ -16,6 +16,7 @@ import (
 func testReviewer(help, version string) *Reviewer {
 	return &Reviewer{
 		resolveBinary: func(context.Context) (string, error) { return "/opt/agy/bin/agy", nil },
+		installHooks:  func(context.Context, string) error { return nil },
 		run: func(_ context.Context, _ map[string]string, _ string, args ...string) ([]byte, error) {
 			if slices.Equal(args, []string{"--help"}) {
 				return []byte(help), nil
@@ -85,7 +86,7 @@ func TestReviewCommandLaunchesHostTrustedInteractiveTUI(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantPrompt := "Read and follow the reviewer system instructions at `/ao/prompts/worker/reviewer/system.md`, then Read and follow `/ao/task.md`."
-	want := []string{"/opt/agy/bin/agy", "--sandbox", "--add-dir", "/worker", "--add-dir", "/ao/prompts/worker/reviewer", "--prompt-interactive", wantPrompt}
+	want := []string{"/opt/agy/bin/agy", "--sandbox", "--settings", reviewerSettings, "--add-dir", "/worker", "--add-dir", "/ao/prompts/worker/reviewer", "--prompt-interactive", wantPrompt}
 	if !slices.Equal(spec.Argv, want) || spec.WorkingDirectory != "/worker" {
 		t.Fatalf("spec = %+v, want argv %#v", spec, want)
 	}
@@ -108,7 +109,7 @@ func TestReviewCommandPassesConfiguredModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/opt/agy/bin/agy", "--sandbox", "--model", "gemini-3-pro", "--add-dir", "/worker", "--add-dir", "/ao/prompts/worker/reviewer", "--prompt-interactive", "Read and follow `/ao/task.md`."}
+	want := []string{"/opt/agy/bin/agy", "--sandbox", "--settings", reviewerSettings, "--model", "gemini-3-pro", "--add-dir", "/worker", "--add-dir", "/ao/prompts/worker/reviewer", "--prompt-interactive", "Read and follow `/ao/task.md`."}
 	if !slices.Equal(spec.Argv, want) {
 		t.Fatalf("argv = %#v, want %#v", spec.Argv, want)
 	}
@@ -254,5 +255,78 @@ func TestVersionAtLeast(t *testing.T) {
 		if got := versionAtLeast(tc.got, minimumVersion); got != tc.want {
 			t.Errorf("versionAtLeast(%q) = %v, want %v", tc.got, got, tc.want)
 		}
+	}
+}
+
+// The reviewer runs in the worker's checkout, where an agy worker's always-on
+// rule tells any agy session there to act as the worker, and agy follows that
+// rule over the reviewer's own prompt (checked live on agy 1.5.16). The
+// session's deny rules therefore keep the reviewer read-only and away from the
+// worker's Orchestrator commands, while leaving the two commands that post and
+// record its review.
+func TestReviewerSettingsDenyEditsAndWorkerCommands(t *testing.T) {
+	var settings struct {
+		Permissions struct {
+			Deny []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal([]byte(reviewerSettings), &settings); err != nil {
+		t.Fatalf("reviewer settings are not JSON: %v", err)
+	}
+	for _, rule := range []string{
+		"write_file(*)", "mcp(*)",
+		"command(git commit)", "command(git push)",
+		"command(gh pr merge)", "command(gh pr create)",
+		"command(ao report)", "command(ao session)", "command(ao spawn)", "command(ao send)", "command(ao decision)",
+	} {
+		if !slices.Contains(settings.Permissions.Deny, rule) {
+			t.Errorf("deny rules %v lack %q", settings.Permissions.Deny, rule)
+		}
+	}
+	for _, needed := range []string{"gh api --method POST /repos/o/r/pulls/1/reviews --input -", "ao review submit --session w-1"} {
+		for _, rule := range settings.Permissions.Deny {
+			prefix, ok := strings.CutPrefix(rule, "command(")
+			if ok && strings.HasPrefix(needed, strings.TrimSuffix(prefix, ")")) {
+				t.Errorf("deny rule %q blocks the reviewer's own %q", rule, needed)
+			}
+		}
+	}
+}
+
+func TestCompatibilityProbeRequiresSessionSettings(t *testing.T) {
+	help := strings.Replace(strings.Join(requiredFlags, "\n"), "--settings", "", 1)
+	if err := testReviewer(help, "1.1.9").verifyCompatibility(context.Background(), "/opt/agy/bin/agy", nil); err == nil || !strings.Contains(err.Error(), "--settings") {
+		t.Fatalf("missing --settings err = %v", err)
+	}
+}
+
+// Installing AO's agy hooks in the checkout lets the review lifecycle see the
+// reviewer go active and idle, as it does for Claude Code's reviewer.
+func TestReviewCommandInstallsActivityHooksInTheCheckout(t *testing.T) {
+	r := testReviewer(strings.Join(requiredFlags, "\n"), "1.1.9")
+	var installed []string
+	r.installHooks = func(_ context.Context, workspace string) error {
+		installed = append(installed, workspace)
+		return nil
+	}
+	if _, err := r.ReviewCommand(context.Background(), ports.ReviewInvocation{
+		DataDir: t.TempDir(), ReviewerID: "review-worker-1", TaskPromptRoot: "/ao/prompts/worker/reviewer",
+		WorkspacePath: "/worker", Prompt: "Read and follow `/ao/task.md`.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(installed, []string{"/worker"}) {
+		t.Fatalf("hooks installed in %v, want the worker checkout", installed)
+	}
+	if !r.ReviewActivityHooks() {
+		t.Fatal("the agy reviewer must report reliable activity hooks once it installs them")
+	}
+
+	r.installHooks = func(context.Context, string) error { return errors.New("read-only checkout") }
+	if _, err := r.ReviewCommand(context.Background(), ports.ReviewInvocation{
+		DataDir: t.TempDir(), ReviewerID: "review-worker-1", TaskPromptRoot: "/ao/prompts/worker/reviewer",
+		WorkspacePath: "/worker", Prompt: "p",
+	}); err == nil || !strings.Contains(err.Error(), "hooks") {
+		t.Fatalf("hook install failure err = %v", err)
 	}
 }
