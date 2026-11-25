@@ -155,39 +155,6 @@ func TestSessionPreambleCarriesStandingInstructionsAsText(t *testing.T) {
 	}
 }
 
-// A Chat in a workspace where AO installed its always-on agy rule already
-// receives the standing instructions from that rule (`agy acp` loads
-// workspace rules), so a preamble would deliver them twice.
-func TestSessionPreambleDefersToTheManagedStandingRule(t *testing.T) {
-	workspace := t.TempDir()
-	if err := agy.New().GetAgentHooks(context.Background(), ports.WorkspaceHookConfig{
-		WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules.",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := sessionPreamble(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules."}); got != nil {
-		t.Fatalf("preamble = %#v, want none beside the managed rule", got)
-	}
-}
-
-func TestSessionPreambleKeepsTextWithoutAManagedRule(t *testing.T) {
-	foreign := t.TempDir()
-	rule := filepath.Join(foreign, ".agents", "rules", "ao-agent-orchestrator.md")
-	if err := os.MkdirAll(filepath.Dir(rule), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(rule, []byte("the project's own rule\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	for name, workspace := range map[string]string{"no rule": t.TempDir(), "foreign rule": foreign, "no workspace": ""} {
-		if got := sessionPreamble(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules."}); len(got) != 1 {
-			t.Errorf("%s: preamble = %#v, want the standing-instructions block", name, got)
-		}
-	}
-}
-
 // appendHandshake is `agy acp` 1.5.16's initialize response as far as the
 // system-prompt extension goes (agentCapabilities._meta.antigravity).
 func appendHandshake(advertised any) acpsdk.InitializeResponse {
@@ -231,17 +198,49 @@ func TestAdvertisedAppendCarriesStandingInstructionsAsSystemPrompt(t *testing.T)
 	}
 }
 
-// The managed rule already puts the instructions in agy's system prompt, so the
-// extension is not used to send them a second time.
-func TestAdvertisedAppendDefersToTheManagedStandingRule(t *testing.T) {
+func workspaceWithStandingRule(t *testing.T, instructions string) string {
+	t.Helper()
 	workspace := t.TempDir()
 	if err := agy.New().GetAgentHooks(context.Background(), ports.WorkspaceHookConfig{
-		WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules.",
+		WorkspacePath: workspace, SystemPrompt: instructions,
 	}); err != nil {
 		t.Fatal(err)
 	}
+	return workspace
+}
+
+// A managed rule holding exactly these instructions already puts them in the
+// system prompt of an `agy acp` that advertises the extension (that server
+// loads workspace rules), so they are not sent a second time.
+func TestAdvertisedAppendDefersToAManagedRuleWithTheSameInstructions(t *testing.T) {
+	workspace := workspaceWithStandingRule(t, "Follow AO worker rules.")
 	if got := sessionMetaForAgent(appendHandshake(true))(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules."}); got != nil {
 		t.Fatalf("session _meta = %#v, want none beside the managed rule", got)
+	}
+}
+
+// A text-handoff fork appends the parent's conversation to the Chat prompt after
+// the rule was written, and a relaunch recomputes the prompt; either way the
+// rule no longer holds what this Chat must receive, so it is sent in full.
+func TestAdvertisedAppendSendsInstructionsTheRuleDoesNotHold(t *testing.T) {
+	workspace := workspaceWithStandingRule(t, "Follow AO worker rules.")
+	prompt := "Follow AO worker rules.\n\nConversation so far: ..."
+	meta := sessionMetaForAgent(appendHandshake(true))(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: prompt})
+	want := map[string]any{"antigravity": map[string]any{"systemPrompt": map[string]any{"append": prompt}}}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("session _meta = %#v, want %#v", meta, want)
+	}
+}
+
+// Google's separate agy_acp_server does not load workspace rules and does not
+// advertise the extension, so beside the rule it still gets the preamble.
+func TestServerWithoutAppendKeepsThePreambleBesideTheRule(t *testing.T) {
+	workspace := workspaceWithStandingRule(t, "Follow AO worker rules.")
+	if sessionPreambleForAgent(acpsdk.InitializeResponse{}) != nil {
+		t.Fatal("a server without the extension must keep the default preamble")
+	}
+	if got := sessionPreamble(acpdriver.LaunchConfig{WorkspacePath: workspace, SystemPrompt: "Follow AO worker rules."}); len(got) != 1 {
+		t.Fatalf("preamble = %#v, want the standing-instructions block", got)
 	}
 }
 

@@ -75,18 +75,6 @@ func removeStandingRule(workspacePath string) error {
 	return nil
 }
 
-// StandingRuleInstalled reports whether workspacePath holds AO's always-on
-// rule. `agy acp` loads workspace rules too, so a Chat there already has AO's
-// standing instructions. An unreadable rule reports false: delivering the
-// instructions twice is safer than not at all.
-func StandingRuleInstalled(workspacePath string) bool {
-	if strings.TrimSpace(workspacePath) == "" {
-		return false
-	}
-	managed, err := isAOManagedRule(agyStandingRulePath(workspacePath))
-	return err == nil && managed
-}
-
 func agyStandingRulePath(workspacePath string) string {
 	return filepath.Join(workspacePath, agyHooksDirName, agyRulesDirName, agyStandingRuleName)
 }

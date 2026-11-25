@@ -267,26 +267,12 @@ func splitModelVariant(model string) (string, acpdriver.SessionOption, bool) {
 // resource URI in testing) rather than as instructions, so plain text is the
 // channel it follows. The instructions do not depend on any mode the user can
 // switch, so they survive approval changes.
-//
-// A workspace prepared for an agy session holds AO's always-on rule with the
-// same instructions (see agy.StandingRuleInstalled), which `agy acp` loads on
-// every turn, so the preamble is left out there rather than sent twice.
 func sessionPreamble(cfg acpdriver.LaunchConfig) []acpsdk.ContentBlock {
-	standing := standingToSend(cfg)
+	standing := strings.TrimSpace(cfg.SystemPrompt)
 	if standing == "" {
 		return nil
 	}
 	return []acpsdk.ContentBlock{acpdriver.PlainStandingInstructionsBlock(standing)}
-}
-
-// standingToSend is the standing instructions AO still has to deliver over ACP:
-// none when there are none, or when AO's managed rule already carries them.
-func standingToSend(cfg acpdriver.LaunchConfig) string {
-	standing := strings.TrimSpace(cfg.SystemPrompt)
-	if standing == "" || agy.StandingRuleInstalled(cfg.WorkspacePath) {
-		return ""
-	}
-	return standing
 }
 
 // systemPromptAppendAdvertised reports agentCapabilities._meta.antigravity.
@@ -302,15 +288,20 @@ func systemPromptAppendAdvertised(init acpsdk.InitializeResponse) bool {
 // sessionMetaForAgent appends AO's standing instructions to agy's own system
 // prompt on session/new, session/load and session/resume, where the server
 // advertises that. The agent then follows them as instructions, and they stay
-// out of the user's first message and its replayed history. Beside AO's
-// managed rule, which already puts them in the system prompt, nothing is sent.
+// out of the user's first message and its replayed history.
+//
+// A server that advertises the extension is `agy acp`, which loads workspace
+// rules, so where AO's managed rule holds exactly these instructions they are
+// already in the system prompt and nothing is sent. Instructions the rule does
+// not hold, such as a text-handoff fork's appended conversation or a prompt
+// recomputed on relaunch, are sent in full.
 func sessionMetaForAgent(init acpsdk.InitializeResponse) func(acpdriver.LaunchConfig) map[string]any {
 	if !systemPromptAppendAdvertised(init) {
 		return nil
 	}
 	return func(cfg acpdriver.LaunchConfig) map[string]any {
-		standing := standingToSend(cfg)
-		if standing == "" {
+		standing := strings.TrimSpace(cfg.SystemPrompt)
+		if standing == "" || agy.StandingRuleHolds(cfg.WorkspacePath, standing) {
 			return nil
 		}
 		return map[string]any{"antigravity": map[string]any{"systemPrompt": map[string]any{"append": standing}}}
