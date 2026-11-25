@@ -162,8 +162,9 @@ func TestACPDriverAsksTheUserForEveryPermissionWhilePlanning(t *testing.T) {
 
 // planModeLiveReconnect resumes a plan-capable binding with an auto-approve
 // policy onto a persistent host that still runs the provider session, as after
-// a daemon restart in the middle of a turn.
-func planModeLiveReconnect(t *testing.T) *conversation {
+// a daemon restart in the middle of a turn. storedPlan is the conversation's
+// stored Plan choice, which the chat service passes on resume.
+func planModeLiveReconnect(t *testing.T, storedPlan bool) *conversation {
 	t.Helper()
 	initialize, err := json.Marshal(acpsdk.InitializeResponse{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
@@ -195,7 +196,7 @@ func planModeLiveReconnect(t *testing.T) *conversation {
 	opened, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
 		SessionID: "ao-session", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
 		ProviderConversationID: "provider-session", ProviderScopeID: "scope",
-		Permissions: ports.PermissionModeAuto,
+		Permissions: ports.PermissionModeAuto, Plan: storedPlan,
 	})
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
@@ -208,12 +209,12 @@ func planModeLiveReconnect(t *testing.T) *conversation {
 	return conv
 }
 
-// A live reconnect cannot tell whether the turn still running on the host is
-// a plan turn, so until the next turn says otherwise every permission request
-// goes to the user: an auto policy could otherwise pass the plan gate of a plan
-// turn that outlived the old daemon.
+// After a live reconnect the stored Plan choice tells whether the turn still
+// running on the host plans. With Plan on, every permission request goes to
+// the user until the next turn: an auto policy could otherwise pass the plan
+// gate of a plan turn that outlived the old daemon.
 func TestACPDriverAsksTheUserAfterALiveReconnectUntilTheNextTurn(t *testing.T) {
-	conv := planModeLiveReconnect(t)
+	conv := planModeLiveReconnect(t, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// The controller activates a live reconnect before its first turn; that
@@ -261,4 +262,22 @@ func approveFirstOptionUnderAuto(mode ports.PermissionMode, params acpsdk.Reques
 		return "", false
 	}
 	return params.Options[0].OptionId, true
+}
+
+// With Plan off, a turn that outlived the old daemon keeps its approval
+// policy: an unattended Auto turn must not stall on a request nobody answers.
+func TestACPDriverKeepsAutoAfterALiveReconnectWithoutPlan(t *testing.T) {
+	conv := planModeLiveReconnect(t, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := conv.ActivateLiveReconnect(ctx, ""); err != nil {
+		t.Fatalf("ActivateLiveReconnect: %v", err)
+	}
+	response, err := conv.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
+		ToolCall: acpsdk.ToolCallUpdate{ToolCallId: "run-1"},
+		Options:  []acpsdk.PermissionOption{{OptionId: "allow-once", Name: "Allow", Kind: acpsdk.PermissionOptionKindAllowOnce}},
+	})
+	if err != nil || response.Outcome.Selected == nil || response.Outcome.Selected.OptionId != "allow-once" {
+		t.Fatalf("an Auto turn without Plan must keep its auto policy after a reconnect; response %#v, err %v", response, err)
+	}
 }
