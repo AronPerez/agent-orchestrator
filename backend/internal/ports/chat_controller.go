@@ -106,6 +106,9 @@ type ChatControllerStarted struct {
 	ProviderConversationID string
 	ControllerGeneration   string
 	Conversation           domain.ConversationRecord
+	// Capabilities is what the started provider offers. A provider switch
+	// drops a stored setting the target cannot honor, such as Plan.
+	Capabilities ChatCapabilities
 	// ProviderBoundary is non-nil when this launch owns a provider namespace
 	// that is not active yet. ControllerReady must commit it atomically with the
 	// session's provider handle and controller generation.

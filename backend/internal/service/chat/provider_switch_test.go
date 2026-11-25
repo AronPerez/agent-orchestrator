@@ -978,3 +978,53 @@ func TestForcedSettingsChangeOnTheRunningAgentStopsItsTurn(t *testing.T) {
 		return len(snapshot.Turns) == 2 && snapshot.Turns[0].State.Terminal() && snapshot.Turns[1].State.Terminal()
 	})
 }
+
+// Plan is stored with the chat, so a switch must not hand it to a target that
+// cannot plan: the composer would show Plan on while that agent ignores it and
+// acts, even editing under bypass. A target that can plan keeps it.
+func TestProviderSwitchKeepsPlanOnlyForATargetThatPlans(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		targetCan bool
+	}{
+		{name: "target without plan mode", targetCan: false},
+		{name: "target with plan mode", targetCan: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			var h *harness
+			var driver *editDriverState
+			h, _, driver = newEditHarnessWithControllerEnv(t, false, ownerCheckedLaunch(&h))
+			if tc.targetCan {
+				driver.target = func(conv *fakeConversation) ports.ChatConversation {
+					caps := conv.Capabilities()
+					caps[ports.ChatCapabilityPlanMode] = true
+					conv.setCapabilities(caps)
+					return conv
+				}
+			}
+			if _, err := h.svc.SetTurnSettings(ctx, testSession, domain.ConversationSettings{
+				ApprovalMode: domain.PermissionModeBypassPermissions, PlanMode: true,
+			}); err != nil {
+				t.Fatalf("SetTurnSettings: %v", err)
+			}
+			if err := h.svc.SwitchProvider(ctx, testSession, domain.ProviderSwitchRequest{
+				TargetHarness: domain.HarnessClaudeCode, Model: "claude-target-model",
+			}); err != nil {
+				t.Fatalf("SwitchProvider: %v", err)
+			}
+			conversation, err := h.st.ConversationForSession(ctx, testSession)
+			if err != nil {
+				t.Fatalf("ConversationForSession: %v", err)
+			}
+			controller, err := h.svc.Controller(testSession)
+			if err != nil {
+				t.Fatalf("Controller: %v", err)
+			}
+			if conversation.Settings.PlanMode != tc.targetCan || controller.Settings().PlanMode != tc.targetCan {
+				t.Fatalf("Plan after the switch: stored %v, controller %v; want %v",
+					conversation.Settings.PlanMode, controller.Settings().PlanMode, tc.targetCan)
+			}
+		})
+	}
+}
