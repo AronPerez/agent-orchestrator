@@ -189,7 +189,7 @@ describe("better-sqlite3 build cache", () => {
 		expect(lines).toEqual(["better-sqlite3: installing the dev Electron binary timed out after 5 s"]);
 	});
 
-	it.each(["npm_config_sqlite3", "npm_package_config_node_gyp_sqlite3", "npm_package_config_sqlite3", "npm_config_debug"])(
+	it.each(["npm_config_sqlite3", "npm_package_config_node_gyp_sqlite3", "NPM_PACKAGE_CONFIG_NODE_GYP_SQLITE3", "NPM_CONFIG_SQLITE3", "npm_package_config_sqlite3", "npm_config_debug"])(
 		"never caches or reuses a build when %s customises it",
 		async (name) => {
 			await prepare();
@@ -208,6 +208,10 @@ describe("better-sqlite3 build cache", () => {
 			"npm_package_config_node_gyp_sqlite3",
 		]);
 		expect(customBuildEnvironment({ npm_package_config_port: "3000" })).toEqual([]);
+		expect(customBuildEnvironment({ NPM_PACKAGE_CONFIG_NODE_GYP_SQLITE3: "/opt/sqlite", Npm_Config_Debug: "true" })).toEqual([
+			"NPM_PACKAGE_CONFIG_NODE_GYP_SQLITE3",
+			"Npm_Config_Debug",
+		]);
 	});
 
 	it("rebuilds when the cached build disappears while it is restored", async () => {

@@ -56,10 +56,17 @@ export const BUILD_ENVIRONMENT = [
 // GYP variable (npm_package_config_node_gyp_sqlite3 becomes `sqlite3`).
 const NODE_GYP_PACKAGE_CONFIG = "npm_package_config_node_gyp_";
 
+// node-gyp matches npm configuration names case-insensitively
+// (NPM_PACKAGE_CONFIG_NODE_GYP_SQLITE3 works too), so compare lower-cased.
+const BUILD_ENVIRONMENT_LOWER = new Set(BUILD_ENVIRONMENT.map((name) => name.toLowerCase()));
+
 export function customBuildEnvironment(env = process.env) {
-	const named = BUILD_ENVIRONMENT.filter((name) => env[name]);
-	const gypVariables = Object.keys(env).filter((name) => name.startsWith(NODE_GYP_PACKAGE_CONFIG) && env[name]);
-	return [...named, ...gypVariables.sort()];
+	return Object.keys(env)
+		.filter((name) => {
+			const lower = name.toLowerCase();
+			return env[name] && (BUILD_ENVIRONMENT_LOWER.has(lower) || lower.startsWith(NODE_GYP_PACKAGE_CONFIG));
+		})
+		.sort();
 }
 
 // Everything node-gyp compiles: the manifest, binding.gyp, src/ and the
