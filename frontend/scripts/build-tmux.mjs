@@ -13,6 +13,14 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	buildDirFor,
+	compilerIdentity,
+	pruneAbandonedBuilds,
+	publishBuild,
+	tmuxBuildCacheRoot,
+	tmuxCacheKey,
+} from "./tmux-build-cache.mjs";
 import { BUNDLED_TMUX_SHA256, BUNDLED_TMUX_VERSION } from "./tmux-version.mjs";
 
 const TMUX = {
@@ -55,7 +63,6 @@ const BUILD_REVISION = 5;
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = resolve(scriptsDir, "..");
-const repoRoot = resolve(frontendRoot, "..");
 const outputRoot = join(frontendRoot, "tmux");
 const outputBinary = join(outputRoot, "bin", "tmux");
 
@@ -65,24 +72,40 @@ if (process.platform !== "darwin" && process.platform !== "linux") {
 	process.exit(0);
 }
 
-const cacheKey = `${process.platform}-${process.arch}-r${BUILD_REVISION}-${SOURCES.map((source) => source.version).join("-")}`;
-// Keep source/build caches outside frontend/: Electron Packager treats that
-// directory as the app root and would otherwise copy hundreds of megabytes of
-// intermediate objects into app.asar in addition to the tiny extraResource.
-const cacheRoot = join(repoRoot, ".cache", "bundled-tmux", cacheKey);
-const downloadsRoot = join(repoRoot, ".cache", "bundled-tmux", "downloads");
+// Shared by every checkout on this machine (see tmux-build-cache.mjs). The key
+// covers the sources, compiler and this file's build() recipe, so editing the
+// recipe or upgrading Xcode builds afresh instead of reusing a stale binary.
+const cacheInputs = {
+	platform: process.platform,
+	arch: process.arch,
+	buildRevision: BUILD_REVISION,
+	sources: SOURCES,
+	compiler: compilerIdentity(),
+	recipe: build.toString(),
+};
+const buildCache = tmuxBuildCacheRoot();
+const cacheRoot = join(buildCache, tmuxCacheKey(cacheInputs));
+const downloadsRoot = join(buildCache, "downloads");
 const sourceRoot = join(cacheRoot, "src");
-const prefix = join(cacheRoot, "prefix");
 const cachedBinary = join(cacheRoot, "tmux");
-const stampPath = join(cacheRoot, "complete.json");
-const expectedStamp =
-	JSON.stringify({ buildRevision: BUILD_REVISION, platform: process.platform, arch: process.arch, sources: SOURCES }, null, 2) +
-	"\n";
+const expectedStamp = JSON.stringify(cacheInputs, null, 2) + "\n";
 
 mkdirSync(downloadsRoot, { recursive: true });
+pruneAbandonedBuilds(buildCache);
 
-if (!existsSync(cachedBinary) || !existsSync(stampPath) || readFileSync(stampPath, "utf8") !== expectedStamp) {
-	await build();
+const isCompleteBuild = (dir) =>
+	existsSync(join(dir, "tmux")) &&
+	existsSync(join(dir, "complete.json")) &&
+	readFileSync(join(dir, "complete.json"), "utf8") === expectedStamp;
+
+if (!isCompleteBuild(cacheRoot)) {
+	const buildDir = buildDirFor(cacheRoot);
+	try {
+		await build(buildDir);
+		publishBuild(buildDir, cacheRoot, isCompleteBuild);
+	} finally {
+		rmSync(buildDir, { recursive: true, force: true });
+	}
 }
 
 rmSync(outputRoot, { recursive: true, force: true });
@@ -116,7 +139,9 @@ if (version !== `tmux ${TMUX.version}`) {
 verifyTerminfoAttach(outputBinary);
 console.log(`Bundled ${version} at ${outputBinary}`);
 
-async function build() {
+async function build(buildDir) {
+	const sourceRoot = join(buildDir, "src");
+	const prefix = join(buildDir, "prefix");
 	for (const source of SOURCES) await download(source);
 
 	rmSync(sourceRoot, { recursive: true, force: true });
@@ -219,9 +244,10 @@ async function build() {
 
 	const builtBinary = join(tmuxDir, "tmux");
 	verifyPortableLinkage(builtBinary, prefix);
-	copyFileSync(builtBinary, cachedBinary);
-	chmodSync(cachedBinary, 0o755);
-	writeFileSync(stampPath, expectedStamp);
+	const binary = join(buildDir, "tmux");
+	copyFileSync(builtBinary, binary);
+	chmodSync(binary, 0o755);
+	writeFileSync(join(buildDir, "complete.json"), expectedStamp);
 }
 
 async function download(source) {
