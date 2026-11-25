@@ -548,7 +548,7 @@ function fireDrag(
 beforeEach(() => {
 	window.localStorage.clear();
 	useSessionReadStore.setState({ baseline: Date.now(), readAt: {} });
-	useSidebarOrderStore.setState({ projectOrder: [], pendingCreatedProjectIds: [], pinnedProjectIds: [], sessionOrders: {} });
+	useSidebarOrderStore.setState({ projectOrder: [], pendingCreatedProjectIds: [], pinnedProjectIds: [], hiddenProjectKeys: [], sessionOrders: {} });
 	useSessionImportStore.setState({ importedCounts: {} });
 	dragEnds.clear();
 	dragOvers.clear();
@@ -1192,7 +1192,10 @@ describe("Sidebar", () => {
 		});
 		const row = document.querySelector<HTMLElement>(`li[data-project-id="${STANDALONE_WORKSPACE_ID}"][data-host-id="box-a"]`)!;
 
-		expect(within(row).queryByLabelText("Project actions for Scratchpad · Host A")).not.toBeInTheDocument();
+		// Its only project actions are a new task and hiding the row.
+		await user.click(within(row).getByRole("button", { name: "Project actions for Scratchpad · Host A" }));
+		expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["New task", "Hide project"]);
+		await user.keyboard("{Escape}");
 		await user.click(within(row).getByRole("button", { name: "Open a new agent" }));
 
 		expect(useUiStore.getState().newTaskRequest).toMatchObject({ projectId: STANDALONE_WORKSPACE_ID, hostId: "box-a" });
@@ -4559,6 +4562,111 @@ describe("Sidebar", () => {
 		expect(labels()).toEqual(["Bravo", "Alpha"]);
 		expect(screen.queryByRole("button", { name: "Unpin" })).not.toBeInTheDocument();
 		expect(useSidebarOrderStore.getState().pinnedProjectIds).toEqual([]);
+	});
+
+	it("hides a project on one machine from its menu, leaving the same project elsewhere listed", async () => {
+		const user = userEvent.setup();
+		renderSidebar({
+			workspaces: [{ ...workspace, id: "web", name: "web", sessions: [] }],
+			remoteHosts: [
+				{ hostId: "m4", label: "M4 Mini", url: "http://m4:3001", status: "connected" },
+				{ hostId: "m6", label: "M6 Mini", url: "http://m6:3001", status: "connected" },
+			],
+			remoteWorkspaces: [
+				{ ...workspace, id: "web", name: "web", hostId: "m4", sessions: [] },
+				{ ...workspace, id: "web", name: "web", hostId: "m6", sessions: [] },
+			],
+		});
+		const rows = () => Array.from(document.querySelectorAll("li[data-project-id]"), (node) => `${node.getAttribute("data-project-id")}@${node.getAttribute("data-host-id") ?? "local"}`);
+		expect(rows()).toEqual(["web@local", "web@m4", "web@m6"]);
+
+		await user.click(screen.getByRole("button", { name: "Project actions for web · M4 Mini" }));
+		await user.click(await screen.findByRole("menuitem", { name: "Hide project" }));
+
+		expect(rows()).toEqual(["web@local", "web@m6"]);
+		expect(JSON.parse(window.localStorage.getItem("ao.sidebar.hidden-projects") ?? "null")).toEqual(["remote:m4:web"]);
+	});
+
+	it("lists hidden projects behind one N hidden row and shows them again", async () => {
+		const user = userEvent.setup();
+		renderSidebar({
+			workspaces: [
+				{ ...workspace, id: "alpha", name: "Alpha", sessions: [] },
+				{ ...workspace, id: "bravo", name: "Bravo", sessions: [] },
+			],
+		});
+		const labels = () => Array.from(document.querySelectorAll("[data-project-label]"), (node) => node.textContent);
+		expect(screen.queryByRole("button", { name: /Hidden projects/ })).not.toBeInTheDocument();
+
+		fireEvent.contextMenu(document.querySelector('[data-project-id="bravo"] [data-project-label]')!);
+		await user.click(await screen.findByRole("menuitem", { name: "Hide project" }));
+		expect(labels()).toEqual(["Alpha"]);
+
+		const toggle = screen.getByRole("button", { name: "Hidden projects: 1" });
+		expect(toggle).toHaveTextContent("1 hidden");
+		expect(toggle).toHaveAttribute("aria-expanded", "false");
+		expect(screen.queryByRole("button", { name: "Show Bravo" })).not.toBeInTheDocument();
+
+		await user.click(toggle);
+		expect(toggle).toHaveAttribute("aria-expanded", "true");
+		const group = screen.getByRole("list", { name: "Hidden projects" });
+		expect(toggle).toHaveAttribute("aria-controls", group.id);
+		await user.click(within(group).getByRole("button", { name: "Show Bravo" }));
+
+		expect(labels()).toEqual(["Alpha", "Bravo"]);
+		expect(screen.queryByRole("button", { name: /Hidden projects/ })).not.toBeInTheDocument();
+		expect(window.localStorage.getItem("ao.sidebar.hidden-projects")).toBeNull();
+		await waitFor(() => expect(document.activeElement?.closest("li[data-project-id]")).toHaveAttribute("data-project-id", "bravo"));
+	});
+
+	it("hides a remote machine's Sessions row and brings it back the same way", async () => {
+		const user = userEvent.setup();
+		renderSidebar({
+			workspaces: [{ ...workspace, id: "alpha", name: "Alpha", sessions: [] }],
+			remoteHosts: [{ hostId: "m4", label: "M4 Mini", url: "http://m4:3001", status: "connected" }],
+			remoteWorkspaces: [
+				{ id: STANDALONE_WORKSPACE_ID, name: "Sessions", kind: STANDALONE_PROJECT_KIND, path: "", hostId: "m4", sessions: [] },
+			],
+		});
+		const sessionsRow = () => document.querySelector(`li[data-project-id="${STANDALONE_WORKSPACE_ID}"][data-host-id="m4"]`);
+		expect(sessionsRow()).not.toBeNull();
+
+		await user.click(screen.getByRole("button", { name: "Project actions for Sessions · M4 Mini" }));
+		await user.click(await screen.findByRole("menuitem", { name: "Hide project" }));
+		expect(sessionsRow()).toBeNull();
+		expect(useSidebarOrderStore.getState().hiddenProjectKeys).toEqual([`remote:m4:${encodeURIComponent(STANDALONE_WORKSPACE_ID)}`]);
+
+		await user.click(screen.getByRole("button", { name: "Hidden projects: 1" }));
+		const group = screen.getByRole("list", { name: "Hidden projects" });
+		expect(within(group).getByText("M4 Mini")).toBeInTheDocument();
+		await user.click(within(group).getByRole("button", { name: "Show Sessions · M4 Mini" }));
+		expect(sessionsRow()).not.toBeNull();
+	});
+
+	it("keeps hidden projects out of the list after a restart, per machine", () => {
+		window.localStorage.setItem("ao.sidebar.hidden-projects", JSON.stringify(["remote:m6:web", "alpha"]));
+		useSidebarOrderStore.setState({ hiddenProjectKeys: ["remote:m6:web", "alpha"] });
+		renderSidebar({
+			workspaces: [{ ...workspace, id: "alpha", name: "Alpha", sessions: [] }, { ...workspace, id: "web", name: "web", sessions: [] }],
+			remoteHosts: [
+				{ hostId: "m4", label: "M4 Mini", url: "http://m4:3001", status: "connected" },
+				{ hostId: "m6", label: "M6 Mini", url: "http://m6:3001", status: "connected" },
+			],
+			remoteWorkspaces: [
+				{ ...workspace, id: "web", name: "web", hostId: "m4", sessions: [] },
+				{ ...workspace, id: "web", name: "web", hostId: "m6", sessions: [] },
+			],
+		});
+		const rows = Array.from(document.querySelectorAll("li[data-project-id]"), (node) => `${node.getAttribute("data-project-id")}@${node.getAttribute("data-host-id") ?? "local"}`);
+		expect(rows).toEqual(["web@local", "web@m4"]);
+		expect(screen.getByRole("button", { name: "Hidden projects: 2" })).toHaveTextContent("2 hidden");
+	});
+
+	it("offers Hide project on a local row right after Pin to top", async () => {
+		renderSidebar({ workspaces: [{ ...workspace, id: "alpha", name: "Alpha" }] });
+		fireEvent.contextMenu(document.querySelector('[data-project-id="alpha"] [data-project-label]')!);
+		const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
+		expect(items.indexOf("Hide project")).toBe(items.indexOf("Pin to top") + 1);
 	});
 
 	it("does not drop an unpinned project into the pinned group", () => {

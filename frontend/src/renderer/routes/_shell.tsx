@@ -712,13 +712,14 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 	// user's drag order, scratchpad), not the daemon's raw list, so "next" always
 	// means the row below the current one on screen.
 	const sidebarSessionOrder = useCallback(() => {
-		const { projectOrder, pinnedProjectIds, sessionOrders } = useSidebarOrderStore.getState();
+		const { projectOrder, pinnedProjectIds, sessionOrders, hiddenProjectKeys } = useSidebarOrderStore.getState();
 		return buildSidebarSessionOrder({
 			workspaces: workspacesRef.current,
 			remoteWorkspaces: remoteWorkspacesRef.current,
 			projectOrder,
 			pinnedProjectIds,
 			sessionOrders,
+			hiddenProjectKeys,
 		});
 	}, []);
 	const openNavSession = useCallback(

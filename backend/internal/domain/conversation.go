@@ -549,7 +549,8 @@ type ConversationSettings struct {
 	// which is the cheaper way to be wrong.
 	FastMode bool `json:"fastMode,omitempty"`
 	// PlanMode asks the provider to plan rather than act, where AO sets that per
-	// turn. Like FastMode it is held for the life of the controller only.
+	// turn. Unlike FastMode it is stored, so a restart keeps it: work queued with
+	// Plan on still plans, and a live reconnect knows the running turn's choice.
 	PlanMode bool `json:"planMode,omitempty"`
 	// ApprovalMode is AO's permission vocabulary, applied per turn.
 	ApprovalMode PermissionMode `json:"approvalMode,omitempty"`

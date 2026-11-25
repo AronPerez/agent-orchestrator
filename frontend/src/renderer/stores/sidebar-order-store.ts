@@ -1,8 +1,18 @@
 import { create } from "zustand";
+import { sessionUiKey } from "../lib/hosts";
 
 export const PROJECT_ORDER_STORAGE_KEY = "ao.sidebar.project-order";
 const PENDING_CREATED_PROJECTS_STORAGE_KEY = "ao.sidebar.pending-created-projects";
 export const PINNED_PROJECTS_STORAGE_KEY = "ao.sidebar.pinned-projects";
+export const HIDDEN_PROJECTS_STORAGE_KEY = "ao.sidebar.hidden-projects";
+
+/**
+ * A hidden project's key: the sidebar's per-machine row key, so the same
+ * project id on two machines (or here and on a remote host) hides separately.
+ */
+export function hiddenProjectKey(projectId: string, hostId?: string): string {
+	return sessionUiKey(projectId, hostId);
+}
 
 function readStoredOrder(storageKey: string): string[] {
 	try {
@@ -19,11 +29,18 @@ type SidebarOrderState = {
 	pendingCreatedProjectIds: string[];
 	/** Projects pinned above the rest of the list. Order within comes from `projectOrder`. */
 	pinnedProjectIds: string[];
+	/**
+	 * Projects left out of the sidebar's Projects list, keyed by
+	 * `hiddenProjectKey`. Local to this app install, like pins: the project
+	 * and its sessions keep working everywhere else.
+	 */
+	hiddenProjectKeys: string[];
 	/** Display order of each mounted project's sessions, keyed by `sessionUiKey(projectId, hostId)`. */
 	sessionOrders: Record<string, string[]>;
 	setProjectOrder: (order: readonly string[], pendingCreatedProjectIds?: readonly string[]) => void;
 	moveProjectToTop: (projectId: string) => void;
 	setProjectPinned: (projectId: string, pinned: boolean) => void;
+	setProjectHidden: (projectId: string, hostId: string | undefined, hidden: boolean) => void;
 	reconcileProjectOrder: (projectIds: readonly string[]) => void;
 	setSessionOrder: (projectKey: string, order: readonly string[]) => void;
 	clearSessionOrder: (projectKey: string) => void;
@@ -37,6 +54,7 @@ export const useSidebarOrderStore = create<SidebarOrderState>((set, get) => ({
 	projectOrder: readStoredOrder(PROJECT_ORDER_STORAGE_KEY),
 	pendingCreatedProjectIds: readStoredOrder(PENDING_CREATED_PROJECTS_STORAGE_KEY),
 	pinnedProjectIds: readStoredOrder(PINNED_PROJECTS_STORAGE_KEY),
+	hiddenProjectKeys: readStoredOrder(HIDDEN_PROJECTS_STORAGE_KEY),
 	sessionOrders: {},
 	setProjectOrder: (order, pendingCreatedProjectIds = []) => {
 		const current = get();
@@ -81,6 +99,17 @@ export const useSidebarOrderStore = create<SidebarOrderState>((set, get) => ({
 		const pinnedRest = rest.filter((id) => others.has(id));
 		const unpinnedRest = rest.filter((id) => !others.has(id));
 		setProjectOrder([...pinnedRest, projectId, ...unpinnedRest], get().pendingCreatedProjectIds);
+	},
+	setProjectHidden: (projectId, hostId, hidden) => {
+		const key = hiddenProjectKey(projectId, hostId);
+		const { hiddenProjectKeys } = get();
+		if (hiddenProjectKeys.includes(key) === hidden) return;
+		const next = hidden ? [...hiddenProjectKeys, key] : hiddenProjectKeys.filter((candidate) => candidate !== key);
+		try {
+			if (next.length > 0) window.localStorage.setItem(HIDDEN_PROJECTS_STORAGE_KEY, JSON.stringify(next));
+			else window.localStorage.removeItem(HIDDEN_PROJECTS_STORAGE_KEY);
+		} catch {}
+		set({ hiddenProjectKeys: next });
 	},
 	reconcileProjectOrder: (projectIds) => {
 		const { projectOrder, pendingCreatedProjectIds, setProjectOrder } = get();

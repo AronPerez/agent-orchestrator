@@ -1,26 +1,18 @@
-import { useNavigate } from "@tanstack/react-router";
-import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocalHostId } from "../hooks/useLocalHostId";
+import { useOpenFleetSession } from "../hooks/useOpenFleetSession";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
-import { sessionNavigateTarget } from "../lib/navigate-to-session";
-import { recordManualWorkerOpen } from "../lib/session-management-telemetry";
 import { useShellMaybe } from "../lib/shell-context";
-import type { WorkspaceSession } from "../types/workspace";
 import { FleetOverview } from "./FleetOverview";
 import { PageTopbar, PageTopbarTitle } from "./PageTopbar";
 
 /** One read-only hierarchy across every local and cached remote project. */
 export function FleetPage() {
 	const { t } = useTranslation();
-	const navigate = useNavigate();
 	const localWorkspaces = useWorkspaceQuery();
 	const shell = useShellMaybe();
 	const localHostId = useLocalHostId();
-	const openSession = useCallback((session: WorkspaceSession, hostId?: string) => {
-		if (session.kind === "worker") recordManualWorkerOpen(session.id, hostId);
-		void navigate(sessionNavigateTarget(session.workspaceId, session.id, hostId));
-	}, [navigate]);
+	const openSession = useOpenFleetSession();
 
 	return (
 		<div className="relative flex h-full min-h-0 flex-col bg-background text-foreground" data-testid="fleet-page">

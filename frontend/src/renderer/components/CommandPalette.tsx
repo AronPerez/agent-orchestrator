@@ -60,7 +60,7 @@ import { useStayAwake } from "../hooks/useStayAwake";
 import { useSessionSwitchStore } from "../stores/session-switch-store";
 import { RoundedInterfaceIcon } from "./SessionInterfaceSwitch";
 import { useLocaleStore } from "../stores/locale-store";
-import { useSidebarOrderStore } from "../stores/sidebar-order-store";
+import { hiddenProjectKey, useSidebarOrderStore } from "../stores/sidebar-order-store";
 import { useSoundNotificationsStore } from "../stores/sound-notifications-store";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SessionArchiveDialog } from "./SessionArchiveDialog";
@@ -544,6 +544,7 @@ export const CommandPalette = memo(function CommandPalette() {
 	const { mutate: terminateSession } = useTerminateSession();
 	const copyToClipboard = useCopyToClipboard();
 	const pinnedProjectIds = useSidebarOrderStore((state) => state.pinnedProjectIds);
+	const hiddenProjectKeys = useSidebarOrderStore((state) => state.hiddenProjectKeys);
 	const sessionMenuEntries = useSessionMenuEntries(menuSession, {
 		// Archive asks first, as from the sidebar; the confirm outlives the palette.
 		onArchive: menuSession && !menuSession.cloud?.shared ? () => {
@@ -570,11 +571,13 @@ export const CommandPalette = memo(function CommandPalette() {
 			restarting: restartingProjectIds.has(workspace.id),
 			hasOrchestrator: Boolean(findProjectOrchestrator(workspaces, workspace.id)),
 			setPinned: (pinned) => useSidebarOrderStore.getState().setProjectPinned(workspace.id, pinned),
+			isHidden: hiddenProjectKeys.includes(hiddenProjectKey(workspace.id, workspace.hostId)),
+			setHidden: (hidden) => useSidebarOrderStore.getState().setProjectHidden(workspace.id, workspace.hostId, hidden),
 			copyPath: () => copyToClipboard(workspace.path),
 			// Remote projects remove through their host, which the sidebar handles.
 			...(removeProject && !workspace.hostId ? { remove: () => setRemoveTarget(workspace) } : {}),
 		}, t);
-	}, [workspaces, pinnedProjectIds, restartingProjectIds, copyToClipboard, removeProject, t]);
+	}, [workspaces, pinnedProjectIds, hiddenProjectKeys, restartingProjectIds, copyToClipboard, removeProject, t]);
 	const menuViewItems = useMemo((): CommandItemModel[] => {
 		switch (view.mode) {
 			case "menu-submenu":

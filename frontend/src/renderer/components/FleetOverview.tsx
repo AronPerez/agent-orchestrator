@@ -14,15 +14,17 @@ import {
 	type FleetSessionNode,
 	type SessionStatus,
 } from "@aoagents/product-ui";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Bot, ChevronDown, ChevronRight, Folder, Monitor, Server, Users, Workflow } from "@/components/app-icons";
 import type { RemoteHost } from "../hooks/useRemoteHosts";
 import type { MessageKey } from "../i18n";
+import { scopeFleetTree } from "../lib/fleet-scope";
 import { LOCAL_HOST } from "../lib/hosts";
 import { getAttentionZoneViewForZone, getSessionStatusView } from "../lib/session-presentation";
 import { cn } from "../lib/utils";
 import { CLOUD_PROJECT_KIND, type WorkspaceSession, type WorkspaceSummary } from "../types/workspace";
+import { FleetSessionDetails } from "./FleetSessionDetails";
 import { Button } from "./ui/button";
 import { Pressable } from "./ui/pressable";
 
@@ -36,7 +38,8 @@ type ProjectRow = {
 type MachineRow = {
 	kind: "machine";
 	key: string;
-	parentKey: string;
+	/** Absent when the tree is scoped to one project and machines are the top level. */
+	parentKey?: string;
 	depth: number;
 	node: FleetMachineNode<WorkspaceSession>;
 };
@@ -49,6 +52,8 @@ type SessionRow = {
 	node: FleetSessionNode<WorkspaceSession>;
 	/** The session runs on a different machine from the branch it is drawn under. */
 	otherMachine: boolean;
+	/** In a project-scoped tree: the parent elsewhere that this root was spawned by. */
+	adoptedParent?: FleetSessionNode<WorkspaceSession>;
 };
 
 type UnscopedMachineRow = {
@@ -66,6 +71,9 @@ type ScmRollup = {
 };
 
 const rollupOrder: AttentionZone[] = ["action", "merge", "pending", "working", "done"];
+const noSessionNames: ReadonlyMap<string, string> = new Map();
+/** A row's left padding; its title starts one chevron and gap (28px) further in. */
+const rowIndent = (depth: number) => 12 + (depth - 1) * 20;
 const FLEET_COLLAPSE_STORAGE_KEY = "ao.fleet.branch-state.v1";
 
 function readCollapsePreferences(): FleetCollapsePreferences {
@@ -123,6 +131,8 @@ function flattenRows(
 	projects: readonly FleetProjectNode<WorkspaceSession>[],
 	unscopedHosts: readonly RemoteHost[],
 	collapsed: ReadonlySet<string>,
+	scoped: boolean,
+	adoptedParents: ReadonlyMap<string, FleetSessionNode<WorkspaceSession>>,
 ): FleetOverviewRow[] {
 	const rows: FleetOverviewRow[] = [];
 	const addSessions = (
@@ -132,16 +142,28 @@ function flattenRows(
 		machineId: string,
 	) => {
 		for (const node of nodes) {
-			rows.push({ kind: "session", key: node.key, parentKey, depth, node, otherMachine: node.machineId !== machineId });
+			rows.push({
+				kind: "session",
+				key: node.key,
+				parentKey,
+				depth,
+				node,
+				otherMachine: node.machineId !== machineId,
+				adoptedParent: adoptedParents.get(node.key),
+			});
 			if (!collapsed.has(node.key)) addSessions(node.children, depth + 1, node.key, machineId);
 		}
 	};
+	// A project-scoped tree starts at its machines: the page already names the project.
+	const machineDepth = scoped ? 1 : 2;
 	for (const node of projects) {
-		rows.push({ kind: "project", key: node.key, depth: 1, node });
-		if (collapsed.has(node.key)) continue;
+		if (!scoped) {
+			rows.push({ kind: "project", key: node.key, depth: 1, node });
+			if (collapsed.has(node.key)) continue;
+		}
 		for (const machine of node.machines) {
-			rows.push({ kind: "machine", key: machine.key, parentKey: node.key, depth: 2, node: machine });
-			if (!collapsed.has(machine.key)) addSessions(machine.sessions, 3, machine.key, machine.machine.id);
+			rows.push({ kind: "machine", key: machine.key, parentKey: scoped ? undefined : node.key, depth: machineDepth, node: machine });
+			if (!collapsed.has(machine.key)) addSessions(machine.sessions, machineDepth + 1, machine.key, machine.machine.id);
 		}
 	}
 	for (const item of unscopedHosts) {
@@ -260,7 +282,14 @@ export function FleetOverview({
 	remoteLoadedProjectHostIds,
 	remoteLoadedSessionHostIds,
 	onOpen,
+	scope,
 }: {
+	/**
+	 * Show one project on one machine (a project's own Fleet tab). The whole
+	 * fleet is still built so cross-machine lineage resolves, then only the
+	 * project with exactly this ID on exactly this machine is drawn.
+	 */
+	scope?: { projectId: string; machineId: string };
 	/** This computer's stable daemon host ID, used by remote rows to address local parents. */
 	localHostId?: string;
 	localWorkspaces: readonly WorkspaceSummary[];
@@ -275,6 +304,7 @@ export function FleetOverview({
 	const [collapsePreferences, setCollapsePreferences] = useState<FleetCollapsePreferences>(readCollapsePreferences);
 	const [showArchived, setShowArchived] = useState(false);
 	const [focusedKey, setFocusedKey] = useState<string>();
+	const [selectedKey, setSelectedKey] = useState<string>();
 	const rowRefs = useRef(new Map<string, HTMLElement>());
 	const hostsById = useMemo(() => new Map(remoteHosts.map((host) => [host.hostId, host])), [remoteHosts]);
 	const refusedHostIds = useMemo(
@@ -290,7 +320,7 @@ export function FleetOverview({
 		if (remoteLoadedProjectHostIds === undefined && remoteLoadedSessionHostIds === undefined) return "ready";
 		return remoteLoadedProjectHostIds?.includes(hostId) && remoteLoadedSessionHostIds?.includes(hostId) ? "ready" : "pending";
 	};
-	const projects = useMemo(() => {
+	const fleet = useMemo(() => {
 		const scopes = [
 			...localWorkspaces
 				.filter((workspace) => workspace.kind !== CLOUD_PROJECT_KIND)
@@ -322,18 +352,60 @@ export function FleetOverview({
 				reachable: host.status === "connected" && host.failureReason !== "unauthorized",
 			})),
 		];
-		return orderProjects(buildFleetTree(scopes, { showArchived, knownMachines }));
+		return { scopes, projects: orderProjects(buildFleetTree(scopes, { showArchived, knownMachines })) };
 	}, [hostsById, localHostId, localWorkspaces, showArchived, t, visibleRemoteWorkspaces]);
+	const scopeProjectId = scope?.projectId;
+	const scopeMachineId = scope?.machineId;
+	const scoped = scopeProjectId !== undefined && scopeMachineId !== undefined;
+	const { projects: visibleProjects, adoptedParents } = useMemo(() => {
+		if (!scoped) return { projects: fleet.projects, adoptedParents: new Map<string, FleetSessionNode<WorkspaceSession>>() };
+		const target = fleet.scopes.find((candidate) => candidate.project.id === scopeProjectId && candidate.machine.id === scopeMachineId) ?? {
+			project: { id: scopeProjectId, name: scopeProjectId },
+			machine: {
+				id: scopeMachineId,
+				name: scopeMachineId === LOCAL_HOST ? t("remote.thisComputer") : hostsById.get(scopeMachineId)?.label ?? scopeMachineId,
+				reachable: scopeMachineId === LOCAL_HOST || hostsById.get(scopeMachineId)?.status !== "offline",
+			},
+		};
+		const narrowed = scopeFleetTree(fleet.projects, target);
+		return { projects: orderProjects(narrowed.projects), adoptedParents: narrowed.adoptedParents };
+	}, [fleet, hostsById, scoped, scopeMachineId, scopeProjectId, t]);
 	const scopedHostIds = useMemo(() => new Set(visibleRemoteWorkspaces.map((workspace) => workspace.hostId).filter(Boolean)), [visibleRemoteWorkspaces]);
 	const unscopedHosts = useMemo(
-		() => remoteHosts.filter((host) => !scopedHostIds.has(host.hostId)),
-		[remoteHosts, scopedHostIds],
+		() => scoped ? [] : remoteHosts.filter((host) => !scopedHostIds.has(host.hostId)),
+		[remoteHosts, scoped, scopedHostIds],
 	);
-	const collapsed = useMemo(
-		() => resolveFleetCollapsedKeys(projects, collapsePreferences),
-		[collapsePreferences, projects],
+	const collapsed = useMemo(() => {
+		const keys = resolveFleetCollapsedKeys(visibleProjects, collapsePreferences);
+		// A project's own tab opens on its machines and their top sessions; only
+		// deeper large branches start folded. Explicit choices still win.
+		if (scoped) {
+			for (const project of visibleProjects) {
+				for (const machine of project.machines) {
+					for (const key of [machine.key, ...machine.sessions.map((session) => session.key)]) {
+						if (collapsePreferences[key] === undefined) keys.delete(key);
+					}
+				}
+			}
+		}
+		return keys;
+	}, [collapsePreferences, scoped, visibleProjects]);
+	const rows = useMemo(
+		() => flattenRows(visibleProjects, unscopedHosts, collapsed, scoped, adoptedParents),
+		[visibleProjects, unscopedHosts, collapsed, scoped, adoptedParents],
 	);
-	const rows = useMemo(() => flattenRows(projects, unscopedHosts, collapsed), [projects, unscopedHosts, collapsed]);
+	// Session IDs are host-local: history and parents are named per machine.
+	const sessionNames = useMemo(() => {
+		const names = new Map<string, Map<string, string>>();
+		const add = (machineId: string, sessions: readonly WorkspaceSession[]) => {
+			const machine = names.get(machineId) ?? new Map<string, string>();
+			for (const session of sessions) machine.set(session.id, session.title);
+			names.set(machineId, machine);
+		};
+		for (const workspace of localWorkspaces) add(LOCAL_HOST, workspace.sessions);
+		for (const workspace of visibleRemoteWorkspaces) if (workspace.hostId) add(workspace.hostId, workspace.sessions);
+		return names;
+	}, [localWorkspaces, visibleRemoteWorkspaces]);
 	const scmRollups = useMemo(() => {
 		const values = new Map<string, ScmRollup>();
 		const visitSession = (node: FleetSessionNode<WorkspaceSession>): ScmRollup => {
@@ -342,7 +414,7 @@ export function FleetOverview({
 			values.set(node.key, rollup);
 			return rollup;
 		};
-		for (const project of projects) {
+		for (const project of visibleProjects) {
 			const projectRollup = emptyScmRollup();
 			for (const machine of project.machines) {
 				const machineRollup = emptyScmRollup();
@@ -353,7 +425,7 @@ export function FleetOverview({
 			values.set(project.key, projectRollup);
 		}
 		return values;
-	}, [projects]);
+	}, [visibleProjects]);
 	const activeFocusKey = rows.some((row) => row.key === focusedKey) ? focusedKey : rows[0]?.key;
 
 	useEffect(() => {
@@ -372,12 +444,28 @@ export function FleetOverview({
 		setFocusedKey(row.key);
 		rowRefs.current.get(row.key)?.focus();
 	};
+	const openSession = (node: FleetSessionNode<WorkspaceSession>) =>
+		onOpen(node.session, node.machineId === LOCAL_HOST ? undefined : node.machineId);
 	const activate = (row: FleetOverviewRow) => {
 		if (row.kind === "session") {
-			onOpen(row.node.session, row.node.machineId === LOCAL_HOST ? undefined : row.node.machineId);
+			openSession(row.node);
 			return;
 		}
 		if (hasChildren(row)) toggle(row.key);
+	};
+	/** A session row unfolds its details below it; picking it again folds them away. */
+	const select = (row: FleetOverviewRow) => {
+		if (row.kind !== "session") {
+			activate(row);
+			return;
+		}
+		setFocusedKey(row.key);
+		setSelectedKey((current) => current === row.key ? undefined : row.key);
+	};
+	const closeDetails = () => {
+		const key = selectedKey;
+		setSelectedKey(undefined);
+		if (key) rowRefs.current.get(key)?.focus();
 	};
 	const handleKeyDown = (event: KeyboardEvent<HTMLElement>, row: FleetOverviewRow, index: number) => {
 		let handled = true;
@@ -395,8 +483,12 @@ export function FleetOverview({
 				if (hasChildren(row) && !collapsed.has(row.key)) toggle(row.key);
 				else focusRow(rows.find((candidate) => candidate.key === ("parentKey" in row ? row.parentKey : undefined)));
 				break;
-			case "Enter":
-			case " ": activate(row); break;
+			case "Enter": activate(row); break;
+			case " ": select(row); break;
+			case "Escape":
+				if (selectedKey) closeDetails();
+				else handled = false;
+				break;
 			default: handled = false;
 		}
 		if (handled) event.preventDefault();
@@ -417,6 +509,8 @@ export function FleetOverview({
 		: hostsById.get(machineId)?.label ?? machineId;
 	const otherMachineText = (row: SessionRow) =>
 		row.otherMachine ? t("fleet.onMachine", { machine: machineLabel(row.node.machineId) }) : undefined;
+	const adoptedParentText = (row: SessionRow) =>
+		row.adoptedParent ? t("fleet.spawnedBy", { name: row.adoptedParent.session.title }) : undefined;
 	const parentUnavailableText = (row: SessionRow) => {
 		switch (row.node.parentUnavailableReason) {
 			case undefined: return undefined;
@@ -424,6 +518,12 @@ export function FleetOverview({
 			case "machine-unknown": return t("fleet.parentMachineUnknown");
 			case "missing": return t("fleet.parentUnavailable");
 		}
+	};
+	const parentName = (node: FleetSessionNode<WorkspaceSession>) => {
+		const address = node.parentAddress;
+		if (!address) return undefined;
+		if (node.parentUnavailable) return `${machineLabel(address.machineId)}/${address.sessionId}`;
+		return sessionNames.get(address.machineId)?.get(address.sessionId) ?? address.sessionId;
 	};
 	const sessionStatus = (row: SessionRow) => row.node.session.displayStatus
 		? getDisplayStatusLabel(row.node.session.displayStatus, (key, values) => t(key as MessageKey, values))
@@ -467,6 +567,7 @@ export function FleetOverview({
 				roleLabel(row),
 				sessionStatus(row),
 				otherMachineText(row),
+				adoptedParentText(row),
 				row.node.session.isTerminated ? t("fleet.archived") : undefined,
 				parentUnavailableText(row),
 				rollupOrder.some((zone) => row.node.rollup[zone] > 0) ? rollupText(row.node.rollup) : undefined,
@@ -504,18 +605,22 @@ export function FleetOverview({
 									: row.node.role === "orchestrator" ? <Workflow aria-hidden="true" className="size-icon-sm" />
 										: row.node.role === "manager" ? <Users aria-hidden="true" className="size-icon-sm" />
 											: <Bot aria-hidden="true" className="size-icon-sm" />;
+						const selected = row.kind === "session" && row.key === selectedKey;
 						return (
+							<Fragment key={row.key}>
 							<Pressable
 								asChild
-								key={row.key}
-								onClick={() => activate(row)}
+								onClick={() => select(row)}
+								onDoubleClick={row.kind === "session" ? () => openSession(row.node) : undefined}
 							>
 								<div
 									aria-expanded={expanded}
 									aria-label={rowLabel(row)}
 									aria-level={row.depth}
+									aria-selected={row.kind === "session" ? selected : undefined}
 									className={cn(
 										"flex min-h-9 w-full min-w-0 cursor-default items-center gap-2 pr-3 text-sm hover:bg-interactive-hover/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
+										selected && "bg-interactive-hover hover:bg-interactive-hover",
 										row.depth === 1 && index > 0 && "border-t border-border/70",
 										row.kind === "project" && "font-medium",
 										row.kind === "unscoped-machine" && "text-muted-foreground",
@@ -527,7 +632,7 @@ export function FleetOverview({
 										else rowRefs.current.delete(row.key);
 									}}
 									role="treeitem"
-									style={{ paddingLeft: `${12 + (row.depth - 1) * 20}px` }}
+									style={{ paddingLeft: `${rowIndent(row.depth)}px` }}
 									tabIndex={activeFocusKey === row.key ? 0 : -1}
 								>
 									{expandable ? (
@@ -546,7 +651,8 @@ export function FleetOverview({
 										</Button>
 									) : <span aria-hidden="true" className="w-5 shrink-0" />}
 									<span className={cn("shrink-0 text-muted-foreground", row.kind === "session" && getSessionStatusView(row.node.session.status, t).className)}>{icon}</span>
-									<span className="min-w-0 flex-1 truncate">{title}</span>
+									{/* The title keeps part of a narrow row; the status text wraps instead. */}
+									<span className="min-w-[30%] flex-1 truncate">{title}</span>
 									{row.kind === "project" ? <span className="flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1"><Rollup rollup={row.node.rollup} /><ScmRollupView rollup={scmRollups.get(row.key) ?? emptyScmRollup()} /></span>
 										: row.kind === "machine" ? (
 											<span className="flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1">
@@ -563,6 +669,7 @@ export function FleetOverview({
 											<span className="flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
 												<span>{roleLabel(row)} · {sessionStatus(row)}</span>
 												{otherMachineText(row) ? <span>{otherMachineText(row)}</span> : null}
+												{adoptedParentText(row) ? <span>{adoptedParentText(row)}</span> : null}
 												{row.node.session.isTerminated ? <span>{t("fleet.archived")}</span> : null}
 												{parentUnavailableText(row) ? <span>{parentUnavailableText(row)}</span> : null}
 												{rollupOrder.some((zone) => row.node.rollup[zone] > 0) ? <Rollup rollup={row.node.rollup} /> : null}
@@ -571,6 +678,21 @@ export function FleetOverview({
 										)}
 								</div>
 							</Pressable>
+							{selected && row.kind === "session" ? (
+								<FleetSessionDetails
+									className="mb-2 mr-3 mt-1"
+									hostId={row.node.machineId}
+									onClose={closeDetails}
+									onOpen={() => openSession(row.node)}
+									parentName={parentName(row.node)}
+									roleLabel={roleLabel(row)}
+									sessionNames={sessionNames.get(row.node.machineId) ?? noSessionNames}
+									session={row.node.session}
+									statusLabel={sessionStatus(row)}
+									style={{ marginLeft: `${rowIndent(row.depth) + 28}px` }}
+								/>
+							) : null}
+							</Fragment>
 						);
 					})}
 				</div>

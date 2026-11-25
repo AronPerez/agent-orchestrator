@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useUiStore } from "../stores/ui-store";
 import { ArchiveModalHost } from "./ArchiveModalHost";
@@ -136,6 +136,8 @@ beforeEach(() => {
 	for (const mock of [mocks.navigate, mocks.localGet, mocks.localPost, mocks.remoteGet, mocks.remotePost,
 		mocks.requestNewTask, mocks.openRemoteProjectSettings, mocks.retryRemoteHosts]) mock.mockReset();
 	mocks.connected = ["box-a", "box-b"];
+	// Fleet fold choices are saved on purpose; each test starts from the defaults.
+	window.localStorage.clear();
 	mocks.projectFailed = false;
 	mocks.remoteHosts = [];
 	useUiStore.setState({ archiveModal: null, developerMode: true });
@@ -177,20 +179,29 @@ it("renders the shared board with host-scoped data, PRs, actions, and navigation
 	expect(mocks.localGet).not.toHaveBeenCalled();
 });
 
+/** The one local read a remote Fleet makes: this computer's host ID, to resolve lineage. */
+const localReadsOtherThanIdentity = () => mocks.localGet.mock.calls.filter(([path]) => path !== "/api/v1/identity");
+
 it("opens Fleet on A and B with equal project/session IDs and keeps GET/Open on the selected host", async () => {
 	const { showHost } = renderBoard("box-a");
 	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
 	expect(screen.getByRole("region", { name: "Session fleet" })).toBeVisible();
+	expect(screen.getByRole("treeitem", { name: /^Host box-a/ })).toHaveAttribute("aria-level", "1");
+	// This computer's project with the same ID is a different project.
+	expect(screen.queryByText("Local worker")).toBeNull();
+	fireEvent.click(screen.getByRole("treeitem", { name: /^Fix login, Worker/ }));
 	await waitFor(() => expect(mocks.remoteGet).toHaveBeenCalledWith("box-a", "/api/v1/sessions/{sessionId}/coordination", expect.objectContaining({ params: { path: { sessionId: "worker-1" } } })));
 	fireEvent.click(screen.getByRole("button", { name: "Open session" }));
 	expect(mocks.navigate).toHaveBeenLastCalledWith({ to: "/host/$hostId/project/$projectId/session/$sessionId", params: { hostId: "box-a", projectId: "shared", sessionId: "worker-1" } });
 	showHost("box-b");
 	expect(screen.queryByRole("region", { name: "Session fleet" })).toBeNull();
 	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
+	expect(screen.queryByText("Fix login")).toBeNull();
+	fireEvent.click(screen.getByRole("treeitem", { name: /^Fix billing, Worker/ }));
 	await waitFor(() => expect(mocks.remoteGet).toHaveBeenCalledWith("box-b", "/api/v1/sessions/{sessionId}/coordination", expect.objectContaining({ params: { path: { sessionId: "worker-1" } } })));
 	fireEvent.click(screen.getByRole("button", { name: "Open session" }));
 	expect(mocks.navigate).toHaveBeenLastCalledWith({ to: "/host/$hostId/project/$projectId/session/$sessionId", params: { hostId: "box-b", projectId: "shared", sessionId: "worker-1" } });
-	expect(mocks.localGet).not.toHaveBeenCalled();
+	expect(localReadsOtherThanIdentity()).toHaveLength(0);
 });
 
 it("passes full remote lineage to Fleet, including an archived orchestrator ancestor", async () => {
@@ -201,10 +212,14 @@ it("passes full remote lineage to Fleet, including an archived orchestrator ance
 	];
 	renderBoard("box-a");
 	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
-	expect(screen.getByRole("button", { name: /Archived orchestrator.*Orchestrator.*Archived/ })).toBeVisible();
-	expect(screen.getByRole("button", { name: /Manager.*Manager/ })).toBeVisible();
+	expect(screen.getByRole("treeitem", { name: /^Archived orchestrator, Orchestrator.*Archived/ })).toBeVisible();
+	const manager = screen.getByRole("treeitem", { name: /^Manager, Manager/ });
+	expect(manager).toHaveAttribute("aria-level", "3");
+	expect(screen.getByRole("treeitem", { name: /^Child, Worker/ })).toHaveAttribute("aria-level", "4");
 	fireEvent.click(screen.getByRole("button", { name: "Collapse Manager" }));
-	expect(screen.queryByRole("button", { name: /Child.*Worker/ })).toBeNull();
+	expect(screen.queryByRole("treeitem", { name: /^Child, Worker/ })).toBeNull();
+	fireEvent.click(manager);
+	expect(within(screen.getByRole("group", { name: "Selected session" })).getByText("Spawned by Archived orchestrator")).toBeVisible();
 	await screen.findByText("No recorded communication in this history.");
 });
 
@@ -212,10 +227,12 @@ it("keeps cached Fleet accessible offline and does not query the local daemon", 
 	mocks.connected = [];
 	renderBoard("box-a");
 	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
-	expect(screen.getByRole("region", { name: "Session fleet" })).toHaveAttribute("data-host-offline");
-	expect(screen.getByRole("button", { name: /Fix login.*Worker/ })).toBeVisible();
+	expect(screen.getByRole("treeitem", { name: /^box-a, Offline/ })).toBeVisible();
+	const row = screen.getByRole("treeitem", { name: /^Fix login, Worker/ });
+	fireEvent.click(row);
+	expect(within(screen.getByRole("group", { name: "Selected session" })).getByRole("status")).toHaveTextContent("Offline");
 	expect(mocks.remoteGet.mock.calls.filter(([, path]) => path.endsWith("/coordination"))).toHaveLength(0);
-	expect(mocks.localGet).not.toHaveBeenCalled();
+	expect(localReadsOtherThanIdentity()).toHaveLength(0);
 });
 
 it("labels a remote Fleet snapshot stale when its project refresh fails", async () => {
@@ -223,7 +240,7 @@ it("labels a remote Fleet snapshot stale when its project refresh fails", async 
 	renderBoard("box-a");
 	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
 	expect(screen.getByText("Could not refresh sessions. Showing the last snapshot.")).toHaveAttribute("role", "alert");
-	expect(screen.getByRole("button", { name: /Fix login.*Worker/ })).toBeVisible();
+	fireEvent.click(screen.getByRole("treeitem", { name: /^Fix login, Worker/ }));
 	await screen.findByText("No recorded communication in this history.");
 });
 
@@ -232,6 +249,7 @@ it("does not require Developer mode to open a locally paired host's Fleet", asyn
 	renderBoard("box-a");
 	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
 	expect(screen.getByRole("region", { name: "Session fleet" })).toBeVisible();
+	fireEvent.click(screen.getByRole("treeitem", { name: /^Fix login, Worker/ }));
 	await screen.findByText("No recorded communication in this history.");
 });
 

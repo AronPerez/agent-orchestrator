@@ -312,7 +312,8 @@ function ArtifactTablePreview({ rows }: { rows: string[][] }) {
 	);
 }
 
-function ArtifactContentPreview({ artifact, session, remote }: { artifact: SessionArtifact; session: WorkspaceSession; remote: boolean }) {
+/** A file's own preview: a page frame, an image, a table, or its first Markdown or text. */
+export function ArtifactContentPreview({ artifact, session, remote }: { artifact: SessionArtifact; session: WorkspaceSession; remote: boolean }) {
 	const { t } = useTranslation();
 	// The frame allows same-origin, which is only safe on the dedicated inline artifact
 	// origin. A remote host's page URL carries a proxy capability token the page could

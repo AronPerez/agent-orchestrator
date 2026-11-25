@@ -93,9 +93,10 @@ func TestSteeringIsOfferedOnlyForAgyACP(t *testing.T) {
 		name, version string
 		want          bool
 	}{
-		{"Antigravity ACP Server", "1.5.4", true},
-		{"Antigravity ACP Server", "1.5.6", true},
-		{"Antigravity ACP Server", "1.5.3", false},
+		{"Antigravity ACP Server", "1.5.15", true},
+		{"Antigravity ACP Server", "1.5.16", true},
+		{"Antigravity ACP Server", "1.5.14", false},
+		{"Antigravity ACP Server", "1.5.4", false},
 		{"Antigravity ACP Server", "1.4.9", false},
 		{"antigravity-acp", "1.4.5", false},
 	} {
@@ -307,8 +308,8 @@ func TestValidateInitializeAdmitsOnlyTestedAntigravityServers(t *testing.T) {
 		info("antigravity-acp", "1.3.0"),
 		info("antigravity-acp", "1.10.2"),
 		info("antigravity-acp", "2.0.0-beta"),
-		info("Antigravity ACP Server", "1.5.4"),
-		info("Antigravity ACP Server", "1.5.6"),
+		info("Antigravity ACP Server", "1.5.15"),
+		info("Antigravity ACP Server", "1.5.16"),
 	} {
 		if err := validateInitialize(ok); err != nil {
 			t.Errorf("validateInitialize(%s %s) = %v", ok.AgentInfo.Name, ok.AgentInfo.Version, err)
@@ -320,7 +321,8 @@ func TestValidateInitializeAdmitsOnlyTestedAntigravityServers(t *testing.T) {
 		info("antigravity-acp", "1.2.1"),
 		info("antigravity-acp", "dev"),
 		info("Antigravity ACP Server", "1.4.0"),
-		info("Antigravity ACP Server", "1.5.3"),
+		info("Antigravity ACP Server", "1.5.4"),
+		info("Antigravity ACP Server", "1.5.14"),
 		info("Antigravity ACP Server", "dev"),
 	} {
 		if err := validateInitialize(bad); err == nil {
@@ -431,10 +433,11 @@ func TestResolverLaunchesAgyACPFromANewEnoughCLI(t *testing.T) {
 		err     error
 		wantCLI bool
 	}{
-		{version: "1.5.4", wantCLI: true},
-		{version: "1.5.6\n", wantCLI: true},
+		{version: "1.5.15", wantCLI: true},
+		{version: "1.5.16\n", wantCLI: true},
 		{version: "2.0.0", wantCLI: true},
-		{version: "1.5.3"},
+		{version: "1.5.14"},
+		{version: "1.5.4"},
 		{version: "1.4.9"},
 		{version: "unknown"},
 		{err: errors.New("agy --version failed")},
@@ -471,7 +474,7 @@ func TestLaunchStartsAgyACPWithTheChatDataFolder(t *testing.T) {
 	cli := writeExecutable(t, filepath.Join(t.TempDir(), "agy"))
 	r := testResolver(t, nil)
 	r.agyCLI = func(context.Context) (string, error) { return cli, nil }
-	r.cliVersion = func(context.Context, string) (string, error) { return "1.5.6", nil }
+	r.cliVersion = func(context.Context, string) (string, error) { return minimumCLIACPVersion, nil }
 	cfg := buildConfig(nil, r, nil)
 
 	launch, err := cfg.Launch(context.Background(), acpdriver.LaunchConfig{Env: map[string]string{"PATH": "/usr/bin"}})

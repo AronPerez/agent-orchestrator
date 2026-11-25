@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
+import { sessionUiKey } from "./hosts";
 import { buildSidebarSessionOrder, EMPTY_GROUP_ORDER, orderGroupSessions, pinnedFirst, pruneGroupOrder, splitGroupOrder } from "./sidebar-order";
 
 function row(id: string, pinnedAt?: string, kind: WorkspaceSession["kind"] = "worker"): WorkspaceSession {
@@ -61,6 +62,19 @@ describe("buildSidebarSessionOrder with pins", () => {
 			projectOrder: ["alpha", "bravo"],
 		});
 		expect(order.map((entry) => entry.sessionId)).toEqual(["alpha-pin", "alpha-1", "bravo-pin", "bravo-1"]);
+	});
+});
+
+describe("buildSidebarSessionOrder with hidden projects", () => {
+	it("skips a hidden project's sessions on that machine only", () => {
+		const project = (id: string, sessions: WorkspaceSession[], hostId?: string): WorkspaceSummary => ({ id, name: id, path: `/${id}`, sessions, hostId });
+		const order = buildSidebarSessionOrder({
+			workspaces: [project("web", [row("local-1")]), project("api", [row("api-1")])],
+			remoteWorkspaces: [project("web", [row("m4-1")], "m4"), project("web", [row("m6-1")], "m6")],
+			projectOrder: ["web", "api"],
+			hiddenProjectKeys: ["api", sessionUiKey("web", "m4")],
+		});
+		expect(order.map((entry) => entry.sessionId)).toEqual(["local-1", "m6-1"]);
 	});
 });
 
