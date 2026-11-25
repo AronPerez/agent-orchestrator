@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	buildChatSearchCommands,
 	buildCommands,
@@ -1009,7 +1009,7 @@ describe("the blank palette", () => {
 });
 
 describe("project actions", () => {
-	const ctx = { isPinned: false, canPin: true, restarting: false, hasOrchestrator: true, setPinned: () => {}, copyPath: () => {}, remove: () => {} };
+	const ctx = { isPinned: false, canPin: true, restarting: false, hasOrchestrator: true, setPinned: () => {}, setHidden: () => {}, copyPath: () => {}, remove: () => {} };
 
 	it("offers what the sidebar's project menu offers", () => {
 		const project = { ...workspaces()[0]!, sessions: [...workspaces()[0]!.sessions, session({ id: "old", isTerminated: true })] };
@@ -1021,10 +1021,23 @@ describe("project actions", () => {
 			"project-action:archive",
 			"project-action:copy-path",
 			"project-action:pin",
+			"project-action:hide",
 			"project-action:settings",
 			"project-action:remove",
 		]);
 		expect(byId(items).get("project-action:archive")?.state).toBe("1");
+	});
+
+	it("hides or shows the project's sidebar row", () => {
+		const setHidden = vi.fn();
+		const hide = byId(buildProjectActions(workspaces()[0]!, { ...ctx, setHidden })).get("project-action:hide");
+		expect(hide?.title).toBe("Hide project");
+		if (hide?.action?.kind === "run") hide.action.run();
+		expect(setHidden).toHaveBeenCalledWith(true);
+		const show = byId(buildProjectActions(workspaces()[0]!, { ...ctx, isHidden: true, setHidden })).get("project-action:hide");
+		expect(show?.title).toBe("Show project");
+		if (show?.action?.kind === "run") show.action.run();
+		expect(setHidden).toHaveBeenLastCalledWith(false);
 	});
 
 	it("names Cloud project removal as a delete, like the sidebar", () => {

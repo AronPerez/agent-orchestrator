@@ -211,10 +211,11 @@ export function useRemoveProject({ findWorkspace, isViewing, cloud }: {
 		}
 		showGlobalToast(isCloud ? t("shell.cloudProjectDeleted", { name }) : t("shell.projectRemoved", { name }), undefined, { tone: "success", dedupeKey: toastKey });
 
-		const unpin = () => {
-			// Project ids come from the folder name, so a stale pin would come back
-			// if the same folder is added again. Remote rows are not pinnable.
+		// Project ids come from the folder name, so a stale pin or hide would come
+		// back if the same folder is added again. Remote rows are not pinnable.
+		const forgetRowPreferences = () => {
 			if (!hostId) useSidebarOrderStore.getState().setProjectPinned(projectId, false);
+			useSidebarOrderStore.getState().setProjectHidden(projectId, hostId, false);
 		};
 
 		try {
@@ -227,7 +228,7 @@ export function useRemoveProject({ findWorkspace, isViewing, cloud }: {
 			// up has removed the project, and putting it back would be wrong.
 			const read = await refetchLists(queryClient, target);
 			if (read && !serverStillLists(queryClient, target)) {
-				unpin();
+				forgetRowPreferences();
 				return;
 			}
 			if (snapshot) {
@@ -243,7 +244,7 @@ export function useRemoveProject({ findWorkspace, isViewing, cloud }: {
 		}
 
 		if (!hostId) void captureRendererEvent("ao.projects.removed", { project_id: projectId });
-		unpin();
+		forgetRowPreferences();
 		const read = await refetchLists(queryClient, target);
 		// A cloud archive finishes after the request returns and its ids are never
 		// reused, so its tombstone stays. A local or remote one ends once a read

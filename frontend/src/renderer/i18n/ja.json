@@ -3570,6 +3570,13 @@
 	"shell.unpinSession": "Unpin session",
 	"shell.pinProject": "Pin to top",
 	"shell.unpinProject": "Unpin",
+	"shell.hideProject": "プロジェクトを非表示",
+	"shell.showProject": "プロジェクトを表示",
+	"shell.hiddenProjectsCount": "非表示 {{count}} 件",
+	"shell.hiddenProjectsAria": "非表示のプロジェクト: {{count}} 件",
+	"shell.hiddenProjects": "非表示のプロジェクト",
+	"shell.showHiddenProjectAction": "表示",
+	"shell.showHiddenProject": "{{name}} を表示",
 	"newTask.task": "Task",
 	"newTask.taskPlaceholders": [
 		"バックエンドのファイルを確認し、デッドコードがないか教えてください",
