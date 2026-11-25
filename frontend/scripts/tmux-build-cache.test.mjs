@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	chmodSync,
 	closeSync,
 	existsSync,
 	mkdirSync,
@@ -151,6 +152,33 @@ describe("cached builds", () => {
 		expect(fakeBuild).toHaveBeenCalledTimes(1);
 		expect(readFileSync(join(final, "output", "tmux"), "utf8")).toBe("binary");
 		expect(readdirSync(join(root, CACHE_NAME)).filter((name) => name.startsWith(".tmp-stale-k-"))).toHaveLength(1);
+	});
+
+	it("builds with the fresh output when a read-only cache holds a damaged entry", async () => {
+		const root = join(dir, "cache");
+		const entries = join(root, CACHE_NAME);
+		mkdirSync(join(entries, "k", "output", "licenses"), { recursive: true });
+		writeFileSync(join(entries, "k", "meta.json"), "{}");
+		chmodSync(entries, 0o555);
+		const lines = [];
+		try {
+			const read = await ensureCachedBuild({
+				root,
+				key: "k",
+				meta: {},
+				build: fakeBuild,
+				isComplete: (built) => existsSync(join(built, "tmux")),
+				use: (built) => readFileSync(join(built, "tmux"), "utf8"),
+				workRoot: dir,
+				log: (line) => lines.push(line),
+			});
+			expect(read).toBe("binary");
+			// The damaged entry could not be set aside and is still there, untouched.
+			expect(existsSync(join(entries, "k", "output", "tmux"))).toBe(false);
+			expect(lines.some((line) => line.startsWith("bundled tmux: warning: could not set the incomplete cache entry aside"))).toBe(true);
+		} finally {
+			chmodSync(entries, 0o755);
+		}
 	});
 
 	it("builds when a cached entry disappears while it is being copied", async () => {
