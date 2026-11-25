@@ -623,6 +623,32 @@ describe("DecisionCallPanel", () => {
 			expect(navigateMock).toHaveBeenCalledWith({ to: "/decisions", search: { call: "dec_later" } });
 		});
 
+		it("never reads a file the call names from this computer while its own machine is unavailable", async () => {
+			const plan = "ao://sessions/shop/w-5512/artifacts/plan.md";
+			sessionMachine.current = { kind: "offline", machine: "laptop" };
+			route({ ...call, context: `Approve ${plan} before I start.` });
+			renderPanel();
+			const material = await screen.findByRole("region", { name: "Supporting material" });
+			const files = within(material).getByRole("region", { name: "Files" });
+			expect(files).toHaveTextContent("plan.md");
+			expect(files).toHaveTextContent("Artifact unavailable");
+			expect(within(files).queryByRole("button")).not.toBeInTheDocument();
+			expect(screen.queryByRole("link", { name: "plan.md" })).not.toBeInTheDocument();
+			expect(screen.getByText((_, element) => element?.tagName === "P" && element.textContent === `Approve ${plan} before I start.`)).toBeInTheDocument();
+		});
+
+		it("links the file once its machine is read, without carrying the earlier state over", async () => {
+			const plan = "ao://sessions/shop/w-5512/artifacts/plan.md";
+			sessionMachine.current = { kind: "checking" };
+			route({ ...call, context: `Approve ${plan} before I start.` });
+			const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+			const view = render(<QueryClientProvider client={client}><DecisionCallPanel callId="dec_1" /></QueryClientProvider>);
+			await screen.findByText((_, element) => element?.tagName === "P" && element.textContent === `Approve ${plan} before I start.`);
+			sessionMachine.current = { kind: "ready", host: "h_laptop", workspaces: [{ id: "shop", sessions: [{ id: "w-5512", artifactFiles: [{ path: "plan.md" }] }] }] };
+			view.rerender(<QueryClientProvider client={client}><DecisionCallPanel callId="dec_1" /></QueryClientProvider>);
+			expect(await screen.findByRole("link", { name: "plan.md" })).toHaveAttribute("href", plan);
+		});
+
 		it("shows nothing for a call that names nothing", async () => {
 			route({ ...call, links: [] });
 			getMock.mockImplementation((path: string) => Promise.resolve(path === "/api/v1/decisions/{id}"

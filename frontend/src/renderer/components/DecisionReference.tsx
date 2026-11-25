@@ -4,7 +4,7 @@ import { useDecisionDetail } from "../hooks/useDecisionInbox";
 import type { DecisionTextPart } from "../lib/decision-references";
 import { decisionSessionTarget, type DecisionMachine } from "../lib/decision-session-target";
 import { openLinkInSystemBrowser } from "../lib/external-link-policy";
-import { LOCAL_HOST, type HostId } from "../lib/hosts";
+import type { HostId } from "../lib/hosts";
 import { useNavigateToSession } from "../lib/navigate-to-session";
 import { useDecisionLinkNavigation } from "../lib/use-decision-link-navigation";
 import { useSessionLinkNavigation } from "../lib/use-session-link-navigation";
@@ -30,10 +30,15 @@ export function decisionChipClass(size: DecisionChipSize = "md", className?: str
 
 const WEB_LINK = "break-words text-markdown-link underline decoration-markdown-link/45 underline-offset-2 hover:text-markdown-link-hover";
 
+/** A page opens in a browser; anything else is a file. */
+export function artifactIcon(name: string) {
+	return /\.html?$/i.test(name) ? BrowserIcon : FileText;
+}
+
 /** A file in a session's artifacts on the call's machine; it opens in that session's Artifacts. */
 function ArtifactChip({ part, host }: { part: Extract<DecisionTextPart, { kind: "artifact" }>; host: HostId }) {
 	const openArtifact = useSessionLinkNavigation(host);
-	const Icon = /\.html?$/i.test(part.name) ? BrowserIcon : FileText;
+	const Icon = artifactIcon(part.name);
 	return (
 		<AppLink
 			href={part.href}
@@ -78,8 +83,15 @@ export function DecisionTextLink({ part, machine }: { part: Exclude<DecisionText
 			return <DecisionChip part={part} />;
 		case "session":
 			return <DecisionSessionChip machine={machine} sessionId={part.sessionId} size="md" icon>{part.text}</DecisionSessionChip>;
-		case "artifact":
-			return <ArtifactChip part={part} host={decisionMachineHost(machine)} />;
+		case "artifact": {
+			// A file is only ever looked up on the call's own machine. Until that
+			// machine's sessions are read, the reference stays text: a same-named
+			// file on this computer is not the one the call means. Keyed by host,
+			// so reaching the machine mounts the chip afresh instead of switching
+			// its hooks from one host's to another's.
+			const host = decisionMachineHost(machine);
+			return host === undefined ? <span>{part.text}</span> : <ArtifactChip key={host} part={part} host={host} />;
+		}
 		case "pr":
 			return (
 				<AppLink href={part.url} systemBrowser className={decisionChipClass()} hoverPreview={() => <PullRequestHoverCard url={part.url} onBrowserOpen={(url) => void openLinkInSystemBrowser(url)} />}>
@@ -111,9 +123,9 @@ export function shortSessionName(name: string): string {
 	return head !== name && head.length <= 40 ? head : name;
 }
 
-/** The host a call's links resolve against: its own machine when this app can reach it. */
-export function decisionMachineHost(machine: DecisionMachine): HostId {
-	return machine.kind === "ready" ? machine.host : LOCAL_HOST;
+/** The host a call's files are read from: its own machine, once this app has read that machine's sessions. */
+export function decisionMachineHost(machine: DecisionMachine): HostId | undefined {
+	return machine.kind === "ready" ? machine.host : undefined;
 }
 
 /**

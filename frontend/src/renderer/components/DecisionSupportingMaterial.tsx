@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useId, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronRight, FileText, Link2 } from "@/components/app-icons";
+import { ChevronRight, Link2 } from "@/components/app-icons";
 import { artifactAtPath } from "../../../../packages/shared/artifacts/deliverables";
 import { useDecisionDetail } from "../hooks/useDecisionInbox";
 import { usePullRequestPreview } from "../hooks/usePullRequestPreview";
@@ -15,9 +15,8 @@ import { parseArtifactLink } from "../lib/session-links";
 import { useDecisionLinkNavigation } from "../lib/use-decision-link-navigation";
 import { useSessionLinkNavigation, useSessionLinkSource } from "../lib/use-session-link-navigation";
 import { cn } from "../lib/utils";
-import { shortSessionName } from "./DecisionReference";
+import { artifactIcon, shortSessionName } from "./DecisionReference";
 import { DecisionStateDot, decisionStateLabel } from "./DecisionStateLabel";
-import { BrowserIcon } from "./icons";
 import { prStateIcon } from "./PRPills";
 import { ArtifactContentPreview } from "./SessionLinkPreviewCard";
 import { Button } from "./ui/button";
@@ -87,7 +86,7 @@ function ArtifactRow({ href, name, host }: { href: string; name: string; host: H
 	const target = parseArtifactLink(href);
 	const session = target ? source.workspaces.find((workspace) => workspace.id === target.projectId)?.sessions.find((candidate) => candidate.id === target.sessionId) : undefined;
 	const artifact = target ? artifactAtPath(session?.artifactFiles, target.path) : undefined;
-	const Icon = /\.html?$/i.test(name) ? BrowserIcon : FileText;
+	const Icon = artifactIcon(name);
 	const author = session ? (session.kind === "orchestrator" ? t("shell.orchestrator") : shortSessionName(session.title || session.id)) : target?.sessionId;
 	return (
 		<div className="min-w-0">
@@ -109,6 +108,21 @@ function ArtifactRow({ href, name, host }: { href: string; name: string; host: H
 					<Button type="button" size="xs" variant="secondary" onClick={() => openArtifact(href)}>{t("decisions.material.openFile")}</Button>
 				</div>
 			) : null}
+		</div>
+	);
+}
+
+/** A file the call names on a machine whose sessions this app has not read: named, never looked up elsewhere. */
+function UnavailableArtifactRow({ name }: { name: string }) {
+	const { t } = useTranslation();
+	const Icon = artifactIcon(name);
+	return (
+		<div className="flex min-w-0 items-start gap-2 px-3 py-2">
+			<Icon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+			<span className="flex min-w-0 flex-1 flex-col gap-0.5">
+				<span className="truncate text-sm font-medium text-foreground">{name}</span>
+				<span className="truncate text-caption text-muted-foreground">{t("artifactLink.unavailable")}</span>
+			</span>
 		</div>
 	);
 }
@@ -170,7 +184,7 @@ export function hasDecisionMaterial(material: DecisionMaterial): boolean {
  * before and after it, the files and pull requests it names, and its links.
  * Groups with nothing in them are not drawn.
  */
-export function DecisionSupportingMaterial({ material, later, host }: { material: DecisionMaterial; later: DecisionCall[]; host: HostId }) {
+export function DecisionSupportingMaterial({ material, later, host }: { material: DecisionMaterial; later: DecisionCall[]; host: HostId | undefined }) {
 	const { t } = useTranslation();
 	if (!hasDecisionMaterial(material) && later.length === 0) return null;
 	return (
@@ -187,7 +201,10 @@ export function DecisionSupportingMaterial({ material, later, host }: { material
 			) : null}
 			{material.artifacts.length > 0 ? (
 				<Group label={t("decisions.material.files")}>
-					{material.artifacts.map((artifact) => <ArtifactRow key={artifact.href} href={artifact.href} name={artifact.name} host={host} />)}
+					{material.artifacts.map((artifact) => host === undefined
+						? <UnavailableArtifactRow key={artifact.href} name={artifact.name} />
+						// Keyed by host as well, so reaching the machine mounts a fresh row on that host's hooks.
+						: <ArtifactRow key={`${host}\n${artifact.href}`} href={artifact.href} name={artifact.name} host={host} />)}
 				</Group>
 			) : null}
 			{material.pullRequests.length > 0 ? (
