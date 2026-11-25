@@ -75,10 +75,7 @@ func (d *Driver) ForkIntoHost(ctx context.Context, sourceID, lastTurnID string, 
 		conv.discard()
 		return nil, fmt.Errorf("encode ACP fork MCP servers: %w", err)
 	}
-	meta := map[string]any(nil)
-	if d.cfg.SessionMeta != nil {
-		meta = d.cfg.SessionMeta(launchCfg)
-	}
+	meta := d.sessionMeta(init, launchCfg)
 	operationCtx := ctx
 	var release func()
 	if cfg.AcquireForkSource != nil {
