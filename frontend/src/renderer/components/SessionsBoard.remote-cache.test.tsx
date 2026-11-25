@@ -47,6 +47,8 @@ function savedSessions(host: string, updatedAt: number) {
 beforeEach(() => {
 	useUiStore.setState({ developerMode: false, diagnostics: false, remoteHosts: true });
 	localGet.mockReset(); navigate.mockReset(); fetchMock.mockReset();
+	// Fleet fold choices are saved on purpose; each test starts from the defaults.
+	window.localStorage.clear();
 	fetchMock.mockRejectedValue(new Error("Offline fixture must not use the network"));
 	vi.stubGlobal("fetch", fetchMock);
 });
@@ -74,15 +76,16 @@ it.each(["restart", "combined-query eviction"])("hydrates offline Fleet from sep
 	render(<QueryClientProvider client={client}><TooltipProvider><SessionsBoard hostId="box-a" projectId="shared" /></TooltipProvider></QueryClientProvider>);
 	// This exercises the real project query, rather than giving the board a mocked workspace.
 	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
-	expect(screen.getByRole("region", { name: "Session fleet" })).toHaveAttribute("data-host-offline");
-	expect(screen.getByRole("button", { name: /box-a orchestrator.*Archived/ })).toBeVisible();
-	expect(screen.getByRole("button", { name: /box-a manager.*Manager/ })).toBeVisible();
-	expect(screen.getByRole("button", { name: /box-a worker.*Worker/ })).toBeVisible();
+	expect(screen.getByRole("treeitem", { name: /^Saved A, Offline/ })).toHaveAttribute("aria-level", "1");
+	expect(screen.getByRole("treeitem", { name: /^box-a orchestrator, Orchestrator.*Archived/ })).toBeVisible();
+	expect(screen.getByRole("treeitem", { name: /^box-a manager, Manager/ })).toBeVisible();
+	expect(screen.getByRole("treeitem", { name: /^box-a worker, Worker/ })).toBeVisible();
 	expect(screen.queryByText("box-b worker")).toBeNull();
 	fireEvent.click(screen.getByRole("button", { name: "Collapse box-a manager" }));
-	expect(screen.queryByRole("button", { name: /box-a worker.*Worker/ })).toBeNull();
+	expect(screen.queryByRole("treeitem", { name: /^box-a worker, Worker/ })).toBeNull();
 	expect(client.getQueryState(remoteWorkspaceQueryKey("box-a"))?.dataUpdatedAt).toBe(updatedAt);
-	expect(localGet).not.toHaveBeenCalled();
+	// Only this computer's host ID is read locally, to resolve cross-machine lineage.
+	expect(localGet.mock.calls.filter(([path]) => path !== "/api/v1/identity")).toHaveLength(0);
 	expect(fetchMock).not.toHaveBeenCalled();
 });
 
@@ -107,12 +110,13 @@ it.each(["projects", "sessions"])("reacts to lists hydrated after the offline bo
 	// No parent rerender: only the separate list queries receive restored data.
 	await act(async () => { restore(first === "projects" ? "sessions" : "projects"); });
 	fireEvent.click(await screen.findByRole("button", { name: "Fleet" }));
-	expect(screen.getByRole("region", { name: "Session fleet" })).toHaveAttribute("data-host-offline");
-	expect(screen.getByRole("button", { name: /box-a orchestrator.*Archived/ })).toBeVisible();
-	expect(screen.getByRole("button", { name: /box-a manager.*Manager/ })).toBeVisible();
-	expect(screen.getByRole("button", { name: /box-a worker.*Worker/ })).toBeVisible();
+	expect(screen.getByRole("treeitem", { name: /^Saved A, Offline/ })).toHaveAttribute("aria-level", "1");
+	expect(screen.getByRole("treeitem", { name: /^box-a orchestrator, Orchestrator.*Archived/ })).toBeVisible();
+	expect(screen.getByRole("treeitem", { name: /^box-a manager, Manager/ })).toBeVisible();
+	expect(screen.getByRole("treeitem", { name: /^box-a worker, Worker/ })).toBeVisible();
 	expect(screen.queryByText("box-b worker")).toBeNull();
 	expect(client.getQueryState(key)?.dataUpdatedAt).toBe(updatedAt);
-	expect(localGet).not.toHaveBeenCalled();
+	// Only this computer's host ID is read locally, to resolve cross-machine lineage.
+	expect(localGet.mock.calls.filter(([path]) => path !== "/api/v1/identity")).toHaveLength(0);
 	expect(fetchMock).not.toHaveBeenCalled();
 });
