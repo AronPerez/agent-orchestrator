@@ -190,15 +190,18 @@ export async function prepareBetterSqlite3({
 	const electronBinary = devElectronBinary(electronDir, run, undefined, log);
 	const abi = electronBinary ? electronAbi(electronBinary, run) : null;
 	if (!electronBinary || !abi) return rebuildWithoutCache("target Electron unavailable to verify a cached build");
-	const moduleVersion = JSON.parse(readFileSync(join(moduleDir, "package.json"), "utf8")).version;
-	const key = nativeModuleCacheKey({
-		platform,
-		arch,
-		electronVersion,
-		abi,
-		moduleVersion,
-		sourceDigest: moduleSourceDigest(moduleDir),
-	});
+	const readModuleVersion = () => JSON.parse(readFileSync(join(moduleDir, "package.json"), "utf8")).version;
+	const currentKey = () =>
+		nativeModuleCacheKey({
+			platform,
+			arch,
+			electronVersion,
+			abi: electronAbi(electronBinary, run),
+			moduleVersion: readModuleVersion(),
+			sourceDigest: moduleSourceDigest(moduleDir),
+		});
+	const key = currentKey();
+	const moduleVersion = readModuleVersion();
 	const releaseDir = join(moduleDir, "build", "Release");
 
 	const cached = lookupEntry(cacheRoot, CACHE_NAME, key);
@@ -215,6 +218,12 @@ export async function prepareBetterSqlite3({
 	await rebuild();
 	if (!hasBuild(releaseDir) || !loadsUnderElectron(electronBinary, moduleDir, run)) {
 		log("better-sqlite3: the fresh build did not load under the target Electron; not caching it.");
+		return "rebuilt";
+	}
+	// The module or Electron changed while node-gyp ran (say a concurrent npm
+	// install): this build does not match the key, so do not store it under it.
+	if (currentKey() !== key) {
+		log("better-sqlite3: inputs changed during the build; not caching it.");
 		return "rebuilt";
 	}
 	storeBuild(cacheRoot, key, releaseDir, { electronVersion, abi, moduleVersion }, log);

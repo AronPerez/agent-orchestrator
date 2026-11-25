@@ -213,6 +213,30 @@ describe("better-sqlite3 build cache", () => {
 		expect(customBuildEnvironment(npmDefaults)).toEqual([]);
 	});
 
+	it.each([
+		["the module source", () => writeFileSync(join(moduleDir, "src", "better_sqlite3.cpp"), "// edited mid-build")],
+		["the module version", () => writeFileSync(join(moduleDir, "package.json"), JSON.stringify({ version: "12.12.0" }))],
+	])("does not store a build when %s changed while it compiled", async (_name, edit) => {
+		const lines = [];
+		const editingRebuild = vi.fn(async () => {
+			await rebuild();
+			edit();
+		});
+		await expect(prepare({ rebuild: editingRebuild, log: (line) => lines.push(line) })).resolves.toBe("rebuilt");
+		expect(cacheEntries()).toHaveLength(0);
+		expect(lines).toEqual(["better-sqlite3: inputs changed during the build; not caching it."]);
+	});
+
+	it("does not store a build when Electron's ABI changed while it compiled", async () => {
+		let abiCalls = 0;
+		const run = vi.fn((_command, args) => {
+			if (args[0] === "-p") return { status: 0, stdout: `${++abiCalls <= 2 ? "149" : "150"}\n` };
+			return { status: 0 };
+		});
+		await expect(prepare({ run })).resolves.toBe("rebuilt");
+		expect(cacheEntries()).toHaveLength(0);
+	});
+
 	it("keeps packaging when the cache cannot be written", async () => {
 		const lines = [];
 		writeFileSync(cacheRoot, "not a directory");
