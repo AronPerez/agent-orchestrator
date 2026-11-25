@@ -137,6 +137,8 @@ describe("cached builds", () => {
 		const root = join(dir, "cache");
 		const key = "racing-key";
 		const final = join(root, CACHE_NAME, key);
+		// Large enough that a half-written copy would show, generated in each
+		// builder: Linux caps a single argument at 128 KB, so it cannot ride in -e.
 		const payload = "x".repeat(256 * 1024);
 		if (damaged) {
 			mkdirSync(join(final, "output"), { recursive: true });
@@ -156,7 +158,7 @@ describe("cached builds", () => {
 				workRoot: ${JSON.stringify(dir)},
 				build: async (_work, out) => {
 					await new Promise((r) => setTimeout(r, Math.random() * 40));
-					writeFileSync(join(out, "tmux"), ${JSON.stringify(payload)});
+					writeFileSync(join(out, "tmux"), "x".repeat(${payload.length}));
 					mkdirSync(join(out, "licenses"));
 					writeFileSync(join(out, "licenses", "tmux.txt"), "ISC");
 				},
