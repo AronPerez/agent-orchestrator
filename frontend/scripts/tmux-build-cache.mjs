@@ -1,18 +1,15 @@
 // The bundled tmux build cache, shared by every checkout and worktree on the
 // machine. A tmux build takes about a minute, and a per-checkout cache made
-// every new worktree pay it again.
+// every new worktree pay it again. Several workers often create worktrees at
+// once, so every step here is safe to run concurrently against one cache.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildCacheRoot, lookupEntry, pruneEntries, storeEntry } from "./dev-cache.mjs";
 
-// Under ~/.ao, beside the Swift helpers' module caches. Never inside frontend/:
-// Electron Packager treats that as the app root and would copy hundreds of
-// megabytes of intermediate objects into app.asar.
-export function tmuxBuildCacheRoot(home = homedir()) {
-	return join(home, ".ao", "build-cache", "bundled-tmux");
-}
+export const CACHE_NAME = "bundled-tmux";
 
 // Environment the build inherits that can change the binary: the compiler,
 // its flags, the SDK and toolchain selection, and library search paths. The
@@ -42,12 +39,20 @@ export function buildEnvironment(env = process.env) {
 	return Object.fromEntries(BUILD_ENVIRONMENT.filter((name) => env[name]).map((name) => [name, env[name]]));
 }
 
-// Share only default builds. A customised environment (say CFLAGS=-march=native)
-// can produce a binary that is wrong for other machines, so it keeps its build
-// in this checkout, as before. The key covers the environment either way.
-export function tmuxCacheLocation({ env = process.env, home = homedir(), repoRoot }) {
+// Share only default builds, in the machine-wide build cache (dev-cache.mjs;
+// AO_BUILD_CACHE_DIR overrides it). A customised environment (say
+// CFLAGS=-march=native) can produce a binary that is wrong for other machines,
+// so it keeps its builds in this checkout's .cache, as before. Neither is
+// inside frontend/: Electron Packager treats that as the app root and would
+// copy hundreds of megabytes of intermediate objects into app.asar.
+export function tmuxCacheLocation({ env = process.env, repoRoot }) {
 	const shared = Object.keys(buildEnvironment(env)).length === 0;
-	return { shared, root: shared ? tmuxBuildCacheRoot(home) : join(repoRoot, ".cache", "bundled-tmux") };
+	return { shared, root: shared ? buildCacheRoot(env) : join(repoRoot, ".cache") };
+}
+
+// Source archives are verified by sha256, so one copy serves every checkout.
+export function sourceDownloadsDir(env = process.env) {
+	return join(buildCacheRoot(env), `${CACHE_NAME}-sources`);
 }
 
 // Everything that decides the bytes of the built binary: the build revision,
@@ -76,44 +81,55 @@ export function compilerIdentity(run = spawnSync, env = process.env) {
 	return identity;
 }
 
-// Builds run in <key>.building-<pid> and are renamed into place only once
-// complete, so two checkouts building the same key never see each other's
-// half-finished tree. The loser of the race keeps the winner's build; a
-// damaged directory already at the key (no completion stamp) is replaced.
-export function buildDirFor(finalDir, pid = process.pid) {
-	return `${finalDir}.building-${pid}`;
+// The cached build for `key`, building it first on a miss. Each builder works
+// in its own temporary directory and publishes through dev-cache's storeEntry
+// (write once, atomic rename, never delete a published entry), so concurrent
+// builders of one key all end with the same complete entry. Returns the
+// entry's output directory.
+export async function ensureCachedBuild({ root, key, meta, build, workRoot = tmpdir() }) {
+	const cached = lookupEntry(root, CACHE_NAME, key);
+	if (cached) return cached;
+	const work = mkdtempSync(join(workRoot, `${CACHE_NAME}-build-`));
+	try {
+		const output = join(work, "output");
+		mkdirSync(output);
+		await build(work, output);
+		storeEntry(root, CACHE_NAME, key, output, meta);
+		pruneEntries(root, CACHE_NAME);
+	} finally {
+		rmSync(work, { recursive: true, force: true });
+	}
+	const stored = lookupEntry(root, CACHE_NAME, key);
+	if (!stored) throw new Error(`bundled tmux cache entry ${key} is missing after storing it`);
+	return stored;
 }
 
-export function publishBuild(buildDir, finalDir, isComplete) {
-	try {
-		renameSync(buildDir, finalDir);
-		return true;
-	} catch (error) {
-		if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") throw error;
-		if (isComplete(finalDir)) {
-			rmSync(buildDir, { recursive: true, force: true });
-			return false;
+// Fetch `url` to `archive` unless a copy with `sha256` is already there. The
+// published archive is never unlinked: a verified download replaces it with
+// one atomic rename, so another checkout that is extracting it keeps reading a
+// whole file.
+export async function fetchVerified({ url, sha256, archive, fetchImpl = fetch, attempts = 3, retryDelayMs = 1000 }) {
+	if (fileSha256(archive) === sha256) return;
+	const part = `${archive}.part-${process.pid}`;
+	let lastError;
+	for (let attempt = 1; attempt <= attempts; attempt += 1) {
+		rmSync(part, { force: true });
+		try {
+			const response = await fetchImpl(url, { redirect: "follow" });
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			writeFileSync(part, Buffer.from(await response.arrayBuffer()));
+			if (fileSha256(part) !== sha256) throw new Error("sha256 mismatch");
+			renameSync(part, archive);
+			return;
+		} catch (error) {
+			lastError = error;
+			if (attempt < attempts) await new Promise((resolveDelay) => setTimeout(resolveDelay, attempt * retryDelayMs));
 		}
-		rmSync(finalDir, { recursive: true, force: true });
-		renameSync(buildDir, finalDir);
-		return true;
 	}
+	rmSync(part, { force: true });
+	throw new Error(`failed to download ${url}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-// Remove build directories left by processes that died mid-build.
-export function pruneAbandonedBuilds(root, isAlive = processIsAlive) {
-	if (!existsSync(root)) return;
-	for (const entry of readdirSync(root)) {
-		const match = entry.match(/\.building-(\d+)$/);
-		if (match && !isAlive(Number(match[1]))) rmSync(join(root, entry), { recursive: true, force: true });
-	}
-}
-
-function processIsAlive(pid) {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return error?.code === "EPERM";
-	}
+function fileSha256(file) {
+	return existsSync(file) ? createHash("sha256").update(readFileSync(file)).digest("hex") : null;
 }

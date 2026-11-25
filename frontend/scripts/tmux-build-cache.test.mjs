@@ -1,15 +1,27 @@
 // @vitest-environment node
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+	closeSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-	buildDirFor,
+	CACHE_NAME,
 	buildEnvironment,
 	compilerIdentity,
-	pruneAbandonedBuilds,
-	publishBuild,
-	tmuxBuildCacheRoot,
+	ensureCachedBuild,
+	fetchVerified,
 	tmuxCacheKey,
 	tmuxCacheLocation,
 } from "./tmux-build-cache.mjs";
@@ -23,7 +35,7 @@ const inputs = {
 		{ name: "libevent", version: "2.1.12-stable", sha256: "bbb" },
 	],
 	compiler: { cc: "Apple clang version 21.0.0", sdk: "27.2" },
-	recipe: "async function build(buildDir) { /* … */ }",
+	recipe: "async function build(buildDir, output) { /* … */ }",
 };
 
 let dir;
@@ -34,11 +46,7 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-describe("tmux build cache", () => {
-	it("lives under ~/.ao/build-cache, shared by every checkout", () => {
-		expect(tmuxBuildCacheRoot("/Users/me")).toBe("/Users/me/.ao/build-cache/bundled-tmux");
-	});
-
+describe("tmux cache key", () => {
 	it("keeps the same key for the same inputs", () => {
 		expect(tmuxCacheKey(inputs)).toBe(tmuxCacheKey(structuredClone(inputs)));
 		expect(tmuxCacheKey(inputs)).toMatch(/^darwin-arm64-r5-3\.5a-2\.1\.12-stable-[0-9a-f]{16}$/);
@@ -48,113 +56,218 @@ describe("tmux build cache", () => {
 		["a source checksum", { sources: [{ ...inputs.sources[0], sha256: "changed" }, inputs.sources[1]] }],
 		["the compiler", { compiler: { ...inputs.compiler, cc: "Apple clang version 22.0.0" } }],
 		["the SDK", { compiler: { ...inputs.compiler, sdk: "28.0" } }],
+		["the build environment", { environment: { CFLAGS: "-O3" } }],
 		["the build recipe", { recipe: `${inputs.recipe} // new flag` }],
 		["the build revision", { buildRevision: 6 }],
 		["the architecture", { arch: "x64" }],
 	])("never reuses a build when %s changes", (_name, change) => {
 		expect(tmuxCacheKey({ ...inputs, ...change })).not.toBe(tmuxCacheKey(inputs));
 	});
+});
 
-	it("publishes a finished build into place", () => {
-		const finalDir = join(dir, "key");
-		const buildDir = buildDirFor(finalDir, 101);
-		mkdirSync(buildDir);
-		writeFileSync(join(buildDir, "tmux"), "mine");
+describe("build environment", () => {
+	const keyFor = (env) => tmuxCacheKey({ ...inputs, environment: buildEnvironment(env) });
 
-		expect(publishBuild(buildDir, finalDir, () => true)).toBe(true);
-		expect(readFileSync(join(finalDir, "tmux"), "utf8")).toBe("mine");
-		expect(existsSync(buildDir)).toBe(false);
+	it("reuses one shared build across checkouts with the default environment", () => {
+		const env = { AO_BUILD_CACHE_DIR: "/cache", PATH: "/usr/bin", PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig" };
+		const first = tmuxCacheLocation({ env, repoRoot: "/src/checkout-a" });
+		const second = tmuxCacheLocation({ env, repoRoot: "/src/checkout-b" });
+		expect(first).toEqual({ shared: true, root: "/cache" });
+		expect(second).toEqual(first);
+		expect(keyFor(env)).toBe(keyFor({}));
 	});
 
-	it("keeps the other checkout's build when it published first", () => {
-		const finalDir = join(dir, "key");
-		mkdirSync(finalDir);
-		writeFileSync(join(finalDir, "tmux"), "theirs");
-		const buildDir = buildDirFor(finalDir, 102);
-		mkdirSync(buildDir);
-		writeFileSync(join(buildDir, "tmux"), "mine");
-
-		expect(publishBuild(buildDir, finalDir, () => true)).toBe(false);
-		expect(readFileSync(join(finalDir, "tmux"), "utf8")).toBe("theirs");
-		expect(existsSync(buildDir)).toBe(false);
+	it("never shares or reuses a build made with a custom flag", () => {
+		const env = { AO_BUILD_CACHE_DIR: "/cache", CFLAGS: "-O3 -march=native" };
+		expect(tmuxCacheLocation({ env, repoRoot: "/src/checkout-a" })).toEqual({ shared: false, root: "/src/checkout-a/.cache" });
+		expect(keyFor(env)).not.toBe(keyFor({}));
 	});
 
-	it("replaces a damaged build at the key instead of reusing it", () => {
-		const finalDir = join(dir, "key");
-		mkdirSync(finalDir);
-		writeFileSync(join(finalDir, "partial.o"), "");
-		const buildDir = buildDirFor(finalDir, 103);
-		mkdirSync(buildDir);
-		writeFileSync(join(buildDir, "tmux"), "mine");
+	it.each(["CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "MACOSX_DEPLOYMENT_TARGET", "SDKROOT"])(
+		"treats %s as customising the build",
+		(name) => {
+			expect(buildEnvironment({ [name]: "x" })).toEqual({ [name]: "x" });
+			expect(tmuxCacheLocation({ env: { [name]: "x" }, repoRoot: "/src/a" }).shared).toBe(false);
+		},
+	);
 
-		expect(publishBuild(buildDir, finalDir, () => false)).toBe(true);
-		expect(readFileSync(join(finalDir, "tmux"), "utf8")).toBe("mine");
-		expect(existsSync(join(finalDir, "partial.o"))).toBe(false);
-		expect(existsSync(buildDir)).toBe(false);
+	it("ignores unrelated and empty variables", () => {
+		expect(buildEnvironment({ PATH: "/usr/bin", CFLAGS: "", HOME: "/Users/me" })).toEqual({});
 	});
 
-	it("prunes builds abandoned by dead processes and leaves the rest", () => {
-		for (const name of ["key.building-111", "key.building-222", "key", "downloads"]) mkdirSync(join(dir, name));
-
-		pruneAbandonedBuilds(dir, (pid) => pid === 222);
-
-		expect(existsSync(join(dir, "key.building-111"))).toBe(false);
-		expect(existsSync(join(dir, "key.building-222"))).toBe(true);
-		expect(existsSync(join(dir, "key"))).toBe(true);
-		expect(existsSync(join(dir, "downloads"))).toBe(true);
+	it("identifies the compiler named by $CC", () => {
+		const run = vi.fn(() => ({ status: 0, stdout: "gcc (GCC) 14.2.0\n" }));
+		expect(compilerIdentity(run, { CC: "gcc-14 -std=c11" }).cc).toBe("gcc (GCC) 14.2.0");
+		expect(run).toHaveBeenCalledWith("gcc-14", ["--version"], expect.anything());
 	});
 
-	it("tolerates a cache root that does not exist yet", () => {
-		expect(() => pruneAbandonedBuilds(join(dir, "missing"))).not.toThrow();
-	});
-
-	describe("build environment", () => {
-		const keyFor = (env) => tmuxCacheKey({ ...inputs, environment: buildEnvironment(env) });
-
-		it("reuses one shared build across checkouts with the default environment", () => {
-			const env = { HOME: "/Users/me", PATH: "/usr/bin", PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig" };
-			const first = tmuxCacheLocation({ env, home: "/Users/me", repoRoot: "/src/checkout-a" });
-			const second = tmuxCacheLocation({ env, home: "/Users/me", repoRoot: "/src/checkout-b" });
-			expect(first).toEqual({ shared: true, root: "/Users/me/.ao/build-cache/bundled-tmux" });
-			expect(second).toEqual(first);
-			expect(keyFor(env)).toBe(keyFor({}));
-		});
-
-		it("never shares or reuses a build made with a custom flag", () => {
-			const env = { CFLAGS: "-O3 -march=native" };
-			expect(tmuxCacheLocation({ env, home: "/Users/me", repoRoot: "/src/checkout-a" })).toEqual({
-				shared: false,
-				root: "/src/checkout-a/.cache/bundled-tmux",
-			});
-			expect(keyFor(env)).not.toBe(keyFor({}));
-		});
-
-		it.each(["CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "MACOSX_DEPLOYMENT_TARGET", "SDKROOT"])(
-			"treats %s as customising the build",
-			(name) => {
-				expect(buildEnvironment({ [name]: "x" })).toEqual({ [name]: "x" });
-				expect(tmuxCacheLocation({ env: { [name]: "x" }, repoRoot: "/src/a" }).shared).toBe(false);
-			},
-		);
-
-		it("ignores unrelated and empty variables", () => {
-			expect(buildEnvironment({ PATH: "/usr/bin", CFLAGS: "", HOME: "/Users/me" })).toEqual({});
-		});
-
-		it("identifies the compiler named by $CC", () => {
-			const run = vi.fn(() => ({ status: 0, stdout: "gcc (GCC) 14.2.0\n" }));
-			expect(compilerIdentity(run, { CC: "gcc-14 -std=c11" }).cc).toBe("gcc (GCC) 14.2.0");
-			expect(run).toHaveBeenCalledWith("gcc-14", ["--version"], expect.anything());
-		});
-	});
-
-	it("identifies the compiler by its first version line", () => {
-		const run = (command) =>
-			command === "cc"
-				? { status: 0, stdout: "Apple clang version 21.0.0 (clang-2100.0.1)\nTarget: arm64-apple-darwin\n" }
-				: { status: 1, stdout: "" };
-		const identity = compilerIdentity(run);
-		expect(identity.cc).toBe("Apple clang version 21.0.0 (clang-2100.0.1)");
-		if (process.platform === "darwin") expect(identity.sdk).toBe("xcrun unavailable");
+	it("falls back when the compiler is unavailable", () => {
+		const identity = compilerIdentity(() => ({ status: 1, stdout: "" }), {});
+		expect(identity.cc).toBe("cc unavailable");
 	});
 });
+
+describe("cached builds", () => {
+	const fakeBuild = vi.fn(async (_work, output) => {
+		writeFileSync(join(output, "tmux"), "binary");
+		mkdirSync(join(output, "licenses"));
+		writeFileSync(join(output, "licenses", "tmux.txt"), "ISC");
+	});
+
+	it("builds on a miss and reuses the entry afterwards", async () => {
+		const root = join(dir, "cache");
+		const first = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, workRoot: dir });
+		expect(readFileSync(join(first, "tmux"), "utf8")).toBe("binary");
+		expect(readFileSync(join(first, "licenses", "tmux.txt"), "utf8")).toBe("ISC");
+		const second = await ensureCachedBuild({ root, key: "k", meta: {}, build: fakeBuild, workRoot: dir });
+		expect(second).toBe(first);
+		expect(fakeBuild).toHaveBeenCalledTimes(1);
+		// The private work directory is gone either way.
+		expect(readdirSync(dir).filter((name) => name.startsWith(`${CACHE_NAME}-build-`))).toEqual([]);
+	});
+
+	// Several workers spawn worktrees at once, so builders race for real here:
+	// separate processes, released together, each with a slow build. A watcher
+	// asserts that the entry, once complete, never disappears or shows partial
+	// content, and every builder must end with the complete entry.
+	it.each([
+		["an empty cache", false],
+		["a damaged leftover entry", true],
+	])("publishes one complete entry when builders race from %s", async (_name, damaged) => {
+		const root = join(dir, "cache");
+		const key = "racing-key";
+		const final = join(root, CACHE_NAME, key);
+		const payload = "x".repeat(256 * 1024);
+		if (damaged) {
+			mkdirSync(join(final, "output"), { recursive: true });
+			writeFileSync(join(final, "output", "tmux"), "partial");
+		}
+		const barrier = join(dir, "go");
+		const moduleUrl = new URL("./tmux-build-cache.mjs", import.meta.url).href;
+		const builder = `
+			import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+			import { join } from "node:path";
+			const { ensureCachedBuild } = await import(${JSON.stringify(moduleUrl)});
+			while (!existsSync(${JSON.stringify(barrier)})) await new Promise((r) => setTimeout(r, 2));
+			const output = await ensureCachedBuild({
+				root: ${JSON.stringify(root)},
+				key: ${JSON.stringify(key)},
+				meta: {},
+				workRoot: ${JSON.stringify(dir)},
+				build: async (_work, out) => {
+					await new Promise((r) => setTimeout(r, Math.random() * 40));
+					writeFileSync(join(out, "tmux"), ${JSON.stringify(payload)});
+					mkdirSync(join(out, "licenses"));
+					writeFileSync(join(out, "licenses", "tmux.txt"), "ISC");
+				},
+			});
+			process.stdout.write(output);
+		`;
+		const children = Array.from({ length: 4 }, () =>
+			spawn(process.execPath, ["--input-type=module", "-e", builder], { stdio: ["ignore", "pipe", "pipe"] }),
+		);
+		const results = children.map(
+			(child) =>
+				new Promise((resolve) => {
+					let stdout = "";
+					let stderr = "";
+					child.stdout.on("data", (chunk) => (stdout += chunk));
+					child.stderr.on("data", (chunk) => (stderr += chunk));
+					child.on("exit", (code) => resolve({ code, stdout, stderr }));
+				}),
+		);
+
+		const violations = [];
+		let seenComplete = false;
+		const watcher = setInterval(() => {
+			const complete = existsSync(join(final, "meta.json"));
+			if (seenComplete && !complete) violations.push("complete entry disappeared");
+			if (complete) {
+				seenComplete = true;
+				try {
+					const binary = readFileSync(join(final, "output", "tmux"), "utf8");
+					if (binary !== payload) violations.push(`partial binary (${binary.length} bytes)`);
+				} catch (error) {
+					violations.push(`unreadable complete entry: ${error.code}`);
+				}
+			}
+		}, 1);
+		writeFileSync(barrier, "");
+		const finished = await Promise.all(results);
+		clearInterval(watcher);
+
+		for (const { code, stderr } of finished) expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+		for (const { stdout } of finished) {
+			expect(stdout).toBe(join(final, "output"));
+			expect(readFileSync(join(stdout, "tmux"), "utf8")).toBe(payload);
+		}
+		expect(violations).toEqual([]);
+		expect(readdirSync(join(root, CACHE_NAME)).filter((name) => !name.startsWith(".tmp-stale-"))).toEqual([key]);
+	}, 30_000);
+});
+
+describe("source downloads", () => {
+	const archiveBytes = Buffer.from("tmux-3.5a.tar.gz contents");
+	const sha256 = createHash("sha256").update(archiveBytes).digest("hex");
+	const slowFetch = (delayMs) =>
+		vi.fn(async () => {
+			await new Promise((r) => setTimeout(r, delayMs));
+			return { ok: true, arrayBuffer: async () => archiveBytes };
+		});
+
+	it("keeps the archive present and valid while two checkouts download it at once", async () => {
+		const archive = join(dir, "tmux.tar.gz");
+		const violations = [];
+		let seen = false;
+		const watcher = setInterval(() => {
+			if (!existsSync(archive)) {
+				if (seen) violations.push("archive disappeared");
+				return;
+			}
+			seen = true;
+			if (!readFileSync(archive).equals(archiveBytes)) violations.push("archive partial or wrong");
+		}, 1);
+		await Promise.all([
+			fetchVerified({ url: "u", sha256, archive, fetchImpl: slowFetch(5) }),
+			fetchVerified({ url: "u", sha256, archive, fetchImpl: slowFetch(25) }),
+		]);
+		clearInterval(watcher);
+		expect(violations).toEqual([]);
+		expect(readFileSync(archive).equals(archiveBytes)).toBe(true);
+	});
+
+	it("replaces a bad archive by rename, so a reader of the old one keeps a whole file", async () => {
+		const archive = join(dir, "tmux.tar.gz");
+		writeFileSync(archive, "stale bytes");
+		const reader = openSync(archive, "r");
+		try {
+			await fetchVerified({ url: "u", sha256, archive, fetchImpl: slowFetch(0) });
+			const buffer = Buffer.alloc(32);
+			const read = readSync(reader, buffer, 0, buffer.length, 0);
+			expect(buffer.subarray(0, read).toString()).toBe("stale bytes");
+		} finally {
+			closeSync(reader);
+		}
+		expect(readFileSync(archive).equals(archiveBytes)).toBe(true);
+	});
+
+	it("does not fetch when a verified archive is already there", async () => {
+		const archive = join(dir, "tmux.tar.gz");
+		writeFileSync(archive, archiveBytes);
+		const fetchImpl = slowFetch(0);
+		await fetchVerified({ url: "u", sha256, archive, fetchImpl });
+		expect(fetchImpl).not.toHaveBeenCalled();
+	});
+
+	it("leaves the published archive alone when a download fails", async () => {
+		const archive = join(dir, "tmux.tar.gz");
+		writeFileSync(archive, "someone else's copy");
+		const failing = vi.fn(async () => ({ ok: false, status: 503 }));
+		await expect(
+			fetchVerified({ url: "https://example.invalid/t.tgz", sha256, archive, fetchImpl: failing, attempts: 2, retryDelayMs: 1 }),
+		).rejects.toThrow(/HTTP 503/);
+		expect(readFileSync(archive, "utf8")).toBe("someone else's copy");
+		expect(readdirSync(dir).filter((name) => name.includes(".part-"))).toEqual([]);
+	});
+});
+

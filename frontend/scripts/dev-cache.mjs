@@ -282,14 +282,7 @@ export function storeEntry(root, name, key, sourceDir, meta, { clone = cloneTree
 		for (const rel of omit) rmSync(path.join(temp, "output", rel), { recursive: true, force: true });
 		for (const [fileName, source] of Object.entries(files)) cpSync(source, path.join(temp, fileName));
 		writeFileSync(path.join(temp, "meta.json"), `${JSON.stringify({ name, key, createdAt: new Date().toISOString(), ...meta }, null, 2)}\n`);
-		if (entryIsComplete(final)) {
-			// Another checkout finished the same key while this one cloned: keep theirs,
-			// readers may already be cloning from it.
-			rmSync(temp, { recursive: true, force: true });
-			return final;
-		}
-		if (existsSync(final)) rmSync(final, { recursive: true, force: true }); // incomplete leftover
-		renameSync(temp, final);
+		publishEntry(temp, final, path.join(root, name, `.tmp-stale-${key}-${process.pid}-${Date.now()}`));
 	} catch (error) {
 		rmSync(temp, { recursive: true, force: true });
 		// Another checkout stored the same key first: theirs is equivalent.
@@ -297,6 +290,33 @@ export function storeEntry(root, name, key, sourceDir, meta, { clone = cloneTree
 		throw error;
 	}
 	return final;
+}
+
+// Move a finished temporary entry into place without ever deleting the final
+// path: readers in other checkouts may be cloning from it. rename() onto an
+// existing entry fails, so a complete entry that landed first stays and ours
+// is dropped. An incomplete leftover is renamed aside (a .tmp- name, pruned
+// after an hour) rather than removed, then the rename is retried.
+function publishEntry(temp, final, aside) {
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			renameSync(temp, final);
+			return;
+		} catch (error) {
+			if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") throw error;
+		}
+		if (entryIsComplete(final)) {
+			rmSync(temp, { recursive: true, force: true });
+			return;
+		}
+		try {
+			renameSync(final, `${aside}-${attempt}`);
+		} catch (error) {
+			// Gone already: another store moved it aside first.
+			if (error?.code !== "ENOENT") throw error;
+		}
+	}
+	throw new Error(`could not publish build cache entry ${final}`);
 }
 
 // Which entries to delete: everything but the `keep` most recently used, plus

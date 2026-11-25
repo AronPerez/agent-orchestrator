@@ -1,24 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { cpus, tmpdir } from "node:os";
-import {
-	chmodSync,
-	copyFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	buildDirFor,
 	buildEnvironment,
 	compilerIdentity,
-	pruneAbandonedBuilds,
-	publishBuild,
+	ensureCachedBuild,
+	fetchVerified,
+	sourceDownloadsDir,
 	tmuxCacheKey,
 	tmuxCacheLocation,
 } from "./tmux-build-cache.mjs";
@@ -86,42 +76,27 @@ const cacheInputs = {
 	environment: buildEnvironment(),
 	recipe: build.toString(),
 };
-const { shared, root: buildCache } = tmuxCacheLocation({ repoRoot: resolve(frontendRoot, "..") });
+const { shared, root: cacheRoot } = tmuxCacheLocation({ repoRoot: resolve(frontendRoot, "..") });
 if (!shared) {
 	console.log(`Custom build environment (${Object.keys(cacheInputs.environment).join(", ")}): keeping the tmux build in this checkout.`);
 }
-const cacheRoot = join(buildCache, tmuxCacheKey(cacheInputs));
-const downloadsRoot = join(buildCache, "downloads");
-const sourceRoot = join(cacheRoot, "src");
-const cachedBinary = join(cacheRoot, "tmux");
-const expectedStamp = JSON.stringify(cacheInputs, null, 2) + "\n";
-
+const downloadsRoot = sourceDownloadsDir();
 mkdirSync(downloadsRoot, { recursive: true });
-pruneAbandonedBuilds(buildCache);
 
-const isCompleteBuild = (dir) =>
-	existsSync(join(dir, "tmux")) &&
-	existsSync(join(dir, "complete.json")) &&
-	readFileSync(join(dir, "complete.json"), "utf8") === expectedStamp;
-
-if (!isCompleteBuild(cacheRoot)) {
-	const buildDir = buildDirFor(cacheRoot);
-	try {
-		await build(buildDir);
-		publishBuild(buildDir, cacheRoot, isCompleteBuild);
-	} finally {
-		rmSync(buildDir, { recursive: true, force: true });
-	}
-}
+// The entry holds the binary and the licenses that ship beside it.
+const { recipe: _recipe, ...metaInputs } = cacheInputs;
+const cached = await ensureCachedBuild({
+	root: cacheRoot,
+	key: tmuxCacheKey(cacheInputs),
+	meta: { inputs: metaInputs },
+	build,
+});
 
 rmSync(outputRoot, { recursive: true, force: true });
 mkdirSync(join(outputRoot, "bin"), { recursive: true });
-mkdirSync(join(outputRoot, "licenses"), { recursive: true });
-copyFileSync(cachedBinary, outputBinary);
+cpSync(join(cached, "licenses"), join(outputRoot, "licenses"), { recursive: true });
+copyFileSync(join(cached, "tmux"), outputBinary);
 chmodSync(outputBinary, 0o755);
-for (const source of SOURCES) {
-	copyFileSync(join(sourceRoot, source.directory, source.license), join(outputRoot, "licenses", `${source.name}.txt`));
-}
 writeFileSync(
 	join(outputRoot, "VERSIONS.json"),
 	JSON.stringify(
@@ -145,7 +120,9 @@ if (version !== `tmux ${TMUX.version}`) {
 verifyTerminfoAttach(outputBinary);
 console.log(`Bundled ${version} at ${outputBinary}`);
 
-async function build(buildDir) {
+// Builds in a private work directory and writes what ships (the binary and
+// each source's license) to `output`, which ensureCachedBuild then publishes.
+async function build(buildDir, output) {
 	const sourceRoot = join(buildDir, "src");
 	const prefix = join(buildDir, "prefix");
 	for (const source of SOURCES) await download(source);
@@ -250,43 +227,25 @@ async function build(buildDir) {
 
 	const builtBinary = join(tmuxDir, "tmux");
 	verifyPortableLinkage(builtBinary, prefix);
-	const binary = join(buildDir, "tmux");
+	const binary = join(output, "tmux");
 	copyFileSync(builtBinary, binary);
 	chmodSync(binary, 0o755);
-	writeFileSync(join(buildDir, "complete.json"), expectedStamp);
+	mkdirSync(join(output, "licenses"));
+	for (const source of SOURCES) {
+		copyFileSync(join(sourceRoot, source.directory, source.license), join(output, "licenses", `${source.name}.txt`));
+	}
 }
 
 async function download(source) {
-	const archive = archivePath(source);
-	if (existsSync(archive) && sha256(archive) === source.sha256) return;
-	rmSync(archive, { force: true });
-	const part = `${archive}.part-${process.pid}`;
-	console.log(`Downloading ${source.name} ${source.version}...`);
-	let lastError;
-	for (let attempt = 1; attempt <= 3; attempt += 1) {
-		rmSync(part, { force: true });
-		try {
-			const response = await fetch(source.url, { redirect: "follow" });
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			writeFileSync(part, Buffer.from(await response.arrayBuffer()));
-			if (sha256(part) !== source.sha256) throw new Error("sha256 mismatch");
-			renameSync(part, archive);
-			return;
-		} catch (error) {
-			lastError = error;
-			if (attempt < 3) await new Promise((resolveDelay) => setTimeout(resolveDelay, attempt * 1000));
-		}
+	try {
+		await fetchVerified({ url: source.url, sha256: source.sha256, archive: archivePath(source) });
+	} catch (error) {
+		fail(error instanceof Error ? error.message : String(error));
 	}
-	rmSync(part, { force: true });
-	fail(`failed to download ${source.url}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
 function archivePath(source) {
 	return join(downloadsRoot, `${source.name}-${source.version}.tar.gz`);
-}
-
-function sha256(file) {
-	return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
 
 function verifyPortableLinkage(binary, buildPrefix) {

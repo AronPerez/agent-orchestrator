@@ -170,6 +170,23 @@ describe("cache entries", () => {
 		assert.equal(readFileSync(path.join(output, "react", "index.js"), "utf8"), "react");
 	});
 
+	test("moves an incomplete leftover aside instead of deleting it, then publishes", () => {
+		const root = tempDir();
+		const src = path.join(root, "src");
+		mkdirSync(src);
+		writeFileSync(path.join(src, "f"), "mine");
+		const cache = path.join(root, "cache");
+		const final = path.join(cache, "daemon", "k");
+		mkdirSync(path.join(final, "output"), { recursive: true });
+		writeFileSync(path.join(final, "output", "f"), "half-written");
+		const copy = (from, to) => cpSync(from, to, { recursive: true });
+		assert.equal(storeEntry(cache, "daemon", "k", src, {}, { clone: copy }), final);
+		assert.equal(readFileSync(path.join(final, "output", "f"), "utf8"), "mine");
+		const aside = readdirSync(path.join(cache, "daemon")).filter((name) => name.startsWith(".tmp-stale-k-"));
+		assert.equal(aside.length, 1);
+		assert.equal(readFileSync(path.join(cache, "daemon", aside[0], "output", "f"), "utf8"), "half-written");
+	});
+
 	test("never replaces an entry another checkout completed during the store", () => {
 		const root = tempDir();
 		const src = path.join(root, "src");
