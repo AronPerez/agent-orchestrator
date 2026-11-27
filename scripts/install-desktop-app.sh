@@ -110,6 +110,10 @@ if [ "$skip_build" -eq 0 ]; then
   # `package`, not `make`: this script installs the .app from out/, so the zip
   # and dmg distributables (about 20 s) were built and never used. Its
   # prepackage script builds the same daemon and bundled resources as premake.
+  # Forge can exit 0 without writing an app (a packaging promise that never
+  # settles lets Node drain and exit), so only accept an .app newer than this.
+  build_marker="$(mktemp)"
+  trap 'rm -f "$build_marker"' EXIT
   log "Building app + daemon (npm run package; update feed: ${AO_RELEASE_REPO:-forge default})…"
   ( cd "$frontend" && npm run package )
 else
@@ -120,12 +124,20 @@ fi
 # Newest *.app under frontend/out/<name>-darwin-<arch>/ (not the makers' out/make).
 app_src="$(
   find "${frontend}/out" -maxdepth 2 -type d -name '*.app' -path "*-darwin-${arch}/*" 2>/dev/null \
-    | while read -r p; do printf '%s\t%s\n' "$(stat -f '%m' "$p")" "$p"; done \
+    | while read -r p; do
+        # Packager always rewrites Info.plist; the .app dir mtime can lag.
+        [ -z "${build_marker:-}" ] || [ "$p/Contents/Info.plist" -nt "$build_marker" ] || continue
+        printf '%s\t%s\n' "$(stat -f '%m' "$p")" "$p"; done \
     | sort -rn | head -1 | cut -f2-
 )"
 [ -n "$app_src" ] && [ -d "$app_src" ] || {
-  echo "error: no built .app found under ${frontend}/out for arch ${arch}." >&2
-  echo "       run without --skip-build, or check that 'npm run package' succeeded." >&2
+  if [ -n "${build_marker:-}" ]; then
+    echo "error: 'npm run package' wrote no new .app under ${frontend}/out for arch ${arch}." >&2
+    echo "       forge can exit 0 when packaging silently stalls; rerun it in frontend/ and check where it stops." >&2
+  else
+    echo "error: no built .app found under ${frontend}/out for arch ${arch}." >&2
+    echo "       run without --skip-build, or check that 'npm run package' succeeded." >&2
+  fi
   exit 1
 }
 app_name="$(basename "$app_src")"

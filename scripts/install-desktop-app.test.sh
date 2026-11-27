@@ -84,6 +84,34 @@ case "${1:-}" in
 		expect "$(sed -n 2p "$tmp/cp.log")" "-R $app $tmp/dest/"
 		[[ ! -e "$installed/Contents/partial" ]] || { printf '%s\n' 'the partial clone was not removed before the fallback copy' >&2; exit 1; }
 		;;
-	*) printf 'Usage: %s {env|https|ssh|unknown|build|copy}\n' "$0" >&2; exit 2 ;;
+	stale)
+		# Forge can exit 0 without packaging (Node drains on a promise that never
+		# settles). An older .app left in out/ must not be installed in its place.
+		if [[ "$(uname -s)" != Darwin ]]; then printf 'PASS %s (skipped: needs macOS)\n' "$1"; exit 0; fi
+		case "$(uname -m)" in arm64) arch=arm64 ;; *) arch=x64 ;; esac
+		repo="$tmp/repo"
+		mkdir -p "$repo/scripts"
+		cp "$script" "$repo/scripts/"
+		app="$repo/frontend/out/Agent Orchestrator-darwin-$arch/Agent Orchestrator.app"
+		mkdir -p "$app/Contents/MacOS"
+		printf 'plist\n' > "$app/Contents/Info.plist"
+		touch -t 202001010000 "$app/Contents/Info.plist"
+		printf '%s\n' '#!/bin/sh' 'exit 0' > "$tmp/bin/codesign"
+		# npm: "succeed"; with TEST_REPACKAGE, rewrite Info.plist like packager does
+		# (after 1 s: bash 3.2 -nt compares whole seconds, a real build takes 10+).
+		printf '%s\n' '#!/bin/sh' 'if [ -n "$TEST_REPACKAGE" ]; then sleep 1; printf "plist\n" > "$TEST_APP/Contents/Info.plist"; fi' 'exit 0' > "$tmp/bin/npm"
+		chmod +x "$tmp/bin/codesign" "$tmp/bin/npm"
+		run_install() {
+			rm -rf "$tmp/dest"; mkdir -p "$tmp/dest"
+			env PATH="$tmp/bin:$PATH" TEST_REMOTE_URL="https://github.com/AronPerez/agent-orchestrator.git" TEST_APP="$app" "$@" \
+				/bin/bash "$repo/scripts/install-desktop-app.sh" --no-daemon --no-launch --dest "$tmp/dest" > "$tmp/out" 2>&1
+		}
+		if run_install; then cat "$tmp/out" >&2; printf '%s\n' 'installed a stale .app after a build that wrote nothing' >&2; exit 1; fi
+		grep -q 'wrote no new .app' "$tmp/out" || { cat "$tmp/out" >&2; printf '%s\n' 'missing the stale-build error' >&2; exit 1; }
+		[[ ! -e "$tmp/dest/Agent Orchestrator.app" ]] || { printf '%s\n' 'stale .app was copied' >&2; exit 1; }
+		run_install TEST_REPACKAGE=1 || { cat "$tmp/out" >&2; exit 1; }
+		[[ -e "$tmp/dest/Agent Orchestrator.app/Contents/Info.plist" ]] || { printf '%s\n' 'fresh build was not installed' >&2; exit 1; }
+		;;
+	*) printf 'Usage: %s {env|https|ssh|unknown|build|copy|stale}\n' "$0" >&2; exit 2 ;;
 esac
 printf 'PASS %s\n' "$1"
